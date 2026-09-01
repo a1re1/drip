@@ -17,18 +17,28 @@
 // src/harness/harness-tools.ts via drip/parity/tools/dump-harness-tools.ts,
 // then renamed lci->drip) — see drip/tests/harness_tools_schema_parity.rs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
 /// port of DEFAULT_MAX_REVIEW_ROUNDS
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 2;
 
+/// port of HarnessRoleSpec (roles.ts): a named role, optionally owned by
+/// another role that must verify its completed work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HarnessRoleSpec {
+    /// verifiedBy: id of the role whose review must confirm this role's work.
+    pub verified_by: Option<String>,
+}
+
 /// port of HarnessRoleGate
 #[derive(Debug, Clone, Default)]
 pub struct HarnessRoleGate {
-    pub roles: HashSet<String>,
+    pub roles: HashMap<String, HarnessRoleSpec>,
     pub max_review_rounds: Option<u32>,
+    /// defaultTaskRole: role assumed for finished tasks that carry no role.
+    pub default_task_role: Option<String>,
 }
 
 /// port of HarnessTaskInput (the parsePlannedTasks entry shape)
@@ -460,7 +470,7 @@ fn parse_planned_tasks(
             })
             .unwrap_or_default();
 
-        if !role.is_empty() && !gate.map(|gate| gate.roles.contains(&role)).unwrap_or(false) {
+        if !role.is_empty() && !gate.map(|gate| gate.roles.contains_key(&role)).unwrap_or(false) {
             unknown_roles.push(role);
             entries.push(HarnessTaskInput {
                 title: title.to_string(),
@@ -1073,5 +1083,1252 @@ mod memory_bank_tests {
         assert!(!remove_repo_memory_page(&dir, "missing-page"));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// port of RepoMemoryConfig (subset the op dispatcher needs)
+#[derive(Debug, Clone, Default)]
+pub struct RepoMemoryConfig {
+    pub memory_dir: String,
+    pub disabled: bool,
+}
+
+/// port of HarnessToolResult: the model-visible outcome of one op.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarnessOpOutcome {
+    pub text: String,
+    pub state_changed: bool,
+    pub task_finished: bool,
+    pub ended_loop: bool,
+    pub direct_response: Option<String>,
+}
+
+/// port of the context the applyHarnessToolCall handlers read: the current
+/// loop's identity, the role gate in force and the repo memory config
+/// (mirrors the TS `gate?`/`repoMemory?` args plus the loop bookkeeping the
+/// per-op branches read).
+#[derive(Debug, Clone, Default)]
+pub struct HarnessOpContext {
+    /// Current loop number (state.r#loop at call time).
+    pub loop_number: u32,
+    /// Id of the task the current loop is working (`currentTask.id`).
+    pub current_task_id: Option<String>,
+    /// Whether the loop has already ended (task-terminal calls are refused).
+    pub loop_ended: bool,
+    /// Role gate in force for this run (plan_tasks role filter, finish gates).
+    pub gate: Option<HarnessRoleGate>,
+    /// Repo memory bank directory + disabled flag (remember/forget repo scope).
+    pub repo_memory: RepoMemoryConfig,
+}
+
+/// port of the status string interpolation in the applyHarnessToolCall
+/// branches: the TS reads the raw status field ("completed", "dropped") when
+/// text like "Task t-1 is already ${status}..." embeds it.
+fn harness_task_status_label(status: &crate::core::types::HarnessTaskStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{status:?}"))
+}
+
+/// port of removeMemoryNote (harness-tools.ts session-scope forget): removes
+/// the memory note with the given id from `state.memory` and reports whether
+/// anything was removed.
+fn remove_memory_note(state: &mut crate::core::types::HarnessState, note_id: &str) -> bool {
+    match state.memory.iter().position(|note| note.id == note_id) {
+        Some(index) => {
+            state.memory.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// port of the plan_tasks, drop_task and revise_task branches of
+/// applyHarnessToolCall (the remaining ops still return their TODO
+/// placeholder).
+pub fn apply_harness_op(
+    state: &mut crate::core::types::HarnessState,
+    op: HarnessOp,
+    ctx: &HarnessOpContext,
+) -> HarnessOpOutcome {
+    match op {
+        HarnessOp::PlanTasks { entries, placement, unknown_roles } => {
+            let placement = if placement == "next" {
+                crate::core::state::HarnessTaskPlacement::Next
+            } else {
+                crate::core::state::HarnessTaskPlacement::End
+            };
+            // harness_tools::HarnessTaskInput -> core_state::HarnessTaskInput
+            let state_entries = entries
+                .into_iter()
+                .map(|entry| core_state::HarnessTaskInput {
+                    depends_on: if entry.depends_on.is_empty() { None } else { Some(entry.depends_on) },
+                    review_of: None,
+                    role: entry.role,
+                    title: entry.title,
+                })
+                .collect::<Vec<_>>();
+            let added = core_state::add_tasks(state, state_entries, placement);
+
+            if added.is_empty() {
+                return HarnessOpOutcome {
+                    text: "No tasks were added. Provide a non-empty tasks array of task titles.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let unknown_role_note = if unknown_roles.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Unknown role(s) {} were ignored — those tasks use the default role.",
+                    unknown_roles.join(", ")
+                )
+            };
+
+            let list = added
+                .iter()
+                .map(|task| {
+                    format!(
+                        "{}: {}{}",
+                        task.id,
+                        task.title,
+                        task.role
+                            .as_ref()
+                            .map(|role| format!(" [role: {}]", role))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            HarnessOpOutcome {
+                text: format!(
+                    "Added {} task(s){}: {}.{}",
+                    added.len(),
+                    if placement == core_state::HarnessTaskPlacement::Next {
+                        " ahead of the pending queue"
+                    } else {
+                        ""
+                    },
+                    list,
+                    unknown_role_note
+                ),
+                state_changed: true,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::DropTask { task_id, reason } => {
+            let existing_status = core_state::get_task_by_id(state, &task_id).map(|task| task.status.clone());
+
+            let Some(existing_status) = existing_status else {
+                return HarnessOpOutcome {
+                    text: if task_id.is_empty() {
+                        "Provide the taskId of the task to drop.".to_string()
+                    } else {
+                        format!("No task with id {task_id} exists.")
+                    },
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            };
+
+            if existing_status == crate::core::types::HarnessTaskStatus::Completed
+                || existing_status == crate::core::types::HarnessTaskStatus::Dropped
+            {
+                return HarnessOpOutcome {
+                    text: format!(
+                        "Task {task_id} is already {} and cannot be dropped.",
+                        harness_task_status_label(&existing_status)
+                    ),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            // captured before the drop: dropping the task the current loop is
+            // working finishes that loop
+            let was_current_task = existing_status == crate::core::types::HarnessTaskStatus::InProgress;
+
+            let dropped_task = core_state::drop_task(state, &task_id, &reason);
+
+            let Some(dropped_task) = dropped_task else {
+                return HarnessOpOutcome {
+                    text: format!("Task {task_id} could not be dropped."),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            };
+
+            let dropped_id = dropped_task.id.clone();
+            let dropped_summary = dropped_task.summary.clone().unwrap_or_default();
+
+            // A pending/in-progress review of the dropped task is now
+            // orphaned — drop it too.
+            let orphaned_review_ids: Vec<String> = state
+                .tasks
+                .iter()
+                .filter(|task| {
+                    task.review_of.as_deref() == Some(dropped_id.as_str())
+                        && (task.status == crate::core::types::HarnessTaskStatus::Pending
+                            || task.status == crate::core::types::HarnessTaskStatus::InProgress)
+                })
+                .map(|task| task.id.clone())
+                .collect();
+
+            for review_id in &orphaned_review_ids {
+                core_state::drop_task(
+                    state,
+                    review_id,
+                    &format!("The reviewed task {dropped_id} was dropped."),
+                );
+            }
+
+            let mut text = format!("Task {dropped_id} dropped: {dropped_summary}");
+
+            if !orphaned_review_ids.is_empty() {
+                text.push_str(&format!(
+                    " (also dropped its review task {})",
+                    orphaned_review_ids.join(", ")
+                ));
+            }
+
+            HarnessOpOutcome {
+                text,
+                state_changed: true,
+                task_finished: was_current_task,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::ReviseTask { task_id, title } => {
+            let existing_task = core_state::get_task_by_id(state, &task_id)
+                .map(|task| (task.status.clone(), task.id.clone()));
+
+            let Some((existing_status, existing_id)) = existing_task else {
+                return HarnessOpOutcome {
+                    text: if task_id.is_empty() {
+                        "Provide the taskId of the task to revise.".to_string()
+                    } else {
+                        format!("No task with id {task_id} exists.")
+                    },
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            };
+
+            if existing_status == crate::core::types::HarnessTaskStatus::Completed
+                || existing_status == crate::core::types::HarnessTaskStatus::Dropped
+            {
+                return HarnessOpOutcome {
+                    text: format!(
+                        "Task {existing_id} is already {}; finished tasks cannot be revised.",
+                        harness_task_status_label(&existing_status)
+                    ),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let revised_task = core_state::revise_task(state, &task_id, &title);
+
+            let Some(revised_task) = revised_task else {
+                return HarnessOpOutcome {
+                    text: "No revision was applied. Provide a non-empty title string.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            };
+
+            HarnessOpOutcome {
+                text: format!("Task {} is now: {}", revised_task.id, revised_task.title),
+                state_changed: true,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::FinishTask { status, summary, task_id } => {
+            use crate::core::types::HarnessTaskStatus;
+
+            // Task-terminal calls are refused once the loop has ended (a
+            // previous call in the same response finished the task).
+            if ctx.loop_ended {
+                return HarnessOpOutcome {
+                    text: "The loop already ended (a previous call in this response finished the task) — finish_task was not executed. Re-issue it from the next loop if still needed.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            // An empty taskId is falsy in the TS: it falls back to the
+            // current task.
+            let task_id = task_id.filter(|id| !id.is_empty());
+            let target_id = match &task_id {
+                Some(id) => match core_state::get_task_by_id(state, id) {
+                    Some(task) => task.id.clone(),
+                    None => {
+                        return HarnessOpOutcome {
+                            text: format!("No task with id {id} exists."),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                },
+                None => match core_state::get_current_task(state) {
+                    Some(task) => task.id.clone(),
+                    None => {
+                        let blocked_ids: Vec<String> = state
+                            .tasks
+                            .iter()
+                            .filter(|task| task.status == HarnessTaskStatus::Blocked)
+                            .map(|task| task.id.clone())
+                            .collect();
+                        let text = if !blocked_ids.is_empty() {
+                            format!(
+                                "There is no current task — name the blocked task to resolve: finish_task {{\"taskId\": \"{}\", ...}}. Blocked: {}. If later work already satisfied one, complete it by id citing that evidence, or drop_task it with the reason.",
+                                blocked_ids[0],
+                                blocked_ids.join(", ")
+                            )
+                        } else {
+                            "There is no current task to finish. Call plan_tasks first.".to_string()
+                        };
+                        return HarnessOpOutcome {
+                            text,
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                },
+            };
+
+            // Snapshot the fields the gates read before any state mutation.
+            let (target_status, target_activations, has_review_of, target_verify_nudged, target_footprint) = {
+                let task = core_state::get_task_by_id(state, &target_id).expect("target task exists");
+                (
+                    task.status.clone(),
+                    task.activations,
+                    task.review_of.is_some(),
+                    task.verify_nudged,
+                    task.footprint.clone(),
+                )
+            };
+
+            let current_task_id = ctx
+                .current_task_id
+                .clone()
+                .or_else(|| core_state::get_current_task(state).map(|task| task.id.clone()));
+            let is_current_task = current_task_id.as_deref() == Some(target_id.as_str());
+            // Planning/replanning loops have no current task; finishing a task
+            // by id there IS the loop's work. The gates below target drive-by
+            // finishes from loops that have their own current task.
+            let is_drive_by = current_task_id.is_some() && !is_current_task;
+            let ends_loop = is_current_task || current_task_id.is_none();
+
+            // A review verdict is only meaningful from the review task's own
+            // loop — otherwise the worker whose output is under review can
+            // confirm itself by naming the review task's id.
+            if has_review_of {
+                if is_drive_by {
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "Task {target_id} is a review task — its verdict must come from its own loop, not from another task's loop."
+                        ),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+
+                let review_task =
+                    core_state::get_task_by_id(state, &target_id).expect("target task exists").clone();
+                let verdict =
+                    apply_review_verdict(state, &review_task, status, &summary, ctx.gate.as_ref());
+                // The verdict comes from the review task's own loop, so
+                // finishing it ends that loop exactly when the task finished.
+                return HarnessOpOutcome {
+                    text: verdict.result_text,
+                    state_changed: verdict.state_changed,
+                    task_finished: verdict.task_finished,
+                    ended_loop: verdict.task_finished,
+                    direct_response: None,
+                };
+            }
+
+            // Completing a pending task that no loop has ever worked is a
+            // plan edit masquerading as progress. Evidence must come from a
+            // loop that actually ran the task — resolving a BLOCKED task by
+            // id from a replanning loop stays legitimate.
+            if status == FinishTaskStatus::Completed
+                && target_status == HarnessTaskStatus::Pending
+                && target_activations.unwrap_or(0) == 0
+            {
+                return HarnessOpOutcome {
+                    text: format!(
+                        "Task {target_id} is pending and has never been worked by a loop — it cannot be marked completed from here. Let its own loop do the work, or drop_task it with a reason if it is no longer needed."
+                    ),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            // Verification honesty gate: completing a task that edited the
+            // workspace while the run's verification evidence is missing,
+            // stale, or red gets ONE bounce-back naming the exact problem. A
+            // second finish_task is accepted unchanged: the model may know
+            // why no check applies here.
+            if status == FinishTaskStatus::Completed
+                && is_current_task
+                && !target_verify_nudged.unwrap_or(false)
+            {
+                let edited_workspace = target_footprint
+                    .iter()
+                    .flatten()
+                    .any(|entry| entry.starts_with("edited "));
+                let verification = state.last_verification.clone();
+                let stale_edits = state.mutations_since_verification.unwrap_or(0);
+                let verification_problem: Option<String> = match &verification {
+                    None => Some(
+                        "no verification command (test/build/typecheck) has run at any point in this run"
+                            .to_string(),
+                    ),
+                    Some(record) if record.failed => Some(format!(
+                        "the most recent verification ({}) FAILED and nothing has passed since",
+                        record.command
+                    )),
+                    Some(record) if stale_edits > 0 => Some(format!(
+                        "{} workspace edit(s) landed after the last verification ({})",
+                        stale_edits, record.command
+                    )),
+                    Some(_) => None,
+                };
+
+                if edited_workspace {
+                    if let Some(problem) = verification_problem {
+                        if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                            task.verify_nudged = Some(true);
+                        }
+                        return HarnessOpOutcome {
+                            text: format!(
+                                "harness: not accepted yet — this task edited the workspace but {problem}. Run the check now (VERIFY, CHECK, or the project's test/build command via BASH), then finish_task. If no check applies to this change, call finish_task again unchanged and it will be accepted."
+                            ),
+                            state_changed: true,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                }
+            }
+
+            let core_status = match status {
+                FinishTaskStatus::Completed => HarnessTaskStatus::Completed,
+                FinishTaskStatus::Blocked => HarnessTaskStatus::Blocked,
+            };
+            let (finished_id, finished_title, finished_role, finished_status_label) =
+                match core_state::finish_task(
+                    state,
+                    core_state::HarnessFinishArgs {
+                        status: core_status,
+                        summary: &summary,
+                        task_id: Some(&target_id),
+                    },
+                ) {
+                    Some(finished_task) => (
+                        finished_task.id.clone(),
+                        finished_task.title.clone(),
+                        finished_task.role.clone(),
+                        harness_task_status_label(&finished_task.status),
+                    ),
+                    None => {
+                        return HarnessOpOutcome {
+                            text: format!("Task {target_id} could not be finished."),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                };
+
+            // Verify gate: completed work by a role with a reviewer does not
+            // pass unexamined — a review task under the reviewer role runs
+            // next.
+            if status == FinishTaskStatus::Completed {
+                if let Some(gate) = ctx.gate.as_ref() {
+                    let role_name = finished_role.clone().or_else(|| gate.default_task_role.clone());
+                    let verifier = role_name
+                        .as_deref()
+                        .and_then(|role| gate.roles.get(role))
+                        .and_then(|spec| spec.verified_by.clone());
+                    let has_open_review = state.tasks.iter().any(|task| {
+                        task.review_of.as_deref() == Some(finished_id.as_str())
+                            && (task.status == HarnessTaskStatus::Pending
+                                || task.status == HarnessTaskStatus::InProgress)
+                    });
+
+                    if let Some(verifier) = verifier {
+                        if gate.roles.contains_key(&verifier) && !has_open_review {
+                            let entries = vec![core_state::HarnessTaskInput {
+                                depends_on: None,
+                                review_of: Some(finished_id.clone()),
+                                role: Some(verifier.clone()),
+                                title: format!(
+                                    "Review {finished_id} (\"{finished_title}\"): independently verify the completed work with your own tools, then finish_task completed to confirm it, or blocked with what is wrong to send it back."
+                                ),
+                            }];
+                            let added = core_state::add_tasks(
+                                state,
+                                entries,
+                                core_state::HarnessTaskPlacement::Next,
+                            );
+                            let review_task_id = added
+                                .first()
+                                .map(|task| task.id.clone())
+                                .unwrap_or_default();
+
+                            // The reviewer starts a fresh transcript: hand
+                            // over the author's recorded footprint so
+                            // verification starts from the actual changes,
+                            // not a re-derivation of them.
+                            let footprint = target_footprint.unwrap_or_default();
+                            if !footprint.is_empty() {
+                                if let Some(review_task) =
+                                    core_state::get_task_by_id_mut(state, &review_task_id)
+                                {
+                                    crate::core::state::append_task_note(
+                                        review_task,
+                                        &format!(
+                                            "author evidence (harness-recorded): {}",
+                                            footprint.join("; ")
+                                        ),
+                                    );
+                                }
+                            }
+
+                            return HarnessOpOutcome {
+                                text: format!(
+                                    "Task {finished_id} marked completed. Review task {review_task_id} (role {verifier}) was created — the goal cannot complete until the review confirms the work."
+                                ),
+                                state_changed: true,
+                                task_finished: ends_loop,
+                                ended_loop: ends_loop,
+                                direct_response: None,
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Finishing a sibling task from a working loop is bookkeeping;
+            // only finishing the CURRENT task (or a resolution from a
+            // planning loop) ends this loop.
+            HarnessOpOutcome {
+                text: format!(
+                    "Task {finished_id} marked {finished_status_label}{}",
+                    if is_drive_by { " (The current task's loop continues.)" } else { "" }
+                ),
+                state_changed: true,
+                task_finished: ends_loop,
+                ended_loop: ends_loop,
+                direct_response: None,
+            }
+        }
+        HarnessOp::Respond { text } => {
+            let text = text.trim().to_string();
+
+            if text.is_empty() {
+                return HarnessOpOutcome {
+                    text: "Provide the answer text to respond with.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let has_unfinished_tasks = state.tasks.iter().any(|task| {
+                matches!(
+                    task.status,
+                    crate::core::types::HarnessTaskStatus::Pending
+                        | crate::core::types::HarnessTaskStatus::InProgress
+                        | crate::core::types::HarnessTaskStatus::Blocked
+                )
+            });
+
+            if has_unfinished_tasks {
+                return HarnessOpOutcome {
+                    text: "Unfinished tasks exist — respond is only for goals that need no task work. Finish, drop, or complete the tasks first.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            // The answer completes the goal through the normal ledger: a synthetic
+            // completed task keeps isGoalComplete/history/summary semantics intact.
+            let mut answer_tasks = core_state::add_tasks(
+                state,
+                vec![core_state::HarnessTaskInput {
+                    depends_on: None,
+                    review_of: None,
+                    role: None,
+                    title: "Answer the goal directly".to_string(),
+                }],
+                core_state::HarnessTaskPlacement::End,
+            );
+            let answer_task = match answer_tasks.pop() {
+                Some(task) => task,
+                None => {
+                    return HarnessOpOutcome {
+                        text: "Answer recorded — the run will report it to the user.".to_string(),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+            };
+
+            let _finished = core_state::finish_task(
+                state,
+                core_state::HarnessFinishArgs {
+                    status: crate::core::types::HarnessTaskStatus::Completed,
+                    summary: &crate::harness::telemetry::truncate_text(&text, 400),
+                    task_id: Some(&answer_task.id),
+                },
+            );
+            state.direct_response = Some(crate::core::types::HarnessDirectResponse {
+                created_at_iteration: state.iteration,
+                text: text.clone(),
+            });
+
+            HarnessOpOutcome {
+                text: "Answer recorded — the run will report it to the user.".to_string(),
+                state_changed: true,
+                task_finished: true,
+                ended_loop: true,
+                direct_response: Some(text),
+            }
+        }
+        HarnessOp::Recall { tool_name, query } => {
+            let requested_tool = tool_name.trim().to_string();
+            let query = query.trim().to_string();
+
+            if requested_tool.is_empty() || query.is_empty() {
+                return HarnessOpOutcome {
+                    text: "Provide toolName and query (a fragment of the original call's input).".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let key_prefix = format!("{}:", requested_tool);
+            let mut candidates: Vec<&crate::core::types::ToolTelemetryRecord> = state
+                .telemetry
+                .values()
+                .filter(|record| {
+                    record.key.starts_with(&key_prefix)
+                        && (record.raw_input.contains(&query) || record.input_preview.contains(&query))
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.last_used_iteration.cmp(&a.last_used_iteration));
+            let matched = candidates.first().copied();
+
+            let matched = match matched {
+                Some(record) => record,
+                None => {
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "No cached {} result matches \"{}\". Run the call itself if the information is still needed.",
+                            requested_tool, query
+                        ),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+            };
+
+            let failed_note = if matched.last_failed.unwrap_or(false) {
+                ", FAILED when last run"
+            } else {
+                ""
+            };
+
+            HarnessOpOutcome {
+                text: format!(
+                    "Cached result of {} (from loop {}{}):\n\n{}",
+                    matched.input_preview, matched.last_used_iteration, failed_note, matched.last_output
+                ),
+                state_changed: false,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::Observe { note, ttl } => {
+            let saved = crate::core::state::add_observation(
+                state,
+                crate::core::state::AddObservationArgs {
+                    text: note,
+                    ttl: ttl.map(|ttl| ttl as i64),
+                },
+                &crate::core::types::DEFAULT_TELEMETRY_CONFIG,
+            );
+            let saved_any = saved.is_some();
+
+            let text = match saved {
+                None => "No observation was saved. Provide a non-empty note string.".to_string(),
+                Some((observation, refreshed)) => {
+                    if refreshed {
+                        format!("Refreshed observation {} (ttl {}).", observation.id, observation.ttl)
+                    } else {
+                        format!(
+                            "Saved observation {} (expires in {} task loop(s) unless re-observed).",
+                            observation.id, observation.ttl
+                        )
+                    }
+                }
+            };
+            HarnessOpOutcome {
+                text,
+                state_changed: saved_any,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::NoteTask { note, task_id } => {
+            let note = note.trim().to_string();
+
+            if note.is_empty() {
+                return HarnessOpOutcome {
+                    text: "Provide the note text.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let trimmed_note = note;
+            let target_task = match task_id.as_deref() {
+                Some(task_id) => {
+                    let resolved = crate::core::state::get_task_by_id(state, task_id).map(|task| task.id.clone());
+                    match resolved {
+                        Some(id) => Some((id, task_id.to_string())),
+                        None => None,
+                    }
+                }
+                None => crate::core::state::get_current_task(state).map(|task| (task.id.clone(), String::new())),
+            };
+
+            let (target_id, requested_task_id) = match target_task {
+                Some(pair) => pair,
+                None => {
+                    let text = match task_id.as_deref() {
+                        Some(task_id) => format!("No task with id {task_id} exists."),
+                        None => "There is no current task to annotate. Use remember for run-wide notes.".to_string(),
+                    };
+                    return HarnessOpOutcome {
+                        text,
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+            };
+
+            let truncated = crate::harness::telemetry::truncate_text(&trimmed_note, 400);
+            if let Some(task) = crate::core::state::get_task_by_id_mut(state, &target_id) {
+                crate::core::state::append_task_note(task, &truncated);
+            }
+
+            HarnessOpOutcome {
+                text: format!("Noted on {target_id}. The loop continues."),
+                state_changed: true,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::Remember { scope, note, topic, hook } => {
+            let text;
+            let mut state_changed = false;
+
+            if matches!(scope, MemoryScope::Repo) {
+                let topic = topic.as_deref().map(str::trim).unwrap_or("");
+                let note_text = note.trim();
+
+                if topic.is_empty() || note_text.is_empty() {
+                    text = "Repo-scoped remember requires both a non-empty 'topic' and a non-empty 'note'.".to_string();
+                } else if ctx.repo_memory.memory_dir.is_empty() {
+                    text = "Repo memory is unavailable (no memory directory configured for this run).".to_string();
+                } else if ctx.repo_memory.disabled {
+                    text = "Repo memory is disabled for this run (--no-repo-memory flag). Note not saved.".to_string();
+                } else {
+                    let slug = write_repo_memory_note(
+                        std::path::Path::new(&ctx.repo_memory.memory_dir),
+                        topic,
+                        note_text,
+                        hook.as_deref().map(str::trim),
+                    );
+                    text = format!("Saved repo memory note to page '{slug}.md' (topic: {topic}).");
+                }
+            } else {
+                // session scope (default)
+                match crate::core::state::add_memory_note(state, &note) {
+                    None => {
+                        text = "No note was saved. Provide a non-empty note string.".to_string();
+                    }
+                    Some(saved) => {
+                        text = format!("Saved memory note {}.", saved.id);
+                        state_changed = true;
+                    }
+                }
+            }
+
+            HarnessOpOutcome {
+                text,
+                state_changed,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::Forget { scope, note_id } => {
+            let text;
+            let mut state_changed = false;
+
+            if matches!(scope, MemoryScope::Repo) {
+                let slug = note_id.trim();
+
+                if slug.is_empty() {
+                    text = "Repo-scoped forget requires a non-empty 'noteId' (the page slug, e.g. 'my-topic').".to_string();
+                } else if ctx.repo_memory.memory_dir.is_empty() {
+                    text = "Repo memory is unavailable (no memory directory configured for this run).".to_string();
+                } else if ctx.repo_memory.disabled {
+                    text = "Repo memory is disabled for this run (--no-repo-memory flag). Nothing removed.".to_string();
+                } else {
+                    let removed =
+                        remove_repo_memory_page(std::path::Path::new(&ctx.repo_memory.memory_dir), slug);
+                    text = if removed {
+                        format!("Removed repo memory page '{slug}.md' and its index entry.")
+                    } else {
+                        format!("No repo memory page found for slug '{slug}'. Nothing removed.")
+                    };
+                }
+            } else {
+                // session scope (default)
+                let removed = remove_memory_note(state, &note_id);
+                state_changed = removed;
+                text = if removed {
+                    format!("Removed memory note {note_id}.")
+                } else {
+                    format!("No memory note with id {note_id} exists.")
+                };
+            }
+
+            HarnessOpOutcome {
+                text,
+                state_changed,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod apply_harness_op_tests {
+    use super::*;
+    use crate::core::state::create_harness_state;
+
+    /// port of the plan_tasks branch behavior: two planned tasks are appended
+    /// with ids task-1/task-2 and the exact model-visible result text the TS
+    /// returns (`Added N task(s): id: title; id: title.` — no "plan_tasks: "
+    /// prefix in the TS).
+    #[test]
+    fn plan_tasks_adds_two_tasks_with_ids_and_exact_result_text() {
+        let mut state = create_harness_state("test goal: plan two tasks");
+        let raw = r#"{"tasks": [{"title": "First task"}, {"title": "Second task"}], "placement": "end"}"#;
+        let op = parse_harness_op("plan_tasks", raw).expect("plan_tasks input parses");
+        let ctx = HarnessOpContext::default();
+        let outcome = apply_harness_op(&mut state, op, &ctx);
+
+        assert_eq!(state.tasks.len(), 2);
+        assert_eq!(state.tasks[0].id, "task-1");
+        assert_eq!(state.tasks[0].title, "First task");
+        assert_eq!(state.tasks[1].id, "task-2");
+        assert_eq!(state.tasks[1].title, "Second task");
+        assert_eq!(
+            outcome.text,
+            "Added 2 task(s): task-1: First task; task-2: Second task."
+        );
+        assert!(outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+        assert_eq!(outcome.direct_response, None);
+
+        // placement "next" inserts ahead of the pending queue and adds the
+        // TS's " ahead of the pending queue" phrase to the result text.
+        let raw_next = r#"{"tasks": [{"title": "Urgent task"}], "placement": "next"}"#;
+        let op_next = parse_harness_op("plan_tasks", raw_next).expect("plan_tasks next parses");
+        let outcome_next = apply_harness_op(&mut state, op_next, &ctx);
+        assert_eq!(state.tasks[0].id, "task-3");
+        assert_eq!(
+            outcome_next.text,
+            "Added 1 task(s) ahead of the pending queue: task-3: Urgent task."
+        );
+    }
+
+    /// The empty-tasks array path returns the TS's refusal text and changes
+    /// no state.
+    #[test]
+    fn plan_tasks_with_empty_tasks_array_is_refused() {
+        let mut state = create_harness_state("test goal: empty plan");
+        let raw = r#"{"tasks": []}"#;
+        let op = parse_harness_op("plan_tasks", raw).expect("plan_tasks empty parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "No tasks were added. Provide a non-empty tasks array of task titles."
+        );
+        assert!(!outcome.state_changed);
+        assert!(state.tasks.is_empty());
+    }
+
+
+    /// port of the respond branch: empty text is refused verbatim; unfinished
+    /// tasks block the answer; otherwise a synthetic completed
+    /// "Answer the goal directly" task is added, the direct response is
+    /// recorded on state, and the loop ends.
+    #[test]
+    fn respond_records_the_direct_answer_and_ends_the_loop() {
+        let mut state = create_harness_state("test goal: respond");
+
+        let op = HarnessOp::Respond {
+            text: "   ".to_string(),
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "Provide the answer text to respond with.");
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+
+        let op = parse_harness_op("plan_tasks", r#"{"tasks": ["Unfinished work"]}"#)
+            .expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        let op = HarnessOp::Respond {
+            text: "too soon".to_string(),
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "Unfinished tasks exist — respond is only for goals that need no task work. Finish, drop, or complete the tasks first."
+        );
+        assert!(!outcome.state_changed);
+
+        let op = parse_harness_op("drop_task", r#"{"taskId": "task-1"}"#).expect("drop input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        let op = HarnessOp::Respond {
+            text: "  the final answer  ".to_string(),
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "Answer recorded — the run will report it to the user.");
+        assert!(outcome.state_changed);
+        assert!(outcome.task_finished);
+        assert!(outcome.ended_loop);
+        assert_eq!(outcome.direct_response.as_deref(), Some("the final answer"));
+        let recorded = state
+            .direct_response
+            .as_ref()
+            .expect("direct response recorded on state");
+        assert_eq!(recorded.text, "the final answer");
+        assert_eq!(recorded.created_at_iteration, state.iteration);
+        let answer_task = state
+            .tasks
+            .iter()
+            .find(|task| task.title == "Answer the goal directly")
+            .expect("synthetic answer task exists");
+        assert_eq!(answer_task.status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
+    /// port of the recall branch: re-surfaces the most recent matching
+    /// telemetry record by toolName + query fragment, echoing the cached
+    /// output verbatim (failed runs carry the FAILED note).
+    #[test]
+    fn recall_surfaces_the_cached_tool_result() {
+        let mut state = create_harness_state("test goal: recall found");
+        state.telemetry.insert(
+            "READ:src/harness/harness-tools.ts:854".to_string(),
+            crate::core::types::ToolTelemetryRecord {
+                call_count: 1,
+                input_preview: "READ {\"offset\":854,\"path\":\"src/harness/harness-tools.ts\"}"
+                    .to_string(),
+                iterations_used: vec![3],
+                key: "READ:src/harness/harness-tools.ts:854".to_string(),
+                last_failed: Some(false),
+                last_output: "Read lines 854-922 of 1099 from src/harness/harness-tools.ts."
+                    .to_string(),
+                last_used_iteration: 3,
+                raw_input: "{\"offset\":854,\"path\":\"src/harness/harness-tools.ts\"}".to_string(),
+                reinforcements: 0,
+                tool_name: "READ".to_string(),
+            },
+        );
+
+        let op = parse_harness_op(
+            "recall",
+            r#"{"toolName": "READ", "query": "harness-tools"}"#,
+        )
+        .expect("recall input parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "Cached result of READ {\"offset\":854,\"path\":\"src/harness/harness-tools.ts\"} (from loop 3):\n\nRead lines 854-922 of 1099 from src/harness/harness-tools.ts."
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+    }
+
+    /// port of the recall branch: no telemetry record matching the query
+    /// yields the verbatim not-found text.
+    #[test]
+    fn recall_without_a_match_reports_it() {
+        let mut state = create_harness_state("test goal: recall miss");
+        let op = parse_harness_op(
+            "recall",
+            r#"{"toolName": "READ", "query": "nothing-here"}"#,
+        )
+        .expect("recall input parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "No cached READ result matches \"nothing-here\". Run the call itself if the information is still needed."
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+    }
+
+    /// port of the drop_task branch: dropping a pending task reports its new
+    /// summary (core_state::drop_task sets the summary to the reason), marks
+    /// the task dropped, and does not finish the loop (the task was not the
+    /// loop's in-progress task). A second drop is refused with the TS's
+    /// terminal-status text.
+    #[test]
+    fn drop_task_drops_a_pending_task_and_reports_the_summary() {
+        let mut state = create_harness_state("test goal: drop pending");
+        let raw = r#"{"tasks": [{"title": "First task"}, {"title": "Second task"}]}"#;
+        let op = parse_harness_op("plan_tasks", raw).expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        let op = parse_harness_op(
+            "drop_task",
+            r#"{"taskId": "task-1", "reason": "no longer needed"}"#,
+        )
+        .expect("drop_task input parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        assert_eq!(outcome.text, "Task task-1 dropped: no longer needed");
+        assert!(outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+        assert_eq!(outcome.direct_response, None);
+        assert_eq!(
+            state.tasks[0].status,
+            crate::core::types::HarnessTaskStatus::Dropped
+        );
+        assert_eq!(state.tasks[0].summary, Some("no longer needed".to_string()));
+
+        // the TS refuses to drop a task that is already dropped
+        let again = parse_harness_op(
+            "drop_task",
+            r#"{"taskId": "task-1", "reason": "again"}"#,
+        )
+        .expect("drop_task again parses");
+        let outcome = apply_harness_op(&mut state, again, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "Task task-1 is already dropped and cannot be dropped."
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+    }
+
+    /// port of the drop_task branch refusals: an unknown id and an empty
+    /// taskId return the TS refusal texts verbatim and change no state.
+    #[test]
+    fn drop_task_unknown_id_returns_the_ts_refusal_text() {
+        let mut state = create_harness_state("test goal: drop unknown");
+
+        let op = parse_harness_op("drop_task", r#"{"taskId": "task-99"}"#)
+            .expect("drop_task unknown parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "No task with id task-99 exists.");
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+
+        // empty taskId → the "provide the taskId" guidance text
+        let op = HarnessOp::DropTask { task_id: String::new(), reason: String::new() };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "Provide the taskId of the task to drop.");
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+    }
+
+    /// port of the revise_task branch: a successful retitle reports the new
+    /// title, updates the task, and (via core_state::revise_task) appends the
+    /// "Retitled from" note.
+    #[test]
+    fn revise_task_retitles_the_task_and_appends_the_retitle_note() {
+        let mut state = create_harness_state("test goal: revise");
+        let raw = r#"{"tasks": [{"title": "First task"}]}"#;
+        let op = parse_harness_op("plan_tasks", raw).expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        let op = parse_harness_op(
+            "revise_task",
+            r#"{"taskId": "task-1", "title": "Renamed task"}"#,
+        )
+        .expect("revise_task input parses");
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        assert_eq!(outcome.text, "Task task-1 is now: Renamed task");
+        assert!(outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+        assert_eq!(state.tasks[0].title, "Renamed task");
+        assert_eq!(state.tasks[0].notes, ["Retitled from \"First task\"."]);
+    }
+
+    /// port of the note_task branch: with no explicit taskId the note is
+    /// appended to the current task and the loop continues; an unknown id and
+    /// a state with no current task return the TS refusal texts verbatim.
+    #[test]
+    fn note_task_appends_the_note_and_reports_the_target() {
+        let mut state = create_harness_state("test goal: note task");
+        let raw = r#"{"tasks": [{"title": "First task"}]}"#;
+        let op = parse_harness_op("plan_tasks", raw).expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+
+        let op = HarnessOp::NoteTask {
+            note: "  partial finding: the parser needs a second pass  ".to_string(),
+            task_id: None,
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "Noted on task-1. The loop continues.");
+        assert!(outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+        assert_eq!(state.tasks[0].notes, ["partial finding: the parser needs a second pass"]);
+
+        // unknown explicit taskId → the verbatim not-found text, no state change
+        let op = HarnessOp::NoteTask {
+            note: "miss".to_string(),
+            task_id: Some("task-99".to_string()),
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "No task with id task-99 exists.");
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+
+        // no tasks at all → the verbatim no-current-task text
+        let mut empty = create_harness_state("test goal: note without tasks");
+        let op = HarnessOp::NoteTask {
+            note: "orphan note".to_string(),
+            task_id: None,
+        };
+        let outcome = apply_harness_op(&mut empty, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "There is no current task to annotate. Use remember for run-wide notes."
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+    }
+
+    /// port of the observe branch: a new note is saved with the base ttl and
+    /// the verbatim saved text; re-observing the same text refreshes the
+    /// existing observation instead of duplicating it; a non-string/empty
+    /// note is refused verbatim.
+    #[test]
+    fn observe_saves_and_refreshes_observations_with_the_verbatim_texts() {
+        let mut state = create_harness_state("test goal: observe");
+
+        let op = HarnessOp::Observe {
+            note: "the failing check is the settings test".to_string(),
+            ttl: None,
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "Saved observation obs-1 (expires in 4 task loop(s) unless re-observed)."
+        );
+        assert!(outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(!outcome.ended_loop);
+        assert_eq!(state.observations.len(), 1);
+        assert_eq!(state.observations[0].id, "obs-1");
+        assert_eq!(state.observations[0].ttl, 4);
+
+        // re-observing the same text refreshes the stored observation
+        let op = HarnessOp::Observe {
+            note: "  the failing check is the settings test  ".to_string(),
+            ttl: None,
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(outcome.text, "Refreshed observation obs-1 (ttl 4).");
+        assert!(outcome.state_changed);
+        assert_eq!(state.observations.len(), 1);
+
+        // an empty note is refused with the verbatim text, no state change
+        let op = HarnessOp::Observe {
+            note: "   ".to_string(),
+            ttl: None,
+        };
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert_eq!(
+            outcome.text,
+            "No observation was saved. Provide a non-empty note string."
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
     }
 }

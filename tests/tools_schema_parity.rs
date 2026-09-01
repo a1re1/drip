@@ -106,3 +106,12 @@ fn fetch_definition_matches_the_ts_oracle() {
         "FETCH definition drifted from tools/fetch-tool.ts"
     );
 }
+
+#[test]
+fn check_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::check::definition(),
+        apply_renames(&fixture_entry("CHECK")),
+        "CHECK definition drifted from tools/check-tool.ts"
+    );
+}

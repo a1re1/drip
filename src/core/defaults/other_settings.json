@@ -1,0 +1,8 @@
+{
+  "runtime.active_profile_id": "glm-5-3-flash",
+  "runtime.active_tool_profile_id": "glm-5-3-flash",
+  "runtime.active_system_prompt_id": "default-coding-agent",
+  "runtime.cerebras_api_key": "",
+  "runtime.role_profiles": "[]",
+  "runtime.role_bindings": "{}"
+}

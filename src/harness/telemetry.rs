@@ -15,7 +15,10 @@ fn sort_json_value(value: Value) -> Value {
 		Value::Array(items) => Value::Array(items.into_iter().map(sort_json_value).collect()),
 		Value::Object(map) => {
 			// JS `localeCompare` on ASCII keys ~ codepoint order; sort by key.
-			let mut sorted_entries: Vec<(String, Value)> = map.into_iter().collect();
+			// Recurse into values too: with serde_json's preserve_order feature the
+			// Map keeps insertion order, so nothing sorts nested objects for us.
+			let mut sorted_entries: Vec<(String, Value)> =
+				map.into_iter().map(|(key, value)| (key, sort_json_value(value))).collect();
 			sorted_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
 			Value::Object(sorted_entries.into_iter().collect())
 		}

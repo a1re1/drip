@@ -97,3 +97,12 @@ fn bash_definition_matches_the_ts_oracle() {
         "BASH definition drifted from tools/bash-tool.ts"
     );
 }
+
+#[test]
+fn fetch_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::fetch::definition(),
+        apply_renames(&fixture_entry("FETCH")),
+        "FETCH definition drifted from tools/fetch-tool.ts"
+    );
+}

@@ -31,7 +31,7 @@ shell-words = "1"
 dirs = "5"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 libc = "0.2"
 # patch_journal.rs: sha256 pre-image digests (node:crypto createHash("sha256") in the TS).
 sha2 = "0.10"

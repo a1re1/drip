@@ -1,0 +1,382 @@
+{
+  "states": {
+    "blockedOnly": {
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "goal": "add a --verbose flag to the CLI",
+      "history": [],
+      "iteration": 4,
+      "loop": 1,
+      "memory": [],
+      "observations": [],
+      "promotedContext": [],
+      "tasks": [
+        {
+          "createdAtIteration": 1,
+          "notes": [
+            "which db?"
+          ],
+          "stallCount": 0,
+          "status": "blocked",
+          "id": "t1",
+          "title": "needs a decision"
+        }
+      ],
+      "telemetry": {},
+      "version": 1
+    },
+    "empty": {
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "goal": "add a --verbose flag to the CLI",
+      "history": [],
+      "iteration": 1,
+      "loop": 1,
+      "memory": [],
+      "observations": [],
+      "promotedContext": [],
+      "tasks": [],
+      "telemetry": {},
+      "version": 1
+    },
+    "question": {
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "goal": "what does the lease module do?",
+      "history": [],
+      "iteration": 1,
+      "loop": 1,
+      "memory": [],
+      "observations": [],
+      "promotedContext": [],
+      "tasks": [],
+      "telemetry": {},
+      "version": 1
+    },
+    "rich": {
+      "createdAt": "2026-09-01T00:00:00.000Z",
+      "goal": "port the loop\nwith a second goal line",
+      "history": [
+        {
+          "archivedAtIteration": 3,
+          "goal": "old goal",
+          "summary": "did the old thing",
+          "tasks": [
+            {
+              "createdAtIteration": 1,
+              "notes": [],
+              "stallCount": 0,
+              "status": "completed",
+              "id": "t0",
+              "title": "old task"
+            }
+          ]
+        }
+      ],
+      "iteration": 7,
+      "loop": 3,
+      "memory": [
+        {
+          "createdAtIteration": 2,
+          "id": "note-1",
+          "text": "the parser lives in src/parser.ts"
+        },
+        {
+          "createdAtIteration": 5,
+          "id": "note-2",
+          "text": "tests run with bun run test"
+        }
+      ],
+      "observations": [
+        {
+          "createdAtIteration": 6,
+          "id": "obs-1",
+          "text": "cargo test takes ~40s",
+          "ttl": 3
+        }
+      ],
+      "promotedContext": [
+        {
+          "dynamic": true,
+          "inputPreview": "git status",
+          "key": "BASH:git status",
+          "output": "On branch main\nnothing to commit",
+          "promotedAtIteration": 5,
+          "rawInput": "{\"command\":\"git status\"}",
+          "reinforcements": 1,
+          "toolName": "BASH",
+          "ttl": 4
+        }
+      ],
+      "tasks": [
+        {
+          "createdAtIteration": 1,
+          "notes": [],
+          "stallCount": 0,
+          "status": "completed",
+          "id": "t1",
+          "title": "read the code",
+          "finishedAtIteration": 6,
+          "summary": "read it"
+        },
+        {
+          "createdAtIteration": 1,
+          "notes": [
+            "attempt (loop 2): budget; tried: PATCH",
+            "parser is recursive"
+          ],
+          "stallCount": 1,
+          "status": "in_progress",
+          "id": "t2",
+          "title": "write the port",
+          "activations": 2,
+          "footprint": [
+            "src/a.ts"
+          ]
+        },
+        {
+          "createdAtIteration": 1,
+          "notes": [],
+          "stallCount": 0,
+          "status": "pending",
+          "id": "t3",
+          "title": "run the tests",
+          "dependsOn": [
+            "t2"
+          ],
+          "role": "reviewer"
+        },
+        {
+          "createdAtIteration": 1,
+          "notes": [
+            "needs credentials"
+          ],
+          "stallCount": 0,
+          "status": "blocked",
+          "id": "t4",
+          "title": "publish",
+          "finishedAtIteration": 6
+        },
+        {
+          "createdAtIteration": 1,
+          "notes": [],
+          "stallCount": 0,
+          "status": "dropped",
+          "id": "t5",
+          "title": "old idea",
+          "droppedExhausted": true
+        }
+      ],
+      "telemetry": {},
+      "version": 1,
+      "inboxCursor": 2,
+      "lastActivation": {
+        "actions": [
+          "READ src/a.ts",
+          "PATCH src/a.ts",
+          "BASH cargo test (failed)"
+        ],
+        "cycles": 3,
+        "iteration": 6,
+        "loop": 2,
+        "outcome": "budget exhausted for this loop",
+        "taskId": "t2"
+      },
+      "lastVerification": {
+        "atIteration": 6,
+        "command": "cargo test",
+        "failed": true,
+        "outputTail": "error[E0308]: mismatched types\n  --> src/a.rs:10:5"
+      },
+      "mutationsSinceVerification": 2,
+      "operatorMessages": [
+        {
+          "id": "op-1",
+          "receivedAtIteration": 4,
+          "text": "stop touching the tokenizer"
+        },
+        {
+          "id": "op-2",
+          "receivedAtIteration": 6,
+          "text": "focus on src/parser.ts"
+        }
+      ],
+      "runSummary": {
+        "createdAtIteration": 3,
+        "reason": "partial",
+        "text": "half done"
+      },
+      "verificationStreak": {
+        "command": "cargo test",
+        "consecutiveFailures": 3,
+        "outputTailHash": "abcd1234"
+      }
+    }
+  },
+  "DEFAULT_HARNESS_SYSTEM_PROMPT": "You are one subagent in a relay working inside a solid-state harness. A planning loop builds a common task list; then each task is worked by its own task loop — you are the subagent for the current loop. A task loop runs as a few short cycles that share this conversation transcript: recent tool results stay hot in the transcript, older ones are folded to one-line digests, and when the loop ends the whole transcript is discarded. Only the shared state store survives between loops. Each loop starts with the full shared state: the goal, the common task list, saved memory notes, short-lived observations, and warm context (tool results the harness cached because separate loops kept reaching for them). The goal may be a follow-up to earlier goals; the history section lists what was already accomplished this session. Rely on history and shared memory to stay consistent with earlier work. The last_activation section shows what the previous loop did and how it ended; use it to continue instead of repeating work. Do exactly one unit of work per task loop: the CURRENT TASK shown in the prompt. Use the available tools to inspect and change the workspace. Anything you do not write to shared state is forgotten when this task loop ends. To persist knowledge for future loops, call remember for durable facts, or observe for short-lived findings (a failing check's cause, an in-flight hypothesis) — observations expire after a few loops unless re-observed. To persist progress, call finish_task with a summary when the current task is done, or status blocked plus follow-up context when you cannot finish it; note_task records partial progress on the task without ending the loop. Never claim a verification (tests, build, typecheck) succeeded unless its passing output is visible in this loop's transcript or warm context. When a verification fails, record the failing detail with observe before moving on. Warm context entries marked failed are calls that did not succeed when last run — do not re-run a call warm context already answers; act on the cached result instead. A folded transcript entry means that result was already seen this loop — re-run the call only if you truly need the full output again. Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents. When a check fails because of the runner or environment (wrong test command, missing global, unavailable module), fix the invocation — never edit product code to accommodate a different runner (no stubbing globals or modules to make tests run). If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded. If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents. The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks. Prefer small tasks that one loop can finish. Do not narrate; act through tool calls.",
+  "RUN_SUMMARY_SYSTEM_PROMPT": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+  "composeHarnessSystemPrompt": {
+    "none": "You are one subagent in a relay working inside a solid-state harness. A planning loop builds a common task list; then each task is worked by its own task loop — you are the subagent for the current loop. A task loop runs as a few short cycles that share this conversation transcript: recent tool results stay hot in the transcript, older ones are folded to one-line digests, and when the loop ends the whole transcript is discarded. Only the shared state store survives between loops. Each loop starts with the full shared state: the goal, the common task list, saved memory notes, short-lived observations, and warm context (tool results the harness cached because separate loops kept reaching for them). The goal may be a follow-up to earlier goals; the history section lists what was already accomplished this session. Rely on history and shared memory to stay consistent with earlier work. The last_activation section shows what the previous loop did and how it ended; use it to continue instead of repeating work. Do exactly one unit of work per task loop: the CURRENT TASK shown in the prompt. Use the available tools to inspect and change the workspace. Anything you do not write to shared state is forgotten when this task loop ends. To persist knowledge for future loops, call remember for durable facts, or observe for short-lived findings (a failing check's cause, an in-flight hypothesis) — observations expire after a few loops unless re-observed. To persist progress, call finish_task with a summary when the current task is done, or status blocked plus follow-up context when you cannot finish it; note_task records partial progress on the task without ending the loop. Never claim a verification (tests, build, typecheck) succeeded unless its passing output is visible in this loop's transcript or warm context. When a verification fails, record the failing detail with observe before moving on. Warm context entries marked failed are calls that did not succeed when last run — do not re-run a call warm context already answers; act on the cached result instead. A folded transcript entry means that result was already seen this loop — re-run the call only if you truly need the full output again. Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents. When a check fails because of the runner or environment (wrong test command, missing global, unavailable module), fix the invocation — never edit product code to accommodate a different runner (no stubbing globals or modules to make tests run). If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded. If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents. The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks. Prefer small tasks that one loop can finish. Do not narrate; act through tool calls.",
+    "empty": "You are one subagent in a relay working inside a solid-state harness. A planning loop builds a common task list; then each task is worked by its own task loop — you are the subagent for the current loop. A task loop runs as a few short cycles that share this conversation transcript: recent tool results stay hot in the transcript, older ones are folded to one-line digests, and when the loop ends the whole transcript is discarded. Only the shared state store survives between loops. Each loop starts with the full shared state: the goal, the common task list, saved memory notes, short-lived observations, and warm context (tool results the harness cached because separate loops kept reaching for them). The goal may be a follow-up to earlier goals; the history section lists what was already accomplished this session. Rely on history and shared memory to stay consistent with earlier work. The last_activation section shows what the previous loop did and how it ended; use it to continue instead of repeating work. Do exactly one unit of work per task loop: the CURRENT TASK shown in the prompt. Use the available tools to inspect and change the workspace. Anything you do not write to shared state is forgotten when this task loop ends. To persist knowledge for future loops, call remember for durable facts, or observe for short-lived findings (a failing check's cause, an in-flight hypothesis) — observations expire after a few loops unless re-observed. To persist progress, call finish_task with a summary when the current task is done, or status blocked plus follow-up context when you cannot finish it; note_task records partial progress on the task without ending the loop. Never claim a verification (tests, build, typecheck) succeeded unless its passing output is visible in this loop's transcript or warm context. When a verification fails, record the failing detail with observe before moving on. Warm context entries marked failed are calls that did not succeed when last run — do not re-run a call warm context already answers; act on the cached result instead. A folded transcript entry means that result was already seen this loop — re-run the call only if you truly need the full output again. Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents. When a check fails because of the runner or environment (wrong test command, missing global, unavailable module), fix the invocation — never edit product code to accommodate a different runner (no stubbing globals or modules to make tests run). If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded. If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents. The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks. Prefer small tasks that one loop can finish. Do not narrate; act through tool calls.",
+    "persona": "You are a terse reviewer.\nNever guess.\n\nYou are one subagent in a relay working inside a solid-state harness. A planning loop builds a common task list; then each task is worked by its own task loop — you are the subagent for the current loop. A task loop runs as a few short cycles that share this conversation transcript: recent tool results stay hot in the transcript, older ones are folded to one-line digests, and when the loop ends the whole transcript is discarded. Only the shared state store survives between loops. Each loop starts with the full shared state: the goal, the common task list, saved memory notes, short-lived observations, and warm context (tool results the harness cached because separate loops kept reaching for them). The goal may be a follow-up to earlier goals; the history section lists what was already accomplished this session. Rely on history and shared memory to stay consistent with earlier work. The last_activation section shows what the previous loop did and how it ended; use it to continue instead of repeating work. Do exactly one unit of work per task loop: the CURRENT TASK shown in the prompt. Use the available tools to inspect and change the workspace. Anything you do not write to shared state is forgotten when this task loop ends. To persist knowledge for future loops, call remember for durable facts, or observe for short-lived findings (a failing check's cause, an in-flight hypothesis) — observations expire after a few loops unless re-observed. To persist progress, call finish_task with a summary when the current task is done, or status blocked plus follow-up context when you cannot finish it; note_task records partial progress on the task without ending the loop. Never claim a verification (tests, build, typecheck) succeeded unless its passing output is visible in this loop's transcript or warm context. When a verification fails, record the failing detail with observe before moving on. Warm context entries marked failed are calls that did not succeed when last run — do not re-run a call warm context already answers; act on the cached result instead. A folded transcript entry means that result was already seen this loop — re-run the call only if you truly need the full output again. Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents. When a check fails because of the runner or environment (wrong test command, missing global, unavailable module), fix the invocation — never edit product code to accommodate a different runner (no stubbing globals or modules to make tests run). If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded. If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents. The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks. Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
+  },
+  "looksLikeQuestionGoal": {
+    "what does the lease module do?": true,
+    "explain how sessions are stored": true,
+    "add a --verbose flag": false,
+    "fix the bug in parser.ts": false,
+    "why is cargo test slow": true,
+    "how do I run this? add a README section": true,
+    "is the queue module thread safe": true,
+    "": false,
+    "!ls": false,
+    "Describe the architecture": true
+  },
+  "buildIterationUserMessage": {
+    "empty_minimal": "current_date: 2026-09-01\n\ncycle: 1\n\ngoal: add a --verbose flag to the CLI\n\ntasks: none yet\n\ninstruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.",
+    "question_minimal": "current_date: 2026-09-01\n\ncycle: 1\n\ngoal: what does the lease module do?\n\ntasks: none yet\n\ninstruction: this goal reads as a question or report request. If the history, memory, and task summaries above already answer it, call respond with the answer NOW instead of planning tasks; only investigate first if the answer is genuinely not recorded.\n\ninstruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.",
+    "blockedOnly": "current_date: 2026-09-01\n\ncycle: 4\n\ngoal: add a --verbose flag to the CLI\n\ntasks:\n[!] t1: needs a decision\n\ninstruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned.",
+    "rich_full": "current_date: 2026-09-01\n\ncycle: 7\n\ngoal: port the loop\nwith a second goal line\n\noperator_messages (fresh instructions from the operator, sent while this run executes — they take precedence over the original goal where they conflict; incorporate them now via plan_tasks/drop_task/revise_task or respond):\n- [cycle 4] stop touching the tokenizer\n- [cycle 6] focus on src/parser.ts\n\nrole: this loop runs as the \"porter\" subagent — ports code faithfully\n\nworkspace: /repo — tools already run from this directory; use relative paths and never cd to a guessed absolute path\n\ntask_loop: loop 3, cycle 1 of up to 4 — cycles in this loop share this transcript; when the loop ends only shared state survives\n\nrun_budget: cycle 7 of 10 for this run\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\ntasks:\n[x] t1: read the code — read it\n[>] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\nstall_warning: the previous 1 task loop(s) recorded no progress. After 2 more loop(s) without progress this task will be AUTO-BLOCKED. Progress = editing files (PATCH) or persisting findings (note_task, observe, remember, finish_task). Start by persisting what you already know, then edit — do not re-read files warm_context already shows.\n\nlast_verification (harness-recorded — trust THIS over memory or summaries): cargo test → FAILED (cycle 6; STALE — 2 workspace edit(s) landed after it, re-run before relying on it)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\ninstruction: the most recent verification FAILED — do not call finish_task status completed for build/fix work until a newer run of it passes.\n\nverification_stuck: cargo test has now failed 3 consecutive times with UNCHANGED output — the edits between runs are not affecting the failure, and such loops count as stalled. Stop patching the same spot: re-read the failing output, form a new hypothesis (record it with observe), try a different location, or finish_task status blocked with what you ruled out.\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nrepo_memory (durable repo-level notes saved across sessions):\n- parser.md: parser notes\n- tests.md: test notes\npages live in /repo/.lci/memory (open with READ using the absolute path); save durable repo learnings with remember scope=repo.\n\nobservations (short-lived findings — ttl decays once per task loop; each expires at 0 unless re-observed with observe):\n- (obs-1, ttl 3) cargo test takes ~40s\n\nwarm_context (cached tool results, auto-managed — do not re-run these calls unless the cached output looks stale):\n[BASH git status] (ttl 4, refreshed live)\nOn branch main\nnothing to commit\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\ncurrent_task: t2: write the port\nnotes from earlier loops:\n- attempt (loop 2): budget; tried: PATCH\n- parser is recursive\nplan_review: t1, t4 just finished. Before working the current task, reconcile the todo list with what you learned: drop_task tasks made unnecessary, revise_task titles that no longer match reality, plan_tasks (placement \"next\") for newly discovered prerequisite work. Skip this if the list is still accurate.\ninstruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked.",
+    "rich_nearly_exhausted": "current_date: 2026-09-01\n\ncycle: 7\n\ngoal: port the loop\nwith a second goal line\n\noperator_messages (fresh instructions from the operator, sent while this run executes — they take precedence over the original goal where they conflict; incorporate them now via plan_tasks/drop_task/revise_task or respond):\n- [cycle 4] stop touching the tokenizer\n- [cycle 6] focus on src/parser.ts\n\nrun_budget: cycle 9 of 10 for this run — the budget is nearly exhausted; prioritize finish_task and prune the todo list over starting new work\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\ntasks:\n[x] t1: read the code — read it\n[>] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\nstall_warning: the previous 1 task loop(s) recorded no progress. After 2 more loop(s) without progress this task will be AUTO-BLOCKED. Progress = editing files (PATCH) or persisting findings (note_task, observe, remember, finish_task). Start by persisting what you already know, then edit — do not re-read files warm_context already shows.\n\nlast_verification (harness-recorded — trust THIS over memory or summaries): cargo test → FAILED (cycle 6; STALE — 2 workspace edit(s) landed after it, re-run before relying on it)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\ninstruction: the most recent verification FAILED — do not call finish_task status completed for build/fix work until a newer run of it passes.\n\nverification_stuck: cargo test has now failed 3 consecutive times with UNCHANGED output — the edits between runs are not affecting the failure, and such loops count as stalled. Stop patching the same spot: re-read the failing output, form a new hypothesis (record it with observe), try a different location, or finish_task status blocked with what you ruled out.\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nobservations (short-lived findings — ttl decays once per task loop; each expires at 0 unless re-observed with observe):\n- (obs-1, ttl 3) cargo test takes ~40s\n\nwarm_context (cached tool results, auto-managed — do not re-run these calls unless the cached output looks stale):\n[BASH git status] (ttl 4, refreshed live)\nOn branch main\nnothing to commit\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\ncurrent_task: t2: write the port\nnotes from earlier loops:\n- attempt (loop 2): budget; tried: PATCH\n- parser is recursive\nplan_review: t1, t4 just finished. Before working the current task, reconcile the todo list with what you learned: drop_task tasks made unnecessary, revise_task titles that no longer match reality, plan_tasks (placement \"next\") for newly discovered prerequisite work. Skip this if the list is still accurate.\ninstruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked.",
+    "rich_no_task_role_no_desc": "current_date: 2026-09-01\n\ncycle: 7\n\ngoal: port the loop\nwith a second goal line\n\noperator_messages (fresh instructions from the operator, sent while this run executes — they take precedence over the original goal where they conflict; incorporate them now via plan_tasks/drop_task/revise_task or respond):\n- [cycle 4] stop touching the tokenizer\n- [cycle 6] focus on src/parser.ts\n\nrole: this loop runs as the \"planner\" subagent\n\ntask_loop: loop 1, cycle 1 of up to 2 — cycles in this loop share this transcript; when the loop ends only shared state survives\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\nlast_verification (harness-recorded — trust THIS over memory or summaries): cargo test → FAILED (cycle 6; STALE — 2 workspace edit(s) landed after it, re-run before relying on it)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\ninstruction: the most recent verification FAILED — do not call finish_task status completed for build/fix work until a newer run of it passes.\n\nverification_stuck: cargo test has now failed 3 consecutive times with UNCHANGED output — the edits between runs are not affecting the failure, and such loops count as stalled. Stop patching the same spot: re-read the failing output, form a new hypothesis (record it with observe), try a different location, or finish_task status blocked with what you ruled out.\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nobservations (short-lived findings — ttl decays once per task loop; each expires at 0 unless re-observed with observe):\n- (obs-1, ttl 3) cargo test takes ~40s\n\nwarm_context (cached tool results, auto-managed — do not re-run these calls unless the cached output looks stale):\n[BASH git status] (ttl 4, refreshed live)\nOn branch main\nnothing to commit\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\ninstruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned."
+  },
+  "buildIterationMessages": {
+    "empty": [
+      {
+        "content": "SYS",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ncycle: 1\n\ngoal: add a --verbose flag to the CLI\n\ntasks: none yet\n\ninstruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.",
+        "role": "user"
+      }
+    ],
+    "rich_context_images": [
+      {
+        "content": "SYS",
+        "role": "system"
+      },
+      {
+        "content": [
+          {
+            "text": "current_date: 2026-09-01\n\ncycle: 7\n\ngoal: port the loop\nwith a second goal line\n\noperator_messages (fresh instructions from the operator, sent while this run executes — they take precedence over the original goal where they conflict; incorporate them now via plan_tasks/drop_task/revise_task or respond):\n- [cycle 4] stop touching the tokenizer\n- [cycle 6] focus on src/parser.ts\n\nworkspace: /repo — tools already run from this directory; use relative paths and never cd to a guessed absolute path\n\ntask_loop: loop 3, cycle 1 of up to 4 — cycles in this loop share this transcript; when the loop ends only shared state survives\n\nrun_budget: cycle 7 of 10 for this run\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\ntasks:\n[x] t1: read the code — read it\n[>] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\nstall_warning: the previous 1 task loop(s) recorded no progress. After 2 more loop(s) without progress this task will be AUTO-BLOCKED. Progress = editing files (PATCH) or persisting findings (note_task, observe, remember, finish_task). Start by persisting what you already know, then edit — do not re-read files warm_context already shows.\n\nlast_verification (harness-recorded — trust THIS over memory or summaries): cargo test → FAILED (cycle 6; STALE — 2 workspace edit(s) landed after it, re-run before relying on it)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\ninstruction: the most recent verification FAILED — do not call finish_task status completed for build/fix work until a newer run of it passes.\n\nverification_stuck: cargo test has now failed 3 consecutive times with UNCHANGED output — the edits between runs are not affecting the failure, and such loops count as stalled. Stop patching the same spot: re-read the failing output, form a new hypothesis (record it with observe), try a different location, or finish_task status blocked with what you ruled out.\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nrepo_memory (durable repo-level notes saved across sessions):\n- parser.md\npages live in /repo/.lci/memory (open with READ using the absolute path); save durable repo learnings with remember scope=repo.\n\nobservations (short-lived findings — ttl decays once per task loop; each expires at 0 unless re-observed with observe):\n- (obs-1, ttl 3) cargo test takes ~40s\n\nwarm_context (cached tool results, auto-managed — do not re-run these calls unless the cached output looks stale):\n[BASH git status] (ttl 4, refreshed live)\nOn branch main\nnothing to commit\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\ncurrent_task: t2: write the port\nnotes from earlier loops:\n- attempt (loop 2): budget; tried: PATCH\n- parser is recursive\nplan_review: t1, t4 just finished. Before working the current task, reconcile the todo list with what you learned: drop_task tasks made unnecessary, revise_task titles that no longer match reality, plan_tasks (placement \"next\") for newly discovered prerequisite work. Skip this if the list is still accurate.\ninstruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked.\n\ncontext line one\ncontext line two",
+            "type": "text"
+          },
+          {
+            "image_url": {
+              "url": "data:image/png;base64,AAAA"
+            },
+            "type": "image_url"
+          },
+          {
+            "image_url": {
+              "url": "data:image/png;base64,BBBB"
+            },
+            "type": "image_url"
+          }
+        ],
+        "role": "user"
+      }
+    ]
+  },
+  "buildCycleContinuationMessage": {
+    "first": "cycle: 2 of up to 4 in this task loop — the transcript above is this loop's earlier work; older tool results may have been folded to digests.\n\ncurrent_task: t2: write the port\n\nreminder: cargo test FAILED at cycle 6 — completed claims need a newer passing run.\n\ninstruction: Continue the current task from where the transcript leaves off. Call finish_task when it is done; persist partial findings with observe or remember.",
+    "last_budget": "cycle: 4 of up to 4 in this task loop — the transcript above is this loop's earlier work; older tool results may have been folded to digests.\n\nrun_budget: cycle 9 of 10 for this run — the budget is nearly exhausted; prioritize finish_task and prune the todo list over starting new work\n\ncurrent_task: t2: write the port\n\nreminder: cargo test FAILED at cycle 6 — completed claims need a newer passing run.\n\ninstruction: This is the FINAL cycle of this loop — the transcript is discarded when it ends. Persist everything worth keeping NOW: finish_task if the task is done or blocked, note_task for where you left off, observe/remember for findings, plan_tasks for follow-up work.",
+    "no_task": "cycle: 2 of up to 3 in this task loop — the transcript above is this loop's earlier work; older tool results may have been folded to digests.\n\nrun_budget: cycle 2 of 5 for this run\n\ninstruction: Continue planning. Call plan_tasks with small, concrete tasks for the goal."
+  },
+  "buildRunSummaryMessages": {
+    "aborted": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: aborted — the run was stopped before the goal completed\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "completed": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: completed — every task completed\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\nworkspace_changes (ground truth at run end):\n M src/a.rs\n?? new.rs\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "error": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: error — the run failed on an infrastructure or endpoint error — the state is persisted and the goal can be resumed\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "futile": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: futile — the run kept stalling with no completed work between recovery escalations — the approach or the goal itself needs to change before resuming\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "max-iterations": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: max-iterations — the cycle budget ran out before the goal completed\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "partial": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: partial — some tasks were dropped without completing — the goal was only partially accomplished\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ],
+    "planned": [
+      {
+        "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+        "role": "system"
+      },
+      {
+        "content": "current_date: 2026-09-01\n\ngoal: port the loop\nwith a second goal line\n\nrun_ended: planned — plan-only mode stopped after task decomposition — resume the session to execute the plan\n\ntasks:\n[x] t1: read the code — read it\n[ ] t2: write the port (2 loop(s) so far, stalled x1)\n[ ] t3: run the tests [role: reviewer] [after t2]\n[!] t4: publish\n[-] t5: old idea\n\ntask_stats: 1 completed, 1 blocked, 1 dropped of 5 total\n\nmemory:\n- (note-1) the parser lives in src/parser.ts\n- (note-2) tests run with bun run test\n\nhistory (earlier goals this session, oldest first):\n- \"old goal\" — 1/1 tasks completed\n  [x] t0: old task\n  run summary: did the old thing\n\nlast_activation (previous loop over 3 cycles, working t2):\n- READ src/a.ts\n- PATCH src/a.ts\n- BASH cargo test (failed)\noutcome: budget exhausted for this loop\n\nlast_verification (harness-recorded — cite THIS, not memory): cargo test → FAILED (cycle 6)\nerror[E0308]: mismatched types\n  --> src/a.rs:10:5\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+        "role": "user"
+      }
+    ]
+  },
+  "buildRunSummaryMessages_empty": [
+    {
+      "content": "You are the reporting step at the end of a solid-state harness run. You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes. Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why. Reply with plain markdown text. Do not call tools.",
+      "role": "system"
+    },
+    {
+      "content": "current_date: 2026-09-01\n\ngoal: add a --verbose flag to the CLI\n\nrun_ended: completed — every task completed\n\ntasks: none were planned\n\ninstruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls.",
+      "role": "user"
+    }
+  ],
+  "buildFallbackRunSummary": {
+    "rich:aborted": "Run ended (aborted): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish",
+    "empty:aborted": "Run ended (aborted): no tasks were planned. the run was stopped before the goal completed.",
+    "rich:completed": "Run ended (completed): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish",
+    "empty:completed": "Run ended (completed): no tasks were planned. every task completed.",
+    "rich:error": "Run ended (error): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish",
+    "empty:error": "Run ended (error): no tasks were planned. the run failed on an infrastructure or endpoint error — the state is persisted and the goal can be resumed.",
+    "rich:futile": "Run ended (futile): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish",
+    "empty:futile": "Run ended (futile): no tasks were planned. the run kept stalling with no completed work between recovery escalations — the approach or the goal itself needs to change before resuming.",
+    "rich:max-iterations": "Run ended (max-iterations): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish\nThe cycle budget ran out — resume the goal to continue.",
+    "empty:max-iterations": "Run ended (max-iterations): no tasks were planned. the cycle budget ran out before the goal completed.",
+    "rich:partial": "Run ended (partial): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish\nDropped tasks mean the goal was only partially accomplished — re-run the goal (or give more direction) to finish the rest.",
+    "empty:partial": "Run ended (partial): no tasks were planned. some tasks were dropped without completing — the goal was only partially accomplished.",
+    "rich:planned": "Run ended (planned): 1/5 task(s) completed, 1 blocked, 1 dropped.\n- t4 blocked: publish",
+    "empty:planned": "Run ended (planned): no tasks were planned. plan-only mode stopped after task decomposition — resume the session to execute the plan."
+  }
+}

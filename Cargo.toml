@@ -33,6 +33,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"
+# patch_journal.rs: sha256 pre-image digests (node:crypto createHash("sha256") in the TS).
+sha2 = "0.10"
 # marketplaces.rs addedAt timestamps (new Date().toISOString() in the TS).
 # Added for --migrate-from-lci (drip-only, no TS counterpart): rusqlite
 # checkpoints the copied index.sqlite via PRAGMA wal_checkpoint(TRUNCATE);

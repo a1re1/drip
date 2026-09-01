@@ -34,6 +34,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"
 # marketplaces.rs addedAt timestamps (new Date().toISOString() in the TS).
+# Added for --migrate-from-lci (drip-only, no TS counterpart): rusqlite
+# checkpoints the copied index.sqlite via PRAGMA wal_checkpoint(TRUNCATE);
+# walkdir walks the skills/marketplaces/sessions trees; dirs resolves the
+# cross-platform home directory.
+walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"

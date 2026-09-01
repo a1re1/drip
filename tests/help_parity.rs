@@ -79,8 +79,13 @@ fn drip_help_matches_renamed_lci_help() {
     let expected = apply_rename(&String::from_utf8(lci_help.stdout).expect("utf8 help"));
     let actual = String::from_utf8(drip_help.stdout).expect("utf8 help");
 
+    // The migration OPTIONS block is drip-only: `--migrate-from-lci` has no
+    // lci counterpart, so the renamed TS output has no matching lines. Strip
+    // it from the drip output before comparing so the rest stays byte-equal.
+    let actual_stripped = drip::cli::help::strip_migration_block(&actual);
+
     assert_eq!(
-        actual, expected,
-        "drip --help must byte-match the renamed lci --help output"
+        actual_stripped, expected,
+        "drip --help (migration block stripped) must byte-match the renamed lci --help output"
     );
 }

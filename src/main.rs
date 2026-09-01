@@ -44,6 +44,33 @@ fn main() {
         return;
     }
 
+    // drip-only: lci → drip migration (`--migrate-from-lci [--from <dir>]
+    // [--dry-run] [--project]`) — drip/PLAN.md; there is no TS dispatch to
+    // mirror, so it sits after help/version like the other leaf commands.
+    if cli_args.migrate_from_lci {
+        let options = drip::migrate::MigrateOptions {
+            from: cli_args.migrate_from.clone(),
+            dry_run: cli_args.dry_run,
+            project: cli_args.migrate_project,
+            to: None,
+            project_root: None,
+        };
+
+        return match drip::migrate::migrate_from_lci(&options) {
+            Ok(report) => {
+                // Summary table on stdout; exit 0 even when every entry was
+                // skipped (the migration is idempotent, not an error).
+                print!("{}", report.summary());
+            }
+            // Missing --from, unwritable destination, etc. — one clear line
+            // on stderr, exit 1.
+            Err(err) => {
+                eprintln!("{err:#}");
+                std::process::exit(1);
+            }
+        };
+    }
+
     // Remaining dispatch (goal runs, subcommands, flags beyond help/version)
     // lands with the later port waves (core state, harness, tools). Echo the
     // leading token back as the unported "command" (brief: `drip: <command>

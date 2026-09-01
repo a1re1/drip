@@ -24,11 +24,12 @@ indexmap = { version = "2", features = ["serde"] }
 regex = "1"
 shell-words = "1"
 dirs = "5"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-anyhow = "1"
-indexmap = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

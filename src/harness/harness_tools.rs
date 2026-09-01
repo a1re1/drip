@@ -479,6 +479,155 @@ fn parse_planned_tasks(
     (entries, unknown_roles)
 }
 
+/// port of HarnessToolResult (the applyHarnessToolCall return shape)
+#[derive(Debug, Clone, PartialEq)]
+pub struct HarnessToolResult {
+    pub result_text: String,
+    pub state_changed: bool,
+    pub task_finished: bool,
+}
+
+/// port of applyReviewVerdict: finishing a review task is a verdict on the
+/// reviewed work. Confirmation completes the review and annotates the
+/// original; rejection completes the review too (its unit of work — judging —
+/// is done) and sends the original back to the queue, or blocks it once its
+/// review-round budget is exhausted so the run escalates to the user instead
+/// of ping-ponging forever.
+pub fn apply_review_verdict(
+    state: &mut crate::core::types::HarnessState,
+    review_task: &crate::core::types::HarnessTask,
+    status: FinishTaskStatus,
+    summary: &str,
+    gate: Option<&HarnessRoleGate>,
+) -> HarnessToolResult {
+    use crate::core::state::{
+        append_task_note, finish_task as finish_task_state, get_task_by_id,
+        get_task_by_id_mut,
+        reopen_task_for_rework, HarnessFinishArgs,
+    };
+    use crate::core::types::HarnessTaskStatus;
+
+    let original = review_task
+        .review_of
+        .as_deref()
+        .and_then(|id| get_task_by_id(state, id))
+        .map(|task| (task.id.clone(), task.status, task.review_round));
+
+    if status == FinishTaskStatus::Completed {
+        finish_task_state(
+            state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary,
+                task_id: Some(&review_task.id),
+            },
+        );
+
+        let review_task_id = &review_task.id;
+        if let Some((original_id, _, _)) = &original {
+            if let Some(task) = get_task_by_id_mut(state, original_id) {
+                append_task_note(task, &format!("Review {review_task_id} confirmed this task: {summary}"));
+            }
+        }
+
+        return HarnessToolResult {
+            result_text: format!(
+                "Review {} confirmed {}.",
+                review_task.id,
+                original.as_ref().map(|(id, _, _)| id.as_str()).unwrap_or_else(|| review_task.review_of.as_deref().unwrap_or_default())
+            ),
+            state_changed: true,
+            task_finished: true,
+        };
+    }
+
+    finish_task_state(
+        state,
+        HarnessFinishArgs {
+            status: HarnessTaskStatus::Completed,
+            summary: &format!("Rejected {}: {summary}", review_task.review_of.as_deref().unwrap_or_default()),
+            task_id: Some(&review_task.id),
+        },
+    );
+
+    let Some((original_id, original_status, original_review_round)) = original else {
+        return HarnessToolResult {
+            result_text: format!(
+                "Review {} recorded a rejection, but the reviewed task {} no longer exists to reopen.",
+                review_task.id,
+                review_task.review_of.as_deref().unwrap_or_default()
+            ),
+            state_changed: true,
+            task_finished: true,
+        };
+    };
+
+    if original_status == crate::core::types::HarnessTaskStatus::Dropped {
+        return HarnessToolResult {
+            result_text: format!(
+                "Review {} recorded a rejection, but the reviewed task {} no longer exists to reopen.",
+                review_task.id,
+                review_task.review_of.as_deref().unwrap_or_default()
+            ),
+            state_changed: true,
+            task_finished: true,
+        };
+    }
+
+    let max_review_rounds = gate
+        .and_then(|gate| gate.max_review_rounds)
+        .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS);
+
+    if original_review_round.unwrap_or(0) >= (max_review_rounds as i64) - 1 {
+        let new_round = original_review_round.unwrap_or(0) + 1;
+        // TS mutates original.reviewRound via the same reference; the Rust
+        // state helper re-looks the task up by id.
+        if let Some(task) = get_task_by_id_mut(state, &original_id) {
+            task.review_round = Some(new_round);
+        }
+        finish_task_state(
+            state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: &format!(
+                    "Review {} rejected the work (rejection {} of {}): {summary}",
+                    review_task.id, new_round, max_review_rounds
+                ),
+                task_id: Some(&original_id),
+            },
+        );
+
+        return HarnessToolResult {
+            result_text: format!(
+                "Review {} rejected {}. Its review budget is exhausted, so {} is now blocked — it needs a different approach or user input.",
+                review_task.id, original_id, original_id
+            ),
+            state_changed: true,
+            task_finished: true,
+        };
+    }
+
+    let review_task_id = &review_task.id;
+    if let Some(task) = get_task_by_id_mut(state, &original_id) {
+        reopen_task_for_rework(
+            task,
+            &format!("Review {review_task_id} rejected the work: {summary}"),
+        );
+    }
+
+    HarnessToolResult {
+        result_text: format!(
+            "Review {} rejected {}. The task was reopened with the review findings (rejection {} of {}).",
+            review_task.id,
+            original_id,
+            original_review_round.unwrap_or(0) + 1,
+            max_review_rounds
+        ),
+        state_changed: true,
+        task_finished: true,
+    }
+}
+
 /// port of the remember/forget scope coercion ("session" default).
 fn parse_scope(input: &serde_json::Value) -> MemoryScope {
     if string_or_default(input, "scope", "session") == "repo" {
@@ -571,5 +720,358 @@ pub fn parse_harness_op_with_gate(
             note_id: string_or_default(&input, "noteId", ""),
         }),
         _ => Err(format!("Unknown harness tool \"{tool_name}\".")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Repo memory bank helpers — port of src/harness/harness-tools.ts:26-132.
+// These file formats must stay byte-identical with the TS implementation: the
+// MEMORY.md index holds one line per page, `- [Title](slug.md) — hook`, and a
+// topic page starts with `# <topic>` when first created (later notes are
+// appended after a blank line).
+// ---------------------------------------------------------------------------
+
+use crate::core::state as core_state;
+
+/// port of MEMORY_INDEX (src/harness/harness-tools.ts:26)
+const MEMORY_INDEX: &str = "MEMORY.md";
+
+/// port of parseMemoryIndex's map value type `{ title: string; hook: string }`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryIndexEntry {
+    pub title: String,
+    pub hook: String,
+}
+
+/// port of slugify (src/harness/harness-tools.ts:29-40)
+///
+/// Lowercases, collapses every run of non-`[a-z0-9]` characters into a single
+/// dash, trims leading/trailing dashes and caps the result at 80 characters
+/// (falling back to "note"). "memory" is remapped to "memory-notes" because
+/// "memory.md" would collide with MEMORY.md on case-insensitive filesystems.
+pub fn slugify(topic: &str) -> String {
+    // toLowerCase() then replace(/[^a-z0-9]+/g, "-")
+    let mut replaced = String::new();
+    let mut last_was_dash = true;
+    for ch in topic.chars() {
+        if ch.is_ascii_alphanumeric() {
+            replaced.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            replaced.push('-');
+            last_was_dash = true;
+        }
+    }
+    // replace(/^-+|-+$/g, "")
+    let trimmed = replaced.trim_matches('-');
+    // slice(0, 80) — the slug is pure ASCII at this point, so code-unit and
+    // character truncation agree.
+    let mut slug: String = trimmed.chars().take(80).collect();
+    if slug.is_empty() {
+        slug = "note".to_string();
+    }
+
+    // "memory.md" matches MEMORY.md on case-insensitive filesystems, so that
+    // slug would let a page write (or forget) clobber the index itself.
+    if slug == "memory" {
+        "memory-notes".to_string()
+    } else {
+        slug
+    }
+}
+
+/// port of parseMemoryIndex (src/harness/harness-tools.ts:46-56)
+///
+/// Parses MEMORY.md into an ordered map of filename → hook line. Lines are
+/// expected to be `- [Title](slug.md) — hook`. A `Vec<(String, _)>` keeps the
+/// TS `Map` insertion order (later duplicates update in place) so
+/// re-serialisation is byte-identical.
+pub fn parse_memory_index(content: &str) -> Vec<(String, MemoryIndexEntry)> {
+    let mut entries: Vec<(String, MemoryIndexEntry)> = Vec::new();
+    for line in content.split('\n') {
+        // ^- \[([^\]]+)\]\(([^)]+\.md)\)(?:\s*—\s*(.*))?$
+        let Some(rest) = line.strip_prefix("- [") else {
+            continue;
+        };
+        let Some(title_end) = rest.find(']') else {
+            continue;
+        };
+        if title_end == 0 {
+            continue; // [^\]]+ needs at least one character
+        }
+        let title = &rest[..title_end];
+        let Some(after_title) = rest[title_end + 1..].strip_prefix('(') else {
+            continue;
+        };
+        // The filename runs to the first ')' (regex [^)]+), must end in ".md"
+        // and carry at least one character before it.
+        let Some(close) = after_title.find(')') else {
+            continue;
+        };
+        let filename = &after_title[..close];
+        if !filename.ends_with(".md") || filename.len() <= ".md".len() {
+            continue;
+        }
+        // Optional ` — hook` tail, then the line must end.
+        let tail = &after_title[close + 1..];
+        let hook = if tail.is_empty() {
+            String::new()
+        } else {
+            let Some(after_dash) = tail.trim_start().strip_prefix('—') else {
+                continue;
+            };
+            after_dash.trim().to_string()
+        };
+        let entry = MemoryIndexEntry {
+            title: title.trim().to_string(),
+            hook,
+        };
+        // Map.set on an existing key keeps its original insertion position.
+        if let Some(slot) = entries.iter_mut().find(|(name, _)| name == filename) {
+            slot.1 = entry;
+        } else {
+            entries.push((filename.to_string(), entry));
+        }
+    }
+    entries
+}
+
+/// port of serializeMemoryIndex (src/harness/harness-tools.ts:59-64)
+///
+/// Serialises the index map back to MEMORY.md content: one line per entry,
+/// `— hook` omitted when the hook is empty, newline-terminated when non-empty.
+pub fn serialize_memory_index(entries: &[(String, MemoryIndexEntry)]) -> String {
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|(filename, entry)| {
+            if entry.hook.is_empty() {
+                format!("- [{}]({})", entry.title, filename)
+            } else {
+                format!("- [{}]({}) — {}", entry.title, filename, entry.hook)
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+/// port of writeRepoMemoryNote (src/harness/harness-tools.ts:73-101)
+///
+/// Upserts a topic page and keeps MEMORY.md's index in sync:
+/// - creates the memory dir if needed,
+/// - appends the note to the topic page (creates it if missing),
+/// - adds or updates the index entry (a `hook` argument overrides; otherwise
+///   the existing hook is kept).
+/// Returns the slug used.
+pub fn write_repo_memory_note(
+    memory_dir: &std::path::Path,
+    topic: &str,
+    note: &str,
+    hook: Option<&str>,
+) -> String {
+    if !memory_dir.exists() {
+        std::fs::create_dir_all(memory_dir).expect("failed to create repo memory dir");
+    }
+
+    let slug = slugify(topic);
+    let filename = format!("{slug}.md");
+    let page_path = memory_dir.join(&filename);
+    let index_path = memory_dir.join(MEMORY_INDEX);
+
+    // Build page content: append note to existing page or create fresh
+    let existing_page_content = if page_path.exists() {
+        std::fs::read_to_string(&page_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let new_page_content = if !existing_page_content.is_empty() {
+        format!("{}\n\n{}\n", existing_page_content.trim_end(), note)
+    } else {
+        format!("# {topic}\n\n{note}\n")
+    };
+    std::fs::write(&page_path, new_page_content).expect("failed to write repo memory page");
+
+    // Upsert index entry
+    let index_content = if index_path.exists() {
+        std::fs::read_to_string(&index_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut entries = parse_memory_index(&index_content);
+    let existing_hook = entries
+        .iter()
+        .find(|(name, _)| name == &filename)
+        .map(|(_, entry)| entry.hook.clone());
+    let hook = hook
+        .map(|hook| hook.to_string())
+        .or(existing_hook)
+        .unwrap_or_default();
+    let entry = MemoryIndexEntry {
+        title: topic.to_string(),
+        hook,
+    };
+    if let Some(slot) = entries.iter_mut().find(|(name, _)| name == &filename) {
+        slot.1 = entry;
+    } else {
+        entries.push((filename, entry));
+    }
+    std::fs::write(&index_path, serialize_memory_index(&entries))
+        .expect("failed to write repo memory index");
+
+    slug
+}
+
+/// port of removeRepoMemoryPage (src/harness/harness-tools.ts:107-132)
+///
+/// Removes a topic page and its index entry from the memory bank. Re-slugifies
+/// so a hostile or sloppy slug ("../notes", "MEMORY") can never resolve outside
+/// the bank or onto the index file itself. Returns true if anything was
+/// actually removed.
+pub fn remove_repo_memory_page(memory_dir: &std::path::Path, slug: &str) -> bool {
+    let filename = format!("{}.md", slugify(slug));
+    let page_path = memory_dir.join(&filename);
+    let index_path = memory_dir.join(MEMORY_INDEX);
+
+    let mut removed = false;
+
+    if page_path.exists() {
+        std::fs::remove_file(&page_path).expect("failed to remove repo memory page");
+        removed = true;
+    }
+
+    if index_path.exists() {
+        let index_content = std::fs::read_to_string(&index_path).unwrap_or_default();
+        let mut entries = parse_memory_index(&index_content);
+        if entries.iter().any(|(name, _)| name == &filename) {
+            entries.retain(|(name, _)| name != &filename);
+            std::fs::write(&index_path, serialize_memory_index(&entries))
+                .expect("failed to write repo memory index");
+            removed = true;
+        }
+    }
+
+    removed
+}
+
+#[cfg(test)]
+mod memory_bank_tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "drip-harness-tools-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn slugify_matches_ts() {
+        assert_eq!(slugify("Hello World!"), "hello-world");
+        assert_eq!(slugify("  --Parity Notes!! --"), "parity-notes");
+        assert_eq!(slugify(""), "note");
+        assert_eq!(slugify("///"), "note");
+        // "memory" would collide with MEMORY.md on case-insensitive filesystems
+        assert_eq!(slugify("memory"), "memory-notes");
+        assert_eq!(slugify("MEMORY"), "memory-notes");
+        let long = "a".repeat(100);
+        assert_eq!(slugify(&long).len(), 80);
+    }
+
+    #[test]
+    fn memory_index_round_trip() {
+        let entries = vec![
+            (
+                "alpha.md".to_string(),
+                MemoryIndexEntry {
+                    title: "Alpha".to_string(),
+                    hook: "first hook".to_string(),
+                },
+            ),
+            (
+                "beta.md".to_string(),
+                MemoryIndexEntry {
+                    title: "Beta".to_string(),
+                    hook: String::new(),
+                },
+            ),
+        ];
+        let serialized = serialize_memory_index(&entries);
+        assert_eq!(
+            serialized,
+            "- [Alpha](alpha.md) — first hook\n- [Beta](beta.md)\n"
+        );
+        assert_eq!(parse_memory_index(&serialized), entries);
+
+        // parsing tolerates a missing hook and trims title whitespace
+        let parsed = parse_memory_index("junk line\n- [  T ](t.md)\n");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "t.md");
+        assert_eq!(parsed[0].1.title, "T");
+        assert_eq!(parsed[0].1.hook, "");
+    }
+
+    #[test]
+    fn write_repo_memory_note_upserts_page_and_index() {
+        let dir = scratch_dir("write-note");
+        let slug = write_repo_memory_note(&dir, "My Topic", "note one", Some("the hook"));
+        assert_eq!(slug, "my-topic");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("my-topic.md")).unwrap(),
+            "# My Topic\n\nnote one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
+            "- [My Topic](my-topic.md) — the hook\n"
+        );
+
+        // second write appends to the page and keeps the existing hook
+        assert_eq!(write_repo_memory_note(&dir, "My Topic", "note two", None), "my-topic");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("my-topic.md")).unwrap(),
+            "# My Topic\n\nnote one\n\nnote two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
+            "- [My Topic](my-topic.md) — the hook\n"
+        );
+
+        // an explicit hook (even empty) replaces the stored one
+        write_repo_memory_note(&dir, "My Topic", "note three", Some(""));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
+            "- [My Topic](my-topic.md)\n"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_repo_memory_page_removes_page_and_index_entry() {
+        let dir = scratch_dir("remove-page");
+        write_repo_memory_note(&dir, "Keep Me", "keep note", Some("keep hook"));
+        write_repo_memory_note(&dir, "Drop Me", "drop note", Some("drop hook"));
+
+        assert!(remove_repo_memory_page(&dir, "drop-me"));
+        assert!(!dir.join("drop-me.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MEMORY.md")).unwrap(),
+            "- [Keep Me](keep-me.md) — keep hook\n"
+        );
+
+        // re-slugify protects the bank: nothing outside resolves, nothing removed
+        assert!(!remove_repo_memory_page(&dir, "../notes"));
+        assert!(!remove_repo_memory_page(&dir, "MEMORY"));
+        assert!(!remove_repo_memory_page(&dir, "missing-page"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

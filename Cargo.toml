@@ -15,7 +15,7 @@ path = "src/bin/dripw.rs"
 
 # Dependency allowlist (drip/PLAN.md + port brief): serde, serde_json, anyhow,
 # thiserror, uuid, chrono, rusqlite (bundled), tokio, reqwest (rustls), regex,
-# dirs, shell-words, indexmap, libc, glob, walkdir, tempfile (dev).
+# dirs, shell-words, indexmap, libc, glob, walkdir, tempfile.
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -39,8 +39,9 @@ sha2 = "0.10"
 # Added for --migrate-from-lci (drip-only, no TS counterpart): rusqlite
 # checkpoints the copied index.sqlite via PRAGMA wal_checkpoint(TRUNCATE);
 # walkdir walks the skills/marketplaces/sessions trees; dirs resolves the
-# cross-platform home directory.
+# cross-platform home directory. tempfile stages the index.sqlite copy in a
+# temp directory so the source database is never opened (migrate.rs).
 walkdir = "2"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"

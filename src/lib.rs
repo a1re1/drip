@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod core;
 pub mod harness;
+pub mod lib_fs;
 pub mod migrate;
 pub mod tools;
 pub mod tui;

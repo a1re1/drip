@@ -19,15 +19,16 @@ path = "src/bin/dripw.rs"
 # parser is hand-written to match lci's exact usage-error text. Waves W2+
 # add the remaining allowed deps as their modules land.
 [dependencies]
+anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indexmap = { version = "2", features = ["serde"] }
-# Added for the tools port (task-2): error text propagation + temp dirs in tests.
-anyhow = "1"
-# Added for the tools port (task-5): destructive-command policy regexes
+# Added for the tools port: destructive-command policy regexes
 # (command-policy.ts) and shell tokenization for credential commands.
 regex = "1"
 shell-words = "1"
+# home.rs ports path.resolve()/homedir(): dirs for the home directory.
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,6 +10,7 @@ pub mod harness_tools;
 pub mod r#loop;
 pub mod model_call;
 pub mod prompt;
+pub mod redact;
 pub mod roles;
 pub mod telemetry;
 pub mod transport;

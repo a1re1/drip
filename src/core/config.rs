@@ -941,7 +941,7 @@ mod tests {
         let mut settings = IndexMap::new();
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
         let error = parse_inference_model_profiles(&settings).unwrap_err().to_string();
-        assert_eq!(error, "Inference profile \"dup\".");
+        assert_eq!(error, "Inference profile \"dup\" is duplicated.");
     }
 
     // (d) merge appends missing defaults to a one-profile string.

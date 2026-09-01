@@ -3,6 +3,7 @@
 // comment. Unported modules are empty files carrying
 // `// port of src/<path> — TODO`.
 
+pub mod chat;
 pub mod cli;
 pub mod core;
 pub mod harness;

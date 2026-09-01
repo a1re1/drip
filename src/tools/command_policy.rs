@@ -307,6 +307,32 @@ pub fn format_policy_refusal(command: &str, rule: &str, why: &str) -> String {
     .join("\n")
 }
 
+// `process.env.LCI_ALLOW_DESTRUCTIVE === "1"` (renamed DRIP_ALLOW_DESTRUCTIVE
+// per the port rule): the shared override check used by the bash/verify tool
+// prepare stages. `--allow-destructive` sets the variable to exactly "1";
+// "0", unset, or any other value leaves blocks enforced.
+pub fn allow_destructive_enabled() -> bool {
+    std::env::var("DRIP_ALLOW_DESTRUCTIVE").ok().as_deref() == Some("1")
+}
+
+// The prepare-stage gate shared by src/tools/bash-tool.ts:449-460 and
+// tools/verify-tool.ts:305-309: evaluate the policy; a blocked command is
+// refused with the formatted refusal unless --allow-destructive downgrades
+// the block to a warning (the command still runs, so the gate returns Ok).
+pub fn enforce_command_policy(command: &str, workspace_root: &str) -> Result<(), String> {
+    match evaluate_command_policy(command, workspace_root) {
+        CommandPolicyVerdict::Allow => Ok(()),
+        CommandPolicyVerdict::Block { rule, why } => {
+            if allow_destructive_enabled() {
+                // --allow-destructive downgrades blocks to warnings.
+                Ok(())
+            } else {
+                Err(format_policy_refusal(command, &rule, &why))
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // port of src/web/command-credentials.ts
 // ---------------------------------------------------------------------------
@@ -552,6 +578,29 @@ mod tests {
     }
 
     // --- destructive-command policy ---------------------------------------
+
+    // --allow-destructive downgrade (TS: bash-tool.ts/verify-tool.ts prepare
+    // stages read LCI_ALLOW_DESTRUCTIVE === "1").
+    #[test]
+    fn allow_destructive_downgrades_blocks_only_when_env_is_exactly_one() {
+        std::env::remove_var("DRIP_ALLOW_DESTRUCTIVE");
+        assert!(!allow_destructive_enabled());
+        std::env::set_var("DRIP_ALLOW_DESTRUCTIVE", "0");
+        assert!(!allow_destructive_enabled());
+
+        let ws = make_workspace();
+        let ws = ws.path().to_str().unwrap().to_string();
+        let refusal = enforce_command_policy("git reset --hard HEAD~3", &ws).unwrap_err();
+        assert!(refusal.starts_with(
+            "Command blocked by the destructive-command policy (rule: git-reset-hard)."
+        ));
+
+        std::env::set_var("DRIP_ALLOW_DESTRUCTIVE", "1");
+        assert!(allow_destructive_enabled());
+        assert!(enforce_command_policy("git reset --hard HEAD~3", &ws).is_ok());
+        assert!(enforce_command_policy("git status", &ws).is_ok());
+        std::env::remove_var("DRIP_ALLOW_DESTRUCTIVE");
+    }
 
     // it("blocks rm -rf outside the workspace but allows it inside")
     #[test]

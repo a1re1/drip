@@ -80,11 +80,20 @@ fn dir_definition_matches_the_ts_oracle() {
 }
 
 #[test]
-fn fixture_covers_exactly_the_three_read_only_tools() {
+fn fixture_covers_exactly_the_built_in_pack() {
     let mut names: Vec<String> = load_fixture()
         .into_iter()
         .map(|entry| entry["function"]["name"].as_str().unwrap().to_string())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["DIR", "GREP", "READ"]);
+    assert_eq!(names, vec!["BASH", "BASH_ASYNC", "CHECK", "DIR", "FETCH", "GREP", "PATCH", "READ", "VERIFY"]);
+}
+
+#[test]
+fn bash_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::bash::definition(),
+        apply_renames(&fixture_entry("BASH")),
+        "BASH definition drifted from tools/bash-tool.ts"
+    );
 }

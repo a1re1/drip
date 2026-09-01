@@ -144,7 +144,7 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "BASH",
-            "description": "Run a bash command in the workspace and return its combined output. Prefer scoped commands (narrow finds/greps, head/tail for long output) and a timeout when a command might hang. Every invocation runs synchronously in its own session; use BASH_ASYNC when a command must outlive the current turn or you want to continue while it runs.",
+            "description": "Run a bash command in the local workspace and wait for it to finish before continuing.",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {

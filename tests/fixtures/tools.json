@@ -2,6 +2,84 @@
   {
     "type": "function",
     "function": {
+      "name": "BASH",
+      "description": "Run a bash command in the local workspace and wait for it to finish before continuing.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The bash command or script to run with `bash -lc`.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Optional timeout for the command in milliseconds. Defaults to 120000.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "BASH_ASYNC",
+      "description": "Run a bash command in a detached tmux session so it can keep running in the background while you inspect it with ASYNC_TAIL or attach manually.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The bash command or script to run in a detached tmux session with `bash -lc`.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+            "type": "string"
+          },
+          "sessionName": {
+            "description": "Optional tmux session name to use. If omitted, a unique session name is generated automatically.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Optional display title for the background job. Defaults to the session name and a shortened command preview.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "CHECK",
+      "description": "Run incremental TypeScript semantic + syntactic diagnostics on the workspace. Input: {path?: string}. With path, reports full diagnostics for that file plus an elsewhere count; without path, reports project-wide diagnostics. Reuses a cached LanguageService per tsconfig for performance.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Optional file path to focus diagnostics on. Relative paths are resolved from the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "DIR",
       "description": "Show the local project structure for a directory as a tree view.",
       "parameters": {
@@ -16,6 +94,30 @@
             "type": "string"
           }
         },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "FETCH",
+      "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires LCI_ALLOW_NET=1. Input: {url, maxBytes?}.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxBytes": {
+            "description": "Maximum bytes of response body to return. Default 50000, max 200000. Content is ends-kept with an elision marker when truncated.",
+            "type": "number"
+          },
+          "url": {
+            "description": "The URL to fetch via HTTP GET. Must use http:// or https:// scheme.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
         "type": "object"
       }
     }
@@ -69,6 +171,73 @@
   {
     "type": "function",
     "function": {
+      "name": "PATCH",
+      "description": "Apply a change to a file and save it to disk. Pass find + replace to swap exact text (every occurrence), or content to create the file or overwrite it entirely.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files or full rewrites.",
+            "type": "string"
+          },
+          "expectedOccurrences": {
+            "description": "How many occurrences of find you expect to replace. Required when find matches more than once; the edit is rejected if the actual count differs.",
+            "type": "number"
+          },
+          "files": {
+            "description": "Array of file edits to apply as a single atomic transaction. ALL entries are validated before any file is written; if any entry fails, NO files are changed. Each entry mirrors the single-file rules: pass content for a full write, or find + replace for a targeted edit.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely.",
+                  "type": "string"
+                },
+                "expectedOccurrences": {
+                  "description": "How many occurrences of find you expect to replace. Required when find matches more than once.",
+                  "type": "number"
+                },
+                "find": {
+                  "description": "Exact text to find in the file. Requires replace.",
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Path to the file, relative to the current working directory or absolute.",
+                  "type": "string"
+                },
+                "replace": {
+                  "description": "Text that replaces every occurrence of find. May be empty to delete it.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "find": {
+            "description": "Exact text to find in the file, including whitespace. A unique match replaces one site; multiple matches require expectedOccurrences. Requires replace.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Path to the file to change, relative to the current working directory or absolute.",
+            "type": "string"
+          },
+          "replace": {
+            "description": "Text that replaces every occurrence of find. May be empty to delete the found text.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "READ",
       "description": "Read the contents of a single file from the local workspace. Supports line-based paging: use offset (1-based first line, default 1) and limit (max lines to return, default 400, cap 1000). Every line is prefixed with its 1-based line number and a tab. The result starts with a header 'Read lines A-B of N from <path>' and, when more lines remain, ends with a footer telling you the next offset to use.",
       "parameters": {
@@ -93,6 +262,30 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "VERIFY",
+      "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, cargo test, go test, and tsc output formats.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The shell command to run.",
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Optional timeout in milliseconds. Defaults to 120000.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
         ],
         "type": "object"
       }

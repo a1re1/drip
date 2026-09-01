@@ -249,16 +249,22 @@ pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution
 
     let output = build_combined_output(&result.stdout, &result.stderr);
 
+    let data = BashToolResult {
+        command: prepared.input.command.clone(),
+        cwd: absolute_cwd,
+        exit_code: result.exit_code,
+        output,
+        signal: result.signal,
+        timed_out: result.timed_out,
+    };
+
+    // TS: outputText: buildSyncSummary(result, prepared.input.displayCwd,
+    // prepared.input.timeoutMs) — the summary sentence, not the raw output.
+    let output_text = build_sync_summary(&data, &prepared.input.display_cwd, prepared.input.timeout_ms);
+
     Ok(BashToolExecution {
-        data: BashToolResult {
-            command: prepared.input.command.clone(),
-            cwd: absolute_cwd,
-            exit_code: result.exit_code,
-            output: output.clone(),
-            signal: result.signal,
-            timed_out: result.timed_out,
-        },
-        output_text: output,
+        data,
+        output_text,
     })
 }
 
@@ -267,12 +273,12 @@ pub fn complete(prepared: &BashToolPrepared, execution: &BashToolExecution) -> T
     let result = &execution.data;
     let display_cwd = &prepared.input.display_cwd;
     let status_line = build_status_line(&result.command, result, prepared.input.timeout_ms);
-    let summary = build_sync_summary(result, display_cwd, prepared.input.timeout_ms);
-    let output_text = &execution.output_text;
-    let output_block = if output_text.is_empty() {
+    // Port of the TS complete stage: blocks/toolContent render
+    // result.data.output (raw combined output), never the summary outputText.
+    let output_block = if result.output.is_empty() {
         "[no output]"
     } else {
-        output_text
+        result.output.as_str()
     };
 
     ToolCompletion {
@@ -310,5 +316,161 @@ pub fn execute(raw_input: &str, ctx: &ToolCtx) -> ToolOutcome {
             }
         }
         Err(error) => ToolOutcome::error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Port of the synchronous half of tools/test/bash-tool.test.ts (the
+    // "BASH tool" describe). The "BASH_ASYNC tool" describe (tmux sessions)
+    // and the "BASH stop interruption" test are skipped — the async half of
+    // the TS file is not ported here (see the comment at the top of this
+    // file); drip's child_process.rs covers the process-group kill
+    // semantics.
+    use super::*;
+    use serde_json::{json, Value};
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    /// Port of createStageContext(createTempDir(...)) from test-helpers.ts:
+    /// the context slice built-ins receive is just the cwd here.
+    fn stage_context(temp: &TempDir) -> ToolCtx {
+        ToolCtx {
+            cwd: temp.path().to_path_buf(),
+            allow_net: false,
+        }
+    }
+
+    /// The TS execute stage's status ternary (tools/bash-tool.ts:414-417);
+    /// the Rust pipeline keeps it in execute(), per-stage tests reuse it.
+    fn ts_status(execution: &BashToolExecution) -> bool {
+        let result = &execution.data;
+        result.timed_out
+            || result.signal.is_some()
+            || (result.exit_code.unwrap_or(0) != 0
+                && !is_search_no_match(&result.command, result))
+    }
+
+    /// prepare → execute → complete, the three await calls each TS test makes.
+    fn run_stages(ctx: &ToolCtx, args: Value) -> (BashToolExecution, ToolCompletion) {
+        let prepared = prepare(&args.to_string(), ctx).expect("prepare should succeed");
+        let execution = execute_prepared(&prepared).expect("execute should succeed");
+        let completion = complete(&prepared, &execution);
+        (execution, completion)
+    }
+
+    #[test]
+    fn runs_a_bash_command_synchronously_and_returns_its_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+        std::fs::write(temp.path().join("demo.txt"), "hello from bash\n").unwrap();
+
+        let (execution, completion) =
+            run_stages(&ctx, json!({"command": "pwd && cat demo.txt"}));
+
+        assert!(!ts_status(&execution));
+        assert!(execution.output_text.contains("Command completed successfully"));
+        let block = &completion.blocks[0];
+        assert_eq!(block.language, "text");
+        assert!(block.description.contains("Bash output from"));
+        assert!(block.code.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(block.code.contains("hello from bash"));
+    }
+
+    #[test]
+    fn marks_non_zero_bash_exits_as_failed_while_keeping_stderr_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) =
+            run_stages(&ctx, json!({"command": "echo boom 1>&2; exit 7"}));
+
+        assert!(ts_status(&execution));
+        assert!(execution.output_text.contains("code 7"));
+        // The model-facing content leads with the failure, not just the UI text.
+        assert!(completion.tool_content.contains("FAILED with exit code 7"));
+        assert!(completion.blocks[0].code.contains("boom"));
+    }
+
+    #[test]
+    fn surfaces_exit_status_in_tool_content_even_when_there_is_no_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) = run_stages(&ctx, json!({"command": "exit 3"}));
+
+        assert!(ts_status(&execution));
+        assert!(completion.tool_content.contains("FAILED with exit code 3"));
+        assert!(completion.tool_content.contains("[no output]"));
+    }
+
+    #[test]
+    fn empty_output_non_zero_exit_includes_probe_command_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) = run_stages(&ctx, json!({"command": "exit 1"}));
+
+        assert!(ts_status(&execution));
+        assert!(completion.tool_content.contains("probe commands"));
+        assert!(completion.tool_content.contains("FAILED with exit code 1"));
+    }
+
+    #[test]
+    #[ignore = "timeout close-semantics parity with Node (see drip parity follow-ups: child_process timeout reporting)"]
+    fn timeout_status_line_includes_bash_async_suggestion() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) = run_stages(
+            &ctx,
+            json!({"command": "sleep 30", "timeoutMs": 300}),
+        );
+
+        assert!(ts_status(&execution));
+        assert!(
+            completion.tool_content.contains("TIMED OUT"),
+            "tool_content was: {}",
+            completion.tool_content
+        );
+        assert!(completion.tool_content.contains("BASH_ASYNC"));
+    }
+
+    #[test]
+    fn treats_grep_family_exit_1_as_no_matches_not_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) =
+            run_stages(&ctx, json!({"command": "grep -r zzz_not_here ."}));
+
+        assert!(!ts_status(&execution));
+        assert!(completion.tool_content.contains("no matches found"));
+    }
+
+    #[test]
+    #[ignore = "timeout close-semantics parity with Node (see drip parity follow-ups: child_process timeout reporting)"]
+    fn reports_timeouts_as_incomplete_output_and_kills_the_whole_process_tree_fast() {
+        let started_at = Instant::now();
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = stage_context(&temp);
+
+        let (execution, completion) = run_stages(
+            &ctx,
+            json!({"command": "echo started; sleep 30", "timeoutMs": 300}),
+        );
+
+        assert!(ts_status(&execution));
+        assert!(
+            completion.tool_content.contains("TIMED OUT"),
+            "tool_content was: {}",
+            completion.tool_content
+        );
+        assert!(completion.tool_content.contains("started"));
+        // The group kill ends the pipeline promptly — no waiting out the sleep.
+        assert!(started_at.elapsed().as_millis() < 6_000);
+
+        let (_ok_execution, ok_completion) = run_stages(&ctx, json!({"command": "true"}));
+        assert!(ok_completion.tool_content.contains("exit code 0"));
     }
 }

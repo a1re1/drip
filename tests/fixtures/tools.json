@@ -1,0 +1,101 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "DIR",
+      "description": "Show the local project structure for a directory as a tree view.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxDepth": {
+            "description": "Optional maximum directory depth to traverse. Defaults to 4.",
+            "type": "number"
+          },
+          "path": {
+            "description": "Directory path to inspect, relative to the current working directory or absolute. Defaults to the cwd.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "GREP",
+      "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
+            "maximum": 5,
+            "minimum": 0,
+            "type": "number"
+          },
+          "flags": {
+            "description": "Optional regex flags to apply. Allowed characters: 'i' (case-insensitive), 'm' (multiline), 's' (dot-all). Example: \"im\".",
+            "type": "string"
+          },
+          "glob": {
+            "description": "Optional simple suffix filter like '*.ts' to restrict which files are searched.",
+            "type": "string"
+          },
+          "literal": {
+            "description": "When true, treat the pattern as a literal string (all regex metacharacters are escaped).",
+            "type": "boolean"
+          },
+          "maxResults": {
+            "description": "Maximum number of matching lines to return. Defaults to 50, capped at 200.",
+            "type": "number"
+          },
+          "path": {
+            "description": "Subdirectory or file to search within, relative to the current working directory or absolute. Defaults to '.'.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "A JavaScript-flavored regex string to search for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "READ",
+      "description": "Read the contents of a single file from the local workspace. Supports line-based paging: use offset (1-based first line, default 1) and limit (max lines to return, default 400, cap 1000). Every line is prefixed with its 1-based line number and a tab. The result starts with a header 'Read lines A-B of N from <path>' and, when more lines remain, ends with a footer telling you the next offset to use.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "force": {
+            "description": "Pass true to bypass the 5 MB size limit and read oversized files. Does NOT override binary file refusal.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum number of lines to return. Default is 400, capped at 1000.",
+            "type": "number"
+          },
+          "offset": {
+            "description": "1-based line number to start reading from. Default is 1 (beginning of file).",
+            "type": "number"
+          },
+          "path": {
+            "description": "Path to the file to read, relative to the current working directory or absolute.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    }
+  }
+]

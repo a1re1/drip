@@ -43,5 +43,7 @@ sha2 = "0.10"
 # temp directory so the source database is never opened (migrate.rs).
 walkdir = "2"
 tempfile = "3"
+# images.rs: data-URL base64 encoding/decoding (Buffer.toString("base64") in the TS).
+base64 = "0.22"
 
 [dev-dependencies]

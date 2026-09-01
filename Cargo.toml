@@ -29,6 +29,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 libc = "0.2"
+# marketplaces.rs addedAt timestamps (new Date().toISOString() in the TS).
 
 [dev-dependencies]
 tempfile = "3"

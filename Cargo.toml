@@ -1,0 +1,24 @@
+[package]
+name = "drip"
+version = "0.1.0"
+edition = "2021"
+description = "drip — Rust port of lci, a headless-first coding agent harness"
+
+# Binaries: `drip` (port of src/cli/main.tsx) and `dripw` (port of src/cli/watch/*).
+[[bin]]
+name = "drip"
+path = "src/main.rs"
+
+[[bin]]
+name = "dripw"
+path = "src/bin/dripw.rs"
+
+# Dependency allowlist is fixed by drip/PLAN.md and the port brief: serde,
+# serde_json, anyhow, thiserror, uuid, chrono, rusqlite (bundled), tokio,
+# reqwest (rustls), regex, dirs, shell-words, indexmap. No clap — the CLI
+# parser is hand-written to match lci's exact usage-error text. Waves W2+
+# add the remaining allowed deps as their modules land.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = { version = "2", features = ["serde"] }

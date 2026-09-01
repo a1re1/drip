@@ -96,7 +96,7 @@ mod tests {
                     ..Default::default()
                 })
             }),
-            complete: Box::new(|_| Ok(super::super::types::ChatToolCompletionResult { blocks: None, tool_content: None })),
+            complete: Box::new(|_| Ok(super::super::types::ChatToolCompletionResult { blocks: None, tool_content: None, tags: None })),
         })
     }
 

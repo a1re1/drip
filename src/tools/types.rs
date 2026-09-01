@@ -234,6 +234,7 @@ pub struct ChatToolResult {
 pub struct ChatToolCompletionResult {
     pub blocks: Option<Vec<ChatMessageBlock>>,
     pub tool_content: Option<String>,
+    pub tags: Option<Vec<crate::chat::types::ChatTag>>,
 }
 
 // export type ChatToolPrepareRequest = {
@@ -364,6 +365,7 @@ mod tests {
             }),
             complete: Box::new(|request| {
                 Ok(ChatToolCompletionResult {
+                    tags: None,
                     blocks: Some(vec![]),
                     tool_content: request
                         .result

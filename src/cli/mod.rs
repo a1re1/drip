@@ -14,6 +14,8 @@ pub mod queue;
 pub mod review;
 pub mod review_report;
 pub mod roles;
+pub mod run_record;
+pub mod state_summary;
 pub mod runner;
 pub mod session_run;
 pub mod skills;

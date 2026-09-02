@@ -115,3 +115,12 @@ fn check_definition_matches_the_ts_oracle() {
         "CHECK definition drifted from tools/check-tool.ts"
     );
 }
+
+#[test]
+fn verify_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::verify::definition(),
+        apply_renames(&fixture_entry("VERIFY")),
+        "VERIFY definition drifted from tools/verify-tool.ts"
+    );
+}

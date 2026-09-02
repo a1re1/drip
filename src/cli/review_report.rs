@@ -752,10 +752,105 @@ fn numbered(content: &str) -> String {
         .join("\n")
 }
 
+// A file over MAX_INLINE_FILE_LINES is not inlined whole; the reviewer used
+// to READ it in ~20K-token slabs instead (nine calls and 180K prompt tokens
+// for one 3,000-line file). Its hunks' surroundings ride into the prompt
+// instead: every post-image line range a hunk touches, widened by
+// EXCERPT_CONTEXT_LINES on each side, merged, and shrunk (narrower context,
+// then dropped tail windows) until the excerpt fits MAX_EXCERPT_LINES.
+pub const EXCERPT_CONTEXT_LINES: usize = 40;
+pub const MAX_EXCERPT_LINES: usize = 600;
+const EXCERPT_CONTEXT_FALLBACKS: [usize; 4] = [EXCERPT_CONTEXT_LINES, 20, 10, 5];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExcerptWindow {
+    pub start: usize,
+    pub end: usize,
+}
+
+fn hunk_header_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@").expect("hunk header regex"))
+}
+
+/// Post-image line ranges (1-based, inclusive) of a unified diff's hunks.
+pub fn hunk_post_image_ranges(diff: &str) -> Vec<ExcerptWindow> {
+    let (_, hunks) = split_diff_hunks(diff);
+    hunks
+        .iter()
+        .filter_map(|hunk| {
+            let caps = hunk_header_re().captures(hunk)?;
+            let start: usize = caps.get(1)?.as_str().parse().ok()?;
+            let count: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(1);
+            let start = start.max(1);
+            Some(ExcerptWindow { start, end: (start + count).saturating_sub(1).max(start) })
+        })
+        .collect()
+}
+
+fn windows_size(windows: &[ExcerptWindow]) -> usize {
+    windows.iter().map(|w| w.end - w.start + 1).sum()
+}
+
+/// The numbered-excerpt windows for a big file's diff (see EXCERPT_CONTEXT_LINES).
+pub fn excerpt_windows(total_lines: usize, diff: &str) -> Vec<ExcerptWindow> {
+    let ranges = hunk_post_image_ranges(diff);
+    if ranges.is_empty() || total_lines == 0 {
+        return Vec::new();
+    }
+    let widen = |context: usize| -> Vec<ExcerptWindow> {
+        let mut merged: Vec<ExcerptWindow> = Vec::new();
+        for range in &ranges {
+            let window = ExcerptWindow { start: range.start.saturating_sub(context).max(1), end: (range.end + context).min(total_lines) };
+            match merged.last_mut() {
+                Some(last) if window.start <= last.end + 1 => last.end = last.end.max(window.end),
+                _ => merged.push(window),
+            }
+        }
+        merged
+    };
+    for context in EXCERPT_CONTEXT_FALLBACKS {
+        let windows = widen(context);
+        if windows_size(&windows) <= MAX_EXCERPT_LINES {
+            return windows;
+        }
+    }
+    // Even the tightest context is too much: keep whole windows from the
+    // front until the cap would be crossed (at least one).
+    let mut kept: Vec<ExcerptWindow> = Vec::new();
+    for window in widen(EXCERPT_CONTEXT_FALLBACKS[EXCERPT_CONTEXT_FALLBACKS.len() - 1]) {
+        if !kept.is_empty() && windows_size(&kept) + window.end - window.start + 1 > MAX_EXCERPT_LINES {
+            break;
+        }
+        kept.push(window);
+    }
+    kept
+}
+
+/// Renders the excerpt windows of `content` numbered like READ output.
+pub fn render_excerpts(content: &str, windows: &[ExcerptWindow]) -> String {
+    let lines: Vec<&str> = content.strip_suffix('\n').unwrap_or(content).split('\n').collect();
+    windows
+        .iter()
+        .map(|window| {
+            let mut block = vec![format!("Lines {}-{}:", window.start, window.end)];
+            for (offset, line) in lines[window.start - 1..window.end.min(lines.len())].iter().enumerate() {
+                block.push(format!("{}\t{}", window.start + offset, line));
+            }
+            block.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n…\n")
+}
+
 pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
     let docs = args.unit.kind == ReviewUnitKind::Docs;
     let many = args.files.len() > 1;
-    let inlined_count = args.files.iter().filter(|file| file.content.is_some()).count();
+    // Files whose text is in the prompt — whole, or as excerpts — drive the
+    // method's first instruction; a big file whose diff has no hunks presents
+    // nothing and must not be counted.
+    let mut presented = 0usize;
+    let mut excerpted = false;
     let mut diffs: Vec<String> = Vec::new();
 
     for file in args.files {
@@ -763,13 +858,30 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
 
         if let Some(content) = file.content {
             let line_count = content.strip_suffix('\n').unwrap_or(content).split('\n').count();
-            block.push(format!(
-                "Full file after the change ({} lines, numbered — do not READ it again):",
-                line_count
-            ));
-            block.push("```".to_string());
-            block.push(numbered(content));
-            block.push("```".to_string());
+            if line_count <= MAX_INLINE_FILE_LINES {
+                presented += 1;
+                block.push(format!(
+                    "Full file after the change ({} lines, numbered — do not READ it again):",
+                    line_count
+                ));
+                block.push("```".to_string());
+                block.push(numbered(content));
+                block.push("```".to_string());
+            } else {
+                let windows = excerpt_windows(line_count, file.diff);
+                if !windows.is_empty() {
+                    presented += 1;
+                    excerpted = true;
+                    block.push(format!(
+                        "Around the change (file is {} lines; these {} excerpt(s) after the change are numbered like READ output — READ beyond them only when a finding depends on it):",
+                        line_count,
+                        windows.len()
+                    ));
+                    block.push("```".to_string());
+                    block.push(render_excerpts(content, &windows));
+                    block.push("```".to_string());
+                }
+            }
         }
 
         block.push(String::new());
@@ -832,8 +944,12 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
             "4. Cite a file path or symbol only if you opened it in this session; otherwise write \"not verified\" — a made-up path is worse than no citation.".to_string(),
         ]);
     } else {
-        lines.push(if inlined_count == args.files.len() {
-            "1. The full file(s) are above — read them there. READ other files only when a finding depends on them.".to_string()
+        lines.push(if presented == args.files.len() {
+            if excerpted {
+                "1. Every file is above — in full, or as numbered excerpts around each hunk for files over 300 lines. Read them there; READ beyond an excerpt (or another file) only when a finding depends on it.".to_string()
+            } else {
+                "1. The full file(s) are above — read them there. READ other files only when a finding depends on them.".to_string()
+            }
         } else {
             "1. READ each full file that is not included above, not just the hunk — hunks hide surrounding invariants.".to_string()
         });
@@ -1397,6 +1513,56 @@ mod tests {
 
         assert_eq!(out.iter().map(|unit| unit.label.clone()).collect::<Vec<_>>(), labels);
         assert!(out.iter().all(|unit| unit.part.is_none()));
+    }
+
+    // test/cli-review.test.ts "inlines a big file as numbered excerpts around its hunks instead of whole"
+    #[test]
+    fn inlines_a_big_file_as_numbered_excerpts_around_its_hunks() {
+        let content = (1..=1000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n") + "\n";
+        let diff = "diff --git a/src/big.ts b/src/big.ts\n--- a/src/big.ts\n+++ b/src/big.ts\n@@ -100,3 +100,4 @@\n line 100\n+added\n line 101\n@@ -900,2 +901,2 @@\n-old\n+new\n";
+
+        assert_eq!(hunk_post_image_ranges(diff), vec![ExcerptWindow { start: 100, end: 103 }, ExcerptWindow { start: 901, end: 902 }]);
+        assert_eq!(excerpt_windows(1000, diff), vec![ExcerptWindow { start: 60, end: 143 }, ExcerptWindow { start: 861, end: 942 }]);
+
+        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/big.ts".into(), paths: vec!["src/big.ts".into()], diff_lines: 9, part: None };
+        let files = [UnitPromptFile { path: "src/big.ts", diff, content: Some(&content) }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "widen the parser", files: &files, unit: &unit });
+
+        assert!(prompt.contains("Around the change (file is 1000 lines; these 2 excerpt(s) after the change are numbered like READ output — READ beyond them only when a finding depends on it):"));
+        assert!(prompt.contains("Lines 60-143:\n60\tline 60\n"));
+        assert!(prompt.contains("143\tline 143\n…\nLines 861-942:\n861\tline 861"));
+        assert!(!prompt.contains("Full file after the change"));
+        assert!(prompt.contains("1. Every file is above — in full, or as numbered excerpts around each hunk for files over 300 lines."));
+        assert_eq!(render_excerpts("a\nb\nc\n", &[ExcerptWindow { start: 2, end: 2 }]), "Lines 2-2:\n2\tb");
+    }
+
+    // test/cli-review.test.ts "shrinks excerpt context, then drops tail windows, to stay under the cap"
+    #[test]
+    fn shrinks_excerpt_context_then_drops_tail_windows() {
+        let hunks = (0..10).map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 100 + 1, i * 100 + 1)).collect::<Vec<_>>().join("\n");
+        let diff = format!("--- a/f\n+++ b/f\n{hunks}\n");
+        let windows = excerpt_windows(2000, &diff);
+        assert_eq!(windows.len(), 10);
+        assert_eq!(windows[0], ExcerptWindow { start: 1, end: 21 });
+        assert_eq!(windows[1], ExcerptWindow { start: 81, end: 121 });
+
+        let dense = (0..200).map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 20 + 1, i * 20 + 1)).collect::<Vec<_>>().join("\n");
+        let kept = excerpt_windows(4000, &format!("--- a/f\n+++ b/f\n{dense}\n"));
+        assert!(windows_size(&kept) <= 600);
+        assert_eq!(kept[0], ExcerptWindow { start: 1, end: 6 });
+        assert!(excerpt_windows(0, &diff).is_empty());
+        assert!(excerpt_windows(100, "no hunks here").is_empty());
+        // One hunk wider than the cap is still presented whole.
+        assert_eq!(excerpt_windows(2000, "--- a/f\n+++ b/f\n@@ -1,900 +1,900 @@\n x\n"), vec![ExcerptWindow { start: 1, end: 905 }]);
+
+        // A big file whose diff carries no hunk presents nothing, so the method
+        // tells the reviewer to READ it instead of claiming it is above.
+        let big = vec!["x"; 400].join("\n");
+        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/big.ts".into(), paths: vec!["src/big.ts".into()], diff_lines: 1, part: None };
+        let files = [UnitPromptFile { path: "src/big.ts", diff: "Binary files differ", content: Some(&big) }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "widen the parser", files: &files, unit: &unit });
+        assert!(prompt.contains("1. READ each full file that is not included above"));
+        assert!(!prompt.contains("Around the change"));
     }
 
     #[test]

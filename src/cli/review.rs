@@ -26,7 +26,7 @@ use crate::cli::review_report::{
     chunk_oversized_units, plan_retry_units, plan_review_units, review_child_budget, unit_part_label, should_skip_synthesis, split_unit_report,
     unit_review_task_title, with_computed_confidence, DiffFile, FileReport, ReportBodySources, ReviewSynthesisMode,
     ReviewUnit, ReviewUnitKind, RetryRun, SkippedSynthesisArgs, SkippedSynthesisFile, SynthesisPromptArgs,
-    SynthesisSkipFile, UnitPromptFile, UnitReviewPromptArgs, MAX_INLINE_FILE_LINES, REVIEW_TOOL_NAMES,
+    SynthesisSkipFile, UnitPromptFile, UnitReviewPromptArgs, REVIEW_TOOL_NAMES,
     SKIPPED_FILE_NAMES, SKIPPED_FILE_SUFFIXES, SYNTHESIS_TASK_TITLE,
 };
 use crate::cli::roles::PRESET_FAST_PROFILE_ID;
@@ -781,8 +781,9 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     let loaded = run_pool(reviewable_paths.clone(), 8, |path: String| match read_diff(&base_ref, &path, &args.cwd) {
         Ok(diff) => {
-            let content = read_file_at_head(&path, &args.cwd)
-                .filter(|content| content.strip_suffix('\n').unwrap_or(content).split('\n').count() <= MAX_INLINE_FILE_LINES);
+            // Every readable file is kept: the prompt inlines small ones whole
+            // and big ones as excerpts around their hunks (see MAX_INLINE_FILE_LINES).
+            let content = read_file_at_head(&path, &args.cwd);
 
             Loaded::Ok { path, diff, content }
         }

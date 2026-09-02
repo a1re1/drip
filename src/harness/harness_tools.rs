@@ -1523,6 +1523,10 @@ pub fn apply_harness_op(
                         "the most recent verification ({}) FAILED and nothing has passed since",
                         record.command
                     )),
+                    Some(record) if record.ran_no_tests == Some(true) => Some(format!(
+                        "the most recent verification ({}) exited green but executed zero tests — run the suite that actually covers this change",
+                        record.command
+                    )),
                     Some(record) if stale_edits > 0 => Some(format!(
                         "{} workspace edit(s) landed after the last verification ({})",
                         stale_edits, record.command

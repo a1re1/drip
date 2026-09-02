@@ -750,6 +750,18 @@ pub fn save_harness_state(state_path: &Path, state: &HarnessState) -> std::io::R
 
 // The single derivation for the result contract's verification and task-stat
 // views (debt audit C2: these were hand-built in four files in lockstep).
+/// One verdict vocabulary for every surface that prints a verification:
+/// "passed" / "FAILED" / the green-but-empty case that must not read as evidence.
+pub fn describe_verification_outcome(failed: bool, ran_no_tests: Option<bool>) -> &'static str {
+	if failed {
+		"FAILED"
+	} else if ran_no_tests == Some(true) {
+		"passed but executed 0 tests (not evidence)"
+	} else {
+		"passed"
+	}
+}
+
 pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationSummary> {
 	let verification = state.last_verification.as_ref()?;
 
@@ -758,6 +770,7 @@ pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationS
 		command: verification.command.clone(),
 		failed: verification.failed,
 		mutations_after: state.mutations_since_verification.unwrap_or(0),
+		ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
 	})
 }
 
@@ -849,6 +862,7 @@ mod tests {
             command: "bun test".to_string(),
             failed: true,
             output_tail: "1 fail".to_string(),
+            ran_no_tests: None,
         });
         state.verifications = Some(vec![state.last_verification.clone().unwrap()]);
         state.verification_streak = Some(HarnessVerificationStreak {

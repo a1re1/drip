@@ -278,6 +278,80 @@ pub fn record_task_footprint(footprint: &mut Option<Vec<String>>, entry: &str) {
     }
 }
 
+/// Test runners whose output says how many tests actually executed. A green
+/// exit from one of these with zero tests is the classic false verification:
+/// a crate with no #[test]s, a glob that matched nothing, a filter typo.
+fn is_test_runner_command(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    for word in ["test", "vitest", "jest", "pytest"] {
+        let mut from = 0;
+        while let Some(pos) = command[from..].find(word) {
+            let start = from + pos;
+            let end = start + word.len();
+            let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+            let after_ok = end == bytes.len() || !is_word_byte(bytes[end]);
+            if before_ok && after_ok {
+                return true;
+            }
+            from = end;
+        }
+    }
+    false
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// True when a passing test-shaped command demonstrably executed no tests —
+/// decided from the runner's own summary lines, never from silence.
+pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
+    if !is_test_runner_command(command) {
+        return false;
+    }
+
+    // cargo test / libtest: one "running N tests" header per test binary.
+    let cargo_runs: Vec<u64> = output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("running ")?;
+            let rest = rest.strip_suffix(" tests").or_else(|| rest.strip_suffix(" test"))?;
+            rest.parse::<u64>().ok()
+        })
+        .collect();
+    if !cargo_runs.is_empty() && cargo_runs.iter().all(|count| *count == 0) {
+        return true;
+    }
+
+    // bun test summary: " 0 pass" / " 0 fail".
+    let has_line = |needle: &str| output.lines().any(|line| line.trim_start() == needle);
+    if has_line("0 pass") && has_line("0 fail") {
+        return true;
+    }
+
+    // vitest / jest / pytest / go test spell it out.
+    let lower = output.to_lowercase();
+    if ["no test files found", "no tests found", "no tests ran", "collected 0 items"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    let go_packages: Vec<&str> = output
+        .lines()
+        .filter(|line| {
+            let mut parts = line.split_whitespace();
+            matches!(parts.next(), Some("ok") | Some("FAIL") | Some("?")) && parts.next().is_some()
+        })
+        .collect();
+    if !go_packages.is_empty() && go_packages.iter().all(|line| line.contains("[no test files]")) {
+        return true;
+    }
+
+    false
+}
+
 pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<String> {
     // BASH_ASYNC is excluded: its "success" is the launch, not the tests — an
     // async test run would record as passed the moment it started.
@@ -378,6 +452,25 @@ mod loop_helpers_tests {
 
         assert!(extract_patched_paths("not json {").is_empty());
         assert!(extract_patched_paths(r#"{"files":5}"#).is_empty());
+    }
+
+    #[test]
+    fn detect_empty_test_run_flags_runners_that_executed_zero_tests() {
+        assert!(detect_empty_test_run("cargo test", "running 0 tests\n\ntest result: ok. 0 passed\n\nrunning 0 tests\n"));
+        assert!(detect_empty_test_run("bun test", "bun test v1.2\n\n 0 pass\n 0 fail\n"));
+        assert!(detect_empty_test_run("bun run test", "No test files found, exiting with code 1"));
+        assert!(detect_empty_test_run("pytest -k widget", "collected 0 items\n\nno tests ran in 0.01s"));
+        assert!(detect_empty_test_run("go test ./...", "?   \texample.com/a\t[no test files]\n?   \texample.com/b\t[no test files]\n"));
+    }
+
+    #[test]
+    fn detect_empty_test_run_leaves_real_runs_and_non_test_commands_alone() {
+        assert!(!detect_empty_test_run("cargo test", "running 0 tests\n\nrunning 12 tests\ntest result: ok. 12 passed"));
+        assert!(!detect_empty_test_run("bun test", " 34 pass\n 0 fail\n"));
+        assert!(!detect_empty_test_run("go test ./...", "?   \texample.com/a\t[no test files]\nok  \texample.com/b\t0.01s\n"));
+        assert!(!detect_empty_test_run("cargo check", "running 0 tests"));
+        assert!(!detect_empty_test_run("bun run typecheck", "No tests found"));
+        assert!(!detect_empty_test_run("attest run", "no tests ran"));
     }
 
     #[test]
@@ -2508,20 +2601,31 @@ impl HarnessRun {
             if let Some(verification_command) = verification_command.clone() {
                 let truncated_command = truncate_text(&verification_command, 200);
                 let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
-                self.state.last_verification = Some(HarnessVerificationRecord {
+                let ran_no_tests =
+                    !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
+                let verification_record = HarnessVerificationRecord {
                     at_iteration: self.state.iteration,
                     command: truncated_command.clone(),
                     failed: execution.failed,
                     output_tail: output_tail.clone(),
-                });
+                    ran_no_tests: ran_no_tests.then_some(true),
+                };
+
+                if ran_no_tests {
+                    self.emit(HarnessEvent {
+                        data: None,
+                        detail: format!(
+                            "verification passed without executing any test: {truncated_command} — it does not count as evidence until a run executes tests"
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+
+                self.state.last_verification = Some(verification_record.clone());
                 self.state.verifications = {
                     let mut timeline = self.state.verifications.clone().unwrap_or_default();
-                    timeline.push(HarnessVerificationRecord {
-                        at_iteration: self.state.iteration,
-                        command: truncated_command.clone(),
-                        failed: execution.failed,
-                        output_tail: output_tail.clone(),
-                    });
+                    timeline.push(verification_record);
                     if timeline.len() > MAX_VERIFICATION_TIMELINE {
                         let excess = timeline.len() - MAX_VERIFICATION_TIMELINE;
                         timeline.drain(0..excess);
@@ -2626,7 +2730,10 @@ impl HarnessRun {
                     let entry = format!(
                         "ran {} -> {}",
                         truncate_text(command, 120),
-                        if execution.failed { "FAILED" } else { "passed" }
+                        match &self.state.last_verification {
+                            Some(record) => core_state::describe_verification_outcome(record.failed, record.ran_no_tests),
+                            None => core_state::describe_verification_outcome(execution.failed, None),
+                        }
                     );
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
                         record_task_footprint(&mut task.footprint, &entry);

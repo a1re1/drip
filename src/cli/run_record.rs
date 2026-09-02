@@ -145,14 +145,7 @@ pub fn load_run_record(path: &Path) -> Option<RunRecord> {
 // Port of deriveVerificationSummary from src/harness/state.ts, inlined until
 // drip/src/harness/state.rs is ported.
 pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationSummary> {
-	let verification = state.last_verification.as_ref()?;
-
-	Some(VerificationSummary {
-		at_iteration: verification.at_iteration,
-		command: verification.command.clone(),
-		failed: verification.failed,
-		mutations_after: state.mutations_since_verification.unwrap_or(0),
-	})
+	crate::core::state::derive_verification_summary(state)
 }
 
 // Port of countTaskStats from src/harness/state.ts, inlined until
@@ -231,6 +224,7 @@ mod tests {
 			command: "bun test".into(),
 			failed: false,
 			output_tail: "2 pass".into(),
+			ran_no_tests: None,
 		});
 
 		build_run_record(&BuildRunRecordArgs {
@@ -283,6 +277,7 @@ mod tests {
 				command: "bun test".into(),
 				failed: false,
 				mutations_after: 0,
+				ran_no_tests: None,
 			})
 		);
 		assert_eq!(record.goal, "build the thing");

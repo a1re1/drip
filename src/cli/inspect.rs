@@ -83,6 +83,8 @@ pub struct InspectVerification {
 	pub at_iteration: i64,
 	pub command: String,
 	pub failed: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub ran_no_tests: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -257,6 +259,7 @@ pub fn build_inspect_report(paths: &InspectPaths) -> InspectReport {
 				at_iteration: verification.at_iteration,
 				command: verification.command.clone(),
 				failed: verification.failed,
+				ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
 			})
 			.collect(),
 	}
@@ -326,7 +329,13 @@ pub fn format_inspect_report(report: &InspectReport) -> String {
 		for verification in &report.verifications {
 			lines.push(format!(
 				"  [{}] cycle {}: {}",
-				if verification.failed { "FAIL" } else { "pass" },
+				if verification.failed {
+					"FAIL"
+				} else if verification.ran_no_tests == Some(true) {
+					"pass, 0 tests"
+				} else {
+					"pass"
+				},
 				verification.at_iteration,
 				verification.command
 			));
@@ -526,12 +535,14 @@ mod tests {
 				command: "bun test".into(),
 				failed: true,
 				output_tail: "1 fail".into(),
+				ran_no_tests: None,
 			},
 			HarnessVerificationRecord {
 				at_iteration: 4,
 				command: "bun test".into(),
 				failed: false,
 				output_tail: "5 pass".into(),
+				ran_no_tests: None,
 			},
 		]);
 		std::fs::write(

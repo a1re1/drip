@@ -192,6 +192,11 @@ pub struct HarnessVerificationRecord {
 	pub failed: bool,
 	/// Ends-kept tail of the command output — enough to cite the actual counts.
 	pub output_tail: String,
+	/// Set when a test-shaped command exited green without executing a single
+	/// test (e.g. `cargo test` printing only "running 0 tests"): a pass that
+	/// proves nothing. Absent otherwise.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub ran_no_tests: Option<bool>,
 }
 
 /// The driver-facing view of the latest verification: the record fields plus
@@ -204,6 +209,9 @@ pub struct VerificationSummary {
 	pub command: String,
 	pub failed: bool,
 	pub mutations_after: i64,
+	/// Present (true) only when the run passed without executing any test.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub ran_no_tests: Option<bool>,
 }
 
 /// Task-ledger tally in the vocabulary every payload shares.

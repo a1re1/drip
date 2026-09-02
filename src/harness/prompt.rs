@@ -226,7 +226,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             "{} (harness-recorded — trust THIS over memory or summaries): {} → {} (cycle {}{})",
             LAST_VERIFICATION_PREFIX,
             verification.command,
-            if verification.failed { "FAILED" } else { "passed" },
+            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests),
             verification.at_iteration,
             if mutations_after > 0 {
                 format!("; STALE — {} workspace edit(s) landed after it, re-run before relying on it", mutations_after)
@@ -526,7 +526,7 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
                 format!(
                     "last_verification (harness-recorded — cite THIS, not memory): {} → {} (cycle {})",
                     last_verification.command,
-                    if last_verification.failed { "FAILED" } else { "passed" },
+                    crate::core::state::describe_verification_outcome(last_verification.failed, last_verification.ran_no_tests),
                     last_verification.at_iteration
                 ),
                 last_verification.output_tail.clone(),

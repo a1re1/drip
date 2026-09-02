@@ -95,11 +95,17 @@ fn outcome_to_result(outcome: ToolOutcome) -> Result<ChatToolResult, String> {
     })
 }
 
+/// How a tool's call is shown in the transcript and the TUI — the TS tool's
+/// `displayInput`, derived from the parsed arguments. Falls back to the raw
+/// input when the arguments do not parse; execute reports that error.
+type DisplayInput = fn(&str, &ToolCtx) -> Option<String>;
+
 /// Wraps one builtin module as a sync ChatToolDefinition.
 fn sync_tool(
     definition: Value,
     mutates_workspace: bool,
     allow_net: bool,
+    display: DisplayInput,
     run: Arc<dyn Fn(&str, &ToolCtx) -> ToolOutcome>,
 ) -> ChatToolDefinition {
     let (name, description, parameters) = split_definition(&definition);
@@ -110,9 +116,11 @@ fn sync_tool(
         parameters,
         mutates_workspace,
         mode: ChatToolMode::Sync,
-        prepare: Box::new(|request: ChatToolPrepareRequest<'_>| {
+        prepare: Box::new(move |request: ChatToolPrepareRequest<'_>| {
+            let ctx = tool_ctx(&request.runtime_context.cwd, allow_net);
+
             Ok(ChatToolPreparedInput {
-                display_input: request.raw_input.to_string(),
+                display_input: display(request.raw_input, &ctx).unwrap_or_else(|| request.raw_input.to_string()),
                 input: Value::String(request.raw_input.to_string()),
                 tags: None,
             })
@@ -135,6 +143,12 @@ fn sync_tool(
 
 fn value_runner(run: fn(&Value, &ToolCtx) -> ToolOutcome) -> Arc<dyn Fn(&str, &ToolCtx) -> ToolOutcome> {
     Arc::new(move |raw_input: &str, ctx: &ToolCtx| run(&Value::String(raw_input.to_string()), ctx))
+}
+
+macro_rules! value_display {
+    ($module:ident) => {
+        |raw_input: &str, ctx: &ToolCtx| builtin::$module::display_input(&Value::String(raw_input.to_string()), ctx)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -607,22 +621,23 @@ pub fn get_framework_tool_definitions() -> Vec<ChatToolDefinition> {
 /// LCI_ALLOW_NET=1 gate FETCH honors (main.tsx:707 sets it from --allow-net).
 pub fn builtin_tool_pack(allow_net: bool) -> Vec<ChatToolDefinition> {
     vec![
-        sync_tool(builtin::read::definition(), false, allow_net, value_runner(builtin::read::execute)),
-        sync_tool(builtin::patch::definition(), true, allow_net, value_runner(builtin::patch::execute)),
-        sync_tool(builtin::dir::definition(), false, allow_net, value_runner(builtin::dir::execute)),
+        sync_tool(builtin::read::definition(), false, allow_net, value_display!(read), value_runner(builtin::read::execute)),
+        sync_tool(builtin::patch::definition(), true, allow_net, value_display!(patch), value_runner(builtin::patch::execute)),
+        sync_tool(builtin::dir::definition(), false, allow_net, value_display!(dir), value_runner(builtin::dir::execute)),
         // Only PATCH declares mutatesWorkspace (patch-tool.ts:401); a BASH
         // call is not progress for the stall accounting.
         sync_tool(
             builtin::bash::definition(),
             false,
             allow_net,
+            builtin::bash::display_input,
             Arc::new(|raw_input: &str, ctx: &ToolCtx| builtin::bash::execute(raw_input, ctx)),
         ),
         async_bash_tool(),
-        sync_tool(builtin::grep::definition(), false, allow_net, value_runner(builtin::grep::execute)),
-        sync_tool(builtin::verify::definition(), false, allow_net, value_runner(builtin::verify::execute)),
-        sync_tool(builtin::fetch::definition(), false, allow_net, value_runner(builtin::fetch::execute)),
-        sync_tool(builtin::check::definition(), false, allow_net, value_runner(builtin::check::execute)),
+        sync_tool(builtin::grep::definition(), false, allow_net, value_display!(grep), value_runner(builtin::grep::execute)),
+        sync_tool(builtin::verify::definition(), false, allow_net, value_display!(verify), value_runner(builtin::verify::execute)),
+        sync_tool(builtin::fetch::definition(), false, allow_net, value_display!(fetch), value_runner(builtin::fetch::execute)),
+        sync_tool(builtin::check::definition(), false, allow_net, value_display!(check), value_runner(builtin::check::execute)),
     ]
 }
 
@@ -679,6 +694,64 @@ mod tests {
             .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed));
 
         (executed.tool_content, failed)
+    }
+
+    /// The tool-call block's `input` for one call — the TS tool's displayInput.
+    fn display_of(name: &str, raw_input: &str, cwd: &std::path::Path) -> String {
+        let tools = builtin_tool_pack(false);
+        let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions { cwd: Some(cwd.to_path_buf()), jobs_root: None });
+        let message = message();
+        let executed = execute_tool_call(ToolExecutionContext {
+            call_id: "c1",
+            history: &[],
+            message: &message,
+            raw_input,
+            runtime_context: ChatRuntimeContext {
+                cwd: cwd.to_string_lossy().to_string(),
+                working_file: WorkingFileContext { exists: false, path: String::new(), scope: WorkingFileScope::Cwd, text: None },
+            },
+            services,
+            tool: tools.iter().find(|tool| tool.name == name),
+            tool_name: name,
+        });
+
+        executed
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                ChatMessageBlock::ToolCall(block) => block.input.clone(),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tool_call_blocks_carry_the_ts_display_input() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi\n").unwrap();
+        let cwd = dir.path();
+
+        assert_eq!(display_of("READ", r#"{"path":"hello.txt"}"#, cwd), "hello.txt");
+        assert_eq!(display_of("PATCH", r#"{"path":"hello.txt","content":"a\nb\n"}"#, cwd), "hello.txt (write 3 line(s))");
+        assert_eq!(display_of("DIR", r#"{"path":".","maxDepth":1}"#, cwd), ".\ndepth 1");
+        assert_eq!(display_of("GREP", r#"{"pattern":"hi","path":".","glob":"*.txt"}"#, cwd), "pattern=hi path=. glob=*.txt");
+        assert_eq!(display_of("VERIFY", r#"{"command":"true"}"#, cwd), "command=true");
+        assert_eq!(display_of("BASH", r#"{"command":"true"}"#, cwd), ".\ntrue");
+        // FETCH's prepare refuses without --allow-net (as the TS prepare throws), so
+        // the block falls back to the raw input there; with net the TS formula shows.
+        assert_eq!(display_of("FETCH", r#"{"url":"https://example.com/x"}"#, cwd), r#"{"url":"https://example.com/x"}"#);
+        assert_eq!(
+            builtin::fetch::display_input(&Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()), &tool_ctx(&cwd.to_string_lossy(), true)),
+            Some("GET https://example.com/x (max 100 bytes)".to_string())
+        );
+        // A failed execution (no tsconfig here) shows the raw input, as buildFailureResult does in TS.
+        assert_eq!(display_of("CHECK", r#"{"path":"hello.txt"}"#, cwd), r#"{"path":"hello.txt"}"#);
+        assert_eq!(
+            builtin::check::display_input(&Value::String(r#"{"path":" hello.txt "}"#.into()), &tool_ctx(&cwd.to_string_lossy(), false)),
+            Some(r#"{ path: "hello.txt" }"#.to_string())
+        );
+        // Unparseable arguments fall back to the raw input; execute reports the error.
+        assert_eq!(display_of("READ", "not json", cwd), "not json");
     }
 
     #[test]

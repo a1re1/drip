@@ -578,6 +578,15 @@ pub fn definition() -> Value {
     })
 }
 
+/// tools/grep-tool.ts:488 — `pattern=<p> path=<display> [glob=<g>]`.
+pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
+    let map = super::tool_arguments(args).ok()?;
+    let input = prepare(&map, ctx).ok()?;
+    let glob = input.glob.as_deref().map(|glob| format!(" glob={glob}")).unwrap_or_default();
+
+    Some(format!("pattern={} path={}{glob}", input.pattern, input.display_path))
+}
+
 /// Full pipeline: parse args → prepare → execute → complete → ToolOutcome.
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     let map = match super::tool_arguments(args) {

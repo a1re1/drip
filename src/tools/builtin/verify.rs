@@ -563,6 +563,13 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
     }
 }
 
+/// The transcript's display string for this call — what the TS tool's prepare
+/// returns as `displayInput` — or None when the arguments do not parse (the
+/// execute path reports that error).
+pub fn display_input(args: &serde_json::Value, ctx: &super::ToolCtx) -> Option<String> {
+    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+}
+
 pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOutcome {
     let prepared = match prepare(args, ctx) {
         Ok(p) => p,

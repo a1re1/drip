@@ -1124,6 +1124,13 @@ pub fn complete(prepared: &PatchToolPrepared, result: &PatchToolResult) -> ToolC
     }
 }
 
+/// The transcript's display string for this call — what the TS tool's prepare
+/// returns as `displayInput` — or None when the arguments do not parse (the
+/// execute path reports that error).
+pub fn display_input(args: &serde_json::Value, ctx: &ToolCtx) -> Option<String> {
+    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+}
+
 pub fn execute(args: &serde_json::Value, ctx: &ToolCtx) -> ToolOutcome {
     let prepared = match prepare(args, ctx) {
         Ok(prepared) => prepared,

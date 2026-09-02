@@ -81,23 +81,26 @@ pub fn definition() -> Value {
 /// Port of the prepare stage. Parses the raw arguments, resolves the target
 /// file (if any) and keeps the workspace root from the context cwd.
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<CheckToolPrepared> {
+    // The pack hands the raw JSON string; a pre-parsed object is accepted too
+    // (the other builtins go through the same helper).
+    let args = super::tool_arguments(args)?;
     let workspace_root = ctx.cwd.to_string_lossy().to_string();
 
-    let (file_path, has_path) = match args.get("path") {
-        None | Some(Value::Null) => (None, false),
+    let (file_path, raw_path) = match args.get("path") {
+        None | Some(Value::Null) => (None, None),
         Some(Value::String(raw_path)) => {
             let resolved = resolve_tool_path(&workspace_root, raw_path);
-            (Some(resolved), true)
+            (Some(resolved), Some(raw_path.trim().to_string()))
         }
         Some(_) => {
             return Err(anyhow::anyhow!("\"path\" must be a string."));
         }
     };
 
-    let display_input = if has_path {
-        format!("{{ path: \"{}\" }}", file_path.as_ref().unwrap().display())
-    } else {
-        "{}".to_string()
+    // check-tool.ts:231 — the trimmed path as given, not the resolved one.
+    let display_input = match &raw_path {
+        Some(raw_path) => format!("{{ path: \"{raw_path}\" }}"),
+        None => "{}".to_string(),
     };
 
     Ok(CheckToolPrepared {
@@ -385,6 +388,13 @@ pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolC
     }
 }
 
+/// The transcript's display string for this call — what the TS tool's prepare
+/// returns as `displayInput` — or None when the arguments do not parse (the
+/// execute path reports that error).
+pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
+    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+}
+
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
 /// to the model-facing failure text (buildFailureResult shape).
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
@@ -512,3 +522,4 @@ mod tests {
         assert_eq!(result.scope, "project");
     }
 }
+

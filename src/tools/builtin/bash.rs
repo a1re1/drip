@@ -294,6 +294,11 @@ pub fn complete(prepared: &BashToolPrepared, execution: &BashToolExecution) -> T
     }
 }
 
+/// tools/bash-tool.ts:462 — `<cwd>\n<command>`.
+pub fn display_input(raw_input: &str, ctx: &ToolCtx) -> Option<String> {
+    prepare(raw_input, ctx).ok().map(|prepared| prepared.display_input)
+}
+
 /// Whole-pipeline entry point: prepare → execute → complete. A failed stage
 /// maps to the model-facing ERROR text; a finished run is marked failed unless
 /// the command exited cleanly (grep-family "no matches" exits stay completed).

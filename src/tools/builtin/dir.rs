@@ -260,6 +260,13 @@ pub fn complete(prepared: &DirToolPrepared, result: &DirToolResult) -> ToolCompl
     }
 }
 
+/// The transcript's display string for this call — what the TS tool's prepare
+/// returns as `displayInput` — or None when the arguments do not parse (the
+/// execute path reports that error).
+pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
+    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+}
+
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
 /// to the model-facing failure text (buildFailureResult shape).
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {

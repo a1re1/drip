@@ -64,6 +64,8 @@ pub type ListChangedFilesFn = Arc<dyn Fn(&str, &str) -> Result<Vec<String>, Stri
 pub type ReadDiffFn = Arc<dyn Fn(&str, &str, &str) -> Result<String, String> + Send + Sync>;
 /// Test seam: `(path, cwd) -> committed content` (None when unreadable).
 pub type ReadFileAtHeadFn = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+/// Test seam: the commit the worktree is on (default `git rev-parse HEAD`).
+pub type ReadHeadFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 /// Test seam: the child-session runner (defaults to run_session_goal on a private runtime).
 pub type RunGoalFn =
     Arc<dyn for<'a> Fn(SessionGoalArgs<'a>) -> Result<SessionGoalOutcome, SessionGoalError> + Send + Sync>;
@@ -91,6 +93,7 @@ pub struct ReviewCommandArgs {
     pub list_changed_files: Option<ListChangedFilesFn>,
     pub read_diff: Option<ReadDiffFn>,
     pub read_file_at_head: Option<ReadFileAtHeadFn>,
+    pub read_head: Option<ReadHeadFn>,
     /// Progress sink (the CLI prints these to stderr): the plan, then one line per finished unit.
     pub on_progress: Option<ProgressFn>,
     pub wall_clock_ms: Option<ReviewWallClockMs>,
@@ -263,6 +266,25 @@ fn default_list_changed_files(base_ref: &str, cwd: &str) -> Result<Vec<String>, 
     let stdout = git_stdout(&["diff", "--name-only", &format!("{base_ref}...HEAD")], cwd)?;
 
     Ok(stdout.split('\n').map(str::trim).filter(|line| !line.is_empty()).map(String::from).collect())
+}
+
+fn default_read_head(cwd: &str) -> Result<String, String> {
+    git_stdout(&["rev-parse", "HEAD"], cwd).map(|out| out.trim().to_string())
+}
+
+// The children read the working tree while the diff is `<base>...HEAD`: a
+// checkout in this worktree mid-review makes them judge one tree against
+// another diff and report phantom findings (review.ts assertHeadUnchanged).
+pub fn assert_head_unchanged(start_head: &str, current_head: &str) -> Result<(), String> {
+    if start_head == current_head {
+        return Ok(());
+    }
+
+    Err(format!(
+        "review aborted: HEAD moved from {} to {} while the review ran — a checkout happened in this worktree, so the reviewers read a different tree than the diff. Re-run on a quiet worktree.",
+        &start_head[..start_head.len().min(12)],
+        &current_head[..current_head.len().min(12)]
+    ))
 }
 
 // The committed content, not the working tree: the review is of <base>...HEAD,
@@ -746,6 +768,8 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
     let read_diff: ReadDiffFn = args.read_diff.clone().unwrap_or_else(|| Arc::new(default_read_diff));
     let read_file_at_head: ReadFileAtHeadFn = args.read_file_at_head.clone().unwrap_or_else(|| Arc::new(default_read_file_at_head));
     let run_goal: RunGoalFn = args.run_goal.clone().unwrap_or_else(|| Arc::new(default_run_goal));
+    let read_head: ReadHeadFn = args.read_head.clone().unwrap_or_else(|| Arc::new(default_read_head));
+    let head_at_start = read_head(&args.cwd)?;
 
     let all_paths = list_changed_files(&base_ref, &args.cwd)?;
     let reviewable_paths: Vec<String> = all_paths
@@ -893,6 +917,8 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     let units_ms = elapsed_ms(command_started_at);
 
+    assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
+
     // Back to diff order: units are planned docs-first and grouped, but the
     // per-file reports (and files[]) should read in the order the diff lists.
     let order: HashMap<&str, usize> = reviewable_paths.iter().enumerate().map(|(i, path)| (path.as_str(), i)).collect();
@@ -997,6 +1023,8 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
             lines.join("\n")
         }
     };
+
+    assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
 
     Ok(ReviewOutcome {
         base: base_ref,
@@ -1147,6 +1175,13 @@ mod tests {
     }
 
     #[test]
+    fn head_guard_passes_on_a_quiet_worktree_and_aborts_after_a_checkout() {
+        assert!(assert_head_unchanged("abc123", "abc123").is_ok());
+        let err = assert_head_unchanged("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb").unwrap_err();
+        assert!(err.contains("HEAD moved from aaaaaaaaaaaa to bbbbbbbbbbbb"), "{err}");
+    }
+
+    #[test]
     fn empty_diff_short_circuits_without_children() {
         let dir = tempfile::tempdir().unwrap();
         let project = mock_project(dir.path());
@@ -1161,6 +1196,7 @@ mod tests {
             list_changed_files: Some(Arc::new(|_, _| Ok(vec![]))),
             read_diff: None,
             read_file_at_head: None,
+            read_head: Some(Arc::new(|_| Ok("head0".to_string()))),
             on_progress: None,
             wall_clock_ms: None,
             run_goal: None,

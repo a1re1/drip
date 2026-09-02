@@ -476,6 +476,7 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
             list_changed_files: None,
             read_diff: None,
             read_file_at_head: None,
+            read_head: None,
             // Progress on stderr: a review runs for minutes with nothing on
             // the terminal otherwise, and --json stdout must stay one object.
             on_progress: Some(Arc::new(move |event: ReviewProgressEvent| match event {

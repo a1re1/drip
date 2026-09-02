@@ -118,8 +118,16 @@ describe("normalizeArtifact — transcript", () => {
     const text = `{\n  "b": 1,\n  "a": "2026-09-01T01:27:15.095Z"\n}\n{"kind":"tool","at":1725150000000}\n`;
     const lines = normalizeArtifact(text, "transcript").split("\n");
 
-    expect(JSON.parse(lines[0]!)).toEqual({ a: "<TS>", b: 1 });
-    expect(JSON.parse(lines[1]!)).toEqual({ at: "<TS>", kind: "tool" });
+    expect(lines[0]).toBe('{"a":"<TS>","b":1} # keys: b,a');
+    expect(lines[1]).toBe('{"at":"<TS>","kind":"tool"} # keys: kind,at');
+  });
+
+  it("pins each line's original key order so type-first vs type-last differs", () => {
+    const lci = normalizeArtifact('{"at":"x","type":"run-end"}', "transcript");
+    const drip = normalizeArtifact('{"type":"run-end","at":"x"}', "transcript");
+
+    expect(lci).not.toBe(drip);
+    expect(lci).toBe('{"at":"x","type":"run-end"} # keys: at,type');
   });
 });
 

@@ -96,6 +96,105 @@ pub fn build_repeated_read_stub(tool_name: &str, prior_call_count: i64) -> Strin
     )
 }
 
+// Workspace-relative file paths a goal names explicitly ("NEW FILE
+// src/lib/widget.ts", "update `drip/src/cli/entry.rs`"). Requires a directory
+// separator so prose like "v1.2" or "README.md" never counts. Mirrors the TS
+// GOAL_PATH_PATTERN; its trailing lookahead is the manual boundary check in
+// `extract_goal_paths` (the regex crate has no lookaround).
+fn goal_path_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r#"(?:^|[\s`'"(\[<])((?:\.{0,2}/)?(?:[0-9A-Za-z_@.-]+/)+[0-9A-Za-z_@.-]+\.[A-Za-z0-9]{1,8})"#).expect("goal path regex")
+    })
+}
+
+const GOAL_PATH_TRAILERS: &str = "`'\"),.]>:;";
+
+/// Explicit file paths in the goal text, normalized (no leading ./), deduplicated.
+pub fn extract_goal_paths(goal: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut from = 0;
+    while let Some(caps) = goal_path_re().captures_at(goal, from) {
+        let whole = caps.get(0).expect("match");
+        let path = caps.get(1).expect("group");
+        from = whole.end();
+        // JS `(?=$|[\s`'"),.\]>:;])`: the path must end the text or be
+        // followed by whitespace / closing punctuation.
+        let boundary_ok = goal[path.end()..]
+            .chars()
+            .next()
+            .is_none_or(|next| next.is_whitespace() || GOAL_PATH_TRAILERS.contains(next));
+        if !boundary_ok {
+            continue;
+        }
+        let normalized = path.as_str().strip_prefix("./").unwrap_or(path.as_str()).to_string();
+        if !paths.contains(&normalized) {
+            paths.push(normalized);
+        }
+    }
+    paths
+}
+
+// A successful PATCH result names every file it created: the whole-file form
+// says "Created <path> with N line(s)." and the files[] transaction form lists
+// "<path>: created N line(s)".
+fn patch_created_res() -> &'static [regex::Regex; 2] {
+    static RE: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        [
+            regex::Regex::new(r"^Created (.+?) with \d+ line\(s\)\.$").expect("created regex"),
+            regex::Regex::new(r"^(.+?): created \d+ line\(s\)$").expect("created regex"),
+        ]
+    })
+}
+
+/// Paths a successful PATCH result reports as newly created.
+pub fn extract_created_paths(patch_output: &str) -> Vec<String> {
+    let mut created = Vec::new();
+    for line in patch_output.split('\n') {
+        let line = line.trim();
+        for re in patch_created_res() {
+            if let Some(caps) = re.captures(line) {
+                let path = caps.get(1).expect("group").as_str();
+                created.push(path.strip_prefix("./").unwrap_or(path).to_string());
+                break;
+            }
+        }
+    }
+    created
+}
+
+/// The note appended to a PATCH result that created a file at a path the goal
+/// never named, when the goal does name paths. Small models under a precise
+/// contract still invent a sibling file (a "result_payload.rs" beside the
+/// "headless_output.rs" the goal asked for) and then build on it; the first
+/// PATCH to an unnamed new path is the earliest signal. None when the goal
+/// names no paths, or every created path is one of them (or under a directory
+/// the goal names).
+pub fn build_unnamed_path_note(goal: &str, patch_output: &str) -> Option<String> {
+    let goal_paths = extract_goal_paths(goal);
+    if goal_paths.is_empty() {
+        return None;
+    }
+    let unnamed: Vec<String> = extract_created_paths(patch_output)
+        .into_iter()
+        .filter(|path| {
+            !goal_paths.contains(path) && !goal_paths.iter().any(|goal_path| path.starts_with(&format!("{goal_path}/")))
+        })
+        .collect();
+    if unnamed.is_empty() {
+        return None;
+    }
+    let mut shown = goal_paths.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
+    if goal_paths.len() > 4 {
+        shown.push_str(&format!(", … ({} paths)", goal_paths.len()));
+    }
+    Some(format!(
+        "[harness] PATCH created {}, which the goal does not name (it names {shown}). If the goal wanted this code at one of its named paths, move it there now instead of building on the new file; if the new file is intentional, say why in your next finish_task note.",
+        unnamed.join(", ")
+    ))
+}
+
 // Commands whose outcome IS the verification story of the run: the harness
 // records the most recent one so summaries and results cite ground truth.
 // Hand-rolled scan of the TS VERIFICATION_COMMAND_PATTERN:
@@ -472,6 +571,41 @@ mod loop_helpers_tests {
             messages[2].content,
             Some(TransportContent::Text("hottest result".to_string()))
         );
+    }
+
+    // test/harness-feedback.test.ts "unnamed-path PATCH note"
+    #[test]
+    fn extract_goal_paths_finds_explicit_workspace_paths() {
+        let goal = "Definition of done: 1. NEW FILE drip/src/cli/headless_output.rs — port of src/cli/headless-output.ts.\n2. UPDATED `drip/src/cli/mod.rs` (see ./drip/PLAN.md). Verify with cargo test; v1.2.3 and README.md are not paths.";
+        assert_eq!(
+            extract_goal_paths(goal),
+            vec!["drip/src/cli/headless_output.rs", "src/cli/headless-output.ts", "drip/src/cli/mod.rs", "drip/PLAN.md"]
+        );
+        assert!(extract_goal_paths("fix the flaky test").is_empty());
+        // A path glued to a following word is not a path (JS lookahead parity).
+        assert!(extract_goal_paths("src/a.ts_x").is_empty());
+    }
+
+    #[test]
+    fn extract_created_paths_reads_both_patch_result_forms() {
+        assert_eq!(extract_created_paths("Created src/new.ts with 12 line(s)."), vec!["src/new.ts"]);
+        assert!(extract_created_paths("Overwrote src/old.ts with 3 line(s).").is_empty());
+        assert_eq!(
+            extract_created_paths("Applied 2 file(s):\n  src/a.ts: replaced 1 occurrence(s)\n  src/b.ts: created 4 line(s)\n"),
+            vec!["src/b.ts"]
+        );
+    }
+
+    #[test]
+    fn unnamed_path_note_fires_only_for_new_files_outside_the_goal() {
+        let goal = "NEW FILE drip/src/cli/headless_output.rs mirroring src/cli/headless-output.ts";
+        let note = build_unnamed_path_note(goal, "Created drip/src/result_payload.rs with 40 line(s).").unwrap();
+        assert!(note.contains("[harness] PATCH created drip/src/result_payload.rs, which the goal does not name"));
+        assert!(note.contains("it names drip/src/cli/headless_output.rs, src/cli/headless-output.ts"));
+        assert!(build_unnamed_path_note(goal, "Created drip/src/cli/headless_output.rs with 40 line(s).").is_none());
+        assert!(build_unnamed_path_note(goal, "Overwrote drip/src/result_payload.rs with 40 line(s).").is_none());
+        assert!(build_unnamed_path_note("port the module", "Created drip/src/anything.rs with 1 line(s).").is_none());
+        assert!(build_unnamed_path_note("add fixtures under test/fixtures/widgets", "Created test/fixtures/widgets/a.json with 1 line(s).").is_none());
     }
 
     #[test]
@@ -2781,6 +2915,14 @@ impl HarnessRun {
             if deduped_tool && !execution.failed && !repeats_hot_result {
                 // The message pushed at the end of this call lands at this index.
                 scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
+            }
+
+            // A new file at a path the goal never named gets one line of
+            // feedback while it is still cheap to move.
+            if !execution.failed && tool_name == "PATCH" {
+                if let Some(note) = build_unnamed_path_note(&self.state.goal, &execution.tool_content) {
+                    tool_content = format!("{tool_content}\n\n{note}");
+                }
             }
 
             scope.digest_actions.push(format!(

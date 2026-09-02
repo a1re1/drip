@@ -1,0 +1,7 @@
+{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["add greeting file"]}}]}
+{"content":"Planned one task."}
+{"toolCalls":[{"name":"PATCH","arguments":{"path":"lib/salutation.txt","content":"Hello from the parity fixture.\n"}}]}
+{"toolCalls":[{"name":"PATCH","arguments":{"path":"lib/greeting.txt","content":"Hello from the parity fixture.\n"}}]}
+{"toolCalls":[{"name":"BASH","arguments":{"command":"make test"}}]}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Added lib/greeting.txt; make test passes."}}]}
+{"content":"Added lib/greeting.txt; make test passes."}

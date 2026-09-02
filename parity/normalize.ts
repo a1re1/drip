@@ -276,7 +276,17 @@ function normalizeJsonLines(text: string, kind: ArtifactKind, options: Normalize
   const rules = genericRules(options);
   const normalized = values.map((value) => normalizeJson(value, kind, options, rules));
 
-  return normalized.map((value) => JSON.stringify(value)).join("\n");
+  // normalizeJson sorts keys, so a transcript line's on-disk key order would
+  // be invisible here — but `tail -f transcript.jsonl` / `diff` consumers see
+  // it, and lci's is part of the contract (alphabetical, `type` last). Pin it
+  // by appending each line's original top-level key order.
+  return normalized
+    .map((value, index) => {
+      const original = values[index];
+      const keys = original !== null && typeof original === "object" && !Array.isArray(original) ? Object.keys(original) : [];
+      return `${JSON.stringify(value)} # keys: ${keys.join(",")}`;
+    })
+    .join("\n");
 }
 
 function normalizeJsonArtifact(text: string, kind: ArtifactKind, options: NormalizeOptions): string {

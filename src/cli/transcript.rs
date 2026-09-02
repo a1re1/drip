@@ -112,10 +112,17 @@ pub struct TranscriptSkillEntry {
 }
 
 // The TS union discriminates on `type`; serde's internally-tagged enum plays
-// that role — the tag is emitted/parsed as the `type` field and each variant
+// that role — the tag is parsed from the `type` field and each variant
 // carries only its own fields. `TranscriptNoteEntry` backs both "error" and
 // "info" (the TS note entry's type is `"error" | "info"`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//
+// Serialization is hand-written (below) rather than derived: the derive puts
+// the tag first, but every TS call site builds the entry as an object literal
+// with alphabetically ordered keys — `type` lands last — and
+// `JSON.stringify` preserves that order, so a `tail -f` / `diff` of the two
+// harnesses' transcript.jsonl files only matches byte-for-byte when drip
+// sorts the keys the same way.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type")]
 pub enum TranscriptEntry {
 	#[serde(rename = "error")]
@@ -132,6 +139,52 @@ pub enum TranscriptEntry {
 	RunEnd(TranscriptRunEndEntry),
 	#[serde(rename = "skill")]
 	Skill(TranscriptSkillEntry),
+}
+
+impl TranscriptEntry {
+	/// The `type` discriminant a line carries.
+	pub fn tag(&self) -> &'static str {
+		match self {
+			TranscriptEntry::Error(_) => "error",
+			TranscriptEntry::Event(_) => "event",
+			TranscriptEntry::Goal(_) => "goal",
+			TranscriptEntry::Info(_) => "info",
+			TranscriptEntry::Model(_) => "model",
+			TranscriptEntry::RunEnd(_) => "run-end",
+			TranscriptEntry::Skill(_) => "skill",
+		}
+	}
+}
+
+impl Serialize for TranscriptEntry {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let inner = match self {
+			TranscriptEntry::Error(e) | TranscriptEntry::Info(e) => serde_json::to_value(e),
+			TranscriptEntry::Event(e) => serde_json::to_value(e),
+			TranscriptEntry::Goal(e) => serde_json::to_value(e),
+			TranscriptEntry::Model(e) => serde_json::to_value(e),
+			TranscriptEntry::RunEnd(e) => serde_json::to_value(e),
+			TranscriptEntry::Skill(e) => serde_json::to_value(e),
+		}
+		.map_err(serde::ser::Error::custom)?;
+		let mut fields = match inner {
+			serde_json::Value::Object(map) => map,
+			_ => return Err(serde::ser::Error::custom("transcript entry must serialize to an object")),
+		};
+		fields.insert("type".to_string(), serde_json::Value::String(self.tag().to_string()));
+		// Top-level keys in the order the TS object literals list them
+		// (alphabetical, byte-wise — the keys are all ASCII). Nested objects
+		// keep their own struct order, which already mirrors the TS shapes.
+		let mut keys: Vec<String> = fields.keys().cloned().collect();
+		keys.sort();
+		let mut ordered = serde_json::Map::with_capacity(keys.len());
+		for key in keys {
+			if let Some(value) = fields.remove(&key) {
+				ordered.insert(key, value);
+			}
+		}
+		ordered.serialize(serializer)
+	}
 }
 
 /// Mirrors the TS `TRANSCRIPT_ENTRY_TYPES` Set — the discriminants
@@ -273,6 +326,42 @@ mod tests {
 		// Port of test/fixtures.ts makeTempRoot: mkdtemp under the OS temp
 		// dir; TempDir removes it on drop (the vitest afterEach cleanup).
 		tempfile::tempdir().expect("makeTempRoot")
+	}
+
+	// Byte-for-byte parity with lci's transcript lines: `type` is the last
+	// key (alphabetical order, as the TS object literals are written), and a
+	// line round-trips through the tagged deserializer.
+	#[test]
+	fn serializes_with_lci_key_order() {
+		let entry = TranscriptEntry::RunEnd(TranscriptRunEndEntry {
+			at: "2026-07-01T00:00:02.000Z".into(),
+			goal_id: "goal-1".into(),
+			iterations: 3,
+			reason: HarnessRunReason::Completed,
+		});
+		let line = serde_json::to_string(&entry).unwrap();
+		assert_eq!(
+			line,
+			r#"{"at":"2026-07-01T00:00:02.000Z","goalId":"goal-1","iterations":3,"reason":"completed","type":"run-end"}"#
+		);
+		assert_eq!(serde_json::from_str::<TranscriptEntry>(&line).unwrap(), entry);
+
+		let event = TranscriptEntry::Event(TranscriptEventEntry {
+			at: "2026-07-01T00:00:01.000Z".into(),
+			data: Some(HarnessEventData::default()),
+			detail: "d".into(),
+			goal_id: "goal-1".into(),
+			iteration: 1,
+			kind: HarnessEventType::ToolCall,
+		});
+		let keys: Vec<String> = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+			&serde_json::to_string(&event).unwrap(),
+		)
+		.unwrap()
+		.keys()
+		.cloned()
+		.collect();
+		assert_eq!(keys, ["at", "data", "detail", "goalId", "iteration", "kind", "type"]);
 	}
 
 	// it("appends entries and replays them in order")

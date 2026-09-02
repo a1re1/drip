@@ -78,6 +78,125 @@ pub fn fold_cold_tool_results(
     fold_count
 }
 
+// Every task loop starts with a fresh transcript, and — transcript audits of
+// flash lanes show — the next loop re-reads the files the previous one just
+// read: the same task after running out of cycles (loop 3 read 11 files,
+// loop 4 re-read 10 of them, then wrote), or the next task of the same goal
+// ("survey the tools" then "write the doc" re-reads every tool file). The
+// hot tail of the ended loop is replayed into the next task loop instead:
+// the last few tool exchanges, verbatim, capped.
+pub const MAX_CARRYOVER_CHARS: usize = 24_000;
+
+#[derive(Clone, Debug)]
+pub struct LoopCarryover {
+    /// Whether the ended loop finished its task (the replay then feeds the next task).
+    pub finished: bool,
+    pub r#loop: i64,
+    pub messages: Vec<TransportRequestMessage>,
+    /// The ended loop's task, or None for a planning loop.
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+}
+
+fn message_chars(message: &TransportRequestMessage) -> usize {
+    match &message.content {
+        Some(TransportContent::Text(text)) => text.chars().count(),
+        // JSON.stringify(content ?? "").length + JSON.stringify(tool_calls ?? []).length
+        other => {
+            serde_json::to_string(&other.clone().unwrap_or(TransportContent::Text(String::new())))
+                .map(|t| t.chars().count())
+                .unwrap_or(0)
+                + serde_json::to_string(&message.tool_calls.clone().unwrap_or_default())
+                    .map(|t| t.chars().count())
+                    .unwrap_or(0)
+        }
+    }
+}
+
+fn message_text(message: &TransportRequestMessage) -> &str {
+    match &message.content {
+        Some(TransportContent::Text(text)) => text.as_str(),
+        _ => "",
+    }
+}
+
+/// The tail of a loop transcript worth replaying into the next loop for the
+/// same task: whole assistant→tool exchanges (never a dangling tool result)
+/// covering at most `hot_tool_results` unfolded tool results and
+/// MAX_CARRYOVER_CHARS, with the loop's own user/system messages left out.
+/// Empty when the loop made no tool calls.
+pub fn extract_loop_carryover(messages: &[TransportRequestMessage], hot_tool_results: usize) -> Vec<TransportRequestMessage> {
+    // Blocks: an assistant message plus every tool result that follows it.
+    let mut blocks: Vec<Vec<&TransportRequestMessage>> = Vec::new();
+    for message in messages {
+        match message.role {
+            ChatRoleTag::Assistant => blocks.push(vec![message]),
+            ChatRoleTag::Tool => {
+                if let Some(last) = blocks.last_mut() {
+                    last.push(message);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut kept: Vec<&Vec<&TransportRequestMessage>> = Vec::new();
+    let mut tool_results = 0usize;
+    let mut chars = 0usize;
+    for block in blocks.iter().rev() {
+        let block_results = block
+            .iter()
+            .filter(|message| message.role == ChatRoleTag::Tool && !message_text(message).starts_with(FOLDED_RESULT_MARKER))
+            .count();
+        let block_chars: usize = block.iter().map(|message| message_chars(message)).sum();
+        if !kept.is_empty() && (tool_results + block_results > hot_tool_results || chars + block_chars > MAX_CARRYOVER_CHARS) {
+            break;
+        }
+        kept.insert(0, block);
+        tool_results += block_results;
+        chars += block_chars;
+    }
+
+    let carried: Vec<TransportRequestMessage> = kept
+        .into_iter()
+        .flat_map(|block| block.iter().copied())
+        .filter(|message| matches!(message.role, ChatRoleTag::Assistant | ChatRoleTag::Tool))
+        .cloned()
+        .collect();
+
+    // Harness ops (plan_tasks, finish_task, observe, …) already live in the
+    // state store the next loop is prompted from; a tail holding nothing but
+    // those is not worth replaying.
+    let has_workspace_result = carried
+        .iter()
+        .any(|message| message.role == ChatRoleTag::Tool && message.name.as_deref().is_some_and(|name| !crate::harness::harness_tools::is_harness_tool(name)));
+    if has_workspace_result {
+        carried
+    } else {
+        Vec::new()
+    }
+}
+
+/// The user note that follows replayed exchanges.
+pub fn build_carryover_note(carryover: &LoopCarryover, next_task_id: &str, exchanges: usize) -> String {
+    let replayed = format!("its last {exchanges} tool exchange(s) are replayed above, verbatim");
+    if carryover.task_id.as_deref() == Some(next_task_id) {
+        return format!(
+            "harness: loop {} worked this same task and ended before finish_task; {replayed}, so you continue from there instead of re-reading. Act on what they show now.",
+            carryover.r#loop
+        );
+    }
+    let previous = match &carryover.task_id {
+        Some(task_id) => format!("{task_id} (\"{}\")", truncate_text(carryover.task_title.as_deref().unwrap_or(""), 80)),
+        None => "the planning step".to_string(),
+    };
+    format!(
+        "harness: loop {} worked {previous}{}; {replayed}, so this task builds on what was already read instead of re-reading. Act on what they show now.",
+        carryover.r#loop,
+        if carryover.finished { " and finished it" } else { "" }
+    )
+}
+
 /// Fold the whole loop transcript past this size instead of waiting for the endpoint to reject it.
 pub const MAX_LOOP_TRANSCRIPT_CHARS: usize = 300_000;
 
@@ -841,6 +960,66 @@ mod loop_helpers_tests {
     }
 
 
+    // test/harness-feedback.test.ts "keeps whole exchanges within the hot-result and size caps, newest first"
+    #[test]
+    fn loop_carryover_keeps_whole_exchanges_within_caps_newest_first() {
+        fn exchange(id: &str, content: &str) -> Vec<TransportRequestMessage> {
+            vec![
+                TransportRequestMessage {
+                    role: ChatRoleTag::Assistant,
+                    tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
+                        function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
+                            arguments: Some("{}".to_string()),
+                            name: Some("READ".to_string()),
+                        }),
+                        id: Some(id.to_string()),
+                        tool_type: Some("function".to_string()),
+                    }]),
+                    ..Default::default()
+                },
+                TransportRequestMessage {
+                    content: Some(TransportContent::Text(content.to_string())),
+                    name: Some("READ".to_string()),
+                    role: ChatRoleTag::Tool,
+                    tool_call_id: Some(id.to_string()),
+                    ..Default::default()
+                },
+            ]
+        }
+        fn user(text: &str) -> TransportRequestMessage {
+            TransportRequestMessage { content: Some(TransportContent::Text(text.to_string())), role: ChatRoleTag::User, ..Default::default() }
+        }
+        let mut messages = vec![TransportRequestMessage { content: Some(TransportContent::Text("sys".into())), role: ChatRoleTag::System, ..Default::default() }, user("iteration")];
+        messages.extend(exchange("a", "one"));
+        messages.extend(exchange("b", "two"));
+        messages.push(user("continue"));
+        messages.extend(exchange("c", "three"));
+
+        let shape = |kept: Vec<TransportRequestMessage>| -> Vec<String> {
+            kept.iter().map(|m| if m.role == ChatRoleTag::Tool { message_text(m).to_string() } else { "call".to_string() }).collect()
+        };
+        assert_eq!(shape(extract_loop_carryover(&messages, 2)), vec!["call", "two", "call", "three"]);
+        assert!(extract_loop_carryover(&messages, 6).iter().all(|m| m.role != ChatRoleTag::User));
+        assert!(extract_loop_carryover(&messages[..1], 6).is_empty());
+        // One oversized exchange is still carried (never an empty handoff for a loop that read something).
+        assert_eq!(extract_loop_carryover(&exchange("big", &"x".repeat(30_000)), 6).len(), 2);
+        let same = LoopCarryover { finished: false, r#loop: 3, messages: vec![], task_id: Some("task-1".into()), task_title: Some("read then finish".into()) };
+        assert_eq!(
+            build_carryover_note(&same, "task-1", 1),
+            "harness: loop 3 worked this same task and ended before finish_task; its last 1 tool exchange(s) are replayed above, verbatim, so you continue from there instead of re-reading. Act on what they show now."
+        );
+        let finished = LoopCarryover { finished: true, r#loop: 2, messages: vec![], task_id: Some("task-1".into()), task_title: Some("survey".into()) };
+        assert_eq!(
+            build_carryover_note(&finished, "task-2", 4),
+            "harness: loop 2 worked task-1 (\"survey\") and finished it; its last 4 tool exchange(s) are replayed above, verbatim, so this task builds on what was already read instead of re-reading. Act on what they show now."
+        );
+        let planning = LoopCarryover { finished: false, r#loop: 1, messages: vec![], task_id: None, task_title: None };
+        assert_eq!(
+            build_carryover_note(&planning, "task-1", 2),
+            "harness: loop 1 worked the planning step; its last 2 tool exchange(s) are replayed above, verbatim, so this task builds on what was already read instead of re-reading. Act on what they show now."
+        );
+    }
+
     #[test]
     fn extract_goal_paths_finds_explicit_workspace_paths() {
         let goal = "Definition of done: 1. NEW FILE drip/src/cli/headless_output.rs — port of src/cli/headless-output.ts.\n2. UPDATED `drip/src/cli/mod.rs` (see ./drip/PLAN.md). Verify with cargo test; v1.2.3 and README.md are not paths.";
@@ -1169,6 +1348,9 @@ pub struct HarnessRun {
     pub aborted: bool,
     pub run_error: Option<String>,
     pub plan_stopped: bool,
+    /// The hot tail of the previous loop when it left its task unfinished —
+    /// replayed into the next loop for the same task (see extract_loop_carryover).
+    pub carryover: Option<LoopCarryover>,
 }
 
 /// Loop-scoped locals (loop.ts:660-745): one instance per task loop.
@@ -1613,6 +1795,7 @@ impl HarnessRun {
             aborted: false,
             run_error: None,
             plan_stopped: false,
+            carryover: None,
         })
     }
 
@@ -2481,6 +2664,75 @@ impl HarnessRun {
                     workspace: Some(&self.cwd),
                 },
             );
+
+            let carried = match (&self.carryover, &scope.current_task_id) {
+                (Some(carryover), Some(_)) if carryover.r#loop == self.state.r#loop - 1 && !carryover.messages.is_empty() => {
+                    Some(carryover.clone())
+                }
+                _ => None,
+            };
+            if let Some(carryover) = carried {
+                let first_carried = scope.transport_messages.len();
+                scope.transport_messages.extend(carryover.messages.iter().cloned());
+
+                // Replayed read-only results are as good as this loop's own for
+                // the repeat stub; replayed folds stay folded; replayed call ids
+                // stay taken.
+                for index in first_carried..scope.transport_messages.len() {
+                    let message = scope.transport_messages[index].clone();
+                    match message.role {
+                        ChatRoleTag::Assistant => {
+                            for call in message.tool_calls.iter().flatten() {
+                                if let Some(id) = &call.id {
+                                    scope.used_tool_call_ids.insert(id.clone());
+                                }
+                            }
+                        }
+                        ChatRoleTag::Tool => {
+                            if let Some(TransportContent::Text(content)) = &message.content {
+                                if content.starts_with(FOLDED_RESULT_MARKER) {
+                                    scope.folded_message_indexes.insert(index);
+                                } else if let Some(name) = message.name.as_deref().filter(|name| DEDUPED_READ_ONLY_TOOLS.contains(name)) {
+                                    let arguments = scope.transport_messages[first_carried..index]
+                                        .iter()
+                                        .flat_map(|earlier| earlier.tool_calls.iter().flatten())
+                                        .find(|candidate| candidate.id.is_some() && candidate.id == message.tool_call_id)
+                                        .and_then(|call| call.function.as_ref().and_then(|function| function.arguments.clone()));
+                                    if let Some(arguments) = arguments {
+                                        scope
+                                            .hot_read_only_results
+                                            .insert(tool_telemetry_key(name, &arguments), (index, hash_text(content)));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let exchanges = carryover.messages.iter().filter(|message| message.role == ChatRoleTag::Assistant).count();
+                let task_id = scope.current_task_id.clone().unwrap_or_default();
+                scope.transport_messages.push(TransportRequestMessage {
+                    content: Some(TransportContent::Text(build_carryover_note(&carryover, &task_id, exchanges))),
+                    role: ChatRoleTag::User,
+                    ..Default::default()
+                });
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData {
+                        r#loop: Some(self.state.r#loop),
+                        task_id: Some(task_id.clone()),
+                        ..Default::default()
+                    }),
+                    detail: format!(
+                        "replayed {exchanges} tool exchange(s) from loop {} into this loop for {task_id}",
+                        carryover.r#loop
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::ContextRefreshed,
+                });
+            }
+
+            self.carryover = None;
         } else {
             // Continuing the same loop: keep the shared transcript, fold its
             // cold tool results, and reorient with a small continuation
@@ -3362,6 +3614,31 @@ impl HarnessRun {
             "progress was recorded, but the current task is not finished".to_string()
         } else {
             "no progress was recorded — nothing from this loop was persisted".to_string()
+        };
+
+        // Every loop hands its hot tail to the next task loop (see
+        // extract_loop_carryover); an aborted loop or one with no exchanges
+        // hands nothing.
+        self.carryover = if self.aborted {
+            None
+        } else {
+            let messages = extract_loop_carryover(&scope.transport_messages, scope.loop_budget.hot_tool_results.max(0) as usize);
+            if messages.is_empty() {
+                None
+            } else {
+                let task_title = scope
+                    .current_task_id
+                    .as_deref()
+                    .and_then(|task_id| self.state.tasks.iter().find(|task| task.id == task_id))
+                    .map(|task| task.title.clone());
+                Some(LoopCarryover {
+                    finished: scope.task_finished,
+                    r#loop: self.state.r#loop,
+                    messages,
+                    task_id: scope.current_task_id.clone(),
+                    task_title,
+                })
+            }
         };
 
         self.record_loop_digest(scope, &outcome);

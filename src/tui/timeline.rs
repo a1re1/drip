@@ -9,7 +9,7 @@ use crate::cli::transcript::{
 use crate::core::types::{HarnessEventType, HarnessRunReason};
 use crate::tui::markdown_ansi::render_markdown_ansi;
 use crate::tui::theme::{event_label, event_paint};
-use crate::watch::ansi::{c, strip_ansi, wrap_ansi};
+use crate::watch::ansi::{c, string_width, strip_ansi, wrap_ansi};
 
 /// Collapse all whitespace runs to a single space, trim, and hard-cut to
 /// `max_chars` characters (appending "...") when longer.
@@ -37,6 +37,16 @@ fn reason_string(reason: &HarnessRunReason) -> String {
 
 /// Render one transcript entry as painted ANSI rows (no trailing newlines).
 pub fn render_timeline_cell(entry: &TranscriptEntry, width: usize) -> Vec<String> {
+    // ink wraps every row's text at word boundaries (`<Text wrap="wrap">`);
+    // a row left longer than the terminal would be broken mid-word by the
+    // terminal itself.
+    render_timeline_cell_rows(entry, width)
+        .into_iter()
+        .flat_map(|row| if width > 0 && string_width(&row) > width { wrap_ansi(&row, width) } else { vec![row] })
+        .collect()
+}
+
+fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<String> {
     match entry {
         TranscriptEntry::Goal(goal) => {
             let mut rows = vec![String::new()];
@@ -186,7 +196,7 @@ pub fn select_repaint_tail_start(entries: &[TranscriptEntry], terminal_rows: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::transcript::{TranscriptNoteEntry, TranscriptRunEndEntry};
+    use crate::cli::transcript::{TranscriptEventEntry, TranscriptNoteEntry, TranscriptRunEndEntry};
 
     fn note(text: &str) -> TranscriptEntry {
         TranscriptEntry::Info(TranscriptNoteEntry {
@@ -205,6 +215,23 @@ mod tests {
         let unicode = truncate_detail("héllo wörld", 8);
         assert_eq!(unicode, "héllo...");
         assert_eq!(unicode.chars().count(), 8);
+    }
+
+    #[test]
+    fn long_event_rows_word_wrap_at_the_terminal_width() {
+        let entry = TranscriptEntry::Event(TranscriptEventEntry {
+            at: "2026-01-01T00:00:00.000Z".to_string(),
+            data: None,
+            detail: "plan_tasks: Added 2 task(s): task-1: read greeting; task-2: slow step.".to_string(),
+            goal_id: "g".to_string(),
+            iteration: 1,
+            kind: HarnessEventType::HarnessOp,
+        });
+        let rows: Vec<String> = render_timeline_cell(&entry, 60).iter().map(|row| strip_ansi(row)).collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].ends_with("task-1: read"), "{rows:?}");
+        assert_eq!(rows[1], "greeting; task-2: slow step.");
+        assert!(rows.iter().all(|row| row.chars().count() <= 60));
     }
 
     #[test]

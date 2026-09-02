@@ -883,9 +883,18 @@ impl TuiApp {
         self.flush_pending_cells();
         self.paths = session_paths_for(&self.bootstrap.project, &record);
         self.session = record;
-        // Replay the new transcript from the top, like remounting <Static>.
+        // Replay the new transcript from the top, like remounting <Static>:
+        // the previous session's rows stay in scrollback (ink cannot take
+        // static output back) and the new transcript is printed below them.
         self.cells = read_transcript(Path::new(&self.paths.transcript_path));
-        self.full_repaint();
+        let mut out = String::new();
+        for entry in &self.cells {
+            for row in render_timeline_cell(entry, self.cols) {
+                out.push_str(&row);
+                out.push('\n');
+            }
+        }
+        self.paint(&out);
     }
 
     // ----- skills ---------------------------------------------------------

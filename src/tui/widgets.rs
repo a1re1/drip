@@ -85,15 +85,34 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     } else {
         let before: String = props.text.chars().take(props.cursor).collect();
         let at: String = props.text.chars().skip(props.cursor).take(1).collect();
-        let at = if at.is_empty() { " ".to_string() } else { at };
         let after: String = props.text.chars().skip(props.cursor + 1).collect();
+        // A cursor on a newline is drawn as an inverse cell at the line's end,
+        // then the break — never an inverse sequence spanning the split below.
+        let (at, after) = match at.as_str() {
+            "" => (" ".to_string(), after),
+            "\n" => (" ".to_string(), format!("\n{after}")),
+            _ => (at, after),
+        };
         format!("{before}{INVERSE_ON}{at}{INVERSE_OFF}{after}")
     };
-    rows.extend(boxed(
-        vec![format!("{}{}", prefix_paint("❯ "), body)],
-        width,
-        border_color,
-    ));
+    // The prompt is a fixed-width sibling of the text in ink, so every line of
+    // a multi-line goal (and every wrapped continuation) sits under the first
+    // character of the text, inside the box.
+    let inner = width.max(6) - 4;
+    let text_width = inner.saturating_sub(2).max(1);
+    let mut body_rows: Vec<String> = Vec::new();
+    for line in body.split('\n') {
+        // The inverse cursor cell drawn on a newline may sit one column past
+        // the text width; the box's inner width still has room for it, and
+        // wrap_ansi would otherwise drop it as a break space.
+        let line_width = if line.ends_with(&format!("{INVERSE_ON} {INVERSE_OFF}")) { text_width + 1 } else { text_width };
+        let pieces = if string_width(line) <= line_width { vec![line.to_string()] } else { wrap_ansi(line, line_width) };
+        for piece in pieces {
+            let lead = if body_rows.is_empty() { prefix_paint("❯ ") } else { "  ".to_string() };
+            body_rows.push(format!("{lead}{piece}"));
+        }
+    }
+    rows.extend(boxed(body_rows, width, border_color));
 
     let show_slash_menu = !props.disabled && !props.slash_suggestions.is_empty();
     let show_mention_menu =
@@ -111,10 +130,11 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
                 "/{}{} — {}",
                 command.name, args, command.description
             );
+            // ink: <Box paddingLeft={2}> around the menu.
             if index == props.selected_suggestion_index {
-                rows.push(format!("{}{}", accent("▸ "), accent(&line)));
+                rows.push(format!("  {}{}", accent("▸ "), accent(&line)));
             } else {
-                rows.push(format!("{}{}", dim("  "), dim(&line)));
+                rows.push(format!("  {}{}", dim("  "), dim(&line)));
             }
         }
     } else if show_mention_menu {
@@ -122,10 +142,11 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
         let dim = paint(DIM_COLOR);
         for (index, path) in props.mention_suggestions.iter().enumerate() {
             let line = format!("@{path}");
+            // ink: <Box paddingLeft={2}> around the menu.
             if index == props.selected_suggestion_index {
-                rows.push(format!("{}{}", accent("▸ "), accent(&line)));
+                rows.push(format!("  {}{}", accent("▸ "), accent(&line)));
             } else {
-                rows.push(format!("{}{}", dim("  "), dim(&line)));
+                rows.push(format!("  {}{}", dim("  "), dim(&line)));
             }
         }
     }
@@ -246,6 +267,43 @@ mod tests {
         };
         let rows = render_composer(&props, 40);
         assert!(rows.iter().any(|row| row.contains("\u{1b}[7mb\u{1b}[27m")));
+    }
+
+    #[test]
+    fn composer_keeps_multi_line_text_inside_the_box() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 8,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_suggestion_index: 0,
+            slash_suggestions: &[],
+            text: "line one\nline two",
+        };
+        let rows = plain(&render_composer(&props, 20));
+        // ╭, "❯ line one", "  line two", ╰ — continuation rows sit under the
+        // text; the cursor on the newline is an inverse cell after "one".
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[1].trim_end_matches(" │").trim_end(), "│ ❯ line one");
+        assert_eq!(rows[2].trim_end_matches(" │").trim_end(), "│   line two");
+        assert!(rows.iter().all(|row| row.chars().count() == 20), "{rows:?}");
+    }
+
+    #[test]
+    fn composer_menus_are_indented_like_ink_padding() {
+        let mentions = vec!["hello.txt".to_string(), "help.md".to_string()];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 4,
+            disabled: false,
+            mention_suggestions: &mentions,
+            selected_suggestion_index: 0,
+            slash_suggestions: &[],
+            text: "@hel",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        assert_eq!(rows[3], "  ▸ @hello.txt");
+        assert_eq!(rows[4], "    @help.md");
     }
 
     #[test]

@@ -457,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timeout close-semantics parity with Node (see drip parity follow-ups: child_process timeout reporting)"]
     fn timeout_status_line_includes_bash_async_suggestion() {
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let ctx = stage_context(&temp);
 
@@ -489,8 +489,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timeout close-semantics parity with Node (see drip parity follow-ups: child_process timeout reporting)"]
     fn reports_timeouts_as_incomplete_output_and_kills_the_whole_process_tree_fast() {
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let temp = tempfile::tempdir().unwrap();
         let ctx = stage_context(&temp);

@@ -252,17 +252,28 @@ fn wait_with_pipes(
     let poll_interval = Duration::from_millis(25);
     let started = Instant::now();
 
-    // Poll until the child exits, a settle deadline passes, or an external
-    // stop fires. The TS close event resolves when the pipes hit EOF; the
-    // reader threads below make that equivalent to child-exit plus the join.
+    // Poll until the child has exited AND both pipes hit EOF (Node's `close`
+    // event: a grandchild that inherited the pipes keeps the result open
+    // after the shell itself exits), or a settle deadline passes, or an
+    // external stop fires. The timeout keeps running after the exit, so a
+    // `sleep 30 &` left holding stdout is group-killed and reported as
+    // timedOut with the shell's own exit code — measured on lci.
+    let mut exited: Option<(Option<i32>, Option<String>)> = None;
     let outcome = loop {
         if STOP_SIGNAL_FIRED.load(Ordering::SeqCst) {
             terminate_active_processes();
         }
 
-        if let Ok(Some(status)) = child.try_wait() {
-            let (exit_code, signal) = status_from_exit(&status);
-            break Outcome::Exited { exit_code, signal };
+        if exited.is_none() {
+            if let Ok(Some(status)) = child.try_wait() {
+                exited = Some(status_from_exit(&status));
+            }
+        }
+
+        if let Some((exit_code, signal)) = exited.clone() {
+            if stdout_handle.eof.load(Ordering::Acquire) && stderr_handle.eof.load(Ordering::Acquire) {
+                break Outcome::Exited { exit_code, signal };
+            }
         }
 
         let now = Instant::now();
@@ -299,8 +310,11 @@ fn wait_with_pipes(
                 // Belt and braces: if surviving grandchildren still hold the
                 // stdio pipes open after the kills, settle with what was
                 // captured instead of hanging until they exit.
-                break Outcome::KilledBySignal {
-                    signal: "SIGTERM".to_string(),
+                break match exited.clone() {
+                    Some((exit_code, signal)) => Outcome::Exited { exit_code, signal },
+                    None => Outcome::KilledBySignal {
+                        signal: "SIGTERM".to_string(),
+                    },
                 };
             }
         }
@@ -448,9 +462,15 @@ pub fn build_combined_output(stdout: &str, stderr: &str) -> String {
     sections.join("\n\n")
 }
 
+/// Test-only: `terminate_active_processes` sweeps EVERY in-flight child in
+/// the process, so a test that fires it must not overlap a test whose child
+/// is still running (it would report a spurious "KILLED by SIGTERM").
+/// Registry tests and timeout tests across modules hold this lock.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
-    static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
 
     fn owned(args: &[&str]) -> Vec<String> {
@@ -492,11 +512,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "timeout close-semantics parity with Node (pipes held by grandchildren) — see drip parity follow-ups"]
-    fn timeout_sigterms_the_group_and_reports_sigterm_with_timed_out() {
-        // `sh` traps TERM, so only the SIGKILL escalation (1s after the
-        // SIGTERM) reaps it; the 3s belt-and-braces settle then resolves
-        // with {exitCode: null, signal: "SIGTERM", timedOut: true}.
+    fn timeout_sigterms_the_group_and_reports_the_reaping_signal_with_timed_out() {
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `sh` ignores TERM (and `sleep` inherits the ignore across exec), so
+        // only the SIGKILL escalation 1s after the SIGTERM reaps it. Measured
+        // on lci (runCapturedProcess, 2026-09-02): {exitCode: null,
+        // signal: "SIGKILL", timedOut: true} in ~1.3s — the signal reported
+        // is the one that actually reaped the child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
         let args = CapturedProcessArgs {
             command: "/bin/sh",
@@ -508,16 +530,18 @@ mod tests {
         let result = run_captured_process(&args).expect("spawn failed");
 
         assert_eq!(result.exit_code, None);
-        assert_eq!(result.signal, Some("SIGTERM".to_string()));
+        assert_eq!(result.signal, Some("SIGKILL".to_string()));
         assert!(result.timed_out);
     }
 
     #[test]
-    #[ignore = "timeout close-semantics parity with Node (pipes held by grandchildren) — see drip parity follow-ups"]
     fn timeout_kill_reaches_grandchildren_in_the_process_group() {
-        // Grandchildren holding the stdio pipes open would stall the result
-        // past the kill without a group kill; with it, the 3s settle means
-        // the result still comes back promptly.
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `sh` exits at once but the backgrounded sleeps hold the stdio pipes,
+        // so the result cannot settle until the timeout group-kills them.
+        // Measured on lci (2026-09-02): {exitCode: 0, signal: null,
+        // timedOut: true} in ~0.3s — the shell's own exit code survives, and
+        // timedOut records that the kill is what freed the pipes.
         let process_args = owned(&["-c", "sleep 30 & sleep 30 & echo started"]);
         let args = CapturedProcessArgs {
             command: "/bin/sh",
@@ -526,11 +550,14 @@ mod tests {
             process_args: &process_args,
             timeout_ms: Some(300),
         };
+        let started = std::time::Instant::now();
         let result = run_captured_process(&args).expect("spawn failed");
 
         assert!(result.timed_out);
-        assert_eq!(result.exit_code, None);
-        assert_eq!(result.signal, Some("SIGTERM".to_string()));
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.signal, None);
+        assert_eq!(result.stdout.trim(), "started");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "settled in {:?}", started.elapsed());
     }
 
     #[test]

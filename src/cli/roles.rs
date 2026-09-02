@@ -3,7 +3,7 @@
 // The CLI-facing role loader: user-authored RoleDefinition objects (config
 // profiles, .drip/roles.json, or a marketplace plugin's agents/ directory)
 // resolved into the harness's runtime shape (HarnessRoleRuntime), the built-in
-// role presets ("reviewed", "research", "team"), and the --roles flag parser.
+// role presets ("reviewed", "research", "team", "planned"), and the --roles flag parser.
 //
 // Renames applied per the porting rules: .lci/roles.json -> .drip/roles.json,
 // lci -> drip in user-visible strings. JSON field names stay identical.
@@ -216,6 +216,53 @@ fn reviewer_role() -> RoleDefinition {
 
 // A preset can carry bindings alongside its roles so the CLI can wire loop
 // kinds to preset roles without the user hand-editing .drip/roles.json.
+// "planned": a stronger model writes the contracts, the fast lane executes
+// them. The architect gets the review-lane model (kimi-k3) because planning
+// for a small executor is where judgment pays; the author gets no reviewer
+// (the finish gate's verification requirement still applies), so the run costs
+// one strong planning loop plus fast task loops.
+fn architect_role() -> RoleDefinition {
+	RoleDefinition {
+		model: Some(PRESET_REVIEW_PROFILE_ID.to_string()),
+		name: "architect".to_string(),
+		tools: Some(read_only_tool_names().into_iter().map(String::from).collect()),
+		prompt: Some(
+			[
+				"You are the architect agent: a stronger model planning for a small, fast implementing model.",
+				"Decompose the goal into tasks the author role can finish one at a time without judgment calls.",
+				"",
+				"- Read enough of the code to plan concretely: name real files, real functions, and the exact",
+				"  verification command for each task.",
+				"- Write each task title as a contract: what to change, where, what must not change, and how",
+				"  it is verified (cargo test, bun run test, or the goal's own check).",
+				"- Keep tasks small (one file or one behaviour each) and ordered so every task leaves the",
+				"  build green.",
+				"- PATCH is not in your toolset; the author role makes every edit. Plan only."
+			]
+			.join("\n"),
+		),
+		..RoleDefinition::default()
+	}
+}
+
+fn planned_author_role() -> RoleDefinition {
+	RoleDefinition {
+		model: Some(PRESET_FAST_PROFILE_ID.to_string()),
+		name: "author".to_string(),
+		prompt: Some(
+			[
+				"You are the author agent. Implement the current task exactly as its contract says — the plan",
+				"was written by a stronger model. If the contract mismatches what you find in the code, record",
+				"the mismatch with observe and finish_task blocked instead of improvising. Run the named",
+				"verification command before finish_task."
+			]
+			.join("\n"),
+		),
+		// no tools field = full tool access; no verified_by = no reviewer loop
+		..RoleDefinition::default()
+	}
+}
+
 fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 	match name {
 		"reviewed" => Some(RoleSetupSource {
@@ -262,6 +309,13 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 			}),
 			roles: vec![researcher_role(), coder_role(), reviewer_role()],
 		}),
+		"planned" => Some(RoleSetupSource {
+			bindings: Some(HarnessRoleBindings {
+				planning: Some("architect".to_string()),
+				task: Some("author".to_string()),
+			}),
+			roles: vec![architect_role(), planned_author_role()],
+		}),
 		_ => None,
 	}
 }
@@ -277,7 +331,7 @@ pub fn builtin_role_preset(name: &str) -> Option<RoleSetupSource> {
 
 /// The built-in preset names, for help text and error messages.
 pub fn builtin_role_preset_names() -> Vec<&'static str> {
-	vec!["reviewed", "research", "team"]
+	vec!["reviewed", "research", "team", "planned"]
 }
 
 /// Resolves a --roles value to its role setup: a built-in preset name first, then

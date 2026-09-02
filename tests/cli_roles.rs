@@ -69,9 +69,27 @@ fn reviewed_preset_planning_role_cannot_patch() {
     assert!(!tools.contains(&"PATCH".to_string()));
 }
 
+// it("'planned' preset: a strong read-only architect plans, the fast author executes without a reviewer")
+#[test]
+fn planned_preset_strong_architect_plans_fast_author_executes() {
+    let setup = builtin_role_preset("planned").unwrap();
+    let bindings = setup.bindings.as_ref().unwrap();
+    assert_eq!(bindings.planning.as_deref(), Some("architect"));
+    assert_eq!(bindings.task.as_deref(), Some("author"));
+    let architect = setup.roles.iter().find(|r| r.name == "architect").unwrap();
+    let author = setup.roles.iter().find(|r| r.name == "author").unwrap();
+    assert_eq!(architect.model.as_deref(), Some(PRESET_REVIEW_PROFILE_ID));
+    assert!(!architect.tools.as_ref().unwrap().contains(&"PATCH".to_string()));
+    assert!(architect.prompt.as_deref().unwrap().contains("exact\n  verification command"));
+    assert_eq!(author.model.as_deref(), Some(PRESET_FAST_PROFILE_ID));
+    assert!(author.tools.is_none());
+    assert!(author.verified_by.is_none());
+    assert!(author.prompt.as_deref().unwrap().contains("finish_task blocked instead of improvising"));
+}
+
 #[test]
 fn every_preset_planning_role_is_denied_patch() {
-    for preset_name in ["reviewed", "research", "team"] {
+    for preset_name in ["reviewed", "research", "team", "planned"] {
         let setup = builtin_role_preset(preset_name).unwrap();
         let bindings = setup.bindings.as_ref().unwrap();
         let planning_name = bindings.planning.as_ref().unwrap();
@@ -188,7 +206,7 @@ fn team_preset_roles_pinned_to_expected_model_profiles() {
 
 #[test]
 fn every_preset_binds_both_loop_kinds_to_a_role_it_defines() {
-    for preset_name in ["reviewed", "research", "team"] {
+    for preset_name in ["reviewed", "research", "team", "planned"] {
         let preset = builtin_role_preset(preset_name).unwrap();
         let names: std::collections::HashSet<&str> =
             preset.roles.iter().map(|r| r.name.as_str()).collect();
@@ -242,7 +260,7 @@ fn load_roles_from_file_returns_no_bindings_for_file_omitting_the_block() {
 
 #[test]
 fn resolve_roles_flag_resolves_preset_name_to_setup_with_roles_and_bindings() {
-    for preset_name in ["reviewed", "research", "team"] {
+    for preset_name in ["reviewed", "research", "team", "planned"] {
         let resolved = resolve_roles_flag(preset_name).unwrap();
         assert!(!resolved.roles.is_empty());
         let bindings = resolved.bindings.as_ref().unwrap();

@@ -15,3 +15,21 @@ fn cargo_version_matches_package_json() {
         "drip/Cargo.toml version must match package.json (bump both in the same PR)"
     );
 }
+
+// Cargo.lock records the crate's own version too; `cargo build` rewrites it
+// after a Cargo.toml bump, and an uncommitted rewrite blocks `git pull` in the
+// checkout that serves the global `drip` symlink. Commit the lock with the bump.
+#[test]
+fn cargo_lock_records_the_same_drip_version() {
+    let lock = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock")).expect("Cargo.lock");
+    let drip_block = lock
+        .split("[[package]]")
+        .find(|block| block.contains("name = \"drip\""))
+        .expect("drip package in Cargo.lock");
+    let locked = drip_block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version = ").map(|v| v.trim_matches('"').to_string()))
+        .expect("drip version in Cargo.lock");
+
+    assert_eq!(locked, env!("CARGO_PKG_VERSION"), "drip/Cargo.lock is stale — run cargo build and commit it with the version bump");
+}

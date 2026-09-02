@@ -130,7 +130,11 @@ OPTIONS
 	                              "research" (a single researcher role that investigates
 	                              and reports findings with citations); "team" (a
 	                              researcher hands findings to a coder, whose work is then
-	                              verified by an independent reviewer). Researcher and
+	                              verified by an independent reviewer); "planned" (a
+	                              stronger architect model writes each task as a contract
+	                              — files, functions, verification command — and the fast
+	                              author lane implements them; no reviewer loop).
+	                              Researcher and
 	                              reviewer roles, and every preset's planning role, are
 	                              denied PATCH — no journaled edits — but keep BASH, so
 	                              they are not a write sandbox. Each

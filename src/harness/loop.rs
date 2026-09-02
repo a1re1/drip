@@ -122,7 +122,9 @@ fn shell_res() -> &'static [regex::Regex; 6] {
     static RE: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         [
-            regex::Regex::new(r"2>&1|2>/dev/null|</dev/null").expect("redirect regex"),
+            // Redirects that never touch a file: fd merges (`2>&1`, `1>&2`) and
+            // /dev/null sinks in either direction.
+            regex::Regex::new(r"[12&]?>&[12]|[12&]?>\s*/dev/null|<\s*/dev/null").expect("redirect regex"),
             regex::Regex::new(r"\|\|?|&&|;|\n").expect("segment regex"),
             regex::Regex::new(r"^for\s+\w+\s+in\b").expect("for regex"),
             regex::Regex::new(r"^[({\s]+").expect("wrapper regex"),
@@ -764,6 +766,7 @@ mod loop_helpers_tests {
             "git log --oneline -5 | head -3",
             "rg -n 'fn main' src/ 2>&1 | head",
             "find . -name '*.rs' | wc -l",
+            "ls missing-dir >/dev/null; cat a.ts 1>&2; grep -q x a.ts &>/dev/null",
         ] {
             assert!(is_read_only_shell_command(command), "{command}");
         }
@@ -791,7 +794,7 @@ mod loop_helpers_tests {
         ] {
             assert!(is_writing_shell_command(command), "{command}");
         }
-        for command in ["cargo test 2>&1 | tail -20", "cat tools/read-tool.ts", "git status", "python3 -c 'print(1)'", ""] {
+        for command in ["cargo test 2>&1 | tail -20", "cat tools/read-tool.ts", "git status", "python3 -c 'print(1)'", "", "cargo build >/dev/null 2>&1", "echo x 1>&2"] {
             assert!(!is_writing_shell_command(command), "{command}");
         }
         assert_eq!(extract_bash_command(r#"{"command":"ls"}"#).as_deref(), Some("ls"));
@@ -3022,12 +3025,20 @@ impl HarnessRun {
             // A successful workspace mutation counts as task progress even if
             // finish_task is not called this loop, so the stall counter does
             // not increment for loops that land real edits.
-            if !execution.failed
-                && self
-                    .tool_registry
-                    .get(&tool_name)
-                    .map(|index| self.tools[*index].mutates_workspace)
-                    .unwrap_or(false)
+            let bash_command = if tool_name == "BASH" { Some(extract_bash_command(&raw_input).unwrap_or_default()) } else { None };
+            // Flash writes whole files with `cat > f <<'EOF'` and edits with
+            // `sed -i`: a plain shell write mutates the workspace exactly
+            // like a PATCH and must count the same way, or the loop registers
+            // no progress (stall accounting), the verification staleness
+            // counter stays at 0, and the task footprint never says "edited".
+            let shell_write = !execution.failed && bash_command.as_deref().is_some_and(is_writing_shell_command);
+            if shell_write
+                || (!execution.failed
+                    && self
+                        .tool_registry
+                        .get(&tool_name)
+                        .map(|index| self.tools[*index].mutates_workspace)
+                        .unwrap_or(false))
             {
                 scope.made_progress = true;
                 scope.persisted_this_loop = true;
@@ -3166,14 +3177,7 @@ impl HarnessRun {
                 scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
             }
 
-            let bash_command = if tool_name == "BASH" { Some(extract_bash_command(&raw_input).unwrap_or_default()) } else { None };
             let read_only_bash = bash_command.as_deref().is_some_and(is_read_only_shell_command);
-
-            // A shell write (`cat > f <<'EOF'`, `sed -i`, `mv`) persists as
-            // much as a PATCH does for the read-only accounting.
-            if !execution.failed && bash_command.as_deref().is_some_and(is_writing_shell_command) {
-                scope.persisted_this_loop = true;
-            }
 
             if (deduped_tool || read_only_bash) && !execution.failed {
                 scope.read_only_calls_this_loop += 1;
@@ -3232,6 +3236,13 @@ impl HarnessRun {
                         for patched_path in patched {
                             record_task_footprint(&mut task.footprint, &format!("edited {patched_path}"));
                         }
+                    }
+                }
+                if shell_write {
+                    let command = bash_command.as_deref().unwrap_or_default();
+                    let collapsed = strip_heredoc_bodies(command).split_whitespace().collect::<Vec<_>>().join(" ");
+                    if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
+                        record_task_footprint(&mut task.footprint, &format!("edited via shell: {}", truncate_text(&collapsed, 120)));
                     }
                 }
                 if let Some(command) = verification_command.as_deref() {

@@ -248,6 +248,233 @@ fn marketplace_root_dir(home: &DripHome, record: &MarketplaceRecord) -> PathBuf 
 }
 
 // ---------------------------------------------------------------------------
+// Git registry operations (port of marketplaces.ts lines 74-79, 160-250)
+// ---------------------------------------------------------------------------
+
+/// Injectable `git` runner so tests (and callers) can stub out real git usage.
+pub type GitRunner<'a> = &'a dyn Fn(&[String], Option<&Path>) -> anyhow::Result<()>;
+
+pub fn run_git(args: &[String], cwd: Option<&Path>) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new("git");
+    command.args(args);
+
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+
+    let output = command.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow::anyhow!("{}", stderr));
+    }
+
+    Ok(())
+}
+
+/// `resolve(source)` — Node's path.resolve without symlink resolution:
+/// relative paths are joined onto the current working directory.
+fn resolve_source_path(source: &str) -> anyhow::Result<std::path::PathBuf> {
+    let path = std::path::Path::new(source);
+
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn remove_path_force(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+pub struct AddMarketplaceArgs<'a> {
+    pub git: Option<GitRunner<'a>>,
+    pub home: &'a crate::core::home::DripHome,
+    pub name: Option<&'a str>,
+    pub now: Option<&'a dyn Fn() -> chrono::DateTime<chrono::Utc>>,
+    pub source: &'a str,
+}
+
+#[derive(Debug)]
+pub struct AddedMarketplace {
+    pub file: MarketplacesFile,
+    pub record: MarketplaceRecord,
+}
+
+pub fn add_marketplace(args: AddMarketplaceArgs<'_>) -> anyhow::Result<AddedMarketplace> {
+    let file = load_marketplaces_file(std::path::Path::new(&args.home.marketplaces_path))?;
+    let local_path = resolve_source_path(args.source)?;
+    let is_local = local_path.is_dir();
+    // `args.name?.trim() || marketplaceNameFromSource(args.source)` — an empty
+    // or whitespace-only name falls back to the source-derived name.
+    let raw_name = match args.name.map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => marketplace_name_from_source(args.source),
+    };
+    let name = Regex::new(r"[^A-Za-z0-9._-]+")
+        .expect("static regex")
+        .replace_all(&raw_name, "-")
+        .into_owned();
+
+    if file
+        .marketplaces
+        .iter()
+        .any(|record| record.name == name)
+    {
+        anyhow::bail!(
+            "A marketplace named \"{}\" is already registered. Remove it first or pass a different name.",
+            name
+        );
+    }
+
+    let now = match args.now {
+        Some(now) => now(),
+        None => chrono::Utc::now(),
+    };
+
+    let record = MarketplaceRecord {
+        added_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        kind: if is_local { "local".to_string() } else { "git".to_string() },
+        name: name.clone(),
+        source: if is_local {
+            local_path.to_string_lossy().to_string()
+        } else {
+            args.source.to_string()
+        },
+    };
+
+    if record.kind == "git" {
+        let target = marketplace_clone_dir(args.home, &record.name);
+
+        if target.exists() {
+            remove_path_force(&target)?;
+        }
+
+        let run: GitRunner = match args.git {
+            Some(git) => git,
+            None => &run_git,
+        };
+
+        run(
+            &[
+                "clone".to_string(),
+                "--depth".to_string(),
+                "1".to_string(),
+                record.source.clone(),
+                target.to_string_lossy().to_string(),
+            ],
+            None,
+        )?;
+    }
+
+    let mut file = file;
+    file.marketplaces.push(record.clone());
+    save_marketplaces_file(std::path::Path::new(&args.home.marketplaces_path), &file)?;
+
+    Ok(AddedMarketplace { file, record })
+}
+
+pub fn remove_marketplace(
+    home: &crate::core::home::DripHome,
+    name: &str,
+) -> anyhow::Result<MarketplacesFile> {
+    let file = load_marketplaces_file(std::path::Path::new(&home.marketplaces_path))?;
+    let record = file
+        .marketplaces
+        .iter()
+        .find(|entry| entry.name == name);
+
+    let Some(record) = record else {
+        anyhow::bail!("No marketplace named \"{}\" is registered.", name);
+    };
+
+    if record.kind == "git" {
+        let target = marketplace_clone_dir(home, &record.name);
+        if target.exists() {
+            remove_path_force(&target)?;
+        }
+    }
+
+    let key_prefix = format!("{}/", record.name);
+    let next_file = MarketplacesFile {
+        disabled: file
+            .disabled
+            .iter()
+            .filter(|key| !key.starts_with(&key_prefix))
+            .cloned()
+            .collect(),
+        enabled: file
+            .enabled
+            .iter()
+            .filter(|key| !key.starts_with(&key_prefix))
+            .cloned()
+            .collect(),
+        marketplaces: file
+            .marketplaces
+            .iter()
+            .filter(|entry| entry.name != name)
+            .cloned()
+            .collect(),
+        version: 1,
+    };
+
+    save_marketplaces_file(std::path::Path::new(&home.marketplaces_path), &next_file)?;
+
+    Ok(next_file)
+}
+
+pub fn update_marketplaces(
+    git: Option<GitRunner<'_>>,
+    home: &crate::core::home::DripHome,
+    name: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let file = load_marketplaces_file(std::path::Path::new(&home.marketplaces_path))?;
+    let targets: Vec<&MarketplaceRecord> = file
+        .marketplaces
+        .iter()
+        .filter(|record| match name {
+            Some(name) => record.name == name,
+            None => true,
+        })
+        .collect();
+
+    if let Some(name) = name {
+        if targets.is_empty() {
+            anyhow::bail!("No marketplace named \"{}\" is registered.", name);
+        }
+    }
+
+    let mut updated: Vec<String> = Vec::new();
+    let run: &dyn Fn(&[String], Option<&Path>) -> anyhow::Result<()> = match git {
+        Some(git) => git,
+        None => &run_git as &dyn Fn(&[String], Option<&Path>) -> anyhow::Result<()>,
+    };
+
+    for record in targets {
+        if record.kind != "git" {
+            continue;
+        }
+
+        run(
+            &["pull".to_string(), "--ff-only".to_string()],
+            Some(&marketplace_clone_dir(home, &record.name)),
+        )?;
+        updated.push(record.name.clone());
+    }
+
+    Ok(updated)
+}
+
+// ---------------------------------------------------------------------------
 // Agent (role) parsing
 // ---------------------------------------------------------------------------
 
@@ -728,5 +955,367 @@ pub fn list_marketplace_plugins(home: &DripHome, file: &MarketplacesFile) -> Mar
     MarketplacePlugins { issues, plugins }
 }
 
+// ---------------------------------------------------------------------------
+// Enable/disable keys
+// ---------------------------------------------------------------------------
+
+pub fn is_marketplace_key_enabled(
+    plugin_key: &str,
+    item_key: &str,
+    file: &MarketplacesFile,
+    overrides: &ProjectPluginOverrides,
+) -> bool {
+    fn key_state(
+        key: &str,
+        file: &MarketplacesFile,
+        overrides: &ProjectPluginOverrides,
+    ) -> Option<bool> {
+        if overrides.disabled.iter().any(|existing| existing == key) {
+            return Some(false);
+        }
+
+        if overrides.enabled.iter().any(|existing| existing == key) {
+            return Some(true);
+        }
+
+        if file.disabled.iter().any(|existing| existing == key) {
+            return Some(false);
+        }
+
+        if file.enabled.iter().any(|existing| existing == key) {
+            return Some(true);
+        }
+
+        None
+    }
+
+    key_state(item_key, file, overrides)
+        .or_else(|| key_state(plugin_key, file, overrides))
+        .unwrap_or(false)
+}
+
+// Flips a plugin or skill key in the user registry and persists the file.
+pub fn set_marketplace_key_enabled(
+    home: &crate::core::home::DripHome,
+    key: &str,
+    enabled: bool,
+) -> anyhow::Result<MarketplacesFile> {
+    let marketplaces_path = std::path::Path::new(&home.marketplaces_path);
+    let file = load_marketplaces_file(marketplaces_path)?;
+    let next_file = MarketplacesFile {
+        disabled: if enabled {
+            file.disabled
+                .iter()
+                .filter(|existing| *existing != key)
+                .cloned()
+                .collect()
+        } else {
+            // [...new Set([...file.disabled, key])] — append only when absent.
+            let mut next = file.disabled.clone();
+            if !next.iter().any(|existing| existing == key) {
+                next.push(key.to_string());
+            }
+            next
+        },
+        enabled: if enabled {
+            // [...new Set([...file.enabled, key])] — append only when absent.
+            let mut next = file.enabled.clone();
+            if !next.iter().any(|existing| existing == key) {
+                next.push(key.to_string());
+            }
+            next
+        } else {
+            file.enabled
+                .iter()
+                .filter(|existing| *existing != key)
+                .cloned()
+                .collect()
+        },
+        marketplaces: file.marketplaces,
+        version: 1,
+    };
+
+    save_marketplaces_file(marketplaces_path, &next_file)?;
+
+    Ok(next_file)
+}
+
+pub fn list_enabled_marketplace_skills(
+    cwd: &std::path::Path,
+    home: &crate::core::home::DripHome,
+) -> anyhow::Result<Vec<crate::cli::skills::CliSkill>> {
+    let marketplaces_path = std::path::Path::new(&home.marketplaces_path);
+    let file = load_marketplaces_file(marketplaces_path)?;
+
+    if file.marketplaces.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let overrides = load_project_plugin_overrides(cwd);
+    let plugins = list_marketplace_plugins(home, &file).plugins;
+    let mut skills: Vec<crate::cli::skills::CliSkill> = Vec::new();
+
+    for plugin in &plugins {
+        for skill in &plugin.skills {
+            if is_marketplace_key_enabled(&plugin.key, &skill.key, &file, &overrides) {
+                skills.push(crate::cli::skills::CliSkill {
+                    description: skill.description.clone(),
+                    key: Some(skill.key.clone()),
+                    name: skill.name.clone(),
+                    path: skill.path.clone(),
+                    source: crate::cli::skills::SkillSource::Marketplace,
+                });
+            }
+        }
+    }
+
+    Ok(skills)
+}
+
+pub fn list_enabled_marketplace_roles(
+    cwd: &std::path::Path,
+    home: &crate::core::home::DripHome,
+) -> anyhow::Result<Vec<MarketplaceRoleEntry>> {
+    let marketplaces_path = std::path::Path::new(&home.marketplaces_path);
+    let file = load_marketplaces_file(marketplaces_path)?;
+
+    if file.marketplaces.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let overrides = load_project_plugin_overrides(cwd);
+    let plugins = list_marketplace_plugins(home, &file).plugins;
+    let mut roles: Vec<MarketplaceRoleEntry> = Vec::new();
+
+    for plugin in &plugins {
+        for role in &plugin.roles {
+            if is_marketplace_key_enabled(&plugin.key, &role.key, &file, &overrides) {
+                roles.push(role.clone());
+            }
+        }
+    }
+
+    Ok(roles)
+}
+
+// Convenience for the app: the full skill pool with marketplace skills merged
+// in under the usual precedence (project > user > marketplace).
+pub fn discover_all_skills(
+    cwd: &std::path::Path,
+    home: &crate::core::home::DripHome,
+) -> anyhow::Result<Vec<crate::cli::skills::CliSkill>> {
+    let marketplace_skills = list_enabled_marketplace_skills(cwd, home)?;
+
+    Ok(crate::cli::skills::discover_skills(
+        cwd,
+        std::path::Path::new(&home.skills_dir),
+        Some(marketplace_skills),
+        None,
+    ))
+}
+
+pub fn discover_all_skills_with_issues(
+    cwd: &std::path::Path,
+    home: &crate::core::home::DripHome,
+) -> anyhow::Result<crate::cli::skills::DiscoverSkillsResult> {
+    let marketplace_skills = list_enabled_marketplace_skills(cwd, home)?;
+
+    Ok(crate::cli::skills::discover_skills_with_issues(
+        cwd,
+        std::path::Path::new(&home.skills_dir),
+        Some(marketplace_skills),
+        None,
+    ))
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    fn make_home(root: &std::path::Path) -> crate::core::home::DripHome {
+        crate::core::home::open_drip_home(root.to_string_lossy().as_ref())
+    }
+
+    fn empty_file() -> MarketplacesFile {
+        MarketplacesFile {
+            disabled: Vec::new(),
+            enabled: Vec::new(),
+            marketplaces: Vec::new(),
+            version: 1,
+        }
+    }
+
+    fn save_registry(home: &crate::core::home::DripHome, file: &MarketplacesFile) {
+        save_marketplaces_file(std::path::Path::new(&home.marketplaces_path), file)
+            .expect("save marketplaces file");
+    }
+
+    fn write_local_source(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("create local marketplace dir");
+        dir
+    }
+
+    #[test]
+    fn adds_a_local_marketplace_and_rejects_duplicate_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = make_home(temp.path());
+        save_registry(&home, &empty_file());
+        let source = write_local_source(temp.path(), "skills-src");
+
+        let fixed = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 1, 2, 3, 4, 5).unwrap();
+        let closure = move || fixed;
+        let now_fn: &dyn Fn() -> chrono::DateTime<chrono::Utc> = &closure;
+
+        let added = add_marketplace(AddMarketplaceArgs {
+            git: None,
+            home: &home,
+            name: None,
+            now: Some(now_fn),
+            source: source.to_string_lossy().as_ref(),
+        })
+        .expect("add local marketplace");
+
+        assert_eq!(added.record.kind, "local");
+        assert_eq!(added.record.name, "skills-src");
+        assert_eq!(added.record.source, source.to_string_lossy().as_ref());
+        assert_eq!(added.record.added_at, "2026-01-02T03:04:05.000Z");
+        assert_eq!(added.file.marketplaces.len(), 1);
+
+        let duplicate = add_marketplace(AddMarketplaceArgs {
+            git: None,
+            home: &home,
+            name: Some("skills-src"),
+            now: None,
+            source: source.to_string_lossy().as_ref(),
+        });
+
+        let message = format!("{}", duplicate.expect_err("duplicate name must fail"));
+        assert_eq!(
+            message,
+            "A marketplace named \"skills-src\" is already registered. Remove it first or pass a different name."
+        );
+    }
+
+    #[test]
+    fn adds_a_git_marketplace_by_cloning_through_the_injected_runner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = make_home(temp.path());
+        save_registry(&home, &empty_file());
+        let source = "https://example.com/acme/skills.git";
+
+        let recorded = std::cell::RefCell::new(Vec::new());
+        let recorded_ref = &recorded;
+        let fake_git = move |args: &[String], cwd: Option<&Path>| -> anyhow::Result<()> {
+            recorded_ref
+                .borrow_mut()
+                .push((args.to_vec(), cwd.map(|path| path.to_path_buf())));
+            Ok(())
+        };
+
+        let added = add_marketplace(AddMarketplaceArgs {
+            git: Some(&fake_git),
+            home: &home,
+            name: None,
+            now: None,
+            source,
+        })
+        .expect("add git marketplace");
+
+        assert_eq!(added.record.kind, "git");
+        assert_eq!(added.record.name, "skills");
+
+        let clone_dir = marketplace_clone_dir(&home, "skills");
+        assert_eq!(
+            *recorded.borrow(),
+            vec![(
+                vec![
+                    "clone".to_string(),
+                    "--depth".to_string(),
+                    "1".to_string(),
+                    source.to_string(),
+                    clone_dir.to_string_lossy().to_string(),
+                ],
+                None::<std::path::PathBuf>,
+            )]
+        );
+    }
+
+    #[test]
+    fn removes_a_marketplace_and_its_enabled_disabled_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = make_home(temp.path());
+
+        let mut file = empty_file();
+        file.marketplaces.push(MarketplaceRecord {
+            added_at: "2026-01-01T00:00:00.000Z".to_string(),
+            kind: "git".to_string(),
+            name: "acme".to_string(),
+            source: "https://example.com/acme/skills.git".to_string(),
+        });
+        file.enabled = vec!["acme/skills/deployer".to_string()];
+        file.disabled = vec!["acme/skills/legacy".to_string(), "other/skill".to_string()];
+        save_registry(&home, &file);
+
+        let next = remove_marketplace(&home, "acme").expect("remove marketplace");
+
+        assert!(next.marketplaces.is_empty());
+        assert!(next.enabled.is_empty());
+        assert_eq!(next.disabled, vec!["other/skill".to_string()]);
+        assert_eq!(next.version, 1);
+
+        let missing = remove_marketplace(&home, "acme");
+        let message = format!("{}", missing.expect_err("second remove must fail"));
+        assert_eq!(message, "No marketplace named \"acme\" is registered.");
+    }
+
+    #[test]
+    fn updates_git_marketplaces_only_and_errors_on_unknown_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = make_home(temp.path());
+
+        let mut file = empty_file();
+        file.marketplaces.push(MarketplaceRecord {
+            added_at: "2026-01-01T00:00:00.000Z".to_string(),
+            kind: "local".to_string(),
+            name: "local-one".to_string(),
+            source: temp.path().join("local-one").to_string_lossy().to_string(),
+        });
+        file.marketplaces.push(MarketplaceRecord {
+            added_at: "2026-01-01T00:00:00.000Z".to_string(),
+            kind: "git".to_string(),
+            name: "acme".to_string(),
+            source: "https://example.com/acme/skills.git".to_string(),
+        });
+        save_registry(&home, &file);
+
+        let recorded = std::cell::RefCell::new(Vec::new());
+        let recorded_ref = &recorded;
+        let fake_git = move |args: &[String], cwd: Option<&Path>| -> anyhow::Result<()> {
+            recorded_ref
+                .borrow_mut()
+                .push((args.to_vec(), cwd.map(|path| path.to_path_buf())));
+            Ok(())
+        };
+
+        let updated = update_marketplaces(Some(&fake_git), &home, None).expect("update all");
+        assert_eq!(updated, vec!["acme".to_string()]);
+        assert_eq!(
+            *recorded.borrow(),
+            vec![(
+                vec!["pull".to_string(), "--ff-only".to_string()],
+                Some(marketplace_clone_dir(&home, "acme")),
+            )]
+        );
+
+        let unknown = update_marketplaces(Some(&fake_git), &home, Some("missing"));
+        let message = format!("{}", unknown.expect_err("unknown name must fail"));
+        assert_eq!(message, "No marketplace named \"missing\" is registered.");
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod enabled_tests;

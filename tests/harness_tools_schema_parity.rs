@@ -51,14 +51,16 @@ fn harness_tool_definitions_match_the_ts_oracle() {
     let fixture_renamed: Vec<serde_json::Value> =
         fixture.iter().map(apply_renames).collect();
 
+    // Serialized, so key order inside each definition is compared too.
     assert_eq!(
-        rust, fixture_renamed,
+        serde_json::to_string(&rust).unwrap(),
+        serde_json::to_string(&fixture_renamed).unwrap(),
         "harness tool definitions drifted from src/harness/harness-tools.ts"
     );
 }
 
 #[test]
-fn fixture_covers_exactly_the_ten_harness_tools_sorted_by_name() {
+fn fixture_covers_exactly_the_ten_harness_tools_in_declaration_order() {
     let raw = include_str!("fixtures/harness-tools.json");
     let fixture: Vec<serde_json::Value> =
         serde_json::from_str(raw).expect("tests/fixtures/harness-tools.json must be a JSON array");
@@ -71,16 +73,16 @@ fn fixture_covers_exactly_the_ten_harness_tools_sorted_by_name() {
     assert_eq!(
         names,
         vec![
-            "drop_task",
-            "finish_task",
-            "forget",
-            "note_task",
-            "observe",
             "plan_tasks",
-            "recall",
-            "remember",
-            "respond",
+            "drop_task",
             "revise_task",
+            "finish_task",
+            "respond",
+            "observe",
+            "recall",
+            "note_task",
+            "remember",
+            "forget",
         ]
     );
     assert_eq!(harness_tool_definitions().len(), names.len());

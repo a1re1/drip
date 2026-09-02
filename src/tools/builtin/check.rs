@@ -390,12 +390,17 @@ pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolC
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     let outcome = prepare(args, ctx).and_then(|prepared| {
         let execution = execute_prepared(&prepared)?;
-        let _completion = complete(&prepared, &execution.data);
-        Ok(execution.output_text)
+        let completion = complete(&prepared, &execution.data);
+        // check-tool.ts: status is "failed" once any error was found, and the
+        // tool message is the completion's diagnostic listing, not the lead line.
+        Ok(ToolOutcome {
+            text: completion.tool_content,
+            failed: execution.data.total_errors > 0,
+        })
     });
 
     match outcome {
-        Ok(text) => ToolOutcome::success(text),
+        Ok(outcome) => outcome,
         Err(error) => ToolOutcome::error(error),
     }
 }

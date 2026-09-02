@@ -149,6 +149,10 @@ function git(cwd: string, args: string[]): string {
       GIT_AUTHOR_EMAIL: "parity@example.invalid",
       GIT_COMMITTER_NAME: "parity",
       GIT_COMMITTER_EMAIL: "parity@example.invalid",
+      // Fixed dates so both sides' fixture commits hash identically (the
+      // --review synthesis prompt embeds `git log --oneline`).
+      GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+      GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
       GIT_CONFIG_GLOBAL: "/dev/null"
     }
   });
@@ -160,12 +164,21 @@ function git(cwd: string, args: string[]): string {
 
 function prepareProject(project: string, scenario: Scenario): void {
   mkdirSync(project, { recursive: true });
+  git(project, ["init", "-q", "-b", "main"]);
+  // A scenario that reviews a diff (--review --base base) ships `fixture-base/`:
+  // committed first and tagged `base`, so `fixture/` lands as the change on top.
+  const baseDir = join(scenario.dir, "fixture-base");
+  if (existsSync(baseDir)) {
+    cpSync(baseDir, project, { recursive: true });
+    git(project, ["add", "-A"]);
+    git(project, ["commit", "-q", "-m", "base"]);
+    git(project, ["tag", "base"]);
+  }
   if (scenario.fixtureDir) cpSync(scenario.fixtureDir, project, { recursive: true });
   // An empty fixture still needs one committed file (git refuses an empty commit).
-  if (readdirSync(project).length === 0) {
+  if (readdirSync(project).filter((name) => name !== ".git").length === 0) {
     writeFileSync(join(project, "README.md"), `# parity fixture: ${scenario.name}\n`);
   }
-  git(project, ["init", "-q", "-b", "main"]);
   git(project, ["add", "-A"]);
   git(project, ["commit", "-q", "-m", "fixture"]);
 }

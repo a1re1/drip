@@ -3,12 +3,15 @@
 // are deferred until the harness loop is ported.
 
 use std::collections::HashMap;
+
+use drip::core::config::CliConfig;
 use std::fs;
 use std::path::PathBuf;
 
+use drip::cli::marketplaces::MarketplaceRoleEntry;
 use drip::cli::roles::{
     builtin_role_preset, load_roles_from_file, resolve_role_setup,
-    resolve_roles_flag, CliConfig, MarketplaceRoleEntry, ResolveRoleSetupArgs,
+    resolve_roles_flag, ResolveRoleSetupArgs,
     PRESET_FAST_PROFILE_ID, PRESET_REVIEW_PROFILE_ID, ROLE_BINDINGS_SETTING_ID,
     ROLE_PROFILES_SETTING_ID,
 };
@@ -25,9 +28,9 @@ fn make_temp_root(prefix: &str) -> PathBuf {
 
 fn default_config() -> CliConfig {
     CliConfig {
-        settings: HashMap::new(),
-        // other fields at default
-        ..CliConfig::default()
+        path: None,
+        settings: indexmap::IndexMap::new(),
+        version: Some(1),
     }
 }
 

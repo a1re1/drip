@@ -124,113 +124,6 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
         json!({
             "type": "function",
             "function": {
-                "name": "drop_task",
-                "description": "Drop a task from the todo list when new information makes it unnecessary, redundant, or wrong. The task stays visible as dropped with your reason.",
-                "parameters": {
-                    "properties": {
-                        "reason": {
-                            "description": "Why this task is no longer needed.",
-                            "type": "string"
-                        },
-                        "taskId": {
-                            "type": "string"
-                        }
-                    },
-                    "required": ["taskId", "reason"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "finish_task",
-                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, or status blocked with a summary of why and what is needed.",
-                "parameters": {
-                    "properties": {
-                        "status": {
-                            "enum": ["blocked", "completed"],
-                            "type": "string"
-                        },
-                        "summary": {
-                            "description": "What was done, or why the task is blocked and what would unblock it.",
-                            "type": "string"
-                        },
-                        "taskId": {
-                            "description": "Optional task id. Defaults to the current task.",
-                            "type": "string"
-                        }
-                    },
-                    "required": ["status", "summary"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "forget",
-                "description": "Remove a shared memory note by id when it is stale or wrong.\n\nOptional scope parameter:\n- 'session' (default): removes a note from in-memory state by noteId.\n- 'repo': removes a topic page from the project's memory bank stored under ~/.drip/projects/<project>/memory (outside the repo tree) by slug. Use when repo-scoped knowledge is no longer accurate.",
-                "parameters": {
-                    "properties": {
-                        "noteId": {
-                            "description": "For scope=session: the memory note id to remove. For scope=repo: the slug of the topic page to remove (e.g. 'build-commands').",
-                            "type": "string"
-                        },
-                        "scope": {
-                            "description": "Where to forget: 'session' (default) or 'repo'.",
-                            "enum": ["session", "repo"],
-                            "type": "string"
-                        }
-                    },
-                    "required": ["noteId"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "note_task",
-                "description": "Append a progress note to a task (defaults to the current task) without ending the loop — partial findings, decisions, or where you left off. Use finish_task when the task is actually done or blocked.",
-                "parameters": {
-                    "properties": {
-                        "note": {
-                            "type": "string"
-                        },
-                        "taskId": {
-                            "description": "Optional task id. Defaults to the current task.",
-                            "type": "string"
-                        }
-                    },
-                    "required": ["note"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "observe",
-                "description": "Save a short-lived observation for the next few task loops: a failing check's detail, an in-flight hypothesis, a result being verified. Observations expire after a few loops unless re-observed (which refreshes their ttl). Use remember instead for durable facts.",
-                "parameters": {
-                    "properties": {
-                        "note": {
-                            "type": "string"
-                        },
-                        "ttl": {
-                            "description": "Optional number of task loops to keep the observation alive (default 4, capped).",
-                            "type": "number"
-                        }
-                    },
-                    "required": ["note"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
                 "name": "plan_tasks",
                 "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish.",
                 "parameters": {
@@ -278,6 +171,107 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "drop_task",
+                "description": "Drop a task from the todo list when new information makes it unnecessary, redundant, or wrong. The task stays visible as dropped with your reason.",
+                "parameters": {
+                    "properties": {
+                        "reason": {
+                            "description": "Why this task is no longer needed.",
+                            "type": "string"
+                        },
+                        "taskId": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["taskId", "reason"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "revise_task",
+                "description": "Rewrite a task's title when what you have learned changed what the task should actually do. Keeps its id, status, and notes.",
+                "parameters": {
+                    "properties": {
+                        "taskId": {
+                            "type": "string"
+                        },
+                        "title": {
+                            "description": "The new task title.",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["taskId", "title"],
+                    "type": "object"
+                }
+            }
+        }),        json!({
+            "type": "function",
+            "function": {
+                "name": "finish_task",
+                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, or status blocked with a summary of why and what is needed.",
+                "parameters": {
+                    "properties": {
+                        "status": {
+                            "enum": ["blocked", "completed"],
+                            "type": "string"
+                        },
+                        "summary": {
+                            "description": "What was done, or why the task is blocked and what would unblock it.",
+                            "type": "string"
+                        },
+                        "taskId": {
+                            "description": "Optional task id. Defaults to the current task.",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["status", "summary"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "respond",
+                "description": "Answer the goal directly and complete the run, when the goal is a question or asks for a status report and needs no workspace changes. The text is delivered to the user verbatim as the run's result. Not allowed while unfinished tasks exist.",
+                "parameters": {
+                    "properties": {
+                        "text": {
+                            "description": "The complete answer or report, in plain markdown.",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["text"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "observe",
+                "description": "Save a short-lived observation for the next few task loops: a failing check's detail, an in-flight hypothesis, a result being verified. Observations expire after a few loops unless re-observed (which refreshes their ttl). Use remember instead for durable facts.",
+                "parameters": {
+                    "properties": {
+                        "note": {
+                            "type": "string"
+                        },
+                        "ttl": {
+                            "description": "Optional number of task loops to keep the observation alive (default 4, capped).",
+                            "type": "number"
+                        }
+                    },
+                    "required": ["note"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "recall",
                 "description": "Recover the cached output of an earlier tool call this run (telemetry keeps an ends-kept copy of each call's last result) instead of re-running it. Match by tool name plus a fragment of the original input.",
                 "parameters": {
@@ -292,6 +286,26 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["toolName", "query"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "note_task",
+                "description": "Append a progress note to a task (defaults to the current task) without ending the loop — partial findings, decisions, or where you left off. Use finish_task when the task is actually done or blocked.",
+                "parameters": {
+                    "properties": {
+                        "note": {
+                            "type": "string"
+                        },
+                        "taskId": {
+                            "description": "Optional task id. Defaults to the current task.",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["note"],
                     "type": "object"
                 }
             }
@@ -329,40 +343,26 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
         json!({
             "type": "function",
             "function": {
-                "name": "respond",
-                "description": "Answer the goal directly and complete the run, when the goal is a question or asks for a status report and needs no workspace changes. The text is delivered to the user verbatim as the run's result. Not allowed while unfinished tasks exist.",
+                "name": "forget",
+                "description": "Remove a shared memory note by id when it is stale or wrong.\n\nOptional scope parameter:\n- 'session' (default): removes a note from in-memory state by noteId.\n- 'repo': removes a topic page from the project's memory bank stored under ~/.drip/projects/<project>/memory (outside the repo tree) by slug. Use when repo-scoped knowledge is no longer accurate.",
                 "parameters": {
                     "properties": {
-                        "text": {
-                            "description": "The complete answer or report, in plain markdown.",
-                            "type": "string"
-                        }
-                    },
-                    "required": ["text"],
-                    "type": "object"
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "revise_task",
-                "description": "Rewrite a task's title when what you have learned changed what the task should actually do. Keeps its id, status, and notes.",
-                "parameters": {
-                    "properties": {
-                        "taskId": {
+                        "noteId": {
+                            "description": "For scope=session: the memory note id to remove. For scope=repo: the slug of the topic page to remove (e.g. 'build-commands').",
                             "type": "string"
                         },
-                        "title": {
-                            "description": "The new task title.",
+                        "scope": {
+                            "description": "Where to forget: 'session' (default) or 'repo'.",
+                            "enum": ["session", "repo"],
                             "type": "string"
                         }
                     },
-                    "required": ["taskId", "title"],
+                    "required": ["noteId"],
                     "type": "object"
                 }
             }
         }),
+
     ]
 }
 
@@ -1652,7 +1652,7 @@ pub fn apply_harness_op(
             // planning loop) ends this loop.
             HarnessOpOutcome {
                 text: format!(
-                    "Task {finished_id} marked {finished_status_label}{}",
+                    "Task {finished_id} marked {finished_status_label}.{}",
                     if is_drive_by { " (The current task's loop continues.)" } else { "" }
                 ),
                 state_changed: true,

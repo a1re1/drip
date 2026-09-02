@@ -19,6 +19,24 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+/// JSON.stringify prints an integral number without a fraction (`0`, not
+/// `0.0`); serde_json prints every f64 with one. Seconds fields go through
+/// this so the wire text matches lci byte for byte.
+pub fn serialize_js_number<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+	if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+		serializer.serialize_i64(*value as i64)
+	} else {
+		serializer.serialize_f64(*value)
+	}
+}
+
+pub fn serialize_js_number_option<S: serde::Serializer>(value: &Option<f64>, serializer: S) -> Result<S::Ok, S::Error> {
+	match value {
+		Some(number) => serialize_js_number(number, serializer),
+		None => serializer.serialize_none(),
+	}
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HarnessTaskStatus {
 	#[serde(rename = "blocked")]
@@ -443,11 +461,14 @@ pub struct HarnessEventData {
 	pub sent_at: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub status: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub task_id: Option<String>,
+	// toolName before taskId: every TS emit site that carries both spreads
+	// `taskId` last ({ callId, loop, toolName, ...taskId }), and the NDJSON
+	// text is the contract.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub tool_name: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	pub task_id: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_js_number_option")]
 	pub wait_seconds: Option<f64>,
 }
 
@@ -508,6 +529,7 @@ pub struct HarnessRunUsage {
 	pub completion_tokens: i64,
 	pub prompt_tokens: i64,
 	/// Seconds spent sleeping out 429s/5xx/network outages.
+	#[serde(serialize_with = "serialize_js_number")]
 	pub rate_limit_wait_seconds: f64,
 	pub retries: i64,
 	pub wall_ms: i64,

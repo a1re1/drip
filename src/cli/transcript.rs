@@ -72,11 +72,12 @@ pub struct TranscriptModelRoleRoute {
 	pub bindings: Option<Vec<String>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub model: Option<String>,
-	pub name: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub provider: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub reasoning_effort: Option<String>,
+	/// Last, as session-run.ts:107-112 spreads the route before `name`.
+	pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

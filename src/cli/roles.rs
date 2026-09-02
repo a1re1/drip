@@ -20,68 +20,13 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::marketplaces::MarketplaceRoleEntry;
+use crate::cli::skills::{CliSkill, LoadedCliSkill};
+use crate::core::config::CliConfig;
+use crate::core::inference::EnvSource;
 use crate::harness::roles::{
 	HarnessRoleBindings, HarnessRoleRuntime, ModelRoute, PartialHarnessLoopConfig,
 };
-
-// ---------------------------------------------------------------------------
-// Local mirrors of not-yet-ported sibling modules
-// ---------------------------------------------------------------------------
-
-/// Port of src/cli/config.ts `CliConfig` ({ settings, version: 1 }).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliConfig {
-	pub settings: HashMap<String, String>,
-	pub version: i64,
-}
-
-impl Default for CliConfig {
-	fn default() -> Self {
-		CliConfig {
-			settings: HashMap::new(),
-			version: 1,
-		}
-	}
-}
-
-/// Port of src/cli/skills.ts `CliSkill` — the discovered skill-pool entry
-/// roles.ts resolves `skills: [...]` references against.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliSkill {
-	pub description: String,
-	/// Set for marketplace skills: "<marketplace>/<plugin>/<skill>", the key used for enable/disable.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub key: Option<String>,
-	pub name: String,
-	pub path: String,
-	/// "builtin" | "marketplace" | "project" | "user"
-	pub source: String,
-}
-
-/// Port of src/cli/marketplaces.ts `MarketplaceRoleEntry` — a plugin's
-/// agents/<name>.md manifest.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarketplaceRoleEntry {
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub description: Option<String>,
-	pub key: String,
-	pub marketplace_name: String,
-	pub name: String,
-	pub plugin_name: String,
-	pub prompt: String,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub tools: Option<Vec<String>>,
-}
-
-/// Port of src/cli/skills.ts `LoadedCliSkill`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadedCliSkill {
-	pub content: String,
-	pub name: String,
-}
 
 // ---------------------------------------------------------------------------
 // Setting-id constants (src/web/settings.ts)
@@ -586,7 +531,7 @@ pub struct ResolveRoleSetupArgs<'a> {
 	pub config: &'a CliConfig,
 	pub cwd: String,
 	/// Env source for model profile credential references ("env:NAME").
-	pub env: Option<&'a HashMap<String, Option<String>>>,
+	pub env: EnvSource<'a>,
 	/// Extra role definitions (from --roles preset or file) merged after all
 	/// other sources — highest precedence, role names override config/project.
 	pub extra_roles: Option<Vec<RoleDefinition>>,
@@ -982,12 +927,26 @@ fn coerce_skill_arg_value(value: &str) -> Option<String> {
 // (src/web/settings.ts); see the resolve_role_setup note above.
 // ---------------------------------------------------------------------------
 
-type EnvSource<'a> = Option<&'a HashMap<String, Option<String>>>;
-
+// settings.ts resolveModelProfileRoute, via core::inference; the resolved
+// route is re-shaped into the serializable roles::ModelRoute (headers as an
+// ordered map, fallback chained recursively).
 fn resolve_model_profile_route(
-	_settings: &HashMap<String, String>,
-	_model_profile_id: &str,
-	_env: EnvSource<'_>,
+	settings: &indexmap::IndexMap<String, String>,
+	model_profile_id: &str,
+	env: EnvSource<'_>,
 ) -> Result<ModelRoute> {
-	Err(anyhow!("model profiles are not ported yet"))
+	fn convert(route: &crate::core::inference::ResolvedModelRoute) -> ModelRoute {
+		ModelRoute {
+			fallback_route: route.fallback_route.as_ref().map(|inner| Box::new(convert(inner))),
+			headers: Some(route.headers.iter().cloned().collect()),
+			model: route.model.clone(),
+			provider: Some(route.provider.clone()),
+			reasoning_effort: route.reasoning_effort.clone(),
+			url: route.url.clone(),
+		}
+	}
+
+	let resolved = crate::core::inference::resolve_model_profile_route(settings, model_profile_id, env)?;
+
+	Ok(convert(&resolved))
 }

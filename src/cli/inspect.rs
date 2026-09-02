@@ -38,6 +38,7 @@ pub struct InspectOperatorMessages {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct InspectRateLimited {
 	pub count: i64,
+	#[serde(serialize_with = "crate::core::types::serialize_js_number")]
 	pub total_wait_seconds: f64,
 }
 

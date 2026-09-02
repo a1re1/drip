@@ -23,14 +23,11 @@ use anyhow::{anyhow, Result};
 
 use crate::core::env_vars::ensure_env_vars_file;
 
-// path.resolve() analogue: canonicalize when the path exists (expands symlinks,
-// matching the TS tests' realpath'd temp roots), else normalize lexically.
+// path.resolve() analogue: lexical only — Node's resolve never expands
+// symlinks (a /tmp home stays /tmp, not /private/tmp), and the slug, session
+// paths, and every printed path derive from this.
 fn resolve(path: impl AsRef<Path>) -> PathBuf {
     let path = path.as_ref();
-
-    if let Ok(resolved) = fs::canonicalize(path) {
-        return resolved;
-    }
 
     if path.is_absolute() {
         return normalize_lexical(path);

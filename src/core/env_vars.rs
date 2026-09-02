@@ -118,7 +118,9 @@ pub fn load_merged_env(
     env_vars_path: &Path,
     process_env: Option<&BTreeMap<String, String>>,
 ) -> BTreeMap<String, String> {
-    let mut merged = process_env.cloned().unwrap_or_default();
+    // env-vars.ts:90 defaults processEnv to process.env: the file overlays
+    // the live environment, it does not replace it.
+    let mut merged = process_env.cloned().unwrap_or_else(|| std::env::vars().collect());
 
     for (k, v) in load_env_vars(env_vars_path).unwrap_or_default() {
         merged.insert(k, v);

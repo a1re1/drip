@@ -34,6 +34,23 @@ pub struct ProjectPaths {
     pub worktree_root: String,
 }
 
+impl From<&crate::core::home::DripProject> for ProjectPaths {
+    // The home.rs DripProject is the real LciProject port; ProjectPaths is the
+    // subset the session store reads. Optional roots fall back to the slug
+    // holder's `root` so a --project-dir override still keys consistently.
+    fn from(project: &crate::core::home::DripProject) -> Self {
+        ProjectPaths {
+            home_root: project.home_root.clone(),
+            memory_dir: project.memory_dir.clone(),
+            repo_root: project.repo_root.clone().unwrap_or_else(|| project.root.clone()),
+            root: project.root.clone(),
+            sessions_dir: project.sessions_dir.clone(),
+            slug: project.slug.clone(),
+            worktree_root: project.worktree_root.clone().unwrap_or_else(|| project.root.clone()),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SessionStatus / SessionRecord
 // ---------------------------------------------------------------------------
@@ -88,6 +105,20 @@ impl SessionIndex {
 // open_session_index
 // ---------------------------------------------------------------------------
 
+fn persist_wal_files(conn: &Connection) {
+    let mut flag: std::os::raw::c_int = 1;
+    // SAFETY: sqlite3_file_control on the connection's main database with the
+    // documented SQLITE_FCNTL_PERSIST_WAL int argument.
+    unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut flag as *mut std::os::raw::c_int).cast(),
+        );
+    }
+}
+
 pub fn open_session_index(db_path: &str) -> SessionIndex {
     // Create parent directories if needed.
     if let Some(parent) = Path::new(db_path).parent() {
@@ -97,6 +128,13 @@ pub fn open_session_index(db_path: &str) -> SessionIndex {
     let conn = Connection::open(db_path).expect("open sqlite db");
 
     conn.execute_batch("PRAGMA journal_mode = WAL;").ok();
+    // Bun's sqlite leaves the -wal/-shm side files in place when the last
+    // connection closes; SQLite's default is to delete them, and a WAL
+    // database without its -shm cannot be opened read-only (dripw, the parity
+    // harness, and anything else that peeks at the index without write
+    // intent). Persisting the WAL files keeps the on-disk layout identical
+    // to lci's.
+    persist_wal_files(&conn);
     // The CLI and the web server share one index; WAL permits cross-process
     // access but a busy timeout is what prevents spurious SQLITE_BUSY throws.
     conn.execute_batch("PRAGMA busy_timeout = 5000;").ok();
@@ -499,6 +537,12 @@ pub struct SessionPaths {
     pub transcript_path: String,
 }
 
+/// sessions.ts:123 — `sessionPaths(project, record)`: a pre-move record's own
+/// sessionsDir wins over the project's.
+pub fn session_paths_for(project: &crate::core::home::DripProject, record: &SessionRecord) -> SessionPaths {
+    session_paths(&ProjectPaths::from(project), &record.id, record.sessions_dir.as_deref())
+}
+
 pub fn session_paths(project: &ProjectPaths, session_id: &str, sessions_dir_override: Option<&str>) -> SessionPaths {
     let base = sessions_dir_override.unwrap_or(&project.sessions_dir);
     let dir = PathBuf::from(base).join(session_id);
@@ -516,4 +560,198 @@ pub fn session_paths(project: &ProjectPaths, session_id: &str, sessions_dir_over
         transcript_path: dir.join("transcript.jsonl").to_string_lossy().into_owned(),
         dir: dir_str,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-registry helpers — sessions.ts:228-361 (siblingWorktreeHomes,
+// openProjectIndexes, stamp, listAllSessions, latestAnySession,
+// resolveAnySessionRef, hasAnySessionIndex, hasAnyWorktreeSessionIndex)
+// ---------------------------------------------------------------------------
+
+use crate::core::home::DripProject;
+
+fn sibling_worktree_homes(project: &DripProject) -> Vec<String> {
+    let Some(repo_root) = project.repo_root.as_deref() else {
+        return Vec::new();
+    };
+
+    let mut homes: Vec<String> = Vec::new();
+    let mut roots = vec![repo_root.to_string()];
+    roots.extend(crate::core::home::list_linked_worktree_roots(repo_root));
+
+    for root in roots {
+        let slug = crate::core::home::project_slug(&root);
+
+        if slug == project.slug {
+            continue;
+        }
+
+        let home = PathBuf::from(&project.home_root).join("projects").join(&slug);
+
+        if home.join("index.sqlite").exists() {
+            homes.push(home.to_string_lossy().into_owned());
+        }
+    }
+
+    homes
+}
+
+pub struct OpenedProjectIndex {
+    pub index: SessionIndex,
+    pub sessions_dir: String,
+}
+
+/// Every registry to read for this project, newest tree first.
+///
+/// With all_worktrees, the project's own index is followed by every sibling
+/// worktree home of the same repo (local wins ties), each entry stamped with
+/// its own sessions_dir so session_paths resolves the record into the home the
+/// session actually lives in. Without it, the read stays worktree-local.
+pub fn open_project_indexes(project: &DripProject, all_worktrees: bool) -> Vec<OpenedProjectIndex> {
+    let mut entries: Vec<OpenedProjectIndex> = Vec::new();
+
+    if Path::new(&project.index_db_path).exists() {
+        entries.push(OpenedProjectIndex {
+            index: open_session_index(&project.index_db_path),
+            sessions_dir: project.sessions_dir.clone(),
+        });
+    }
+
+    if all_worktrees {
+        for home in sibling_worktree_homes(project) {
+            let home = PathBuf::from(home);
+            entries.push(OpenedProjectIndex {
+                index: open_session_index(&home.join("index.sqlite").to_string_lossy()),
+                sessions_dir: home.join("sessions").to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    if let (Some(legacy_index), Some(legacy_sessions_dir)) =
+        (project.legacy_index_db_path.as_deref(), project.legacy_sessions_dir.as_deref())
+    {
+        entries.push(OpenedProjectIndex {
+            index: open_session_index(legacy_index),
+            sessions_dir: legacy_sessions_dir.to_string(),
+        });
+    }
+
+    entries
+}
+
+fn stamp(mut record: SessionRecord, sessions_dir: &str, project: &DripProject) -> SessionRecord {
+    // Only a legacy record needs the marker; leaving it off for the project's own
+    // tree keeps records comparable to what the single-index path produces.
+    if sessions_dir != project.sessions_dir {
+        record.sessions_dir = Some(sessions_dir.to_string());
+    }
+
+    record
+}
+
+/// Union of every registry, newest first — for --list and --continue. With
+/// all_worktrees the union spans every sibling worktree home of the same repo.
+pub fn list_all_sessions(project: &DripProject, limit: Option<i64>, all_worktrees: bool) -> Vec<SessionRecord> {
+    let limit = limit.unwrap_or(50);
+    let opened = open_project_indexes(project, all_worktrees);
+    let mut merged: Vec<SessionRecord> = opened
+        .iter()
+        .flat_map(|entry| {
+            list_sessions(&entry.index, Some(limit))
+                .into_iter()
+                .map(|record| stamp(record, &entry.sessions_dir, project))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // b.updatedAt.localeCompare(a.updatedAt): ISO stamps compare as plain
+    // strings; a stable sort keeps registry order for equal stamps.
+    merged.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    merged.truncate(limit.max(0) as usize);
+
+    for entry in opened {
+        entry.index.close();
+    }
+
+    merged
+}
+
+pub fn latest_any_session(project: &DripProject) -> Option<SessionRecord> {
+    list_all_sessions(project, Some(1), false).into_iter().next()
+}
+
+/// Resolves a session ref across every registry.
+///
+/// Ambiguity is decided over the UNION of candidates, not per registry: probing
+/// the new tree first and falling back would report a unique match for a prefix
+/// that is actually ambiguous once the old tree is considered.
+pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -> Option<SessionRecord> {
+    let Some(reference) = reference else {
+        return latest_any_session(project);
+    };
+
+    let opened = open_project_indexes(project, false);
+
+    for entry in &opened {
+        if let Some(exact) = get_session(&entry.index, reference) {
+            return Some(stamp(exact, &entry.sessions_dir, project));
+        }
+    }
+
+    let pattern = format!("{reference}%");
+    let mut prefixed: Vec<SessionRecord> = Vec::new();
+
+    for entry in &opened {
+        let mut stmt = entry
+            .index
+            .conn
+            .prepare(
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                 FROM sessions WHERE id LIKE ?1 ORDER BY updated_at DESC LIMIT 2",
+            )
+            .expect("prepare resolve_any_session_ref");
+        let rows: Vec<SessionRecord> = stmt
+            .query_map(rusqlite::params![pattern], |row| {
+                Ok(row_to_record(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .expect("query resolve_any_session_ref")
+            .map(|row| row.expect("row"))
+            .collect();
+
+        prefixed.extend(rows.into_iter().map(|record| stamp(record, &entry.sessions_dir, project)));
+    }
+
+    let result = if prefixed.len() == 1 { prefixed.into_iter().next() } else { None };
+
+    for entry in opened {
+        entry.index.close();
+    }
+
+    result
+}
+
+/// True when neither registry exists — i.e. nothing was ever recorded here.
+pub fn has_any_session_index(project: &DripProject) -> bool {
+    Path::new(&project.index_db_path).exists()
+        || project
+            .legacy_index_db_path
+            .as_deref()
+            .map(|path| Path::new(path).exists())
+            .unwrap_or(false)
+}
+
+/// The repo-wide form of that gate: true when this worktree OR any sibling
+/// worktree of the same repo has an index, so dripw does not read a repo as
+/// empty just because every run so far happened in a worktree.
+pub fn has_any_worktree_session_index(project: &DripProject) -> bool {
+    has_any_session_index(project) || !sibling_worktree_homes(project).is_empty()
 }

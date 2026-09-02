@@ -538,41 +538,41 @@ pub fn definition() -> Value {
             "name": "GREP",
             "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
             "parameters": {
-                "type": "object",
                 "additionalProperties": false,
-                "required": ["pattern"],
                 "properties": {
                     "context": {
-                        "type": "number",
                         "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
+                        "maximum": 5,
                         "minimum": 0,
-                        "maximum": 5
+                        "type": "number"
                     },
                     "flags": {
-                        "type": "string",
-                        "description": "Optional regex flags to apply. Allowed characters: 'i' (case-insensitive), 'm' (multiline), 's' (dot-all). Example: \"im\"."
+                        "description": "Optional regex flags to apply. Allowed characters: 'i' (case-insensitive), 'm' (multiline), 's' (dot-all). Example: \"im\".",
+                        "type": "string"
                     },
                     "glob": {
-                        "type": "string",
-                        "description": "Optional simple suffix filter like '*.ts' to restrict which files are searched."
+                        "description": "Optional simple suffix filter like '*.ts' to restrict which files are searched.",
+                        "type": "string"
                     },
                     "literal": {
-                        "type": "boolean",
-                        "description": "When true, treat the pattern as a literal string (all regex metacharacters are escaped)."
+                        "description": "When true, treat the pattern as a literal string (all regex metacharacters are escaped).",
+                        "type": "boolean"
                     },
                     "maxResults": {
-                        "type": "number",
-                        "description": "Maximum number of matching lines to return. Defaults to 50, capped at 200."
+                        "description": "Maximum number of matching lines to return. Defaults to 50, capped at 200.",
+                        "type": "number"
                     },
                     "path": {
-                        "type": "string",
-                        "description": "Subdirectory or file to search within, relative to the current working directory or absolute. Defaults to '.'."
+                        "description": "Subdirectory or file to search within, relative to the current working directory or absolute. Defaults to '.'.",
+                        "type": "string"
                     },
                     "pattern": {
-                        "type": "string",
-                        "description": "A JavaScript-flavored regex string to search for."
+                        "description": "A JavaScript-flavored regex string to search for.",
+                        "type": "string"
                     }
-                }
+                },
+                "required": ["pattern"],
+                "type": "object"
             }
         }
     })

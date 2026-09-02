@@ -45,6 +45,22 @@ fn load_fixture() -> Vec<serde_json::Value> {
     serde_json::from_str(raw).expect("tests/fixtures/tools.json must be a JSON array")
 }
 
+/// The wire shape lci sends (createRequestTool: function{description,name,parameters}, type),
+/// serialized so key ORDER inside `parameters` is compared too — the model
+/// sees the JSON text, and serde_json Value equality would ignore order.
+fn canonical(definition: &serde_json::Value) -> String {
+    let function = &definition["function"];
+    serde_json::to_string(&serde_json::json!({
+        "function": {
+            "description": function["description"],
+            "name": function["name"],
+            "parameters": function["parameters"]
+        },
+        "type": "function"
+    }))
+    .unwrap()
+}
+
 fn fixture_entry(name: &str) -> serde_json::Value {
     load_fixture()
         .into_iter()
@@ -55,8 +71,8 @@ fn fixture_entry(name: &str) -> serde_json::Value {
 #[test]
 fn read_definition_matches_the_ts_oracle() {
     assert_eq!(
-        read::definition(),
-        apply_renames(&fixture_entry("READ")),
+        canonical(&read::definition()),
+        canonical(&apply_renames(&fixture_entry("READ"))),
         "READ definition drifted from tools/read-tool.ts"
     );
 }
@@ -64,8 +80,8 @@ fn read_definition_matches_the_ts_oracle() {
 #[test]
 fn grep_definition_matches_the_ts_oracle() {
     assert_eq!(
-        grep::definition(),
-        apply_renames(&fixture_entry("GREP")),
+        canonical(&grep::definition()),
+        canonical(&apply_renames(&fixture_entry("GREP"))),
         "GREP definition drifted from tools/grep-tool.ts"
     );
 }
@@ -73,8 +89,8 @@ fn grep_definition_matches_the_ts_oracle() {
 #[test]
 fn dir_definition_matches_the_ts_oracle() {
     assert_eq!(
-        dir::definition(),
-        apply_renames(&fixture_entry("DIR")),
+        canonical(&dir::definition()),
+        canonical(&apply_renames(&fixture_entry("DIR"))),
         "DIR definition drifted from tools/dir-tool.ts"
     );
 }
@@ -92,8 +108,8 @@ fn fixture_covers_exactly_the_built_in_pack() {
 #[test]
 fn bash_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::bash::definition(),
-        apply_renames(&fixture_entry("BASH")),
+        canonical(&drip::tools::builtin::bash::definition()),
+        canonical(&apply_renames(&fixture_entry("BASH"))),
         "BASH definition drifted from tools/bash-tool.ts"
     );
 }
@@ -101,8 +117,8 @@ fn bash_definition_matches_the_ts_oracle() {
 #[test]
 fn fetch_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::fetch::definition(),
-        apply_renames(&fixture_entry("FETCH")),
+        canonical(&drip::tools::builtin::fetch::definition()),
+        canonical(&apply_renames(&fixture_entry("FETCH"))),
         "FETCH definition drifted from tools/fetch-tool.ts"
     );
 }
@@ -110,8 +126,8 @@ fn fetch_definition_matches_the_ts_oracle() {
 #[test]
 fn check_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::check::definition(),
-        apply_renames(&fixture_entry("CHECK")),
+        canonical(&drip::tools::builtin::check::definition()),
+        canonical(&apply_renames(&fixture_entry("CHECK"))),
         "CHECK definition drifted from tools/check-tool.ts"
     );
 }
@@ -119,8 +135,8 @@ fn check_definition_matches_the_ts_oracle() {
 #[test]
 fn verify_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::verify::definition(),
-        apply_renames(&fixture_entry("VERIFY")),
+        canonical(&drip::tools::builtin::verify::definition()),
+        canonical(&apply_renames(&fixture_entry("VERIFY"))),
         "VERIFY definition drifted from tools/verify-tool.ts"
     );
 }
@@ -128,8 +144,8 @@ fn verify_definition_matches_the_ts_oracle() {
 #[test]
 fn bash_async_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::bash::async_definition(),
-        apply_renames(&fixture_entry("BASH_ASYNC")),
+        canonical(&drip::tools::builtin::bash::async_definition()),
+        canonical(&apply_renames(&fixture_entry("BASH_ASYNC"))),
         "BASH_ASYNC definition drifted from tools/bash-tool.ts"
     );
 }
@@ -137,8 +153,8 @@ fn bash_async_definition_matches_the_ts_oracle() {
 #[test]
 fn patch_definition_matches_the_ts_oracle() {
     assert_eq!(
-        drip::tools::builtin::patch::definition(),
-        apply_renames(&fixture_entry("PATCH")),
+        canonical(&drip::tools::builtin::patch::definition()),
+        canonical(&apply_renames(&fixture_entry("PATCH"))),
         "PATCH definition drifted from tools/patch-tool.ts"
     );
 }

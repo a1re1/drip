@@ -940,12 +940,18 @@ impl HarnessRun {
             headers.insert(0, ("content-type".to_string(), "application/json".to_string()));
         }
 
-        // TODO(async-jobs): createChatToolRuntimeServices({ cwd }) once the
-        // async_jobs port lands; until then the runner supplies the services.
-        let tool_services = options
-            .tool_services
-            .take()
-            .ok_or_else(|| "tool services are required".to_string())?;
+        // loop.ts:476-485 — `options.toolServices ?? createChatToolRuntimeServices({ cwd })`:
+        // the CLI runs without a web server, so the harness owns the async-job
+        // runtime for the run.
+        let tool_services = match options.tool_services.take() {
+            Some(services) => services,
+            None => crate::tools::async_jobs::create_chat_tool_runtime_services(
+                crate::tools::async_jobs::CreateChatToolRuntimeServicesOptions {
+                    cwd: Some(std::path::PathBuf::from(&cwd)),
+                    jobs_root: None,
+                },
+            ),
+        };
 
         let mut state = match options.initial_state.take() {
             Some(state) => state,

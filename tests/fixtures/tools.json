@@ -2,167 +2,30 @@
   {
     "type": "function",
     "function": {
-      "name": "BASH",
-      "description": "Run a bash command in the local workspace and wait for it to finish before continuing.",
+      "name": "READ",
+      "description": "Read the contents of a single file from the local workspace. Supports line-based paging: use offset (1-based first line, default 1) and limit (max lines to return, default 400, cap 1000). Every line is prefixed with its 1-based line number and a tab. The result starts with a header 'Read lines A-B of N from <path>' and, when more lines remain, ends with a footer telling you the next offset to use.",
       "parameters": {
         "additionalProperties": false,
         "properties": {
-          "command": {
-            "description": "The bash command or script to run with `bash -lc`.",
-            "type": "string"
-          },
-          "cwd": {
-            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
-            "type": "string"
-          },
-          "timeoutMs": {
-            "description": "Optional timeout for the command in milliseconds. Defaults to 120000.",
-            "type": "number"
-          }
-        },
-        "required": [
-          "command"
-        ],
-        "type": "object"
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "BASH_ASYNC",
-      "description": "Run a bash command in a detached tmux session so it can keep running in the background while you inspect it with ASYNC_TAIL or attach manually.",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "command": {
-            "description": "The bash command or script to run in a detached tmux session with `bash -lc`.",
-            "type": "string"
-          },
-          "cwd": {
-            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
-            "type": "string"
-          },
-          "sessionName": {
-            "description": "Optional tmux session name to use. If omitted, a unique session name is generated automatically.",
-            "type": "string"
-          },
-          "title": {
-            "description": "Optional display title for the background job. Defaults to the session name and a shortened command preview.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "command"
-        ],
-        "type": "object"
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "CHECK",
-      "description": "Run incremental TypeScript semantic + syntactic diagnostics on the workspace. Input: {path?: string}. With path, reports full diagnostics for that file plus an elsewhere count; without path, reports project-wide diagnostics. Reuses a cached LanguageService per tsconfig for performance.",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "path": {
-            "description": "Optional file path to focus diagnostics on. Relative paths are resolved from the workspace root.",
-            "type": "string"
-          }
-        },
-        "required": [],
-        "type": "object"
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "DIR",
-      "description": "Show the local project structure for a directory as a tree view.",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maxDepth": {
-            "description": "Optional maximum directory depth to traverse. Defaults to 4.",
-            "type": "number"
-          },
-          "path": {
-            "description": "Directory path to inspect, relative to the current working directory or absolute. Defaults to the cwd.",
-            "type": "string"
-          }
-        },
-        "type": "object"
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "FETCH",
-      "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires LCI_ALLOW_NET=1. Input: {url, maxBytes?}.",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "maxBytes": {
-            "description": "Maximum bytes of response body to return. Default 50000, max 200000. Content is ends-kept with an elision marker when truncated.",
-            "type": "number"
-          },
-          "url": {
-            "description": "The URL to fetch via HTTP GET. Must use http:// or https:// scheme.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "url"
-        ],
-        "type": "object"
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "GREP",
-      "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "context": {
-            "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
-            "maximum": 5,
-            "minimum": 0,
-            "type": "number"
-          },
-          "flags": {
-            "description": "Optional regex flags to apply. Allowed characters: 'i' (case-insensitive), 'm' (multiline), 's' (dot-all). Example: \"im\".",
-            "type": "string"
-          },
-          "glob": {
-            "description": "Optional simple suffix filter like '*.ts' to restrict which files are searched.",
-            "type": "string"
-          },
-          "literal": {
-            "description": "When true, treat the pattern as a literal string (all regex metacharacters are escaped).",
+          "force": {
+            "description": "Pass true to bypass the 5 MB size limit and read oversized files. Does NOT override binary file refusal.",
             "type": "boolean"
           },
-          "maxResults": {
-            "description": "Maximum number of matching lines to return. Defaults to 50, capped at 200.",
+          "limit": {
+            "description": "Maximum number of lines to return. Default is 400, capped at 1000.",
+            "type": "number"
+          },
+          "offset": {
+            "description": "1-based line number to start reading from. Default is 1 (beginning of file).",
             "type": "number"
           },
           "path": {
-            "description": "Subdirectory or file to search within, relative to the current working directory or absolute. Defaults to '.'.",
-            "type": "string"
-          },
-          "pattern": {
-            "description": "A JavaScript-flavored regex string to search for.",
+            "description": "Path to the file to read, relative to the current working directory or absolute.",
             "type": "string"
           }
         },
         "required": [
-          "pattern"
+          "path"
         ],
         "type": "object"
       }
@@ -238,30 +101,125 @@
   {
     "type": "function",
     "function": {
-      "name": "READ",
-      "description": "Read the contents of a single file from the local workspace. Supports line-based paging: use offset (1-based first line, default 1) and limit (max lines to return, default 400, cap 1000). Every line is prefixed with its 1-based line number and a tab. The result starts with a header 'Read lines A-B of N from <path>' and, when more lines remain, ends with a footer telling you the next offset to use.",
+      "name": "DIR",
+      "description": "Show the local project structure for a directory as a tree view.",
       "parameters": {
         "additionalProperties": false,
         "properties": {
-          "force": {
-            "description": "Pass true to bypass the 5 MB size limit and read oversized files. Does NOT override binary file refusal.",
-            "type": "boolean"
-          },
-          "limit": {
-            "description": "Maximum number of lines to return. Default is 400, capped at 1000.",
-            "type": "number"
-          },
-          "offset": {
-            "description": "1-based line number to start reading from. Default is 1 (beginning of file).",
+          "maxDepth": {
+            "description": "Optional maximum directory depth to traverse. Defaults to 4.",
             "type": "number"
           },
           "path": {
-            "description": "Path to the file to read, relative to the current working directory or absolute.",
+            "description": "Directory path to inspect, relative to the current working directory or absolute. Defaults to the cwd.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "BASH",
+      "description": "Run a bash command in the local workspace and wait for it to finish before continuing.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The bash command or script to run with `bash -lc`.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Optional timeout for the command in milliseconds. Defaults to 120000.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "BASH_ASYNC",
+      "description": "Run a bash command in a detached tmux session so it can keep running in the background while you inspect it with ASYNC_TAIL or attach manually.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The bash command or script to run in a detached tmux session with `bash -lc`.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+            "type": "string"
+          },
+          "sessionName": {
+            "description": "Optional tmux session name to use. If omitted, a unique session name is generated automatically.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Optional display title for the background job. Defaults to the session name and a shortened command preview.",
             "type": "string"
           }
         },
         "required": [
-          "path"
+          "command"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "GREP",
+      "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
+            "maximum": 5,
+            "minimum": 0,
+            "type": "number"
+          },
+          "flags": {
+            "description": "Optional regex flags to apply. Allowed characters: 'i' (case-insensitive), 'm' (multiline), 's' (dot-all). Example: \"im\".",
+            "type": "string"
+          },
+          "glob": {
+            "description": "Optional simple suffix filter like '*.ts' to restrict which files are searched.",
+            "type": "string"
+          },
+          "literal": {
+            "description": "When true, treat the pattern as a literal string (all regex metacharacters are escaped).",
+            "type": "boolean"
+          },
+          "maxResults": {
+            "description": "Maximum number of matching lines to return. Defaults to 50, capped at 200.",
+            "type": "number"
+          },
+          "path": {
+            "description": "Subdirectory or file to search within, relative to the current working directory or absolute. Defaults to '.'.",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "A JavaScript-flavored regex string to search for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
         ],
         "type": "object"
       }
@@ -287,6 +245,48 @@
         "required": [
           "command"
         ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "FETCH",
+      "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires LCI_ALLOW_NET=1. Input: {url, maxBytes?}.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxBytes": {
+            "description": "Maximum bytes of response body to return. Default 50000, max 200000. Content is ends-kept with an elision marker when truncated.",
+            "type": "number"
+          },
+          "url": {
+            "description": "The URL to fetch via HTTP GET. Must use http:// or https:// scheme.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "CHECK",
+      "description": "Run incremental TypeScript semantic + syntactic diagnostics on the workspace. Input: {path?: string}. With path, reports full diagnostics for that file plus an elsewhere count; without path, reports project-wide diagnostics. Reuses a cached LanguageService per tsconfig for performance.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Optional file path to focus diagnostics on. Relative paths are resolved from the workspace root.",
+            "type": "string"
+          }
+        },
+        "required": [],
         "type": "object"
       }
     }

@@ -85,7 +85,10 @@ const DURATION_KEYS = new Set([
   "waitMs",
   "wait_ms",
   "ageMs",
-  "age_ms"
+  "age_ms",
+  "synthesisMs",
+  "totalMs",
+  "unitsMs"
 ]);
 
 const UUID_PATTERN = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
@@ -162,6 +165,14 @@ function identityRules(): ReplaceRule[] {
     { pattern: /(?<![A-Za-z])lci(?![A-Za-z0-9])/g, replacement: "drip" },
     { pattern: /\.lci\b/g, replacement: ".drip" },
 
+    // --- documented drip-only surfaces (drip/README.md known deviations) ----
+    // The `--migrate-from-lci` OPTIONS block has no lci counterpart: strip
+    // it (synopsis line through the last continuation line before
+    // `--version`) so `--help` compares byte-for-byte otherwise.
+    { pattern: /\t--migrate-from-(?:lci|drip)[^\n]*\n(?:\t {30}[^\n]*\n)*/g, replacement: "" },
+    // drip embeds the seven built-in skills; lci reads them from <repo>/skills.
+    { pattern: /"path": "[^"\n]*\/skills\/([A-Za-z0-9._-]+\/SKILL\.md)"/g, replacement: '"path": "<builtin>/$1"' },
+
     // --- machine-local addresses --------------------------------------------
     // Loopback first: the version rule below would otherwise eat "127.0.0"
     // out of the IP and leave a corrupted "<VERSION>.1:<PORT>" behind.
@@ -186,9 +197,13 @@ function identityRules(): ReplaceRule[] {
     { pattern: /\b\d+(?:\.\d+)?(?:ms|µs)\b/g, replacement: "<MS>" },
     // Duration fields inside JSON lines printed to stdout (--json NDJSON events).
     {
-      pattern: /"(durationMs|duration_ms|latencyMs|latency_ms|elapsedMs|elapsed_ms|wallMs|wall_ms|waitMs|wait_ms|ageMs|age_ms)":\s*\d+(?:\.\d+)?/g,
+      pattern: /"(durationMs|duration_ms|latencyMs|latency_ms|elapsedMs|elapsed_ms|wallMs|wall_ms|waitMs|wait_ms|ageMs|age_ms|synthesisMs|totalMs|unitsMs)":\s*\d+(?:\.\d+)?/g,
       replacement: '"$1":<MS>'
     },
+    // --review progress on stderr rounds wall-clock to seconds ("in 4s — 13s total").
+    { pattern: /\b(in|elapsed|total|done in) (\d+)s\b/g, replacement: "$1 <S>s" },
+    { pattern: /— (\d+)s total\b/g, replacement: "— <S>s total" },
+    { pattern: /\((\d+)s elapsed\)/g, replacement: "(<S>s elapsed)" },
     // Session-id prefixes (resumeIdPrefix, `--resume 91c1c835`): 8 lowercase hex.
     { pattern: /\b[0-9a-f]{8}\b/g, replacement: "<ID8>" },
     { pattern: /\b\d+\.\d+(?:e[+-]?\d+)?\b/gi, replacement: "<NUM>" }

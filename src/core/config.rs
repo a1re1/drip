@@ -579,7 +579,7 @@ pub fn serialize_editable_inference_model_profiles(
             Value::Object(map)
         })
         .collect();
-    serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
 }
 
 pub fn parse_editable_system_prompt_profiles(
@@ -639,7 +639,7 @@ pub fn serialize_editable_system_prompt_profiles(
             Value::Object(map)
         })
         .collect();
-    serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -717,10 +717,130 @@ pub fn create_default_cli_config() -> CliConfig {
     }
 }
 
-/// TODO: upgradeCerebrasProfiles / upgradeRetiredVendorProfiles are not ported
-/// yet — they currently return the settings unchanged.
-fn upgrade_cerebras_profiles(_settings: &mut IndexMap<String, String>) {}
-fn upgrade_retired_vendor_profiles(_settings: &mut IndexMap<String, String>) {}
+// upgradeCerebrasProfiles(): early builds stored the key inline on the profile
+// (or not at all); once runtime.cerebras_api_key existed, profiles with no
+// credential at all are upgraded to read the env key — but only when the user
+// has not configured the legacy key setting themselves.
+fn upgrade_cerebras_profiles(settings: &mut IndexMap<String, String>) {
+    let mut profiles = match parse_editable_inference_model_profiles(
+        settings.get(MODEL_PROFILES_SETTING_ID).map(String::as_str),
+    ) {
+        Ok(profiles) => profiles,
+        Err(_) => return,
+    };
+
+    let legacy_key_configured = settings
+        .get(CEREBRAS_API_KEY_SETTING_ID)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let mut changed = false;
+
+    for profile in &mut profiles {
+        if profile.provider == "cerebras"
+            && profile.credential_mode == "none"
+            && !legacy_key_configured
+        {
+            profile.credential_mode = "env".to_string();
+            profile.credential_value = "CEREBRAS_API_KEY".to_string();
+            changed = true;
+        }
+    }
+
+    if changed {
+        settings.insert(
+            MODEL_PROFILES_SETTING_ID.to_string(),
+            serialize_editable_inference_model_profiles(&profiles),
+        );
+    }
+}
+
+// v0.73–0.74 shipped `glm-5-3-flash` / `glm-5-3` / `kimi-k3` on FriendliAI and
+// Baseten with hand-built fallback chains; v0.75 re-points the same ids at
+// OpenRouter. mergeMissingDefaultInferenceProfiles only fills in ids a saved
+// catalog lacks, so an upgraded config would keep the retired vendor route
+// under the very ids every preset and --review pin — and the one-key setup
+// would fail on a missing FRIENDLI_TOKEN. Re-point entries that still
+// sit on one of those two hosts to the shipped profile of the same id. Only
+// hosts a shipped default ever pointed those ids at qualify — Z.AI is not
+// one (its routes shipped under `zai-*` ids), so a user who deliberately
+// re-pointed a lane at api.z.ai keeps it, as does anyone on any other host.
+const RETIRED_VENDOR_HOSTS: [&str; 2] = ["api.friendli.ai", "inference.baseten.co"];
+
+// new URL(...).hostname semantics: scheme required, authority ends at the
+// first "/", "?" or "#"; userinfo and port are stripped; the host is
+// lowercased. Unparseable input yields None (isRetiredVendorHost → false).
+fn url_hostname(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://")?.1;
+    // Authority runs until the first "/", "?" or "#".
+    let authority = {
+        let end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        &after_scheme[..end]
+    };
+    // Userinfo ends at the last "@" in the authority; the port is the last
+    // ":" after that (IPv6 hosts keep their brackets, which never contain a
+    // bare ":" in these host strings).
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    Some(host.to_ascii_lowercase())
+}
+
+fn is_retired_vendor_host(base_url: &str) -> bool {
+    match url_hostname(base_url) {
+        Some(host) => RETIRED_VENDOR_HOSTS.contains(&host.as_str()),
+        None => false,
+    }
+}
+
+fn upgrade_retired_vendor_profiles(settings: &mut IndexMap<String, String>) {
+    let profiles = match parse_editable_inference_model_profiles(
+        settings.get(MODEL_PROFILES_SETTING_ID).map(String::as_str),
+    ) {
+        Ok(profiles) => profiles,
+        Err(_) => return,
+    };
+
+    let mut changed = false;
+    let upgraded: Vec<EditableInferenceModelProfile> = profiles
+        .into_iter()
+        .map(|profile| {
+            let shipped = default_model_profile_by_id(profile.id.trim());
+
+            let shipped = shipped.filter(|_| is_retired_vendor_host(&profile.base_url));
+            match shipped {
+                Some(shipped) => {
+                    changed = true;
+                    shipped
+                }
+                None => profile,
+            }
+        })
+        .collect();
+
+    if changed {
+        settings.insert(
+            MODEL_PROFILES_SETTING_ID.to_string(),
+            serialize_editable_inference_model_profiles(&upgraded),
+        );
+    }
+}
+
+// defaultModelProfiles.find((candidate) => candidate.id === profile.id.trim()),
+// re-materialized as the EditableInferenceModelProfile the shipper would emit
+// (createEditableInferenceModelProfile) by running the default entry back
+// through the shared parse path.
+fn default_model_profile_by_id(id: &str) -> Option<EditableInferenceModelProfile> {
+    let defaults: Vec<Value> = serde_json::from_str(MODEL_PROFILES_DEFAULT_JSON).ok()?;
+    let item = defaults
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(id))?;
+    let text = serde_json::to_string(&Value::Array(vec![item.clone()])).ok()?;
+    parse_editable_inference_model_profiles(Some(&text))
+        .ok()?
+        .into_iter()
+        .next()
+}
 
 // loadCliConfig(): a missing file is created with the defaults; otherwise the
 // {"settings": {...}, "version": 1} wrapper is required or the load fails.
@@ -791,41 +911,12 @@ pub fn save_cli_config(path: &Path, config: &CliConfig) -> Result<()> {
     Ok(())
 }
 
+// cli/config.ts:81 — resolveCliInference(config, env?) → resolveInferenceConfig(settings, {env}).
 pub fn resolve_cli_inference(
-    settings: &IndexMap<String, String>,
+    config: &CliConfig,
     env: Option<&std::collections::HashMap<String, String>>,
-) -> Result<ResolvedInferenceConfig> {
-    let profiles = parse_inference_model_profiles(settings)?;
-    let active_id = get_active_cli_profile_id(settings);
-    let profile = profiles
-        .iter()
-        .find(|profile| profile.id == active_id)
-        .ok_or_else(|| anyhow!(
-            "Unknown active model id \"{}\". Add it to Model Profiles or switch Active Model ID.",
-            active_id
-        ))?;
-    let mut api_key_ref = profile.api_key_ref.clone();
-    let mut api_key = profile.api_key.clone();
-    if let Some(reference) = &api_key_ref {
-        if let Some(name) = reference.strip_prefix("env:") {
-            let resolved = env
-                .and_then(|map| map.get(name).cloned())
-                .or_else(|| std::env::var(name).ok());
-            api_key = resolved;
-        }
-    }
-    Ok(ResolvedInferenceConfig {
-        profile: profile.clone(),
-        api_key,
-        api_key_ref,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedInferenceConfig {
-    pub profile: InferenceModelProfile,
-    pub api_key: Option<String>,
-    pub api_key_ref: Option<String>,
+) -> Result<crate::core::inference::ResolvedInferenceConfig> {
+    crate::core::inference::resolve_inference_config(&config.settings, env)
 }
 
 pub fn list_cli_model_profiles(settings: &IndexMap<String, String>) -> Result<Vec<InferenceModelProfile>> {
@@ -930,8 +1021,8 @@ mod tests {
         let serialized = serialize_editable_inference_model_profiles(
             &parse_editable_inference_model_profiles(Some(profile_json)).expect("editable"),
         );
-        assert!(serialized.contains("\"maxContextTokens\":\"64000\""));
-        assert!(serialized.contains("\"apiKeyRef\":\"env:X\""));
+        assert!(serialized.contains("\"maxContextTokens\": \"64000\""));
+        assert!(serialized.contains("\"apiKeyRef\": \"env:X\""));
     }
 
     // (c) Duplicate id error text.
@@ -952,5 +1043,81 @@ mod tests {
         let items: Vec<Value> = serde_json::from_str(&merged).expect("merged parses");
         assert!(items.iter().any(|item| item.get("id").and_then(Value::as_str) == Some("custom")));
         assert!(items.iter().any(|item| item.get("id").and_then(Value::as_str) == Some("glm-5-3-flash")));
+    }
+
+    // upgradeCerebrasProfiles(): a cerebras profile with an inline apiKey has
+    // credentialMode "none"? No — inline keys parse as "inline"; the upgraded
+    // shape is a profile with NO credential at all plus the legacy key setting
+    // unset, which flips to env/CEREBRAS_API_KEY. Idempotent on re-run.
+    #[test]
+    fn test_upgrade_cerebras_profiles_env_upgrade() {
+        let json = r#"[{"id":"c1","model":"zai-glm","provider":"cerebras","baseUrl":"https://api.cerebras.ai/v1","label":"C"}]"#;
+        let mut settings = IndexMap::new();
+        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
+        settings.insert(CEREBRAS_API_KEY_SETTING_ID.to_string(), String::new());
+
+        upgrade_cerebras_profiles(&mut settings);
+        let items: Vec<Value> =
+            serde_json::from_str(&settings[MODEL_PROFILES_SETTING_ID]).expect("json");
+        // The editable credentialMode/credentialValue pair serializes back
+        // as the apiKeyRef the runtime reads.
+        assert_eq!(items[0]["apiKeyRef"], "env:CEREBRAS_API_KEY");
+
+        // Idempotent: running twice changes nothing.
+        let once = settings[MODEL_PROFILES_SETTING_ID].clone();
+        upgrade_cerebras_profiles(&mut settings);
+        assert_eq!(settings[MODEL_PROFILES_SETTING_ID], once);
+
+        // A legacy key configured by the user blocks the upgrade.
+        let mut settings2 = IndexMap::new();
+        settings2.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
+        settings2.insert(CEREBRAS_API_KEY_SETTING_ID.to_string(), "sk-legacy".to_string());
+        upgrade_cerebras_profiles(&mut settings2);
+        let items2: Vec<Value> =
+            serde_json::from_str(&settings2[MODEL_PROFILES_SETTING_ID]).expect("json");
+        assert!(items2[0].get("apiKeyRef").is_none());
+    }
+
+    // upgradeRetiredVendorProfiles(): a FriendliAI baseUrl on a shipped id is
+    // re-pointed at the shipped OpenRouter profile; a non-retired host and a
+    // non-shipped id are left alone. Idempotent on re-run.
+    #[test]
+    fn test_upgrade_retired_vendor_profiles() {
+        let json = r#"[{"id":"glm-5-3-flash","model":"z-ai/glm-5.3-flash","provider":"openai-compatible","baseUrl":"https://api.friendli.ai/serverless/v1","label":"GLM","apiKeyRef":"env:FRIENDLI_TOKEN"},{"id":"custom","model":"m","provider":"openai","baseUrl":"https://api.z.ai/api/paas/v4","label":"Z"}]"#;
+        let mut settings = IndexMap::new();
+        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
+
+        upgrade_retired_vendor_profiles(&mut settings);
+        let items: Vec<Value> =
+            serde_json::from_str(&settings[MODEL_PROFILES_SETTING_ID]).expect("json");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["baseUrl"], "https://openrouter.ai/api/v1");
+        assert_eq!(items[0]["apiKeyRef"], "env:OPENROUTER_API_KEY");
+        assert_eq!(items[0]["provider"], "openrouter");
+        // Z.AI is not a retired host and "custom" is not a shipped id: kept.
+        assert_eq!(items[1]["baseUrl"], "https://api.z.ai/api/paas/v4");
+
+        // Idempotent: running twice changes nothing.
+        let once = settings[MODEL_PROFILES_SETTING_ID].clone();
+        upgrade_retired_vendor_profiles(&mut settings);
+        assert_eq!(settings[MODEL_PROFILES_SETTING_ID], once);
+    }
+
+    // Both upgrades: a non-JSON model_profiles value leaves settings unchanged
+    // (the TS try/catch returns early).
+    #[test]
+    fn test_upgrade_functions_non_json_noop() {
+        for upgrade in [
+            upgrade_cerebras_profiles as fn(&mut IndexMap<String, String>),
+            upgrade_retired_vendor_profiles as fn(&mut IndexMap<String, String>),
+        ] {
+            let mut settings = IndexMap::new();
+            settings.insert(
+                MODEL_PROFILES_SETTING_ID.to_string(),
+                "not json at all".to_string(),
+            );
+            upgrade(&mut settings);
+            assert_eq!(settings[MODEL_PROFILES_SETTING_ID], "not json at all");
+        }
     }
 }

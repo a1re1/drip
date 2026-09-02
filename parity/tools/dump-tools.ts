@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Dumps the OpenAI function-call definition for each built-in tool,
-// sorted by name, as a JSON array.  Run from the repo root:
+// in declaration order, as a JSON array.  Run from the repo root:
 //   bun drip/parity/tools/dump-tools.ts
 
 import { asyncBashTool, bashTool } from "../../../tools/bash-tool";
@@ -14,8 +14,9 @@ import { verifyTool } from "../../../tools/verify-tool";
 
 const tools = [readTool, patchTool, dirTool, bashTool, asyncBashTool, grepTool, verifyTool, fetchTool, checkTool];
 
-// Sort by name so the output is deterministic
-tools.sort((a, b) => a.name.localeCompare(b.name));
+// Declaration order is part of the contract: the transport sends tools in
+// this order and the model sees it. Do NOT sort.
+
 
 const definitions = tools.map((t) => ({
   type: "function",

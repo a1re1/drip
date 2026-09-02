@@ -187,7 +187,54 @@ pub fn find_incomplete_overwrite_error(old_text: &str, new_text: &str) -> Option
         ));
     }
 
-    None
+    find_duplicated_copy_error(old_text, new_text)
+}
+
+const DUPLICATE_GUARD_MIN_LINES: usize = 40;
+const DUPLICATE_GUARD_MIN_APPENDED: usize = 20;
+const DUPLICATE_GUARD_MIN_LINE_CHARS: usize = 12;
+const DUPLICATE_GUARD_RATIO: f64 = 0.8;
+
+/// Port of findDuplicatedCopyError. The other small-model overwrite failure:
+/// "content" = the existing file followed by a second (often lightly edited)
+/// copy of it — the model meant to change a hunk and instead appended the
+/// whole file again. The tail of such a write is made almost entirely of
+/// lines the file already has.
+pub fn find_duplicated_copy_error(old_text: &str, new_text: &str) -> Option<String> {
+    let old_trimmed = old_text.trim_end();
+
+    if count_lines(old_text) < DUPLICATE_GUARD_MIN_LINES
+        || old_trimmed.is_empty()
+        || !new_text.starts_with(old_trimmed)
+    {
+        return None;
+    }
+
+    let distinctive = |text: &str| -> Vec<String> {
+        text.split('\n')
+            .map(|line| line.trim())
+            .filter(|line| line.chars().count() >= DUPLICATE_GUARD_MIN_LINE_CHARS)
+            .map(|line| line.to_string())
+            .collect()
+    };
+    let existing_lines: std::collections::HashSet<String> = distinctive(old_text).into_iter().collect();
+    let appended_lines = distinctive(&new_text[old_trimmed.len()..]);
+
+    if appended_lines.len() < DUPLICATE_GUARD_MIN_APPENDED {
+        return None;
+    }
+
+    let duplicated = appended_lines.iter().filter(|line| existing_lines.contains(*line)).count();
+
+    if (duplicated as f64) < appended_lines.len() as f64 * DUPLICATE_GUARD_RATIO {
+        return None;
+    }
+
+    Some(format!(
+        "the new content is the existing file followed by {} more line(s), {} of which the file already contains — that appends a second copy instead of editing it. Use find + replace to change the existing text, or write the complete intended file once.",
+        appended_lines.len(),
+        duplicated
+    ))
 }
 
 const SHRINK_GUARD_MIN_LINES: usize = 200;
@@ -903,8 +950,14 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
             None
         };
 
-        if existing_text.is_some() {
-            assert_patch_keeps_file_parseable(&display_path, &absolute_path, existing_text.as_deref().unwrap_or(""), &content)?;
+        // Overwrites of an existing parseable file are gated; brand-new files are
+        // not (deliberately broken fixtures are a legitimate thing to create).
+        if let Some(existing) = existing_text.as_deref() {
+            if let Some(incomplete_error) = find_incomplete_overwrite_error(existing, &content) {
+                return Err(format!("PATCH rejected: {incomplete_error} The file was left unchanged."));
+            }
+
+            assert_patch_keeps_file_parseable(&display_path, &absolute_path, existing, &content)?;
         }
 
         crate::lib_fs::write_file_atomic(std::path::Path::new(&absolute_path), &content, true).map_err(|error| error.to_string())?;
@@ -1193,6 +1246,31 @@ mod execute_tests {
             !journal_path.exists(),
             "failed patch must not touch the journal"
         );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_guard_tests {
+    use super::*;
+
+    fn sixty_lines() -> String {
+        (0..60).map(|i| format!("export const value{i} = {i}; // keep this line\n")).collect()
+    }
+
+    #[test]
+    fn rejects_an_overwrite_that_appends_a_second_copy() {
+        let original = sixty_lines();
+        let second_copy = original.replace("value3 = 3", "value3 = 30");
+        let error = find_incomplete_overwrite_error(&original, &format!("{original}{second_copy}"))
+            .expect("duplicate copy rejected");
+        assert!(error.contains("appends a second copy"), "{error}");
+    }
+
+    #[test]
+    fn allows_an_overwrite_that_appends_new_lines() {
+        let original = sixty_lines();
+        let additions: String = (0..30).map(|i| format!("export const extra{i} = value{i} * 2; // new\n")).collect();
+        assert_eq!(find_incomplete_overwrite_error(&original, &format!("{original}{additions}")), None);
     }
 }
 

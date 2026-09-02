@@ -36,25 +36,38 @@ fn is_harness_state(value: &serde_json::Value) -> bool {
         && value.get("telemetry").map_or(false, |v| v.is_object())
 }
 
-fn load_harness_state(state_path: &Path) -> Option<HarnessState> {
+fn load_harness_state(state_path: &Path) -> Result<Option<HarnessState>, String> {
     if !state_path.exists() {
-        return None;
+        return Ok(None);
     }
 
     let content = match std::fs::read_to_string(state_path) {
         Ok(c) => c,
-        // Unreadable file: TS JSON.parse would throw; callers here only need
-        // the null-vs-state distinction, so surface it as the same error path.
-        Err(_) => panic!("The file at {} is not a valid harness state file.", state_path.display()),
+        // Unreadable file: TS loadHarnessState would throw the read error.
+        Err(error) => {
+            return Err(format!(
+                "Could not read harness state at {}: {error}",
+                state_path.display()
+            ))
+        }
     };
 
     let mut state: HarnessState = match serde_json::from_str(&content) {
         Ok(s) => s,
-        Err(_) => panic!("The file at {} is not a valid harness state file.", state_path.display()),
+        // Corrupt JSON: TS JSON.parse throws before the shape check.
+        Err(error) => {
+            return Err(format!(
+                "Could not read harness state at {}: {error}",
+                state_path.display()
+            ))
+        }
     };
 
     if !is_harness_state(&serde_json::to_value(&state).unwrap_or(Value::Null)) {
-        panic!("The file at {} is not a valid harness state file.", state_path.display());
+        return Err(format!(
+            "The file at {} is not a valid harness state file.",
+            state_path.display()
+        ));
     }
 
     // State files written before goal history existed load with an empty history
@@ -65,7 +78,7 @@ fn load_harness_state(state_path: &Path) -> Option<HarnessState> {
         state.r#loop = state.iteration;
     }
 
-    Some(state)
+    Ok(Some(state))
 }
 
 
@@ -156,7 +169,12 @@ pub fn build_state_summary_json(
     lease_path: &Path,
     state_path: &Path,
 ) -> Option<serde_json::Map<String, Value>> {
-    let state = load_harness_state(state_path)?;
+    // Per the port contract, an Err here (unreadable/corrupt state) is treated
+    // the same as a missing file: the JSON summary builder has no error path.
+    let state = match load_harness_state(state_path) {
+        Ok(s) => s,
+        Err(_) => None,
+    }?;
 
     // slice(Math.max(0, consumedCount)) in readInboxEntries clamps negatives to 0.
     let consumed = state.inbox_cursor.unwrap_or(0).max(0) as usize;
@@ -213,8 +231,9 @@ pub fn build_state_summary_json(
 /// Human-readable single-string summary of a session's state.
 pub fn format_state_summary(state_path: &Path) -> String {
     let state = match load_harness_state(state_path) {
-        Some(s) => s,
-        None => return "no harness state yet — send a goal to start.".to_string(),
+        Ok(Some(s)) => s,
+        Ok(None) => return "no harness state yet — send a goal to start.".to_string(),
+        Err(message) => return message,
     };
 
     let mut lines: Vec<String> = vec![
@@ -313,6 +332,30 @@ mod tests {
         let state_path = root.path().join("state.json");
         let result = format_state_summary(&state_path);
         assert_eq!(result, "no harness state yet — send a goal to start.");
+    }
+
+    // format_state_summary reports missing state with the placeholder text
+    #[test]
+    fn format_state_summary_reports_missing_state() {
+        let root = make_temp_root();
+        let state_path = root.path().join("state.json");
+        assert!(!state_path.exists());
+        let result = format_state_summary(&state_path);
+        assert_eq!(result, "no harness state yet — send a goal to start.");
+    }
+
+    // format_state_summary surfaces the corrupt-file error verbatim
+    #[test]
+    fn format_state_summary_reports_corrupt_state() {
+        let root = make_temp_root();
+        let state_path = root.path().join("state.json");
+        std::fs::write(&state_path, "{not json").unwrap();
+
+        let result = format_state_summary(&state_path);
+        assert!(
+            result.contains("Could not read harness state at"),
+            "expected read-error text, got: {result}"
+        );
     }
 
     // format_state_summary renders goal, iteration, tasks, memory

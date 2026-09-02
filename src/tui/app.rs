@@ -975,8 +975,14 @@ impl TuiApp {
                 self.push_info(text);
             }
             "state" => {
+                // A corrupt state file comes back as the loader's error text,
+                // which the TS surfaces through pushError.
                 let summary = format_state_summary(Path::new(&self.paths.state_path));
-                self.push_info(summary);
+                if summary.starts_with("Could not read harness state at ") || summary.starts_with("The file at ") {
+                    self.push_error(summary);
+                } else {
+                    self.push_info(summary);
+                }
             }
             "skills" => {
                 let discovered = discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home).unwrap_or_default();

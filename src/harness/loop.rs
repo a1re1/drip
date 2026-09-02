@@ -325,7 +325,24 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
         return false;
     }
 
-    // cargo test / libtest: one "running N tests" header per test binary.
+    // cargo test / libtest: a "test result:" summary that counts executed tests
+    // is proof by itself — the "running N tests" headers above it are the first
+    // thing a `| tail` cuts off, and the doc-test block that closes cargo's
+    // output always says "running 0 tests".
+    let executed_by_summary = output.lines().any(|line| {
+        let Some(rest) = line.strip_prefix("test result: ") else { return false };
+        let Some(rest) = rest.strip_prefix("ok. ").or_else(|| rest.strip_prefix("FAILED. ")) else { return false };
+        let mut counts = rest.split("; ").filter_map(|part| {
+            let (count, label) = part.split_once(' ')?;
+            (label == "passed" || label == "failed").then(|| count.parse::<u64>().ok()).flatten()
+        });
+        counts.any(|count| count > 0)
+    });
+    if executed_by_summary {
+        return false;
+    }
+
+    // Otherwise one "running N tests" header per test binary.
     let cargo_runs: Vec<u64> = output
         .lines()
         .filter_map(|line| {
@@ -472,6 +489,13 @@ mod loop_helpers_tests {
     #[test]
     fn detect_empty_test_run_flags_runners_that_executed_zero_tests() {
         assert!(detect_empty_test_run("cargo test", "running 0 tests\n\ntest result: ok. 0 passed\n\nrunning 0 tests\n"));
+        // A `| tail` that kept only the doc-test block's header but also the lib
+        // block's summary: the summary proves tests ran.
+        assert!(!detect_empty_test_run(
+            "cargo test 2>&1 | tail -20",
+            "test plan::b ... ok\n\ntest result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests reviewkit\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        ));
+        assert!(!detect_empty_test_run("cargo test", "running 0 tests\n\ntest result: FAILED. 0 passed; 2 failed; 0 ignored\n"));
         assert!(detect_empty_test_run("bun test", "bun test v1.2\n\n 0 pass\n 0 fail\n"));
         assert!(detect_empty_test_run("bun run test", "No test files found, exiting with code 1"));
         assert!(detect_empty_test_run("pytest -k widget", "collected 0 items\n\nno tests ran in 0.01s"));

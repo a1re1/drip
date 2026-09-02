@@ -7,10 +7,15 @@ renamed `DRIP_*`, and `~/.lci` become `~/.drip`. `dripw` is the port of
 `lciw`, the read-only watch TUI.
 
 ```
-cd drip && cargo build            # drip/target/debug/{drip,dripw}
+cd drip && cargo build --release   # drip/target/release/{drip,dripw}
+ln -sfn "$PWD/target/release/drip" ~/.cargo/bin/drip     # same model as the global lci:
+ln -sfn "$PWD/target/release/dripw" ~/.cargo/bin/dripw   # a merged PR goes live after git pull + cargo build --release
 drip --help                        # identical to lci --help modulo the rename
 drip --migrate-from-lci            # copy ~/.lci (config, env.vars, sessions, index) into ~/.drip
 ```
+
+`drip --version` reports the lci version it is a port of (`drip/Cargo.toml`
+and `package.json` are kept in lockstep by `drip/tests/version_lockstep.rs`).
 
 ## How parity is checked
 

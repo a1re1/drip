@@ -105,13 +105,53 @@ pub fn get_optional_number_argument(
             Some(f) => Ok(Some(f)),
             None => Err(anyhow!("Expected \"{}\" to be a number.", key)),
         },
-        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => {
-            match s.trim().parse::<f64>() {
-                Ok(parsed) => Ok(Some(parsed)),
-                Err(_) => Err(anyhow!("Expected \"{}\" to be a number.", key)),
-            }
-        }
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => match js_number(s.trim()) {
+            Some(parsed) => Ok(Some(parsed)),
+            None => Err(anyhow!("Expected \"{}\" to be a number.", key)),
+        },
         _ => Err(anyhow!("Expected \"{}\" to be a number.", key)),
+    }
+}
+
+/// `Number(text)` for an already-trimmed, non-empty string: the decimal
+/// literal forms, `Infinity` with an optional sign, and the unsigned `0x`/`0o`/
+/// `0b` prefixes. Rust's `f64::from_str` differs on both sides — it takes
+/// `nan`/`inf`/`infinity` (JS: NaN) and rejects the hex/octal/binary forms.
+pub fn js_number(text: &str) -> Option<f64> {
+    static DECIMAL: OnceLock<regex::Regex> = OnceLock::new();
+    let decimal = DECIMAL.get_or_init(|| regex::Regex::new(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$").unwrap());
+
+    match text {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        _ => {}
+    }
+
+    let radix = match text.get(..2) {
+        Some("0x") | Some("0X") => Some(16),
+        Some("0o") | Some("0O") => Some(8),
+        Some("0b") | Some("0B") => Some(2),
+        _ => None,
+    };
+
+    if let Some(radix) = radix {
+        // Accumulate in f64 so a literal past u64::MAX stays a large finite
+        // float, as Number() gives, instead of an overflow error.
+        let digits = &text[2..];
+
+        if digits.is_empty() {
+            return None;
+        }
+
+        return digits
+            .chars()
+            .try_fold(0.0_f64, |acc, ch| ch.to_digit(radix).map(|digit| acc * radix as f64 + digit as f64));
+    }
+
+    if decimal.is_match(text) {
+        text.parse::<f64>().ok()
+    } else {
+        None
     }
 }
 
@@ -364,6 +404,27 @@ mod tests {
         // null means "absent", not "invalid".
         assert_eq!(get_optional_number_argument(&args, "d").unwrap(), None);
         assert_eq!(get_optional_number_argument(&args, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn js_number_matches_the_js_number_constructor() {
+        assert_eq!(js_number("12"), Some(12.0));
+        assert_eq!(js_number("+1.5e2"), Some(150.0));
+        assert_eq!(js_number(".5"), Some(0.5));
+        assert_eq!(js_number("0x10"), Some(16.0));
+        assert_eq!(js_number("0b101"), Some(5.0));
+        assert_eq!(js_number("0o17"), Some(15.0));
+        assert_eq!(js_number("Infinity"), Some(f64::INFINITY));
+        assert_eq!(js_number("-Infinity"), Some(f64::NEG_INFINITY));
+        // Rust's parser would take these; Number() gives NaN.
+        assert_eq!(js_number("nan"), None);
+        assert_eq!(js_number("inf"), None);
+        assert_eq!(js_number("infinity"), None);
+        assert_eq!(js_number("1_000"), None);
+        assert_eq!(js_number("-0x10"), None);
+        assert_eq!(js_number("0x"), None);
+        assert_eq!(js_number("0xFFFFFFFFFFFFFFFFFF"), Some(4722366482869645213695.0));
+        assert_eq!(js_number("12abc"), None);
     }
 
     #[test]

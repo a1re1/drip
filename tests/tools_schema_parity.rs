@@ -124,3 +124,12 @@ fn verify_definition_matches_the_ts_oracle() {
         "VERIFY definition drifted from tools/verify-tool.ts"
     );
 }
+
+#[test]
+fn bash_async_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::bash::async_definition(),
+        apply_renames(&fixture_entry("BASH_ASYNC")),
+        "BASH_ASYNC definition drifted from tools/bash-tool.ts"
+    );
+}

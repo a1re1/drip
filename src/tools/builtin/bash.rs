@@ -1,8 +1,8 @@
 // port of tools/bash-tool.ts (the synchronous BASH tool)
 //
-// The async/tmux half of the TS file (BASH_ASYNC, session names, terminate
-// plumbing) is not ported here; drip covers the process-group kill semantics
-// in child_process.rs.
+// The async/tmux half of the TS file (BASH_ASYNC, session naming, tmux
+// probes) is ported in this file (below the sync half) and in
+// drip/src/tools/async_jobs.rs, which ports src/tools/async-jobs.ts.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -319,6 +319,41 @@ pub fn execute(raw_input: &str, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
+/// Port of asyncBashTool's definition (tools/bash-tool.ts:567-590) — the
+/// BASH_ASYNC function envelope, strings verbatim; the name stays "BASH_ASYNC".
+pub fn async_definition() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "BASH_ASYNC",
+            "description": "Run a bash command in a detached tmux session so it can keep running in the background while you inspect it with ASYNC_TAIL or attach manually.",
+            "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                    "command": {
+                        "description": "The bash command or script to run in a detached tmux session with `bash -lc`.",
+                        "type": "string"
+                    },
+                    "cwd": {
+                        "description": "Optional working directory for the command, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+                        "type": "string"
+                    },
+                    "sessionName": {
+                        "description": "Optional tmux session name to use. If omitted, a unique session name is generated automatically.",
+                        "type": "string"
+                    },
+                    "title": {
+                        "description": "Optional display title for the background job. Defaults to the session name and a shortened command preview.",
+                        "type": "string"
+                    }
+                },
+                "required": ["command"],
+                "type": "object"
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     // Port of the synchronous half of tools/test/bash-tool.test.ts (the
@@ -472,5 +507,442 @@ mod tests {
 
         let (_ok_execution, ok_completion) = run_stages(&ctx, json!({"command": "true"}));
         assert!(ok_completion.tool_content.contains("exit code 0"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tmux-backed async session helpers
+// ---------------------------------------------------------------------------
+
+pub const TMUX_POLL_INTERVAL_MS: u64 = 250;
+
+pub const SHELL_WRAPPER_COMMANDS: &[&str] = &["bash", "sh", "zsh"];
+
+pub fn quote_shell_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+pub fn sanitize_tmux_session_name(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| match character {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' => character,
+            _ => '-',
+        })
+        .collect();
+
+    let collapsed: String = {
+        let mut result = String::new();
+        let mut previous_was_dash = false;
+
+        for character in sanitized.chars() {
+            if character == '-' {
+                if !previous_was_dash {
+                    result.push('-');
+                }
+
+                previous_was_dash = true;
+            } else {
+                result.push(character);
+                previous_was_dash = false;
+            }
+        }
+
+        result
+    };
+
+    collapsed.trim_matches('-').to_string()
+}
+
+pub fn strip_command_extension(token: &str) -> String {
+    const KNOWN_EXTENSIONS: [&str; 10] = [
+        "sh", "bash", "zsh", "js", "mjs", "cjs", "ts", "tsx", "py", "rb",
+    ];
+
+    for extension in KNOWN_EXTENSIONS {
+        let suffix = format!(".{}", extension);
+
+        if token.to_ascii_lowercase().ends_with(&suffix) {
+            return token[..token.len() - suffix.len()].to_string();
+        }
+    }
+
+    token.to_string()
+}
+
+pub fn clamp_identifier(value: &str, max_length: usize) -> String {
+    if value.chars().count() <= max_length {
+        return value.to_string();
+    }
+
+    let truncated: String = value.chars().take(max_length).collect();
+
+    truncated.trim_end_matches('-').to_string()
+}
+
+pub fn compact_session_token(token: &str) -> String {
+    let segments: Vec<&str> = token
+        .split(|character: char| character == '-' || character == '_')
+        .map(|segment| segment.trim())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    if segments.is_empty() {
+        return String::new();
+    }
+
+    let selected_segments: Vec<&str> = if segments.len() >= 3 {
+        vec![segments[0], segments[segments.len() - 1]]
+    } else {
+        segments.to_vec()
+    };
+
+    clamp_identifier(&selected_segments.join("-"), 12)
+}
+
+pub fn build_command_session_prefix(command: &str) -> String {
+    let raw_tokens: Vec<String> = crate::tools::async_jobs::compact_whitespace(command)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+
+    let effective_tokens: Vec<String> = if raw_tokens.len() >= 2
+        && raw_tokens
+            .first()
+            .map(|token| SHELL_WRAPPER_COMMANDS.contains(&token.to_lowercase().as_str()))
+            .unwrap_or(false)
+    {
+        let mut tokens = vec![basename(&raw_tokens[1])];
+        tokens.extend(raw_tokens.iter().skip(2).cloned());
+        tokens
+    } else {
+        raw_tokens
+    };
+
+    let mut filtered_tokens: Vec<String> = Vec::new();
+
+    for raw_token in effective_tokens.iter() {
+        if filtered_tokens.len() >= 2 {
+            break;
+        }
+
+        if raw_token.starts_with('-') {
+            continue;
+        }
+
+        let candidate = if raw_token.contains('/') {
+            basename(raw_token)
+        } else {
+            raw_token.clone()
+        };
+
+        let normalized_token = sanitize_tmux_session_name(&strip_command_extension(&candidate)).to_lowercase();
+
+        if normalized_token.is_empty()
+            || normalized_token == "run"
+            || normalized_token == "command"
+            || normalized_token == "exec"
+        {
+            continue;
+        }
+
+        let compact_token = compact_session_token(&normalized_token);
+
+        if compact_token.is_empty() {
+            continue;
+        }
+
+        filtered_tokens.push(compact_token);
+    }
+
+    let prefix = filtered_tokens.join("-");
+
+    if prefix.is_empty() {
+        return "bash".to_string();
+    }
+
+    clamp_identifier(&prefix, 18)
+}
+
+fn basename(value: &str) -> String {
+    value.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
+}
+
+fn generate_session_suffix() -> String {
+    // A simple wall-clock-derived suffix instead of a uuid: xorshift over the
+    // current nanos is unique enough for session names without pulling in a
+    // random-number dependency.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+
+    let mut state = nanos ^ 0x9e37_79b9_7f4a_7c15;
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+    (0..6)
+        .map(|index| {
+            let slot = ((state >> (index * 5)) & 0x1f) as usize;
+            ALPHABET[slot % ALPHABET.len()] as char
+        })
+        .collect()
+}
+
+pub fn create_session_name(command: &str, requested_name: Option<&str>) -> String {
+    if let Some(requested_name) = requested_name {
+        let sanitized_requested_name = sanitize_tmux_session_name(requested_name);
+
+        if sanitized_requested_name.is_empty() {
+            panic!(
+                "Unable to derive a tmux session name from \"{}\".",
+                requested_name
+            );
+        }
+
+        return sanitized_requested_name;
+    }
+
+    let prefix = build_command_session_prefix(command);
+
+    // The drip- namespace marks sessions as harness-owned, so orphaned
+    // sessions can be reaped by convention without a separate registry file.
+    format!("drip-{}-{}", prefix, generate_session_suffix())
+}
+
+pub fn build_tmux_wrapped_command(command: &str, log_path: &str) -> String {
+    format!(
+        "set -o pipefail\n({}) 2>&1 | tee -a {}\nexit ${{PIPESTATUS[0]}}",
+        command,
+        quote_shell_argument(log_path)
+    )
+}
+
+// The pane command: credentials are unset inline because the shared tmux
+// server's environment predates the harness scrub, and the shell is
+// non-login — profile sourcing inside panes was the source of spurious
+// non-zero exits under parallel load and panes have no need of it (the
+// wrapped command carries its own settings).
+pub fn build_tmux_pane_command(wrapped_command: &str) -> String {
+    let unset_arguments = build_env_unset_arguments();
+    let env_prefix = if unset_arguments.is_empty() {
+        String::new()
+    } else {
+        format!("env {} ", unset_arguments.join(" "))
+    };
+
+    format!(
+        "{}bash -c {}; exit",
+        env_prefix,
+        quote_shell_argument(wrapped_command)
+    )
+}
+
+fn build_env_unset_arguments() -> Vec<String> {
+    // drip scrubs credential environment variables when spawning the async
+    // tool process itself, so no extra unset arguments are needed here.
+    Vec::new()
+}
+
+pub fn assert_tmux_available() -> anyhow::Result<()> {
+    let output = std::process::Command::new("tmux").arg("-V").output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("tmux is required for BASH_ASYNC but is not available on this machine.");
+    }
+
+    Ok(())
+}
+
+pub fn tmux_session_exists(session_name: &str) -> bool {
+    std::process::Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+pub fn run_tmux_command(process_args: &[&str], failure_message: &str) -> anyhow::Result<String> {
+    let output = std::process::Command::new("tmux").args(process_args).output()?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_detail = build_combined_output(&stdout, &stderr);
+
+        if !error_detail.is_empty() {
+            anyhow::bail!("{}\n{}", failure_message, error_detail);
+        }
+
+        anyhow::bail!("{}", failure_message);
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub struct StartTmuxSessionArgs<'a> {
+    pub absolute_cwd: &'a str,
+    pub command: &'a str,
+    pub log_path: &'a str,
+    pub session_name: &'a str,
+}
+
+pub fn start_tmux_session(args: StartTmuxSessionArgs) -> anyhow::Result<()> {
+    let wrapped_command = build_tmux_wrapped_command(&args.command, &args.log_path);
+
+    let result = (|| -> anyhow::Result<()> {
+        run_tmux_command(
+            &[
+                "new-session",
+                "-d",
+                "-s",
+                args.session_name,
+                "-c",
+                args.absolute_cwd,
+            ],
+            &format!("Unable to start tmux session \"{}\".", args.session_name),
+        )?;
+        run_tmux_command(
+            &[
+                "set-window-option",
+                "-t",
+                args.session_name,
+                "remain-on-exit",
+                "on",
+            ],
+            &format!(
+                "Unable to configure tmux session \"{}\".",
+                args.session_name
+            ),
+        )?;
+        run_tmux_command(
+            &[
+                "send-keys",
+                "-t",
+                args.session_name,
+                &build_tmux_pane_command(&wrapped_command),
+                "Enter",
+            ],
+            &format!(
+                "Unable to send the bash command to tmux session \"{}\".",
+                args.session_name
+            ),
+        )?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = kill_tmux_session(args.session_name);
+    }
+
+    result
+}
+
+pub fn kill_tmux_session(session_name: &str) -> anyhow::Result<()> {
+    if !tmux_session_exists(session_name) {
+        return Ok(());
+    }
+
+    std::process::Command::new("tmux")
+        .args(["kill-session", "-t", session_name])
+        .output()?;
+
+    Ok(())
+}
+
+pub fn wait_for_tmux_session_exit(session_name: &str) -> anyhow::Result<Option<i32>> {
+    let pane_target = session_name;
+
+    loop {
+        let output = std::process::Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                pane_target,
+                "#{pane_dead} #{pane_dead_status}",
+            ])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+        if !output.status.success() {
+            if !tmux_session_exists(session_name) {
+                return Ok(None);
+            }
+
+            anyhow::bail!("Unable to inspect tmux session \"{}\".", session_name);
+        }
+
+        let mut parts = stdout.trim().split_whitespace();
+        let dead_value = parts.next().unwrap_or("");
+        let exit_code_value = parts.next().unwrap_or("");
+
+        if dead_value == "1" {
+            let exit_code = exit_code_value.parse::<i32>().ok();
+
+            return Ok(exit_code);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(TMUX_POLL_INTERVAL_MS));
+    }
+}
+
+#[cfg(test)]
+mod tmux_helper_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_tmux_session_name_strips_unsafe_characters() {
+        assert_eq!(
+            sanitize_tmux_session_name("  My Session! Name  "),
+            "My-Session-Name"
+        );
+        assert_eq!(sanitize_tmux_session_name("---abc---"), "abc");
+        assert_eq!(sanitize_tmux_session_name("a_b-c"), "a_b-c");
+    }
+
+    #[test]
+    fn create_session_name_uses_requested_name_when_given() {
+        assert_eq!(
+            create_session_name("echo hi", Some("my session")),
+            "my-session"
+        );
+    }
+
+    #[test]
+    fn create_session_name_generates_drip_prefixed_name() {
+        let name = create_session_name("echo hi", None);
+
+        assert!(name.starts_with("drip-"), "unexpected name: {}", name);
+        assert!(name.ends_with("-echo-hi") || name.contains("echo-hi"));
+    }
+
+    #[test]
+    fn build_tmux_wrapped_command_quotes_the_log_path() {
+        let wrapped = build_tmux_wrapped_command("echo hi", "/tmp/some log.txt");
+
+        assert!(wrapped.contains("set -o pipefail"));
+        assert!(wrapped.contains("(echo hi) 2>&1 | tee -a '/tmp/some log.txt'"));
+        assert!(wrapped.contains("exit ${PIPESTATUS[0]}"));
+    }
+
+    #[test]
+    fn build_tmux_pane_command_wraps_in_bash_with_exit() {
+        let pane = build_tmux_pane_command("echo hi");
+
+        assert!(pane.starts_with("bash -c 'echo hi'; exit"), "unexpected: {}", pane);
+    }
+
+    #[test]
+    fn quote_shell_argument_wraps_in_single_quotes() {
+        assert_eq!(quote_shell_argument("hello"), "'hello'");
+        assert_eq!(
+            quote_shell_argument("it's here"),
+            "'it'\\''s here'"
+        );
     }
 }

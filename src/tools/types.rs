@@ -72,7 +72,8 @@ pub enum ChatAsyncToolJobStatus {
     Running,
 }
 
-// export type ChatAsyncToolJob = { ... } — camelCase wire format.
+// export type ChatAsyncToolJob = { command?, cwd, error?, exitCode?: number | null,
+//   finishedAt?, id, logPath, startedAt, status, title, toolName } — camelCase wire format.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAsyncToolJob {
@@ -81,50 +82,49 @@ pub struct ChatAsyncToolJob {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `exitCode?: number | null` — absent while running, null when the
+    /// process ended without a status, a number otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<Option<i64>>,
+    pub exit_code: Option<Option<i32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
     pub id: String,
     pub log_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mutates_workspace: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tmux_session_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
+    pub started_at: String,
+    pub status: ChatAsyncToolJobStatus,
+    pub title: String,
+    pub tool_name: String,
 }
 
 impl ChatAsyncToolJob {
-    // cloneJob(job) spread — the Clone impl covers the TS helper.
+    /// TS cloneJob(job) — a structural copy.
     pub fn clone_job(&self) -> Self {
         self.clone()
     }
 
     pub fn is_running(&self) -> bool {
-        self.finished_at.is_none() && self.error.is_none() && self.exit_code.is_none()
+        self.status == ChatAsyncToolJobStatus::Running
     }
 }
 
-// export type ChatAsyncToolTailResult = { isRunning, lines: string[] }
+// export type ChatAsyncToolTailResult = { job, lines, output }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAsyncToolTailResult {
-    pub is_running: bool,
-    pub lines: Vec<String>,
+    pub job: ChatAsyncToolJob,
+    pub lines: i64,
+    pub output: String,
 }
 
-// export type ChatAsyncToolWaitResult = { job, logText }
+// export type ChatAsyncToolWaitResult = { completed, job }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatAsyncToolWaitResult {
+    pub completed: bool,
     pub job: ChatAsyncToolJob,
-    pub log_text: String,
 }
 
-// export type ChatAsyncToolLogger = { append, jobId, line, log, logPath }
+// export type ChatAsyncToolLogger = { append(text), jobId, line(text), logPath, log(text) }
 pub trait ChatAsyncToolLogger: Send + Sync {
     fn append(&self, text: &str) -> anyhow::Result<()>;
     fn line(&self, text: &str) -> anyhow::Result<()>;
@@ -148,51 +148,41 @@ pub struct ChatTmuxSession {
     pub tool_name: String,
 }
 
-// export type ChatTmuxSessionRuntime = {
-//   getSession, registerSession, removeSession, resolveSessionNameToJobId }
+// export type ChatTmuxSessionRuntime = { getSession, listSessions, registerSession }
 pub trait ChatTmuxSessionRuntime: Send + Sync {
     fn get_session(&self, session_name: &str) -> Option<ChatTmuxSession>;
+    fn list_sessions(&self) -> Vec<ChatTmuxSession>;
     fn register_session(&self, session: ChatTmuxSession);
-    fn remove_session(&self, session_name: &str) -> Option<ChatTmuxSession>;
-    fn resolve_session_name_to_job_id(&self, session_name: &str) -> Option<String>;
 }
 
-// export type ChatAsyncToolCommandRequest = {
-//   command, cwd, displayInput, input, mutatesWorkspace?, title, toolName }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+// export type ChatAsyncToolCommandRequest = { args?, command, cwd?, env?, title?, toolName }
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChatAsyncToolCommandRequest {
+    pub args: Option<Vec<String>>,
     pub command: String,
-    pub cwd: String,
-    pub display_input: String,
-    pub input: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mutates_workspace: Option<bool>,
-    pub title: String,
+    pub cwd: Option<String>,
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    pub title: Option<String>,
     pub tool_name: String,
 }
 
-// export type ChatAsyncToolTaskRequest = {
-//   run(logger), title, toolName }
+// export type ChatAsyncToolTaskRequest = { cwd?, run(logger), title?, toolName }
 pub struct ChatAsyncToolTaskRequest {
-    pub title: String,
+    pub cwd: Option<String>,
+    pub run: Box<dyn FnOnce(&dyn ChatAsyncToolLogger) -> anyhow::Result<()> + Send>,
+    pub title: Option<String>,
     pub tool_name: String,
-    // run: (logger) => Promise<void>
-    pub run: Box<dyn FnOnce(Box<dyn ChatAsyncToolLogger>) -> anyhow::Result<()> + Send>,
 }
 
-// export type ChatAsyncToolRuntime = {
-//   startTask, startCommand, getJob, removeJob, tail, wait }
+// export type ChatAsyncToolRuntime = { getJob, startCommand, startTask, tailJob, waitForJob }
 pub trait ChatAsyncToolRuntime: Send + Sync {
-    fn start_task(&self, request: ChatAsyncToolTaskRequest) -> anyhow::Result<ChatAsyncToolJob>;
-    fn start_command(
-        &self,
-        request: ChatAsyncToolCommandRequest,
-    ) -> anyhow::Result<ChatAsyncToolJob>;
     fn get_job(&self, job_id: &str) -> Option<ChatAsyncToolJob>;
-    fn remove_job(&self, job_id: &str) -> Option<ChatAsyncToolJob>;
-    fn tail(&self, job_id: &str, lines: usize) -> ChatAsyncToolTailResult;
-    fn wait(&self, job_id: &str, tail_lines: usize, timeout_ms: u64) -> ChatAsyncToolWaitResult;
+    fn start_command(&self, request: ChatAsyncToolCommandRequest) -> anyhow::Result<ChatAsyncToolJob>;
+    fn start_task(&self, request: ChatAsyncToolTaskRequest) -> anyhow::Result<ChatAsyncToolJob>;
+    /// tailJob(jobId, lines = 60)
+    fn tail_job(&self, job_id: &str, lines: Option<i64>) -> anyhow::Result<ChatAsyncToolTailResult>;
+    /// waitForJob(jobId, timeoutMs = 60_000)
+    fn wait_for_job(&self, job_id: &str, timeout_ms: Option<i64>) -> anyhow::Result<ChatAsyncToolWaitResult>;
 }
 
 // export type ChatToolRuntimeServices = { asyncJobs, tmuxSessions }
@@ -407,10 +397,10 @@ mod tests {
             finished_at: None,
             id: "job-1".to_string(),
             log_path: "/tmp/logs/job-1.log".to_string(),
-            mutates_workspace: None,
-            title: Some("demo".to_string()),
-            tmux_session_name: None,
-            tool_name: Some("DEMO_ASYNC".to_string()),
+            started_at: "2026-09-01T00:00:00.000Z".to_string(),
+            status: ChatAsyncToolJobStatus::Running,
+            title: "demo".to_string(),
+            tool_name: "DEMO_ASYNC".to_string(),
         };
 
         let encoded = serde_json::to_value(&job).unwrap();
@@ -420,6 +410,8 @@ mod tests {
                 "cwd": "/tmp/project",
                 "id": "job-1",
                 "logPath": "/tmp/logs/job-1.log",
+                "startedAt": "2026-09-01T00:00:00.000Z",
+                "status": "running",
                 "title": "demo",
                 "toolName": "DEMO_ASYNC"
             })
@@ -621,11 +613,8 @@ mod tests {
     struct StubAsyncJobs;
 
     impl ChatAsyncToolRuntime for StubAsyncJobs {
-        fn start_task(
-            &self,
-            _request: ChatAsyncToolTaskRequest,
-        ) -> anyhow::Result<ChatAsyncToolJob> {
-            anyhow::bail!("stub async runtime has no jobs")
+        fn get_job(&self, _job_id: &str) -> Option<ChatAsyncToolJob> {
+            None
         }
 
         fn start_command(
@@ -635,28 +624,19 @@ mod tests {
             anyhow::bail!("stub async runtime has no jobs")
         }
 
-        fn get_job(&self, _job_id: &str) -> Option<ChatAsyncToolJob> {
-            None
-        }
-
-        fn remove_job(&self, _job_id: &str) -> Option<ChatAsyncToolJob> {
-            None
-        }
-
-        fn tail(&self, _job_id: &str, _lines: usize) -> ChatAsyncToolTailResult {
-            ChatAsyncToolTailResult {
-                is_running: false,
-                lines: vec![],
-            }
-        }
-
-        fn wait(
+        fn start_task(
             &self,
-            _job_id: &str,
-            _tail_lines: usize,
-            _timeout_ms: u64,
-        ) -> ChatAsyncToolWaitResult {
-            unreachable!("stub async runtime has no jobs")
+            _request: ChatAsyncToolTaskRequest,
+        ) -> anyhow::Result<ChatAsyncToolJob> {
+            anyhow::bail!("stub async runtime has no jobs")
+        }
+
+        fn tail_job(&self, _job_id: &str, _lines: Option<i64>) -> anyhow::Result<ChatAsyncToolTailResult> {
+            anyhow::bail!("stub async runtime has no jobs")
+        }
+
+        fn wait_for_job(&self, _job_id: &str, _timeout_ms: Option<i64>) -> anyhow::Result<ChatAsyncToolWaitResult> {
+            anyhow::bail!("stub async runtime has no jobs")
         }
     }
 
@@ -667,14 +647,10 @@ mod tests {
             None
         }
 
+        fn list_sessions(&self) -> Vec<ChatTmuxSession> {
+            Vec::new()
+        }
+
         fn register_session(&self, _session: ChatTmuxSession) {}
-
-        fn remove_session(&self, _session_name: &str) -> Option<ChatTmuxSession> {
-            None
-        }
-
-        fn resolve_session_name_to_job_id(&self, _session_name: &str) -> Option<String> {
-            None
-        }
     }
 }

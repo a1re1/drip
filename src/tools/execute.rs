@@ -135,16 +135,12 @@ fn serialize_blocks(blocks: &[ChatMessageBlock]) -> String {
     block_texts.join("\n\n")
 }
 
-// ChatAsyncToolJob has no `status` field in the Rust port (TS derives it from
-// the finishedAt/error/exitCode trio); the equivalent is is_running() plus an
-// error check, matching how async_jobs.rs classifies jobs.
+// `Status: ${job.status}` — the job's wire status string.
 fn async_job_status_text(job: &ChatAsyncToolJob) -> &'static str {
-    if job.is_running() {
-        "running"
-    } else if job.error.is_some() {
-        "failed"
-    } else {
-        "completed"
+    match job.status {
+        crate::tools::types::ChatAsyncToolJobStatus::Completed => "completed",
+        crate::tools::types::ChatAsyncToolJobStatus::Failed => "failed",
+        crate::tools::types::ChatAsyncToolJobStatus::Running => "running",
     }
 }
 
@@ -367,12 +363,10 @@ pub fn execute_tool_call(args: ToolExecutionContext<'_>) -> ExecutedToolCall {
 // TS derives the tool-call block status as `result.status ?? result.asyncJob?.status`;
 // the job's status string maps onto ToolCallStatus directly.
 fn async_job_status_to_tool_call_status(job: &ChatAsyncToolJob) -> ToolCallStatus {
-    if job.is_running() {
-        ToolCallStatus::Running
-    } else if job.error.is_some() {
-        ToolCallStatus::Failed
-    } else {
-        ToolCallStatus::Completed
+    match job.status {
+        crate::tools::types::ChatAsyncToolJobStatus::Running => ToolCallStatus::Running,
+        crate::tools::types::ChatAsyncToolJobStatus::Failed => ToolCallStatus::Failed,
+        crate::tools::types::ChatAsyncToolJobStatus::Completed => ToolCallStatus::Completed,
     }
 }
 

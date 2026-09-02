@@ -68,8 +68,9 @@ either a platform difference or an lci feature that only makes sense in Bun.
 - **`state.json` key order** follows the Rust struct; lci writes keys in
   object-mutation order. The files are structurally identical (`--state
   --json --full` output differs in key order only).
-- **`transcript.jsonl` entries** put `"type"` first; lci puts it last.
-  Structurally identical; every consumer parses the JSON.
+- **`--migrate-from-lci`** was dogfooded against a live `~/.lci` (446 MB,
+  30 sessions, 9928 files): `--list`, `--state`, `--inspect` and `--skills`
+  output from the migrated `~/.drip` is byte-identical to lci's.
 - **Error text from the runtime** (a malformed tool-call JSON, a failed
   `kill`) uses Rust's messages rather than Bun's `SyntaxError: …` /
   `kill ESRCH` strings.

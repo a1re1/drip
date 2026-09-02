@@ -45,6 +45,8 @@ type MockReply = {
   content?: string;
   toolCalls?: MockToolCall[];
   when?: { contains: string };
+  /** Hold the reply this long before answering — lets a scenario steer (--send) or --stop a live run. */
+  delayMs?: number;
   status?: number;
   error?: Record<string, unknown>;
 };
@@ -362,6 +364,7 @@ const server = Bun.serve({
     }
 
     const reply = pickReply(raw);
+    if (reply.delayMs) await new Promise((resolve) => setTimeout(resolve, reply.delayMs));
     const parsedBody = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
     const model = typeof parsedBody.model === "string" ? parsedBody.model : "mock-model";
     const stream = parsedBody.stream === true;

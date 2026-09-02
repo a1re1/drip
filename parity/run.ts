@@ -48,7 +48,8 @@ type Side = {
 type Scenario = {
   name: string;
   dir: string;
-  args: string[];
+  /** One CLI invocation per step (args.json = one step; steps.json = several, run in order in the same project/home). */
+  steps: string[][];
   responsesPath: string;
   fixtureDir: string | null;
   env: Record<string, string>;
@@ -98,14 +99,17 @@ function discoverScenarios(only: string | null): Scenario[] {
     if (only && name !== only) continue;
     const dir = join(SCENARIOS_DIR, name);
     const argsPath = join(dir, "args.json");
-    if (!existsSync(argsPath)) continue;
-    const args = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    const stepsPath = join(dir, "steps.json");
+    if (!existsSync(argsPath) && !existsSync(stepsPath)) continue;
+    const steps = existsSync(stepsPath)
+      ? (JSON.parse(readFileSync(stepsPath, "utf8")) as string[][])
+      : [JSON.parse(readFileSync(argsPath, "utf8")) as string[]];
     const responsesPath = join(dir, "responses.jsonl");
     if (!existsSync(responsesPath)) writeFileSync(responsesPath, "");
     const fixtureDir = existsSync(join(dir, "fixture")) ? join(dir, "fixture") : null;
     const envPath = join(dir, "env.json");
     const env = existsSync(envPath) ? (JSON.parse(readFileSync(envPath, "utf8")) as Record<string, string>) : {};
-    scenarios.push({ name, dir, args, responsesPath, fixtureDir, env });
+    scenarios.push({ name, dir, steps, responsesPath, fixtureDir, env });
   }
   return scenarios;
 }
@@ -228,7 +232,7 @@ function startMock(root: string, responsesPath: string): Promise<MockServer> {
 
 type Capture = { stdout: string; stderr: string; exit: string };
 
-function runCli(side: Side, scenario: Scenario, home: string, project: string): Promise<Capture> {
+function runCli(side: Side, scenario: Scenario, args: string[], home: string, project: string): Promise<Capture> {
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   delete env.LCI_HOME;
   delete env.LCI_PROJECT_DIR;
@@ -241,7 +245,7 @@ function runCli(side: Side, scenario: Scenario, home: string, project: string): 
   Object.assign(env, scenario.env);
   const [command, ...prefix] = side.command;
   return new Promise((resolveCapture) => {
-    const child = spawn(command!, [...prefix, ...scenario.args], { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command!, [...prefix, ...args], { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -281,6 +285,8 @@ function readIfExists(path: string): string | null {
 function sqliteRows(dbPath: string, table: string): string[] {
   const db = new Database(dbPath, { readonly: true });
   try {
+    // A detached run may still be closing its connection when we read.
+    db.run("PRAGMA busy_timeout = 5000");
     const exists = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
     if (!exists) return [];
     return (db.query(`SELECT * FROM ${table}`).all() as Array<Record<string, unknown>>).map((row) =>
@@ -396,7 +402,23 @@ async function runSide(side: Side, scenario: Scenario, keep: boolean): Promise<{
     prepareProject(project, scenario);
     mock = await startMock(root, scenario.responsesPath);
     writeMockConfig(home, mock.port);
-    const capture = await runCli(side, scenario, home, project);
+    // Steps run back to back; their captures are joined with a marker so a
+    // multi-invocation scenario (run, then --state; --detach, then --wait)
+    // diffs as one artifact per stream.
+    const captures: Capture[] = [];
+    for (const args of scenario.steps) {
+      // ["@sleep", "<ms>"]: a pause between steps (a --detach child needs a
+      // moment to take its lease before --wait can attach to it).
+      if (args[0] === "@sleep") {
+        await new Promise((resolve) => setTimeout(resolve, Number(args[1] ?? "0")));
+        captures.push({ stdout: "", stderr: "", exit: "sleep" });
+        continue;
+      }
+      captures.push(await runCli(side, scenario, args, home, project));
+    }
+    const joined = (pick: (c: Capture) => string) =>
+      captures.length === 1 ? pick(captures[0]!) : captures.map((c, i) => `=== step ${i + 1} ===\n${pick(c)}`).join("");
+    const capture: Capture = { stdout: joined((c) => c.stdout), stderr: joined((c) => c.stderr), exit: captures.map((c) => c.exit).join(",") };
     const artifacts = collectArtifacts(capture, home, project, mock);
     if (keep) {
       writeFileSync(join(root, "stdout.txt"), capture.stdout);

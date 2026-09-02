@@ -1,0 +1,1 @@
+[["--detach","--json","--max-iterations","3","Say hello"],["@sleep","2500"],["--wait","--json","--timeout-secs","60"],["--result","--json"],["--list","--json"]]

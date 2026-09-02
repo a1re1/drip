@@ -1,0 +1,8 @@
+{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["read hello","update hello"]}}]}
+{"content":"Planned two tasks."}
+{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}}]}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Read hello.txt."}}]}
+{"toolCalls":[{"name":"PATCH","arguments":{"path":"hello.txt","content":"Hello again.\n"}}]}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Updated hello.txt."}}]}
+{"content":"Both tasks are done."}
+{"toolCalls":[{"name":"respond","arguments":{"text":"Hello from mock"}}]}

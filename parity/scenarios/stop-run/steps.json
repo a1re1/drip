@@ -1,0 +1,1 @@
+[["--detach","--json","--max-iterations","6","Do one thing in fixture/"],["@sleep","800"],["--stop"],["@sleep","2500"],["--result","--json"],["--list","--json"],["--stop"]]

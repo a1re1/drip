@@ -1,0 +1,4 @@
+{"delayMs":4000,"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["do the thing"]}}]}
+{"content":"Planned one task."}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Done."}}]}
+{"content":"Finished."}

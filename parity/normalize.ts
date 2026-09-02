@@ -88,7 +88,9 @@ const DURATION_KEYS = new Set([
   "age_ms",
   "synthesisMs",
   "totalMs",
-  "unitsMs"
+  "unitsMs",
+  "totalDurationMs",
+  "stopLatencyMs"
 ]);
 
 const UUID_PATTERN = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
@@ -197,12 +199,17 @@ function identityRules(): ReplaceRule[] {
     { pattern: /\b\d+(?:\.\d+)?(?:ms|µs)\b/g, replacement: "<MS>" },
     // Duration fields inside JSON lines printed to stdout (--json NDJSON events).
     {
-      pattern: /"(durationMs|duration_ms|latencyMs|latency_ms|elapsedMs|elapsed_ms|wallMs|wall_ms|waitMs|wait_ms|ageMs|age_ms|synthesisMs|totalMs|unitsMs)":\s*\d+(?:\.\d+)?/g,
+      pattern: /"(durationMs|duration_ms|latencyMs|latency_ms|elapsedMs|elapsed_ms|wallMs|wall_ms|waitMs|wait_ms|ageMs|age_ms|synthesisMs|totalMs|unitsMs|totalDurationMs|stopLatencyMs)":\s*\d+(?:\.\d+)?/g,
       replacement: '"$1":<MS>'
     },
     // --review progress on stderr rounds wall-clock to seconds ("in 4s — 13s total").
     { pattern: /\b(in|elapsed|total|done in) (\d+)s\b/g, replacement: "$1 <S>s" },
     { pattern: /— (\d+)s total\b/g, replacement: "— <S>s total" },
+    // Process ids (--detach's started line, --list's running rows, lease files).
+    { pattern: /"pid":\s*\d+/g, replacement: '"pid":<PID>' },
+    { pattern: /\(pid \d+\)/g, replacement: "(pid <PID>)" },
+    // --inspect's per-tool in-tool time is wall-clock; a 0ms tool call omits it entirely.
+    { pattern: /, \d+s in-tool/g, replacement: "" },
     { pattern: /\((\d+)s elapsed\)/g, replacement: "(<S>s elapsed)" },
     // Session-id prefixes (resumeIdPrefix, `--resume 91c1c835`): 8 lowercase hex.
     { pattern: /\b[0-9a-f]{8}\b/g, replacement: "<ID8>" },

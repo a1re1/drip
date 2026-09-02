@@ -23,6 +23,7 @@ use crate::cli::transcript::{read_transcript, TranscriptEntry};
 use crate::core::types::{HarnessEventType, HarnessRunUsage, HarnessState};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectToolStat {
 	pub calls: i64,
 	pub failures: i64,
@@ -30,12 +31,14 @@ pub struct InspectToolStat {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectOperatorMessages {
 	pub adoption_latencies_ms: Vec<i64>,
 	pub count: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectRateLimited {
 	pub count: i64,
 	#[serde(serialize_with = "crate::core::types::serialize_js_number")]
@@ -48,6 +51,7 @@ pub struct InspectRateLimited {
 // `wallSeconds` are string|null / number|null in TS — None serializes as
 // null, never skipped.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectGoalReport {
 	pub ended_at: Option<String>,
 	pub event_counts: IndexMap<String, i64>,
@@ -62,6 +66,7 @@ pub struct InspectGoalReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectLastRun {
 	pub reason: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +78,7 @@ pub struct InspectLastRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectVerification {
 	pub at_iteration: i64,
 	pub command: String,
@@ -80,6 +86,7 @@ pub struct InspectVerification {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectReport {
 	pub goals: Vec<InspectGoalReport>,
 	#[serde(skip_serializing_if = "Option::is_none")]

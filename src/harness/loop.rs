@@ -3412,7 +3412,7 @@ impl HarnessRun {
                     let spill_path = spill_tool_output(&state_path.to_string_lossy(), self.state.r#loop as u32, &call_id, &execution.tool_content);
                     if let Some(spill_path) = spill_path {
                         tool_content = format!(
-                            "{}\n\n[harness] {} chars total — the full output is saved at {}; READ or GREP it instead of re-running the command.",
+                            "{}\n\n[harness] {} chars total — the full output is saved at {}; READ or GREP that exact absolute path (it is outside the workspace) instead of re-running the command.",
                             tool_content,
                             format_thousands(execution.tool_content.chars().count()),
                             spill_path

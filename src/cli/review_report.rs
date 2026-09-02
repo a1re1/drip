@@ -66,6 +66,13 @@ fn file_header_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?m)^###\s*File:").unwrap())
 }
 
+/// The per-file header with its path captured — the split regex in
+/// review-report.ts:602. `file_header_re` above is the plain line-finder.
+fn file_header_path_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?m)^###\s*File:\s*(.+?)\s*$").unwrap())
+}
+
 fn section_start_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?m)^## Confidence Score[^\n]*\n").unwrap())
@@ -908,8 +915,7 @@ pub fn unit_review_task_title(unit: &ReviewUnit) -> String {
 // to null — the caller decides how to represent the gap.
 pub fn split_unit_report(report: &str, paths: &[String]) -> Vec<(String, Option<String>)> {
     let mut sections: Vec<(String, Option<String>)> = paths.iter().map(|path| (path.clone(), None)).collect();
-    let header = file_header_re();
-    let matches: Vec<(usize, String)> = header
+    let matches: Vec<(usize, String)> = file_header_path_re()
         .captures_iter(report)
         .map(|caps| {
             let whole = caps.get(0).expect("header match");
@@ -1293,6 +1299,57 @@ mod tests {
             paths: vec!["src/big.rs".into()],
             part: None,
         }
+    }
+
+    fn two_file_report() -> String {
+        [
+            "### File: `src/cli/roles.ts`",
+            "**Rating**: ✅",
+            "**Issues**:",
+            "(none)",
+            "",
+            "### File: test/cli-roles.test.ts",
+            "**Rating**: ⚠️",
+            "**Issues**:",
+            "- P2 (line 4): the new assertion does not pin the changed default",
+        ]
+        .join("\n")
+    }
+
+    fn section<'a>(sections: &'a [(String, Option<String>)], path: &str) -> Option<&'a str> {
+        sections.iter().find(|(bound, _)| bound == path).and_then(|(_, section)| section.as_deref())
+    }
+
+    #[test]
+    fn split_unit_report_returns_each_paths_own_section_tolerating_backticks() {
+        let paths = ["src/cli/roles.ts".to_string(), "test/cli-roles.test.ts".to_string()];
+        let sections = split_unit_report(&two_file_report(), &paths);
+
+        let roles = section(&sections, "src/cli/roles.ts").expect("roles section");
+        assert!(roles.contains("**Rating**: ✅") && !roles.contains("P2"));
+        let parsed = parse_file_report(section(&sections, "test/cli-roles.test.ts").expect("test section"));
+        assert_eq!((parsed.p2, parsed.rating.as_deref()), (1, Some("⚠️")));
+    }
+
+    #[test]
+    fn split_unit_report_refuses_an_ambiguous_bare_basename_heading() {
+        let paths = ["src/a.ts".to_string(), "test/a.ts".to_string()];
+        let sections = split_unit_report("### File: a.ts\n**Rating**: ✅", &paths);
+        assert!(section(&sections, "src/a.ts").is_none() && section(&sections, "test/a.ts").is_none());
+
+        // Unambiguous suffix matches still bind, and only at a segment boundary.
+        let paths = ["src/cli/a.ts".to_string(), "test/a.test.ts".to_string()];
+        assert!(section(&split_unit_report("### File: cli/a.ts\n**Rating**: ✅", &paths), "src/cli/a.ts").unwrap().contains("✅"));
+        let paths = ["src/ba.ts".to_string(), "src/a.ts".to_string()];
+        assert!(section(&split_unit_report("### File: ba.ts\n**Rating**: ✅", &paths), "src/a.ts").is_none());
+    }
+
+    #[test]
+    fn split_unit_report_maps_a_skipped_path_to_none() {
+        let paths = ["src/cli/roles.ts".to_string(), "test/cli-roles.test.ts".to_string(), "src/cli/config.ts".to_string()];
+        let sections = split_unit_report(&two_file_report(), &paths);
+        assert!(section(&sections, "src/cli/config.ts").is_none());
+        assert!(section(&sections, "src/cli/roles.ts").is_some());
     }
 
     #[test]

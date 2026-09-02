@@ -275,7 +275,11 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         });
     }
 
-    let heartbeat_stop = Arc::new(AtomicBool::new(false));
+    // (Mutex<bool>, Condvar): the run end wakes the heartbeat immediately
+    // instead of waiting out its sleep — a 250ms tick was ~250ms of pure
+    // overhead on every short run (review children, DELEGATE calls).
+    let heartbeat_stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)> =
+        Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let mut heartbeat_thread: Option<std::thread::JoinHandle<()>> = None;
 
     if let Some(lease_path) = &args.lease_path {
@@ -285,12 +289,17 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         let lease_path = lease_path.clone();
         let stop = heartbeat_stop.clone();
         heartbeat_thread = Some(std::thread::spawn(move || {
-            let mut elapsed_ms: u64 = 0;
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                elapsed_ms += 250;
-                if elapsed_ms >= 30_000 {
-                    elapsed_ms = 0;
+            let (lock, condvar) = &*stop;
+            let mut stopped = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            loop {
+                let (guard, timeout) = condvar
+                    .wait_timeout(stopped, std::time::Duration::from_millis(30_000))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                stopped = guard;
+                if *stopped {
+                    break;
+                }
+                if timeout.timed_out() {
                     // A failed heartbeat must never kill the run.
                     let _ = write_lease(&lease_path, &chrono::Utc::now);
                 }
@@ -396,7 +405,11 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
     }
 
     // finally { clearInterval(heartbeatTimer); clearLease(leasePath) }
-    heartbeat_stop.store(true, Ordering::Relaxed);
+    {
+        let (lock, condvar) = &*heartbeat_stop;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        condvar.notify_all();
+    }
     if let Some(handle) = heartbeat_thread {
         let _ = handle.join();
     }

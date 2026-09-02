@@ -1,0 +1,6 @@
+{"toolCalls": [{"name": "plan_tasks", "arguments": {"tasks": ["write notes"]}}]}
+{"content": "Planned."}
+{"toolCalls": [{"name": "BASH", "arguments": {"command": "cat > NOTES.md <<'EOF'\n# Notes\nEOF"}}]}
+{"toolCalls": [{"name": "BASH", "arguments": {"command": "test -s NOTES.md && grep -c Notes NOTES.md"}}]}
+{"toolCalls": [{"name": "finish_task", "arguments": {"status": "completed", "summary": "Wrote NOTES.md; verification prints 1."}}]}
+{"content": "Wrote NOTES.md; verification prints 1."}

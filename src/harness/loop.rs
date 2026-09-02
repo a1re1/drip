@@ -662,7 +662,27 @@ pub fn strip_heredoc_bodies(command: &str) -> String {
     kept.join("\n")
 }
 
+/// Whitespace-collapsed, trimmed text — the shape goal/command containment is checked in.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A goal contract usually names its own verification ("Verification: test -s
+/// docs/TOOLS.md && grep -c '^## ' docs/TOOLS.md prints 8"), and that command
+/// is rarely a test runner the VERIFICATION_COMMAND_PATTERN knows. A BASH
+/// command the goal text contains verbatim (whitespace-collapsed; at least one
+/// space and 8 characters, so `ls` does not qualify) is the goal's declared
+/// verification and counts like one.
+pub fn is_goal_declared_verification(goal: &str, command: &str) -> bool {
+    let collapsed = collapse_whitespace(&strip_heredoc_bodies(command));
+    collapsed.chars().count() >= 8 && collapsed.contains(' ') && collapse_whitespace(goal).contains(&collapsed)
+}
+
 pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<String> {
+    extract_verification_command_for_goal(tool_name, raw_input, "")
+}
+
+pub fn extract_verification_command_for_goal(tool_name: &str, raw_input: &str, goal: &str) -> Option<String> {
     // BASH_ASYNC is excluded: its "success" is the launch, not the tests — an
     // async test run would record as passed the moment it started.
     if tool_name != "BASH" && tool_name != "VERIFY" {
@@ -683,6 +703,8 @@ pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<
     }
 
     if verification_pattern_matches(&strip_heredoc_bodies(&command)) {
+        Some(command)
+    } else if !goal.is_empty() && is_goal_declared_verification(goal, &command) {
         Some(command)
     } else {
         None
@@ -801,7 +823,24 @@ mod loop_helpers_tests {
         assert_eq!(extract_bash_command("{"), None);
     }
 
-    // test/harness-feedback.test.ts "unnamed-path PATCH note"
+    // test/harness-verify-gate.test.ts "a command the goal names verbatim is its declared verification"
+    #[test]
+    fn goal_declared_commands_count_as_verification() {
+        let goal = "NEW FILE docs/TOOLS.md … Verification: test -s docs/TOOLS.md && grep -c \"^## \" docs/TOOLS.md prints 8. Scope: docs only.";
+        let declared = r#"test -s docs/TOOLS.md   && grep -c "^## " docs/TOOLS.md"#;
+        assert!(is_goal_declared_verification(goal, declared));
+        assert!(!is_goal_declared_verification(goal, "ls docs"));
+        assert!(!is_goal_declared_verification(goal, "grep -c \"^## \" other.md"));
+        let raw = serde_json::json!({ "command": declared }).to_string();
+        assert_eq!(extract_verification_command_for_goal("BASH", &raw, goal).as_deref(), Some(declared));
+        assert_eq!(extract_verification_command_for_goal("BASH", &raw, ""), None);
+        assert_eq!(extract_verification_command("BASH", &raw), None);
+        // VERIFY is the declaration itself — the goal heuristic never changes it.
+        assert_eq!(extract_verification_command_for_goal("VERIFY", r#"{"command":"ls"}"#, "").as_deref(), Some("ls"));
+        assert_eq!(extract_verification_command_for_goal("VERIFY", r#"{"command":""}"#, goal), None);
+    }
+
+
     #[test]
     fn extract_goal_paths_finds_explicit_workspace_paths() {
         let goal = "Definition of done: 1. NEW FILE drip/src/cli/headless_output.rs — port of src/cli/headless-output.ts.\n2. UPDATED `drip/src/cli/mod.rs` (see ./drip/PLAN.md). Verify with cargo test; v1.2.3 and README.md are not paths.";
@@ -3046,7 +3085,7 @@ impl HarnessRun {
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
 
-            let verification_command = extract_verification_command(&tool_name, &raw_input);
+            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal);
             if let Some(verification_command) = verification_command.clone() {
                 let truncated_command = truncate_text(&verification_command, 200);
                 let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);

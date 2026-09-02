@@ -1,6 +1,6 @@
 [package]
 name = "drip"
-version = "0.95.1"
+version = "0.96.0"
 edition = "2021"
 description = "drip — Rust port of lci, a headless-first coding agent harness"
 

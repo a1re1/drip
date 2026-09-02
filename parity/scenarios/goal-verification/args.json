@@ -1,0 +1,1 @@
+["--json","--max-iterations","6","Write NOTES.md with a Notes heading. Verification: test -s NOTES.md && grep -c Notes NOTES.md prints 1."]

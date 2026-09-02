@@ -1627,7 +1627,7 @@ pub fn apply_harness_op(
                         }
                         return HarnessOpOutcome {
                             text: format!(
-                                "harness: not accepted yet — this task edited the workspace but {problem}. Run the check now (VERIFY, CHECK, or the project's test/build command via BASH), then finish_task. If no check applies to this change, call finish_task again unchanged and it will be accepted."
+                                "harness: not accepted yet — this task edited the workspace but {problem}. Run the check now (VERIFY, CHECK, the verification command the goal names, or the project's test/build command via BASH), then finish_task. If no check applies to this change, call finish_task again unchanged and it will be accepted."
                             ),
                             state_changed: true,
                             task_finished: false,
@@ -2167,6 +2167,30 @@ mod apply_harness_op_tests {
         let accepted = apply_harness_op(&mut state, op, &ctx);
         assert!(accepted.task_finished);
         assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
+    /// The unverified-edit bounce names every accepted route, including the
+    /// verification command the goal itself declares.
+    #[test]
+    fn finish_task_bounce_names_the_goal_declared_verification_route() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op("plan_tasks", r#"{"tasks": ["write NOTES.md"]}"#).expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].activations = Some(1);
+        state.tasks[0].footprint = Some(vec!["edited via shell: cat > NOTES.md <<'EOF'".to_string()]);
+        state.workspace_edits = Some(1);
+        state.mutations_since_verification = Some(1);
+        let ctx = HarnessOpContext {
+            current_task_id: Some("task-1".to_string()),
+            ..HarnessOpContext::default()
+        };
+
+        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done"}"#).unwrap();
+        let bounced = apply_harness_op(&mut state, op, &ctx);
+        assert!(!bounced.task_finished);
+        assert!(bounced.text.contains("this task edited the workspace but"));
+        assert!(bounced.text.contains("the verification command the goal names"), "{}", bounced.text);
     }
 
     /// Planning-loop work: the run edited the workspace before the task was

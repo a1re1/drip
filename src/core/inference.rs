@@ -36,7 +36,7 @@ pub struct ResolvedModelRoute {
     pub profile_id: String,
     pub provider: String,
     pub reasoning_effort: Option<String>,
-    pub refresh_headers: Option<Arc<dyn Fn() -> Headers + Send + Sync>>,
+    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Headers, String> + Send + Sync>>,
     pub url: String,
 }
 
@@ -398,15 +398,18 @@ fn resolve_profile_route_visited(
 
     let fallback_route = resolve_fallback_route(profile, settings, env, profiles, visited);
 
-    let refresh_headers: Option<Arc<dyn Fn() -> Headers + Send + Sync>> = if uses_dynamic_credential {
+    let refresh_headers: Option<Arc<dyn Fn() -> Result<Headers, String> + Send + Sync>> = if uses_dynamic_credential {
         let profile = profile.clone();
         let settings = settings.clone();
         let env = env.cloned();
 
+        // A failing command is the call's error, exactly as the TS closure throws:
+        // a request silently sent without Authorization would surface as a 401
+        // with no hint of the real cause.
         Some(Arc::new(move || {
-            let token = resolve_profile_api_key(&profile, &settings, env.as_ref()).ok().flatten();
+            let token = resolve_profile_api_key(&profile, &settings, env.as_ref()).map_err(|error| error.to_string())?;
 
-            build_headers(&profile, token.as_deref())
+            Ok(build_headers(&profile, token.as_deref()))
         }))
     } else {
         None
@@ -578,6 +581,29 @@ mod tests {
             error.to_string(),
             "Inference profile \"mock\" references env var \"NOPE_KEY\" but it is not set."
         );
+    }
+
+    #[test]
+    fn cmd_credential_refresh_propagates_the_command_failure() {
+        // A unique command so the shared TTL cache holds no earlier success for it.
+        let profiles = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai","apiKeyRef":"cmd:echo refresh-ok-1"}]"#;
+        let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, profiles),
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "mock"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let resolved = resolve_inference_config(&settings, Some(&HashMap::new())).unwrap();
+        let refresh = resolved.refresh_headers.clone().expect("cmd credentials refresh per request");
+        assert!(refresh().unwrap().contains(&("Authorization".to_string(), "Bearer refresh-ok-1".to_string())));
+
+        let failing = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai","apiKeyRef":"cmd:false"}]"#;
+        let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, failing),
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "mock"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let error = resolve_inference_config(&settings, Some(&HashMap::new())).unwrap_err().to_string();
+        assert!(error.contains("Failed to run credential command \"false\""), "{error}");
     }
 
     #[test]

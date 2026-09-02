@@ -124,6 +124,12 @@ pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> 
     })
 }
 
+/// The first 12 characters of a git object id, or the whole string when git
+/// printed something shorter (a slice would panic on it).
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
 fn git_publish_pattern() -> &'static Regex {
     static PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     PATTERN.get_or_init(|| Regex::new(r"\bgit\s+(commit|push)\b|\bgh\s+pr\s+create\b").unwrap())
@@ -485,8 +491,8 @@ pub fn capture_workspace_baseline(cwd: &Path, session_id: &str) -> Option<Worksp
         ),
         note: format!(
             "The working tree had uncommitted changes at run start; a baseline snapshot is pinned at refs/drip/baseline/{session_id} ({}) — restorable with: git stash apply {}",
-            &sha[..12],
-            &sha[..12]
+            short_sha(&sha),
+            short_sha(&sha)
         ),
         sha,
     })

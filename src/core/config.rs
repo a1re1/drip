@@ -6,7 +6,7 @@
 // are embedded byte-exact from getDefaultWebSettingValues().
 #![allow(non_snake_case)]
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -252,10 +252,12 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
         .filter(|value| OPENAI_REASONING_EFFORT_VALUES.contains(value))
         .map(|value| value.to_string());
     let headers = match obj.get("headers") {
-        Some(Value::Object(map)) if !map.is_empty() => {
+        None => None,
+        Some(Value::Object(map)) => {
             let mut headers = IndexMap::new();
             for (key, value) in map {
-                if let Some(value) = value.as_str() {
+                // Blank values are dropped, not sent (TS normalizeHeaders).
+                if let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) {
                     headers.insert(key.clone(), value.to_string());
                 }
             }
@@ -265,14 +267,20 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
                 Some(headers)
             }
         }
-        _ => None,
+        Some(_) => bail!("Inference profile \"{id}\" must use an object for headers."),
     };
     Ok(InferenceModelProfile {
         id: id.to_string(),
         model: model.to_string(),
         provider: provider.to_string(),
-        base_url: str_field(obj, "baseUrl").map(|v| v.to_string()),
-        label: str_field(obj, "label").map(|v| v.to_string()),
+        base_url: str_field(obj, "baseUrl")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string()),
+        label: str_field(obj, "label")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_string()),
         max_context_tokens,
         api_key: str_field(obj, "apiKey")
             .map(str::trim)
@@ -1011,6 +1019,20 @@ mod tests {
     }
 
     // (b) Round-trip with maxContextTokens stored as string "64000".
+    #[test]
+    fn profile_fields_are_trimmed_and_blank_headers_dropped_like_the_ts() {
+        let json = r#"{"id":"p1","model":"m","provider":"openai","baseUrl":"  ","label":" L ","headers":{"X-A":" ","X-B":"b"},"apiKeyRef":"env:X"}"#;
+        let profile = normalize_model_profile(&serde_json::from_str(json).unwrap(), 0).unwrap();
+        assert_eq!(profile.base_url, None);
+        assert_eq!(profile.label.as_deref(), Some("L"));
+        assert_eq!(profile.headers.as_ref().unwrap().len(), 1);
+        assert_eq!(profile.headers.as_ref().unwrap().get("X-B").map(String::as_str), Some("b"));
+
+        let bad = r#"{"id":"p1","model":"m","provider":"openai","headers":"nope"}"#;
+        let error = normalize_model_profile(&serde_json::from_str(bad).unwrap(), 0).unwrap_err().to_string();
+        assert_eq!(error, "Inference profile \"p1\" must use an object for headers.");
+    }
+
     #[test]
     fn test_round_trip_string_max_context_tokens() {
         let profile_json = r#"[{"id":"p1","model":"m","provider":"openai","maxContextTokens":"64000","label":"L","apiKeyRef":"env:X"}]"#;

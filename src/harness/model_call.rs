@@ -200,7 +200,7 @@ pub struct ModelRoute {
     pub provider: Option<String>,
     pub reasoning_effort: Option<String>,
     /// Re-mints this route's headers before each request when the credential is dynamic (a "cmd:" token).
-    pub refresh_headers: Option<Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>>,
+    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     pub url: String,
 }
 
@@ -398,7 +398,7 @@ pub struct ModelCallerDeps {
     /// Provider of the base model route; "claude" switches to the native Anthropic API (prompt caching).
     pub provider: Option<String>,
     /// Re-mints the base route's headers before each request when the credential is dynamic (a "cmd:" token).
-    pub refresh_headers: Option<Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>>,
+    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     /// Stable key sent to providers that support prompt-cache routing hints (OpenAI: prompt_cache_key body field; xAI: x-grok-conv-id header).
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -683,16 +683,19 @@ impl ModelCaller {
         // A route with refreshHeaders re-mints its auth headers on every call so a
         // "cmd:" token that expires mid-run is transparently renewed; the command
         // result is TTL-cached, so calling this per request stays cheap.
-        let route_headers: Option<Vec<(String, String)>> = route.map(|route| {
-            let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-            let route_headers = match &route.refresh_headers {
-                Some(refresh_headers) => refresh_headers(),
-                None => route.headers.clone().unwrap_or_default(),
-            };
+        let route_headers: Option<Vec<(String, String)>> = match route {
+            Some(route) => {
+                let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+                let route_headers = match &route.refresh_headers {
+                    Some(refresh_headers) => refresh_headers().map_err(ModelCallError::Message)?,
+                    None => route.headers.clone().unwrap_or_default(),
+                };
 
-            headers.extend(route_headers);
-            headers
-        });
+                headers.extend(route_headers);
+                Some(headers)
+            }
+            None => None,
+        };
         // Text-only calls carry no route, so they resolve to the run's base
         // provider; a routed call uses that route's own provider.
         let provider = match route {
@@ -703,10 +706,13 @@ impl ModelCaller {
         let request_url = route
             .map(|route| route.url.clone())
             .unwrap_or_else(|| self.deps.url.clone());
-        let request_headers = route_headers.unwrap_or_else(|| match &self.deps.refresh_headers {
-            Some(refresh_headers) => refresh_headers(),
-            None => self.deps.headers.clone(),
-        });
+        let request_headers = match route_headers {
+            Some(headers) => headers,
+            None => match &self.deps.refresh_headers {
+                Some(refresh_headers) => refresh_headers().map_err(ModelCallError::Message)?,
+                None => self.deps.headers.clone(),
+            },
+        };
         let model = route
             .map(|route| route.model.clone())
             .unwrap_or_else(|| self.deps.model.clone());

@@ -630,7 +630,7 @@ pub struct SolidStateHarnessOptions {
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
     pub request_timeout_ms: Option<u64>,
-    pub refresh_headers: Option<Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>>,
+    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     pub repo_memory: Option<RepoMemoryConfig>,
     pub repo_memory_index: Option<String>,
     pub role_bindings: Option<HarnessRoleBindings>,

@@ -133,3 +133,12 @@ fn bash_async_definition_matches_the_ts_oracle() {
         "BASH_ASYNC definition drifted from tools/bash-tool.ts"
     );
 }
+
+#[test]
+fn patch_definition_matches_the_ts_oracle() {
+    assert_eq!(
+        drip::tools::builtin::patch::definition(),
+        apply_renames(&fixture_entry("PATCH")),
+        "PATCH definition drifted from tools/patch-tool.ts"
+    );
+}

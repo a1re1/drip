@@ -184,6 +184,7 @@ fn verification_pattern_matches(command: &str) -> bool {
 }
 
 /// One-shot corrective push for narration-only replies (exported for tests).
+pub const TRUNCATION_NUDGE_MESSAGE: &str = "harness: that reply was cut off at the provider's output-token limit before any tool call, so nothing was done. Reply again with far less text: one sentence at most, then the tool call. If you are writing a large file, split it into two or three PATCH calls of a few hundred lines each.";
 pub const NARRATION_NUDGE_MESSAGE: &str = "harness: that reply was narration, not work — it was recorded as a task note. Act through tool calls now (BASH/READ/PATCH/...), or call finish_task if the task is genuinely done; a second text-only reply ends this loop.";
 
 /// Verification runs kept in the state timeline (newest last).
@@ -634,6 +635,7 @@ pub struct LoopScope {
     pub made_progress: bool,
     pub verification_stuck_this_loop: bool,
     pub narration_nudge_used: bool,
+    pub truncation_nudge_used: bool,
     pub tool_calls_this_loop: i64,
     pub overflow_retried_this_loop: bool,
     pub concluded_naturally: bool,
@@ -1614,6 +1616,7 @@ impl HarnessRun {
             made_progress: false,
             verification_stuck_this_loop: false,
             narration_nudge_used: false,
+            truncation_nudge_used: false,
             tool_calls_this_loop: 0,
             overflow_retried_this_loop: false,
             concluded_naturally: false,
@@ -2118,6 +2121,60 @@ impl HarnessRun {
                 .and_then(|message| message.content.as_ref())
                 .unwrap_or(&Value::Null),
         );
+
+        let truncated = response
+            .choices
+            .as_ref()
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.finish_reason.as_deref())
+            == Some("length");
+
+        if tool_calls.is_empty() && truncated {
+            // The warning lands even when no round is left to nudge into, so
+            // the transcript says why the loop concluded on cut-off text.
+            let can_nudge = !scope.truncation_nudge_used
+                && round < scope.loop_budget.max_tool_rounds_per_cycle - 1;
+            let completion_tokens = response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens)
+                .map(|tokens| tokens.to_string())
+                .unwrap_or_else(|| "?".to_string());
+
+            self.emit(HarnessEvent {
+                data: None,
+                detail: format!(
+                    "reply cut off at the provider's output-token cap ({completion_tokens} completion tokens) before any tool call{}",
+                    if can_nudge { " — asking for a shorter turn" } else { "" }
+                ),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::RunWarning,
+            });
+
+            if can_nudge {
+                scope.truncation_nudge_used = true;
+                scope.transport_messages.push(TransportRequestMessage {
+                    anthropic_content: response_message
+                        .and_then(|message| message.anthropic_content.clone()),
+                    content: Some(TransportContent::Text(if response_text.trim().is_empty() {
+                        "(reply truncated at the output-token cap)".to_string()
+                    } else {
+                        response_text.clone()
+                    })),
+                    role: ChatRoleTag::Assistant,
+                    ..Default::default()
+                });
+                scope.transport_messages.push(TransportRequestMessage {
+                    content: Some(TransportContent::Text(TRUNCATION_NUDGE_MESSAGE.to_string())),
+                    role: ChatRoleTag::User,
+                    ..Default::default()
+                });
+                scope
+                    .digest_actions
+                    .push("reply truncated at the output cap (nudged to say less and act)".to_string());
+                return RoundOutcome::Continue;
+            }
+        }
 
         if tool_calls.is_empty() {
             // A narration-only first reply with an unfinished task gets ONE

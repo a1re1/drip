@@ -521,6 +521,10 @@ pub struct AnthropicTranslatedMessage {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnthropicTranslatedChoice {
+    /// "length" when Anthropic reports `stop_reason: "max_tokens"`, the
+    /// OpenAI spelling the loop keys its truncation nudge on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<AnthropicTranslatedMessage>,
 }
@@ -637,6 +641,8 @@ pub fn translate_anthropic_response(data: &Value) -> AnthropicTranslatedResponse
 
     AnthropicTranslatedResponse {
         choices: Some(vec![AnthropicTranslatedChoice {
+            finish_reason: (data.get("stop_reason").and_then(Value::as_str) == Some("max_tokens"))
+                .then(|| "length".to_string()),
             message: Some(AnthropicTranslatedMessage {
                 // The raw blocks ride along so the loop can echo this turn back
                 // verbatim (thinking blocks must survive a tool round-trip).

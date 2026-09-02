@@ -205,6 +205,8 @@ function identityRules(): ReplaceRule[] {
     // --review progress on stderr rounds wall-clock to seconds ("in 4s — 13s total").
     { pattern: /\b(in|elapsed|total|done in) (\d+)s\b/g, replacement: "$1 <S>s" },
     { pattern: /— (\d+)s total\b/g, replacement: "— <S>s total" },
+    // BASH_ASYNC tmux session names end in a random 6-char suffix.
+    { pattern: /\b(drip|lci)-([a-z0-9-]+?)-(\d+)-[a-z0-9]{6}\b/g, replacement: "$1-$2-$3-<RAND>" },
     // Process ids (--detach's started line, --list's running rows, lease files).
     { pattern: /"pid":\s*\d+/g, replacement: '"pid":<PID>' },
     { pattern: /\(pid \d+\)/g, replacement: "(pid <PID>)" },

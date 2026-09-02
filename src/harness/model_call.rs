@@ -140,6 +140,8 @@ pub struct OpenAICompatibleResponseMessage {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenAICompatibleResponseChoice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<OpenAICompatibleResponseMessage>,
 }
 
@@ -160,6 +162,7 @@ impl From<crate::harness::anthropic::AnthropicTranslatedResponse> for OpenAIComp
                 choices
                     .into_iter()
                     .map(|choice| OpenAICompatibleResponseChoice {
+                        finish_reason: choice.finish_reason,
                         message: choice.message.map(|message| OpenAICompatibleResponseMessage {
                             anthropic_content: message.anthropic_content,
                             content: message.content,

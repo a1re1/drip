@@ -47,6 +47,8 @@ type MockReply = {
   when?: { contains: string };
   /** Hold the reply this long before answering — lets a scenario steer (--send) or --stop a live run. */
   delayMs?: number;
+  /** Override the OpenAI finish_reason ("length" = cut at the output cap; Anthropic maps it to stop_reason "max_tokens"). */
+  finishReason?: string;
   status?: number;
   error?: Record<string, unknown>;
 };
@@ -173,7 +175,7 @@ function openAiPayload(reply: MockReply, model: string): Record<string, unknown>
       {
         index: 0,
         message,
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finish_reason: reply.finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
         logprobs: null
       }
     ],
@@ -210,7 +212,7 @@ function anthropicPayload(reply: MockReply, model: string): Record<string, unkno
     role: "assistant",
     model,
     content: anthropicBlocks(reply),
-    stop_reason: hasToolCalls ? "tool_use" : "end_turn",
+    stop_reason: reply.finishReason === "length" ? "max_tokens" : hasToolCalls ? "tool_use" : "end_turn",
     stop_sequence: null,
     usage: { input_tokens: 1, output_tokens: 1 }
   };
@@ -257,7 +259,7 @@ function openAiStream(reply: MockReply, model: string): ReadableStream<Uint8Arra
       {
         index: 0,
         delta: {},
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finish_reason: reply.finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
         logprobs: null
       }
     ]
@@ -276,7 +278,8 @@ function openAiStream(reply: MockReply, model: string): ReadableStream<Uint8Arra
 
 function anthropicStream(reply: MockReply, model: string): ReadableStream<Uint8Array> {
   const blocks = anthropicBlocks(reply) as Array<Record<string, unknown>>;
-  const stopReason = blocks.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn";
+  const stopReason =
+    reply.finishReason === "length" ? "max_tokens" : blocks.some((block) => block.type === "tool_use") ? "tool_use" : "end_turn";
   const events: unknown[] = [
     {
       type: "message_start",

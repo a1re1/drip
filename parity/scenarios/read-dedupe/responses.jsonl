@@ -1,0 +1,9 @@
+{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["read the greeting"]}}]}
+{"content":"Planned one task."}
+{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}}]}
+{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}},{"name":"READ","arguments":{"path":"hello.txt"}}]}
+{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}}]}
+{"toolCalls":[{"name":"GREP","arguments":{"pattern":"Hello","path":"."}}]}
+{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}},{"name":"GREP","arguments":{"pattern":"Hello","path":"."}}]}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"hello.txt holds the greeting."}}]}
+{"content":"hello.txt holds the greeting."}

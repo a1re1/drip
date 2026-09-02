@@ -81,6 +81,21 @@ pub fn fold_cold_tool_results(
 /// Fold the whole loop transcript past this size instead of waiting for the endpoint to reject it.
 pub const MAX_LOOP_TRANSCRIPT_CHARS: usize = 300_000;
 
+// Read-only tools whose identical repeat, on an unchanged workspace, returns
+// exactly what an earlier (still verbatim) result in this loop's transcript
+// already says. Transcript audits of flash runs found 38% of all READ calls
+// were exact same-cycle repeats — the file's content was already in context.
+pub const DEDUPED_READ_ONLY_TOOLS: [&str; 3] = ["READ", "GREP", "DIR"];
+
+/// The stub that replaces a repeated read-only result whose earlier, identical
+/// output is still verbatim in the transcript.
+pub fn build_repeated_read_stub(tool_name: &str, prior_call_count: i64) -> String {
+    format!(
+        "[harness] {tool_name}: identical call #{} this run and the output is unchanged — it is verbatim in this conversation above (an earlier {tool_name} result). Use that copy; re-reading adds nothing. Act on it, or record the finding with observe/remember/finish_task.",
+        prior_call_count + 1
+    )
+}
+
 // Commands whose outcome IS the verification story of the run: the harness
 // records the most recent one so summaries and results cite ground truth.
 // Hand-rolled scan of the TS VERIFICATION_COMMAND_PATTERN:
@@ -520,6 +535,15 @@ mod loop_helpers_tests {
     }
 
     #[test]
+    fn repeated_read_stub_matches_the_ts_text() {
+        assert_eq!(
+            build_repeated_read_stub("READ", 1),
+            "[harness] READ: identical call #2 this run and the output is unchanged — it is verbatim in this conversation above (an earlier READ result). Use that copy; re-reading adds nothing. Act on it, or record the finding with observe/remember/finish_task."
+        );
+        assert!(DEDUPED_READ_ONLY_TOOLS.contains(&"GREP") && !DEDUPED_READ_ONLY_TOOLS.contains(&"BASH"));
+    }
+
+    #[test]
     fn hash_text_is_stable_hex() {
         assert_eq!(hash_text("cargo build failed"), hash_text("cargo build failed"));
         assert_ne!(hash_text("cargo build"), hash_text("cargo build failed"));
@@ -722,6 +746,11 @@ pub struct LoopScope {
     pub loop_budget: HarnessLoopConfig,
     pub transport_messages: Vec<TransportRequestMessage>,
     pub folded_message_indexes: HashSet<usize>,
+    /// Where each read-only call's verbatim result sits in this loop's transcript
+    /// (telemetry key → message index + content hash), so an identical repeat can
+    /// point at it instead of sending the content again — only while that
+    /// message is still unfolded.
+    pub hot_read_only_results: HashMap<String, (usize, String)>,
     pub used_tool_call_ids: HashSet<String>,
     pub affordable_cycles: i64,
     pub task_finished: bool,
@@ -1703,6 +1732,7 @@ impl HarnessRun {
             loop_budget,
             transport_messages: Vec::new(),
             folded_message_indexes: HashSet::new(),
+            hot_read_only_results: HashMap::new(),
             used_tool_call_ids: HashSet::new(),
             affordable_cycles,
             task_finished: false,
@@ -2695,8 +2725,21 @@ impl HarnessRun {
                 &self.telemetry_config,
             );
 
+            let content_hash = hash_text(&execution.tool_content);
+            let deduped_tool = DEDUPED_READ_ONLY_TOOLS.contains(&tool_name.as_str());
+            let repeats_hot_result = deduped_tool
+                && !execution.failed
+                && scope
+                    .hot_read_only_results
+                    .get(&telemetry_key)
+                    .is_some_and(|(index, hash)| *hash == content_hash && !scope.folded_message_indexes.contains(index));
+
             // Identical re-runs get one line of feedback in the tool result.
-            if prior_call_count > 0 {
+            if repeats_hot_result {
+                // The earlier result is still verbatim in the transcript: a
+                // stub keeps the model's context and the request small.
+                tool_content = build_repeated_read_stub(&tool_name, prior_call_count);
+            } else if prior_call_count > 0 {
                 let output_unchanged = prior_output.as_deref() == Some(record.last_output.as_str());
                 let prior_loop = prior_loop_text.clone().unwrap_or_else(|| "undefined".to_string());
                 tool_content = format!(
@@ -2709,6 +2752,11 @@ impl HarnessRun {
                         "The output changed since the previous run."
                     }
                 );
+            }
+
+            if deduped_tool && !execution.failed && !repeats_hot_result {
+                // The message pushed at the end of this call lands at this index.
+                scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
             }
 
             scope.digest_actions.push(format!(

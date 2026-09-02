@@ -6,7 +6,7 @@
 // argument extraction/validation of applyHarnessToolCall (parseToolInput +
 // parsePlannedTasks + the per-branch field coercion) as parse_harness_op.
 // The state-mutating op handlers (addTasks/dropTask/finishTask/... and their
-// resultText strings) are ported in a follow-up chunk.
+// resultText strings) are ported below as apply_harness_op.
 //
 // Rename rule applied to user-visible text: `~/.lci` -> `~/.drip` (three
 // description sites: remember, remember scope param, forget). Everything else
@@ -1192,9 +1192,8 @@ fn remove_memory_note(state: &mut crate::core::types::HarnessState, note_id: &st
     }
 }
 
-/// port of the plan_tasks, drop_task and revise_task branches of
-/// applyHarnessToolCall (the remaining ops still return their TODO
-/// placeholder).
+/// port of the state-mutating branches of applyHarnessToolCall (every
+/// HarnessOp variant is handled here).
 pub fn apply_harness_op(
     state: &mut crate::core::types::HarnessState,
     op: HarnessOp,

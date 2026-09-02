@@ -1,7 +1,7 @@
 // drip — Rust port of lci (see drip/PLAN.md). Module tree from PLAN.md's
 // Layout section; each module names the TS file it ports in its header
-// comment. Unported modules are empty files carrying
-// `// port of src/<path> — TODO`.
+// comment. The port is complete for every headless surface (parity suite:
+// drip/parity); the web UI and ink terminal layer are out of scope.
 
 pub mod chat;
 pub mod cli;

@@ -6,12 +6,11 @@
 // resolved by the caller (the CLI composes skills and model profiles into this
 // runtime shape) so the harness itself stays free of skill and config formats.
 //
-// Port note — ModelRoute: src/harness/model-call.ts is not ported yet (its
-// module stub is still a TODO), so the canonical ModelRoute type is defined
-// here verbatim from model-call.ts:40-51. The `refreshHeaders` function field
-// has no serde-representable equivalent in a plain struct; it is kept as a
-// documented omission because the harness never serializes a route. When the
-// model-call port lands it should re-export / replace this definition.
+// Port note — ModelRoute: this is the serializable role-definition shape
+// (headers as an ordered map, fallback chained by value) from
+// model-call.ts:40-51. The live transport route with its `refreshHeaders`
+// closure is harness::model_call::ModelRoute; cli::roles converts between
+// the two when a role's model is resolved.
 
 use std::collections::HashSet;
 

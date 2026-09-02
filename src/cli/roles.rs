@@ -8,11 +8,10 @@
 // Renames applied per the porting rules: .lci/roles.json -> .drip/roles.json,
 // lci -> drip in user-visible strings. JSON field names stay identical.
 //
-// NOTE on shared types: CliConfig (src/cli/config.ts) is only a stub in
-// drip/src/core/config.rs, skills/marketplaces are stubs, and
-// resolveModelProfileRoute (src/web/settings.ts) is not ported yet; the minimal
-// shapes and helpers roles.ts needs are defined here so this module stands
-// alone until those ports land (then they can be deduplicated).
+// NOTE on shared types: the minimal shapes roles.ts needs (role definitions,
+// presets, bindings) are defined here; model resolution goes through
+// core::inference (the port of settings.ts resolveModelProfileRoute) via
+// resolve_model_profile_route at the bottom of this module.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -602,10 +601,10 @@ pub struct ResolveRoleSetupArgs<'a> {
 // validates their references, and resolves them into the harness runtime
 // shape: composed prompt material, tool allowlists, and model routes.
 //
-// The TS `resolveModelProfileRoute` (src/web/settings.ts) is not yet ported
-// into drip/src/web; until it lands, `definition.model` resolution goes
-// through the placeholder at the bottom of this module, which reports the
-// fallback issue exactly like an unresolvable profile.
+// `definition.model` resolution goes through resolve_model_profile_route at
+// the bottom of this module (core::inference, the port of settings.ts
+// resolveModelProfileRoute); an unresolvable profile reports the fallback
+// issue exactly like the TS.
 pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 	let mut issues: Vec<String> = Vec::new();
 	let config_source = load_roles_from_config(args.config, &mut issues);

@@ -1,8 +1,7 @@
 // port of src/cli/run-record.ts
 //
 // The helpers run-record.ts pulls from sibling modules are inlined here
-// because their drip homes are not ported yet (this wave has no other
-// consumer of either):
+// (this module is their only consumer):
 //   - writeFileAtomic (src/lib/fs.ts) -> `write_file_atomic`
 //   - countTaskStats / deriveVerificationSummary (src/harness/state.ts)
 //     -> `count_task_stats` / `derive_verification_summary`

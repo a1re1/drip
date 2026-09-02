@@ -1,4 +1,4 @@
-// port of src/core — TODO
+// port of src/core
 //
 // There is no src/core directory in the TS tree: home/config/env-vars/
 // sessions/lease live under src/cli/, state/types under src/harness/.

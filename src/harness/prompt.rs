@@ -136,9 +136,14 @@ pub fn looks_like_question_goal(goal: &str) -> bool {
 pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMessageArgs<'_>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    sections.push(format!("current_date: {}", args.current_date));
-    sections.push(format!("cycle: {}", state.iteration));
+    // Stable-first ordering (prompt.ts): the goal leads so the provider's
+    // prompt cache keeps hitting across cycles; the per-cycle fields sit just
+    // above the instruction.
     sections.push(format!("goal: {}", state.goal));
+    let mut cycle_sections: Vec<String> = vec![
+        format!("current_date: {}", args.current_date),
+        format!("cycle: {}", state.iteration),
+    ];
 
     if !state.operator_messages.as_ref().map_or(true, Vec::is_empty) {
         // Steering sent to a live session outranks the original goal text: the
@@ -171,7 +176,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
     }
 
     if args.loop_info.is_some() {
-        sections.push(format!(
+        cycle_sections.push(format!(
             "task_loop: loop {}, cycle 1 of up to {} — cycles in this loop share this transcript; when the loop ends only shared state survives",
             args.loop_info.as_ref().unwrap().index,
             args.loop_info.as_ref().unwrap().max_cycles
@@ -179,7 +184,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
     }
 
     if let Some(run_budget) = &args.run_budget {
-        sections.push(build_run_budget_line(run_budget));
+        cycle_sections.push(build_run_budget_line(run_budget));
     }
 
     if !state.history.is_empty() {
@@ -315,6 +320,8 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
     if !last_activation_section.is_empty() {
         sections.push(last_activation_section);
     }
+
+    sections.push(cycle_sections.join("\n"));
 
     if let Some(current_task) = args.current_task.as_ref() {
         let mut task_sections: Vec<String> = Vec::new();

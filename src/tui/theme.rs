@@ -50,5 +50,27 @@ pub fn event_label(kind: HarnessEventType) -> &'static str {
     }
 }
 
+/// Ink colour name → ANSI painter (watch::ansi::c). Unknown names dim.
+pub fn paint(color: &str) -> fn(&str) -> String {
+    use crate::watch::ansi::c;
+    match color {
+        "gray" => c::gray,
+        "yellow" => c::yellow,
+        "cyan" => c::cyan,
+        "blue" => c::blue,
+        "blueBright" => c::cyan_bold,
+        "red" => c::red,
+        "green" => c::green,
+        "white" => c::white,
+        "magenta" => c::magenta,
+        _ => c::dim,
+    }
+}
+
+/// The painter for an event kind (`paint(event_color(kind))`).
+pub fn event_paint(kind: HarnessEventType) -> fn(&str) -> String {
+    paint(event_color(kind))
+}
+
 pub const ACCENT_COLOR: &str = "cyan";
 pub const DIM_COLOR: &str = "gray";

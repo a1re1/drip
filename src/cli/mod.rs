@@ -3,8 +3,10 @@
 // Children mirror the module tree in drip/PLAN.md; each child names the TS
 // file it ports in its header comment.
 pub mod args;
+pub mod commands;
 pub mod delegate_tool;
 pub mod entry;
+pub mod file_suggestions;
 pub mod gc;
 pub mod headless_output;
 pub mod help;
@@ -12,6 +14,7 @@ pub mod images;
 pub mod inspect;
 pub mod marketplaces;
 pub mod mentions;
+pub mod paste;
 pub mod queue;
 pub mod review;
 pub mod review_report;

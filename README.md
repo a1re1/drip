@@ -44,8 +44,15 @@ either a platform difference or an lci feature that only makes sense in Bun.
 
 - **`--tools <path>`** — lci loads TypeScript tool packs; drip only ships the
   built-in pack and rejects any other path with a usage error.
-- **`--tui`** — not ported yet (prints a notice and exits 1). Everything the
-  TUI does is reachable from the CLI and `dripw`.
+- **`--tui`** — ported without Ink: the timeline scrolls into the terminal's
+  scrollback and the composer/picker/status bar are repainted in place with
+  raw ANSI (`src/tui/app.rs`). Same slash commands, keys, mention and slash
+  menus, image paste/ctrl+v, bracketed paste, and per-session transcript
+  replay. Visual differences: box-drawing borders are painted by
+  `tui::widgets::boxed` (Ink's `round` border), text wrapping is the port's
+  own, and the help/status strings still say "lci" where the TS does. drip's
+  TUI also scrubs `env.vars` secrets from tool output like headless runs do
+  (the Ink TUI passes no redaction list).
 - **CHECK** shells out to `tsc` like lci, and **PATCH**'s syntax check runs
   through `bun` when it is on PATH; without Bun the syntax pass is skipped.
 - **Markdown in `dripw`** — lci renders through `marked-terminal`; dripw has a

@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 use crate::cli::transcript::{format_model_route_lines, TranscriptEntry, TranscriptEventEntry};
 use crate::core::types::HarnessEventType;
 use crate::tui::markdown_ansi::render_markdown_ansi;
-use crate::tui::theme::{event_color as theme_color, event_label};
+use crate::tui::theme::event_label;
 use crate::watch::ansi::{c, color_enabled, strip_ansi, wrap_ansi};
 
 /// render.ts `RowCell`.
@@ -75,18 +75,7 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 fn event_color(kind: HarnessEventType) -> fn(&str) -> String {
-    match theme_color(kind) {
-        "gray" => c::gray,
-        "yellow" => c::yellow,
-        "cyan" => c::cyan,
-        "blue" => c::blue,
-        "blueBright" => c::cyan_bold,
-        "red" => c::red,
-        "green" => c::green,
-        "white" => c::white,
-        "magenta" => c::magenta,
-        _ => c::dim,
-    }
+    crate::tui::theme::event_paint(kind)
 }
 
 /// `[  2] label  ` — the shared row prefix for events.

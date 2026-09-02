@@ -1805,9 +1805,23 @@ pub async fn main(argv: Vec<String>) -> i32 {
         return exit_code;
     }
 
+    // The interactive session owns the terminal from here; it opens its own
+    // index handle per goal run, so the bootstrap one is released first.
     index.close();
-    eprintln!("drip: --tui is not ported yet");
-    1
+    let allow_net = cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
+    tokio::task::block_in_place(|| {
+        crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
+            allow_net,
+            config,
+            cwd: cwd.clone(),
+            home: home.clone(),
+            initial_goal: goal_text.filter(|text| !text.is_empty()),
+            max_iterations: cli_args.max_iterations,
+            no_repo_memory: cli_args.no_repo_memory,
+            project: project.clone(),
+            session,
+        })
+    })
 }
 
 fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome) -> anyhow::Result<i32> {

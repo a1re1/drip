@@ -1,0 +1,1 @@
+["--json","--skill","verify-before-done","--skill","tdd","--max-iterations","4","Update the greeting in fixture/hello.txt."]

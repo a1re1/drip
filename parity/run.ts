@@ -127,6 +127,15 @@ function writeMockConfig(home: string, port: number): void {
       baseUrl: `http://127.0.0.1:${port}/v1`,
       label: "Parity mock",
       maxContextTokens: "64000"
+    },
+    // A second profile on the same mock, for --profile pinning scenarios.
+    {
+      id: "mock-alt",
+      model: "mock-alt-model",
+      provider: "openai-compatible",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      label: "Parity mock (alt)",
+      maxContextTokens: "64000"
     }
   ];
   const config = {
@@ -232,6 +241,36 @@ function startMock(root: string, responsesPath: string): Promise<MockServer> {
 
 type Capture = { stdout: string; stderr: string; exit: string };
 
+/**
+ * A step's stdout is text — except when it is one pretty-printed JSON
+ * document (`--state --json --full`), whose key order is JS insertion order
+ * in lci and struct order in drip: that document is re-emitted with sorted
+ * keys so the two sides compare structurally.
+ */
+function canonicalizeJsonDocument(stdout: string): string {
+  const trimmed = stdout.trim();
+
+  if (!(trimmed.startsWith("{") && trimmed.endsWith("}") && trimmed.includes("\n"))) return stdout;
+  try {
+    return `${JSON.stringify(sortKeys(JSON.parse(trimmed)), null, 2)}\n`;
+  } catch {
+    return stdout;
+  }
+}
+
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, sortKeys((value as Record<string, unknown>)[key])]),
+    );
+  }
+
+  return value;
+}
+
 function runCli(side: Side, scenario: Scenario, args: string[], home: string, project: string): Promise<Capture> {
   const env: Record<string, string> = { ...(process.env as Record<string, string>) };
   delete env.LCI_HOME;
@@ -310,7 +349,8 @@ function collectArtifacts(capture: Capture, home: string, project: string, mock:
       sessionDirs.push(join(projectsDir, slug, "sessions", id));
     }
   }
-  for (const base of [".lci", ".drip"]) {
+  // Legacy in-repo stores, plus any --project-dir target (scenarios use ./data).
+  for (const base of [".lci", ".drip", "data"]) {
     for (const legacy of listDirs(join(project, base, "sessions"))) {
       sessionDirs.push(join(project, base, "sessions", legacy));
     }
@@ -362,6 +402,12 @@ function collectArtifacts(capture: Capture, home: string, project: string, mock:
         .sort();
       artifacts.set(`index/${table}`, rows.join("\n"));
     }
+  }
+
+  // Top-level home registries (marketplaces.json, plugins.json) written by
+  // --marketplace-* / --plugin-*; config.json is the harness's own input.
+  for (const name of readdirSync(home).filter((entry) => entry.endsWith(".json") && entry !== "config.json").sort()) {
+    artifacts.set(`home/${name}`, normalizeArtifact(readFileSync(join(home, name), "utf8"), "session-json", options));
   }
 
   const requestLog = readIfExists(mock.logPath) ?? "";
@@ -418,7 +464,13 @@ async function runSide(side: Side, scenario: Scenario, keep: boolean): Promise<{
     }
     const joined = (pick: (c: Capture) => string) =>
       captures.length === 1 ? pick(captures[0]!) : captures.map((c, i) => `=== step ${i + 1} ===\n${pick(c)}`).join("");
-    const capture: Capture = { stdout: joined((c) => c.stdout), stderr: joined((c) => c.stderr), exit: captures.map((c) => c.exit).join(",") };
+    // A step that printed one JSON document (`--state --json --full`) is
+    // canonicalized on its own, before the steps are joined into one text.
+    const capture: Capture = {
+      stdout: joined((c) => canonicalizeJsonDocument(c.stdout)),
+      stderr: joined((c) => c.stderr),
+      exit: captures.map((c) => c.exit).join(","),
+    };
     const artifacts = collectArtifacts(capture, home, project, mock);
     if (keep) {
       writeFileSync(join(root, "stdout.txt"), capture.stdout);

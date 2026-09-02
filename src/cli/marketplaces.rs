@@ -274,14 +274,11 @@ pub fn run_git(args: &[String], cwd: Option<&Path>) -> anyhow::Result<()> {
 
 /// `resolve(source)` — Node's path.resolve without symlink resolution:
 /// relative paths are joined onto the current working directory.
+/// `path.resolve(source)` — absolutizes against the cwd and collapses `.` /
+/// `..`, so `--marketplace-add ./market` registers `<cwd>/market`, not
+/// `<cwd>/./market`.
 fn resolve_source_path(source: &str) -> anyhow::Result<std::path::PathBuf> {
-    let path = std::path::Path::new(source);
-
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
+    Ok(resolve_path(&std::env::current_dir()?, Path::new(source)))
 }
 
 fn remove_path_force(path: &Path) -> std::io::Result<()> {

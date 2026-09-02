@@ -101,7 +101,11 @@ fn to_fixed_2(value: f64) -> String {
 }
 
 fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinition>, String> {
-    if tools_path != "./tools" && !Path::new(tools_path).exists() {
+    if tools_path != "./tools" {
+        // A missing pack fails exactly as lci's resolveToolsEntryPath does; a
+        // pack that exists is TypeScript, which drip cannot load.
+        crate::tools::loader::resolve_tools_entry_path(tools_path)?;
+
         return Err(format!(
             "--tools: drip only ships the built-in tool pack; \"{tools_path}\" cannot be loaded (TypeScript tool packs are an lci-only feature)."
         ));

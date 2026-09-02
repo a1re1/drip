@@ -1,0 +1,2 @@
+{"toolCalls":[{"name":"respond","arguments":{"text":"Hello from mock"}}]}
+{"toolCalls":[{"name":"respond","arguments":{"text":"Hello again from mock"}}]}

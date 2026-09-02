@@ -1121,7 +1121,9 @@ pub struct ExtractedFinding {
 
 fn extract_findings_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?m)^\s*[-*]\s*\**(P[012])(?!\d)\**[:\s—–-]*(.*)$").unwrap())
+    // The TS pattern uses `(?!\d)` after the level; the regex crate has no
+    // look-around, so extract_findings re-checks the character after it.
+    RE.get_or_init(|| Regex::new(r"(?m)^\s*[-*]\s*\**(P[012])\**[:\s—–-]*(.*)$").unwrap())
 }
 
 // The finding bullets of one per-file report, for a table that lists what
@@ -1132,9 +1134,13 @@ pub fn extract_findings(report: &str) -> Vec<ExtractedFinding> {
     // Tolerates "- P1 (line 3): …", "- P1: …", and "- **P1** — …"; the lookahead
     // keeps "P10" from reading as P1 with a stray digit in its text.
     for caps in extract_findings_re().captures_iter(report) {
-        let level = match caps.get(1).map(|g| g.as_str()) {
-            Some("P0") => FindingLevel::P0,
-            Some("P1") => FindingLevel::P1,
+        let level_match = caps.get(1).expect("level group");
+        if report[level_match.end()..].starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let level = match level_match.as_str() {
+            "P0" => FindingLevel::P0,
+            "P1" => FindingLevel::P1,
             _ => FindingLevel::P2,
         };
         let text = caps.get(2).map(|g| g.as_str().trim().replace('|', "\\|")).unwrap_or_default();
@@ -1209,7 +1215,7 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
         format!("# Code Review: {}...HEAD", args.base_ref),
         "## Summary".to_string(),
         format!(
-            "{} file(s) reviewed in {} unit(s); {}. {}.{} Per-file reports follow.",
+            "{} file(s) reviewed in {} unit(s); {}. {}{} Per-file reports follow.",
             args.files.len(),
             args.unit_count,
             reason,
@@ -1327,6 +1333,14 @@ pub fn review_tools_from<T: Clone>(tools: &[T], name_of: &dyn Fn(&T) -> &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_findings_reads_levels_without_look_around() {
+        let findings = extract_findings("- **P1** — missing handler\n- P3: nit\n- P10: not a level");
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(findings[0].level, FindingLevel::P1));
+        assert_eq!(findings[0].text, "missing handler");
+    }
 
     #[test]
     fn parses_a_well_formed_two_file_report() {

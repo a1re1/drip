@@ -121,6 +121,12 @@ function genericRules(options: NormalizeOptions): ReplaceRule[] {
 
   if (options.project !== undefined) {
     rules.push(pathRule(options.project, "<PROJECT>"));
+    // The project's slug form ("/private/tmp/x/project" -> "-private-tmp-x-project")
+    // appears in session.json's projectSlug when --project-dir bypasses ~/projects.
+    for (const root of [`/private${options.project}`, options.project]) {
+      const dashed = root.replace(/\//g, "-").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      rules.push({ pattern: new RegExp(dashed, "g"), replacement: "<SLUG>" });
+    }
   }
 
   if (options.home !== undefined) {
@@ -214,6 +220,7 @@ function identityRules(): ReplaceRule[] {
     { pattern: /, \d+s in-tool/g, replacement: "" },
     { pattern: /\((\d+)s elapsed\)/g, replacement: "(<S>s elapsed)" },
     // Session-id prefixes (resumeIdPrefix, `--resume 91c1c835`): 8 lowercase hex.
+    { pattern: /\b[0-9a-f]{12}\b/g, replacement: "<SHA12>" },
     { pattern: /\b[0-9a-f]{8}\b/g, replacement: "<ID8>" },
     { pattern: /\b\d+\.\d+(?:e[+-]?\d+)?\b/gi, replacement: "<NUM>" }
   ];

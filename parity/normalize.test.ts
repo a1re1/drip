@@ -19,6 +19,22 @@ describe("normalizeText — identities and rename", () => {
     expect(normalizeText("at 2026-09-01T01:27:15.095Z end")).toBe("at <TS> end");
   });
 
+  it("masks the plain (non-/private) dashed slug form too", () => {
+    const out = normalizeText('"projectSlug": "-tmp-parity-x-project-data"', { project: "/tmp/parity-x/project" });
+
+    expect(out).toBe('"projectSlug": "<SLUG>-data"');
+  });
+
+  it("masks 12-hex git stash shas as one token", () => {
+    expect(normalizeText("git stash apply 0e821408ae2c")).toBe("git stash apply <SHA12>");
+  });
+
+  it("masks the project's dashed slug form", () => {
+    const out = normalizeText('"projectSlug": "-private-tmp-parity-x-project-data"', { project: "/tmp/parity-x/project" });
+
+    expect(out).toBe('"projectSlug": "<SLUG>-data"');
+  });
+
   it("masks bare version numbers", () => {
     expect(normalizeText("drip 0.91.0")).toBe("drip <VERSION>");
     expect(normalizeText('{"version":"0.91.0"}')).toBe('{"version":"<VERSION>"}');

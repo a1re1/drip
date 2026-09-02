@@ -1,0 +1,6 @@
+{
+  "name": "parity-market",
+  "plugins": [
+    { "name": "greeter", "source": "./plugins/greeter", "description": "Greets the fixture." }
+  ]
+}

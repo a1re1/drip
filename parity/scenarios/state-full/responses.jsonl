@@ -1,0 +1,11 @@
+{"toolCalls": [{"name": "plan_tasks", "arguments": {"tasks": ["update greeting"]}}]}
+{"content": "Planned one task."}
+{"toolCalls": [{"name": "READ", "arguments": {"path": "hello.txt"}}]}
+{"toolCalls": [{"name": "PATCH", "arguments": {"path": "hello.txt", "content": "Hello from the parity fixture.\n"}}]}
+{"toolCalls": [{"name": "BASH", "arguments": {"command": "make test"}}]}
+{"toolCalls": [{"name": "finish_task", "arguments": {"status": "completed", "summary": "Updated hello.txt; make test passes."}}]}
+{"content": "Updated hello.txt with the new greeting; make test passes."}
+{"toolCalls": [{"name": "plan_tasks", "arguments": {"tasks": ["say done"]}}]}
+{"content": "Planned."}
+{"toolCalls": [{"name": "finish_task", "arguments": {"status": "completed", "summary": "Done."}}]}
+{"content": "Done."}

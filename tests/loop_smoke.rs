@@ -69,7 +69,7 @@ async fn plan_finish_summary_completes_the_run() {
 
     let (url, server) = spawn_scripted_server(vec![
         // Loop 1 (planning): plan_tasks, then a text turn ends the loop.
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["write the file"]})),
+        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["work on the file"]})),
         text_response("planned"),
         // Loop 2 (task-1): finish_task ends the loop and completes the goal.
         tool_call_response("call-2", "finish_task", serde_json::json!({"status": "completed", "summary": "wrote it"})),

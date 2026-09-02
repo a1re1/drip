@@ -181,6 +181,7 @@ pub fn add_tasks(
 			summary: None,
 			title: trimmed_title.to_string(),
 			verify_nudged: None,
+			edit_nudged: None,
 		});
 	}
 

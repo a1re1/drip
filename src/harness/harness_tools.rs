@@ -367,6 +367,54 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
 }
 
 /// port of isHarnessTool
+// Leading verbs that make a task title read as "change the code". Judged on
+// the first word only, so "verify the added export" (verify) and "add a
+// check for X" (add) land on the right side; nouns like "check" or "test"
+// inside the title never count.
+const BUILD_TASK_VERBS: &[&str] = &[
+    "add", "append", "build", "change", "convert", "create", "delete", "extend", "extract", "fix",
+    "implement", "introduce", "migrate", "move", "patch", "port", "refactor", "remove", "rename",
+    "replace", "rewrite", "update", "wire", "write",
+];
+
+// Objects that make a build verb prose instead of code: "write summary",
+// "update the plan" — those finish in the reply, not the workspace.
+const PROSE_OBJECT_WORDS: &[&str] = &[
+    "summary", "summaries", "report", "note", "notes", "answer", "reply", "response", "message",
+    "findings", "plan", "user",
+];
+
+/// True when a task title starts with a code-changing verb aimed at the
+/// workspace rather than at prose.
+pub fn looks_like_build_task(title: &str) -> bool {
+    let has_prose_object = title
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+        .any(|word| {
+            let lower = word.to_ascii_lowercase();
+            PROSE_OBJECT_WORDS.contains(&lower.as_str())
+        });
+    if has_prose_object {
+        return false;
+    }
+
+    // Strip leading numbering/bullets the way the TS regex does, then take
+    // the first whitespace-delimited word and keep its letters only.
+    let stripped = title
+        .trim()
+        .trim_start_matches(|c: char| c.is_whitespace() || c.is_ascii_digit() || matches!(c, '.' | ')' | ':' | '(' | '-' | '*' | '•'));
+    let first_word: String = stripped
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+
+    !first_word.is_empty() && BUILD_TASK_VERBS.contains(&first_word.as_str())
+}
+
 pub fn is_harness_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -1427,7 +1475,7 @@ pub fn apply_harness_op(
             };
 
             // Snapshot the fields the gates read before any state mutation.
-            let (target_status, target_activations, has_review_of, target_verify_nudged, target_footprint) = {
+            let (target_status, target_activations, has_review_of, target_verify_nudged, target_footprint, target_edit_nudged, target_title) = {
                 let task = core_state::get_task_by_id(state, &target_id).expect("target task exists");
                 (
                     task.status.clone(),
@@ -1435,6 +1483,8 @@ pub fn apply_harness_op(
                     task.review_of.is_some(),
                     task.verify_nudged,
                     task.footprint.clone(),
+                    task.edit_nudged,
+                    task.title.clone(),
                 )
             };
 
@@ -1497,6 +1547,38 @@ pub fn apply_harness_op(
                     ended_loop: false,
                     direct_response: None,
                 };
+            }
+
+            // Edit honesty gate: a task whose title reads as a code change ("add …",
+            // "fix …", "port …") completed without a single workspace edit while it
+            // was active is the small-model false completion seen in delegation
+            // lanes (finish_task completed, zero PATCH calls). ONE bounce names it;
+            // a second unchanged finish_task is accepted — the change may already
+            // exist, or the task turned out to be analysis only.
+            if status == FinishTaskStatus::Completed
+                && is_current_task
+                && !target_edit_nudged.unwrap_or(false)
+            {
+                let edited_workspace = target_footprint
+                    .iter()
+                    .flatten()
+                    .any(|entry| entry.starts_with("edited "));
+
+                if !edited_workspace && looks_like_build_task(&target_title) {
+                    if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                        task.edit_nudged = Some(true);
+                    }
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "harness: not accepted yet — this task reads like a code change (\"{}\") but no workspace edit landed while it was active. Make the change now (PATCH), then finish_task. If the task genuinely needs no edit (already in place, or analysis only), call finish_task again unchanged and it will be accepted.",
+                            crate::harness::telemetry::truncate_text(&target_title, 80)
+                        ),
+                        state_changed: true,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
             }
 
             // Verification honesty gate: completing a task that edited the
@@ -2040,6 +2122,49 @@ mod apply_harness_op_tests {
     /// port of the respond branch: empty text is refused verbatim; unfinished
     /// tasks block the answer; otherwise a synthetic completed
     /// "Answer the goal directly" task is added, the direct response is
+    #[test]
+    fn looks_like_build_task_keys_on_the_leading_verb_and_a_workspace_object() {
+        assert!(looks_like_build_task("add the widget export"));
+        assert!(looks_like_build_task("2. Fix src/parser.ts trailing newline"));
+        assert!(looks_like_build_task("port loop.ts to Rust"));
+        assert!(!looks_like_build_task("write summary"));
+        assert!(!looks_like_build_task("update the plan"));
+        assert!(!looks_like_build_task("verify the added export"));
+        assert!(!looks_like_build_task("inspect module a"));
+        assert!(!looks_like_build_task("run the tests"));
+    }
+
+    /// The edit gate: a build-shaped task completed without any workspace
+    /// edit bounces once, then the unchanged retry is accepted.
+    #[test]
+    fn finish_task_bounces_a_build_task_without_edits_once() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op("plan_tasks", r#"{"tasks": ["add the widget export to src/index.ts"]}"#)
+            .expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        {
+            let task = &mut state.tasks[0];
+            task.status = crate::core::types::HarnessTaskStatus::InProgress;
+            task.activations = Some(1);
+            task.footprint = Some(vec!["ran bun run test -> passed".to_string()]);
+        }
+        let ctx = HarnessOpContext {
+            current_task_id: Some("task-1".to_string()),
+            ..HarnessOpContext::default()
+        };
+
+        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done"}"#).unwrap();
+        let bounced = apply_harness_op(&mut state, op, &ctx);
+        assert!(!bounced.task_finished);
+        assert!(bounced.text.contains("no workspace edit landed"));
+        assert_eq!(state.tasks[0].edit_nudged, Some(true));
+
+        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"already in place"}"#).unwrap();
+        let accepted = apply_harness_op(&mut state, op, &ctx);
+        assert!(accepted.task_finished);
+        assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
     /// recorded on state, and the loop ends.
     #[test]
     fn respond_records_the_direct_answer_and_ends_the_loop() {

@@ -201,6 +201,7 @@ mod tests {
 			summary: None,
 			title: title.into(),
 			verify_nudged: None,
+			edit_nudged: None,
 		}
 	}
 

@@ -89,6 +89,9 @@ pub struct HarnessTask {
 	/// Set once the finish gate has bounced a completion for missing/stale/failed verification — the next attempt is accepted.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verify_nudged: Option<bool>,
+	/// The finish gate already bounced this task once for completing a build-shaped task without any workspace edit.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub edit_nudged: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -601,6 +604,7 @@ mod tests {
 			summary: None,
 			title: "Port types".into(),
 			verify_nudged: None,
+			edit_nudged: None,
 		};
 		let json = serde_json::to_value(&task).unwrap();
 		let obj = json.as_object().unwrap();

@@ -1,0 +1,1 @@
+["--json","--max-iterations","6","Confirm the unit tests pass: python3 -B -m unittest test_math.py"]

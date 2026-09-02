@@ -54,7 +54,7 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "function": {
-            "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, cargo test, go test, and tsc output formats.",
+            "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.",
             "name": "VERIFY",
             "parameters": {
                 "additionalProperties": false,
@@ -244,6 +244,48 @@ fn parse_pytest(output: &str) -> Option<VerifyVerdict> {
     })
 }
 
+// python unittest: "Ran N tests in 0.002s" then "OK", "OK (skipped=1)" or
+// "FAILED (failures=1, errors=2, skipped=1)" (tools/verify-tool.ts parseUnittest).
+fn parse_unittest(output: &str) -> Option<VerifyVerdict> {
+    let ran_match = Regex::new(r"(?m)^Ran (\d+) tests? in [\d.]+s$")
+        .unwrap()
+        .captures(output)?;
+    let total: i64 = ran_match[1].parse().unwrap_or(0);
+    let status_match = Regex::new(r"(?m)^(OK|FAILED)(?: \(([^)]*)\))?$")
+        .unwrap()
+        .captures(output)?;
+
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let pair_re = Regex::new(r"^(\w+)=(\d+)$").unwrap();
+    for part in status_match
+        .get(2)
+        .map(|m| m.as_str())
+        .unwrap_or("")
+        .split(',')
+    {
+        if let Some(pair) = pair_re.captures(part.trim()) {
+            counts.insert(pair[1].to_string(), pair[2].parse().unwrap_or(0));
+        }
+    }
+
+    let failed = counts.get("failures").copied().unwrap_or(0) + counts.get("errors").copied().unwrap_or(0);
+    let skipped = counts.get("skipped").copied().unwrap_or(0);
+    let passed = (total - failed - skipped).max(0);
+    let failure_line_re = Regex::new(r"^(FAIL|ERROR): ").unwrap();
+    let first_failures = extract_lines(output, |line| failure_line_re.is_match(line), 5);
+
+    Some(VerifyVerdict {
+        exit_code: None,
+        failed,
+        first_failures,
+        output: output.to_string(),
+        passed,
+        runner: "unittest".to_string(),
+        skipped,
+        timed_out: false,
+    })
+}
+
 // cargo test: "test result: ok. N passed; N failed; N ignored"
 fn parse_cargo_test(output: &str) -> Option<VerifyVerdict> {
     let result_match = Regex::new(
@@ -379,10 +421,11 @@ fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
 /// tsc-clean-pass check (recognized by the command text), then to the
 /// "unknown" runner.
 pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
-    let parsers: [fn(&str) -> Option<VerifyVerdict>; 6] = [
+    let parsers: [fn(&str) -> Option<VerifyVerdict>; 7] = [
         parse_bun_test,
         parse_vitest,
         parse_pytest,
+        parse_unittest,
         parse_cargo_test,
         parse_go_test,
         parse_tsc,
@@ -443,7 +486,7 @@ pub struct VerifyToolPrepared {
     pub display_input: String,
 }
 
-/// Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, cargo test, go test, and tsc output formats.
+/// Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.
 pub fn prepare(args: &serde_json::Value, ctx: &super::ToolCtx) -> anyhow::Result<VerifyToolPrepared> {
     let args = super::tool_arguments(args)?;
 
@@ -674,6 +717,41 @@ mod tests {
     }
 
     // -- pytest ------------------------------------------------------------
+
+    #[test]
+    fn parses_a_passing_unittest_run() {
+        let output = ".....\n----------------------------------------------------------------------\nRan 5 tests in 0.002s\n\nOK";
+
+        let result = parse_verify_output("python3 -m unittest scripts/test_ab_lanes.py", output);
+        assert_eq!(result.runner, "unittest");
+        assert_eq!(result.passed, 5);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.skipped, 0);
+    }
+
+    #[test]
+    fn unittest_counts_failures_and_errors_and_lists_their_lines() {
+        let output = "F.Es\n======================================================================\nERROR: test_boom (t.T.test_boom)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  ZeroDivisionError: division by zero\n======================================================================\nFAIL: test_add (t.T.test_add)\n----------------------------------------------------------------------\nAssertionError: 3 != 5\n----------------------------------------------------------------------\nRan 4 tests in 0.003s\n\nFAILED (failures=1, errors=1, skipped=1)";
+
+        let result = parse_verify_output("python3 -m unittest", output);
+        assert_eq!(result.runner, "unittest");
+        assert_eq!(result.passed, 1);
+        assert_eq!(result.failed, 2);
+        assert_eq!(result.skipped, 1);
+        assert_eq!(
+            result.first_failures,
+            vec!["ERROR: test_boom (t.T.test_boom)".to_string(), "FAIL: test_add (t.T.test_add)".to_string()]
+        );
+    }
+
+    #[test]
+    fn help_output_that_mentions_tests_is_not_a_unittest_run() {
+        let result = parse_verify_output(
+            "python3 scripts/ab-lanes.py --help",
+            "usage: ab-lanes.py [-h] --spec SPEC\n\nRan tests are summarized per lane.",
+        );
+        assert_eq!(result.runner, "unknown");
+    }
 
     #[test]
     fn parses_all_passing_pytest_output() {

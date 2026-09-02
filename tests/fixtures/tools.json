@@ -229,7 +229,7 @@
     "type": "function",
     "function": {
       "name": "VERIFY",
-      "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, cargo test, go test, and tsc output formats.",
+      "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

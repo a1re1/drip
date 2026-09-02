@@ -369,9 +369,13 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 _ => return Err(anyhow!("[entry {}] Missing or empty \"path\".", i)),
             };
 
-            let has_content = entry.get("content").map_or(false, Value::is_string);
             let has_find = entry.get("find").map_or(false, Value::is_string);
             let has_replace = entry.get("replace").map_or(false, Value::is_string);
+            // Small models routinely send `content: ""` as a placeholder next to a
+            // real find/replace pair; an empty content beside a find is noise, not
+            // an overwrite request (an actual empty overwrite has no find).
+            let placeholder_content = has_find && entry.get("content").and_then(Value::as_str) == Some("");
+            let has_content = !placeholder_content && entry.get("content").map_or(false, Value::is_string);
 
             if has_content && (has_find || has_replace) {
                 return Err(anyhow!(
@@ -434,6 +438,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 content: entry
                     .get("content")
                     .and_then(Value::as_str)
+                    .filter(|text| !(text.is_empty() && has_find))
                     .map(str::to_string),
             });
         }
@@ -458,8 +463,14 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 
     let raw_path = get_required_string_argument(&args, "path")?;
     // find/replace/content are read raw (not trimmed): leading and trailing whitespace is significant in file edits.
-    let content = args.get("content").and_then(Value::as_str).map(str::to_string);
     let find = args.get("find").and_then(Value::as_str).map(str::to_string);
+    // `content: ""` beside a find is a placeholder, not an overwrite (see the
+    // multi-file entry check).
+    let content = args
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !(text.is_empty() && find.is_some()))
+        .map(str::to_string);
     let replace = args
         .get("replace")
         .and_then(Value::as_str)

@@ -1,0 +1,4 @@
+{"toolCalls":[{"name":"PATCH","arguments":{"path":"note.txt","content":"","find":"beta","replace":"gamma"}}]}
+{"toolCalls":[{"name":"PATCH","arguments":{"files":[{"path":"note.txt","content":"","find":"gamma","replace":"delta"}]}}]}
+{"toolCalls":[{"name":"respond","arguments":{"text":"Changed beta to delta."}}]}
+{"content":"Done."}

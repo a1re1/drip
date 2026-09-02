@@ -10,7 +10,9 @@ if pid == 0:
     os.environ["DRIP_HOME"] = home; os.environ["LCI_HOME"] = home
     os.environ["TERM"] = "xterm-256color"; os.environ["COLUMNS"] = str(COLS); os.environ["LINES"] = str(ROWS)
     os.chdir(cwd)
-    os.execvp(bin_, [bin_, "--tui"] + os.environ.get("DRIP_ARGS", "").split())
+    # TUI_FLAG="" drives a program that is a TUI by itself (lciw / dripw).
+    flag = [os.environ["TUI_FLAG"]] if os.environ.get("TUI_FLAG", "--tui") else []
+    os.execvp(bin_, [bin_] + flag + os.environ.get("DRIP_ARGS", "").split())
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 ESCAPES = {"r": "\r", "n": "\n", "t": "\t", "e": "\x1b", "\\": "\\"}
 def keys(step):

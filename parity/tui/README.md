@@ -22,6 +22,16 @@ Steps: text is keystrokes with `\r` enter, `\e`/`\x1b` esc, `\x1b[B` down,
 screen, `@resize <rows>x<cols>` sends SIGWINCH, `@paste <text>` sends a
 bracketed paste. Normalize session ids/timestamps/durations before diffing.
 
+The watch TUIs take the same drive with `TUI_FLAG=""` (no `--tui` argument)
+against a home that already holds sessions:
+
+```
+TUI_FLAG="" .venv/bin/python drip/parity/tui/drive.py dripw <home> <repo> \
+  "@snap start" j "@snap down" 2 "@snap recent" j "]" "@snap scroll" 3 "\t" w "@snap all-worktrees" "@resize 24x80" "@snap resized" q
+```
+(2026-09-02: `lciw` and `dripw` render identically on every snapshot except the
+sessions' relative age.)
+
 Known, accepted differences (2026-09-02): ink leaves one trailing blank row
 after the status line, so lci's screen is scrolled one row further; after a
 resize ink's clear-and-repaint leaves the two rows above the repaint start on

@@ -164,7 +164,12 @@ const out: Record<string, unknown> = {
   buildRunSummaryMessages: Object.fromEntries(
     (["aborted", "completed", "error", "futile", "max-iterations", "partial", "planned"] as const).map((reason) => [
       reason,
-      buildRunSummaryMessages(rich, { currentDate: CURRENT_DATE, reason, workspaceChanges: reason === "completed" ? " M src/a.rs\n?? new.rs" : reason === "partial" ? null : undefined })
+      buildRunSummaryMessages(rich, {
+        currentDate: CURRENT_DATE,
+        reason,
+        toolUsage: reason === "completed" ? { DELEGATE: 1, PATCH: 3, READ: 4, VERIFY: 0 } : reason === "partial" ? {} : undefined,
+        workspaceChanges: reason === "completed" ? " M src/a.rs\n?? new.rs" : reason === "partial" ? null : undefined
+      })
     ])
   ),
   buildRunSummaryMessages_empty: buildRunSummaryMessages(empty, { currentDate: CURRENT_DATE, reason: "completed" }),

@@ -234,10 +234,20 @@ fn run_summary_messages_match() {
             "completed" => Some(" M src/a.rs\n?? new.rs".to_string()),
             _ => None,
         };
-        let got = build_run_summary_messages(&rich, &RunSummaryMessagesArgs { current_date: DATE, reason, workspace_changes });
+        let tool_usage = match name {
+            "completed" => Some(
+                [("DELEGATE", 1u64), ("PATCH", 3), ("READ", 4), ("VERIFY", 0)]
+                    .into_iter()
+                    .map(|(name, count)| (name.to_string(), count))
+                    .collect(),
+            ),
+            "partial" => Some(std::collections::BTreeMap::new()),
+            _ => None,
+        };
+        let got = build_run_summary_messages(&rich, &RunSummaryMessagesArgs { current_date: DATE, reason, tool_usage, workspace_changes });
         assert_eq!(serde_json::to_value(&got).unwrap(), expect_value(&fx, &["buildRunSummaryMessages", name]), "buildRunSummaryMessages {name}");
     }
-    let got = build_run_summary_messages(&empty, &RunSummaryMessagesArgs { current_date: DATE, reason: HarnessRunReason::Completed, workspace_changes: None });
+    let got = build_run_summary_messages(&empty, &RunSummaryMessagesArgs { current_date: DATE, reason: HarnessRunReason::Completed, tool_usage: None, workspace_changes: None });
     assert_eq!(serde_json::to_value(&got).unwrap(), expect_value(&fx, &["buildRunSummaryMessages_empty"]), "buildRunSummaryMessages empty");
 }
 

@@ -103,8 +103,31 @@ const MAX_HISTORY_SUMMARY_CHARS: usize = 400;
 pub struct RunSummaryMessagesArgs<'a> {
     pub current_date: &'a str,
     pub reason: HarnessRunReason,
+    /// Harness-recorded workspace tool calls this run, by tool name (DELEGATE included).
+    pub tool_usage: Option<std::collections::BTreeMap<String, u64>>,
     /// Ground-truth workspace facts gathered by the caller (e.g. git status) at run end.
     pub workspace_changes: Option<String>,
+}
+
+/// prompt.ts buildToolUsageLine — names sorted by code point, zero counts dropped.
+pub fn build_tool_usage_line(tool_usage: &std::collections::BTreeMap<String, u64>) -> String {
+    let entries: Vec<String> = tool_usage
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect();
+    let delegated = tool_usage.get("DELEGATE").copied().unwrap_or(0);
+    let tail = if delegated > 0 {
+        format!("{delegated} DELEGATE child session(s) were spawned")
+    } else {
+        "no DELEGATE child sessions were spawned".to_string()
+    };
+
+    if entries.is_empty() {
+        return format!("tool_usage (harness-recorded for this run): no workspace tools were called; {tail}");
+    }
+
+    format!("tool_usage (harness-recorded for this run): {}; {tail}", entries.join(", "))
 }
 
 pub fn compose_harness_system_prompt(persona_prompt: Option<&str>) -> String {
@@ -551,8 +574,15 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
         }
     }
 
+    // A tainted-fixture run showed flash claiming "delegated to a DELEGATE child
+    // session" with no DELEGATE call in the transcript; the counts make that
+    // claim checkable the same way task_stats makes the counts checkable.
+    if let Some(tool_usage) = &args.tool_usage {
+        sections.push(build_tool_usage_line(tool_usage));
+    }
+
     sections.push(
-        "instruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
+        "instruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
             .to_string(),
     );
 

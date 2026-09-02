@@ -1351,6 +1351,9 @@ pub struct HarnessRun {
     /// The hot tail of the previous loop when it left its task unfinished —
     /// replayed into the next loop for the same task (see extract_loop_carryover).
     pub carryover: Option<LoopCarryover>,
+    /// Workspace tool calls this run, by tool name — the run summary cites
+    /// them so it cannot claim a delegation or a tool the run never used.
+    pub run_tool_usage: std::collections::BTreeMap<String, u64>,
 }
 
 /// Loop-scoped locals (loop.ts:660-745): one instance per task loop.
@@ -1796,6 +1799,7 @@ impl HarnessRun {
             run_error: None,
             plan_stopped: false,
             carryover: None,
+            run_tool_usage: std::collections::BTreeMap::new(),
         })
     }
 
@@ -3563,6 +3567,7 @@ impl HarnessRun {
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::ToolCall,
             });
+            *self.run_tool_usage.entry(tool_name.clone()).or_insert(0) += 1;
             self.emit(HarnessEvent {
                 data: Some(HarnessEventData {
                     call_id: Some(call_id.clone()),
@@ -4000,6 +4005,7 @@ impl HarnessRun {
             &crate::harness::prompt::RunSummaryMessagesArgs {
                 current_date: &(self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 reason,
+                tool_usage: Some(self.run_tool_usage.clone()),
                 workspace_changes,
             },
         );

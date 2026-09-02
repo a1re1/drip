@@ -36,7 +36,7 @@ fn walk(cwd: &Path, current: &Path, collected: &mut Vec<String>) -> std::io::Res
         })
         .filter(|(name, _, _)| !IGNORED_DIRECTORY_NAMES.contains(&name.as_str()))
         .collect();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.sort_by(|left, right| crate::tools::helpers::locale_compare(&left.0, &right.0));
 
     for (_, path, file_type) in entries {
         if file_type.is_dir() {
@@ -92,7 +92,7 @@ pub fn get_workspace_file_suggestions(files: &[String], query: &str, limit: usiz
             .partial_cmp(&right.0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(left.1.chars().count().cmp(&right.1.chars().count()))
-            .then(left.1.cmp(right.1))
+            .then(crate::tools::helpers::locale_compare(left.1, right.1))
     });
     scored.into_iter().take(limit.max(1)).map(|(_, path)| path.clone()).collect()
 }

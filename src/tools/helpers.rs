@@ -326,6 +326,90 @@ pub fn assert_directory_path(target_path: &Path, display_path: &str) -> Result<(
     }
 }
 
+// --- localeCompare -----------------------------------------------------------
+//
+// JS `String.prototype.localeCompare` under Bun is ICU root collation. The TS
+// tools sort directory listings, grep walks, @-mention suggestions and
+// canonical JSON keys with it, and a model sees that order (`DIR` puts
+// `hello.txt` before `NOTES.md`; byte order would not). This is the subset of
+// the root collation the workspace names actually exercise: three levels —
+// primary (whitespace < ICU punctuation order < digits < letters, case and
+// accents ignored), secondary (accents), tertiary (lowercase first) — then
+// byte order for anything still tied.
+
+// ICU root order of the ASCII "variable" characters, primary level.
+const ICU_ASCII_SYMBOL_ORDER: &str = "\t\n _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
+
+/// (primary weight, has accent, is upper) per collation element; a char may
+/// expand to two elements (æ → a e, ß → s s).
+fn collation_elements(ch: char, out: &mut Vec<(u32, bool, bool)>) {
+    let letter = |base: char, accent: bool, upper: bool| (200 + (base as u32 - 'a' as u32), accent, upper);
+    match ch {
+        'a'..='z' => out.push(letter(ch, false, false)),
+        'A'..='Z' => out.push(letter(ch.to_ascii_lowercase(), false, true)),
+        '0'..='9' => out.push((100 + (ch as u32 - '0' as u32), false, false)),
+        _ if ch.is_ascii() => match ICU_ASCII_SYMBOL_ORDER.find(ch) {
+            Some(index) => out.push((index as u32, false, false)),
+            None => out.push((1000 + ch as u32, false, false)),
+        },
+        'æ' => {
+            out.push(letter('a', true, false));
+            out.push(letter('e', false, false));
+        }
+        'Æ' => {
+            out.push(letter('a', true, true));
+            out.push(letter('e', false, true));
+        }
+        'ß' => {
+            out.push(letter('s', true, false));
+            out.push(letter('s', false, false));
+        }
+        _ => {
+            let upper = ch.is_uppercase();
+            let base = match ch.to_lowercase().next().unwrap_or(ch) {
+                'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => Some('a'),
+                'ç' => Some('c'),
+                'è' | 'é' | 'ê' | 'ë' => Some('e'),
+                'ì' | 'í' | 'î' | 'ï' => Some('i'),
+                'ñ' => Some('n'),
+                'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' => Some('o'),
+                'ù' | 'ú' | 'û' | 'ü' => Some('u'),
+                'ý' | 'ÿ' => Some('y'),
+                _ => None,
+            };
+            match base {
+                Some(base) => out.push(letter(base, true, upper)),
+                None => out.push((100_000 + ch as u32, false, upper)),
+            }
+        }
+    }
+}
+
+/// Port of `left.localeCompare(right)` (ICU root collation, see above).
+pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if left == right {
+        return Ordering::Equal;
+    }
+    let mut l = Vec::with_capacity(left.len());
+    let mut r = Vec::with_capacity(right.len());
+    left.chars().for_each(|ch| collation_elements(ch, &mut l));
+    right.chars().for_each(|ch| collation_elements(ch, &mut r));
+    let primary = l.iter().map(|e| e.0).cmp(r.iter().map(|e| e.0));
+    if primary != Ordering::Equal {
+        return primary;
+    }
+    let secondary = l.iter().map(|e| e.1).cmp(r.iter().map(|e| e.1));
+    if secondary != Ordering::Equal {
+        return secondary;
+    }
+    let tertiary = l.iter().map(|e| e.2).cmp(r.iter().map(|e| e.2));
+    if tertiary != Ordering::Equal {
+        return tertiary;
+    }
+    left.cmp(right)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +666,125 @@ mod tests {
             default_ignored_dirs(),
             &HashSet::from([".git", ".drip", ".local-coding-app", ".solid-state", "dist", "node_modules"])
         );
+    }
+
+    // The fixture is `[...names].sort((a, b) => a.localeCompare(b))` under Bun
+    // (ICU root); every adjacent pair must compare the same way here.
+    #[test]
+    fn locale_compare_matches_bun_icu_root_order() {
+        let expected: Vec<&str> = vec![
+            "_x",
+            "-a",
+            ".drip",
+            ".git",
+            "[a",
+            "@a",
+            "~a",
+            "$x",
+            "10",
+            "1a",
+            "9",
+            "a",
+            "A",
+            "ä",
+            "a b",
+            "a_b",
+            "a-b",
+            "a,",
+            "a;",
+            "a:",
+            "a!",
+            "a?",
+            "a.b",
+            "a'",
+            "a\"",
+            "a(",
+            "a)",
+            "a[",
+            "a]",
+            "a{",
+            "a}",
+            "a@",
+            "a*",
+            "a/",
+            "a\\",
+            "a&",
+            "a#",
+            "a%",
+            "a`",
+            "a^",
+            "a+",
+            "a<",
+            "a=",
+            "a>",
+            "a|",
+            "a~",
+            "a$",
+            "a1",
+            "a10",
+            "a2",
+            "aa",
+            "Aa",
+            "ab",
+            "aB",
+            "Ab",
+            "ae",
+            "æ",
+            "b",
+            "B",
+            "c",
+            "ç",
+            "Cargo.toml",
+            "e",
+            "é",
+            "f",
+            "hello.txt",
+            "index.ts",
+            "Index.ts",
+            "lib.rs",
+            "Lib.rs",
+            "license",
+            "LICENSE",
+            "main.rs",
+            "Makefile",
+            "mod.rs",
+            "MOD.rs",
+            "n",
+            "ñ",
+            "NOTES.md",
+            "o",
+            "ø",
+            "package-lock.json",
+            "package.json",
+            "readme",
+            "Readme",
+            "READme",
+            "README",
+            "README.md",
+            "src",
+            "Src",
+            "ss",
+            "ß",
+            "test",
+            "test_utils.ts",
+            "test-utils.ts",
+            "test.ts",
+            "tests",
+            "x_",
+            "x.rs",
+            "x.RS",
+            "X.rs",
+            "x$",
+            "z",
+            "Z"
+        ];
+        let mut shuffled: Vec<&str> = expected.iter().rev().copied().collect();
+        shuffled.sort_by(|a, b| locale_compare(a, b));
+        assert_eq!(shuffled, expected);
+        for pair in expected.windows(2) {
+            assert_eq!(locale_compare(pair[0], pair[1]), std::cmp::Ordering::Less, "{:?} < {:?}", pair[0], pair[1]);
+            assert_eq!(locale_compare(pair[1], pair[0]), std::cmp::Ordering::Greater);
+        }
+        assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
     }
 }

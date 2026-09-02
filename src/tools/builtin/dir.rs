@@ -110,13 +110,13 @@ fn walk(
         visible_entries.push((name, is_dir));
     }
 
-    // Directories sort first, then names (TS uses localeCompare; byte order
-    // matches for the ASCII names workspaces actually contain).
+    // Directories sort first, then names by localeCompare (ICU root order:
+    // `hello.txt` before `NOTES.md`).
     visible_entries.sort_by(|left, right| {
         right
             .1
             .cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
+            .then_with(|| crate::tools::helpers::locale_compare(&left.0, &right.0))
     });
 
     let shown_entries = &visible_entries[..visible_entries.len().min(MAX_ENTRIES_PER_DIRECTORY)];

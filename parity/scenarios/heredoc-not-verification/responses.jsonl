@@ -1,0 +1,7 @@
+{"toolCalls": [{"name": "plan_tasks", "arguments": {"tasks": ["write notes"]}}]}
+{"content": "Planned."}
+{"toolCalls": [{"name": "BASH", "arguments": {"command": "cat > NOTES.md <<'EOF'\n# Notes\nRun cargo test or bun test to verify.\nEOF\nwc -l NOTES.md"}}]}
+{"toolCalls": [{"name": "READ", "arguments": {"path": "NOTES.md"}}, {"name": "READ", "arguments": {"path": "hello.txt"}}, {"name": "BASH", "arguments": {"command": "cat NOTES.md"}}, {"name": "BASH", "arguments": {"command": "wc -c hello.txt"}}]}
+{"toolCalls": [{"name": "GREP", "arguments": {"pattern": "cargo", "path": "NOTES.md"}}, {"name": "DIR", "arguments": {"path": "."}}, {"name": "BASH", "arguments": {"command": "ls"}}, {"name": "BASH", "arguments": {"command": "head -1 NOTES.md"}}]}
+{"toolCalls": [{"name": "finish_task", "arguments": {"status": "completed", "summary": "Wrote NOTES.md."}}]}
+{"content": "Wrote NOTES.md."}

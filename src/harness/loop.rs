@@ -96,6 +96,152 @@ pub fn build_repeated_read_stub(tool_name: &str, prior_call_count: i64) -> Strin
     )
 }
 
+// A loop's transcript is discarded when the loop ends, so read-only calls
+// that never turn into an edit or a recorded fact are pure waste — and the
+// next loop re-reads the same files. Transcript audits of flash port lanes
+// found 48% of loops were read-only end to end (530 of 894 READ/GREP/DIR
+// calls in one 118-loop run), with a median of 1–5 reads before the first
+// write in the healthy loops. Every READ_ONLY_NUDGE_EVERY-th read-only call
+// in a loop that has not yet written or recorded anything gets one line.
+pub const READ_ONLY_NUDGE_EVERY: i64 = 8;
+
+// Shell commands that only inspect the workspace. Flash reads through BASH
+// as much as through READ (`cat a.ts b.ts`, `sed -n '1,140p' x.rs`, `for f in
+// …; do awk … $f; done`), so the read-only accounting has to see those too.
+// Conservative: a command is read-only only when every segment's program is
+// on this list and nothing is redirected to a file; anything unrecognized is
+// treated as a write (no nudge). Mirrors the TS READ_ONLY_SHELL_PROGRAMS.
+const READ_ONLY_SHELL_PROGRAMS: [&str; 33] = [
+    "[", "awk", "basename", "cat", "command", "cut", "diff", "dirname", "du", "echo", "file", "find", "grep", "head", "jq", "ls", "nl", "printf", "pwd",
+    "realpath", "rg", "sed", "sort", "stat", "tail", "test", "tr", "tree", "true", "type", "uniq", "wc", "which",
+];
+const READ_ONLY_GIT_SUBCOMMANDS: [&str; 8] = ["blame", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"];
+const SHELL_KEYWORD_SEGMENTS: [&str; 10] = ["", "do", "done", "else", "fi", "then", "{", "}", "(", ")"];
+
+fn shell_res() -> &'static [regex::Regex; 6] {
+    static RE: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        [
+            regex::Regex::new(r"2>&1|2>/dev/null|</dev/null").expect("redirect regex"),
+            regex::Regex::new(r"\|\|?|&&|;|\n").expect("segment regex"),
+            regex::Regex::new(r"^for\s+\w+\s+in\b").expect("for regex"),
+            regex::Regex::new(r"^[({\s]+").expect("wrapper regex"),
+            regex::Regex::new(r"^(?:if|then|do|else)\s+").expect("keyword regex"),
+            regex::Regex::new(r"^-[a-zA-Z]*i").expect("sed -i regex"),
+        ]
+    })
+}
+
+fn assignment_res() -> &'static [regex::Regex; 3] {
+    static RE: std::sync::OnceLock<[regex::Regex; 3]> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        [
+            regex::Regex::new(r"^\w+=\$\(").expect("assign subshell regex"),
+            regex::Regex::new(r"^\w+=\S*\s+").expect("env assign regex"),
+            regex::Regex::new(r"^\$\(").expect("subshell regex"),
+        ]
+    })
+}
+
+/// True when a BASH command only inspects the workspace (see READ_ONLY_SHELL_PROGRAMS).
+pub fn is_read_only_shell_command(command: &str) -> bool {
+    let [redirect_re, segment_re, for_re, wrapper_re, keyword_re, sed_i_re] = shell_res();
+    // stderr merges and null redirects are fine; any other redirection or a
+    // heredoc means the command writes somewhere.
+    let stripped = redirect_re.replace_all(command, " ");
+    if stripped.contains('>') || stripped.contains("<<") {
+        return false;
+    }
+    let mut saw_program = false;
+    for raw_segment in segment_re.split(&stripped) {
+        let mut segment = raw_segment.trim();
+        // Loop / conditional scaffolding and subshell wrappers carry no program.
+        if SHELL_KEYWORD_SEGMENTS.contains(&segment) || for_re.is_match(segment) {
+            continue;
+        }
+        let without_wrapper = wrapper_re.replace(segment, "");
+        let without_keyword = keyword_re.replace(&without_wrapper, "");
+        segment = without_keyword.as_ref();
+        // `n=$(grep …)` and `FOO=bar cmd`: look at the program, not the assignment.
+        let [assign_subshell_re, env_assign_re, subshell_re] = assignment_res();
+        let a = assign_subshell_re.replace(segment, "");
+        let b = env_assign_re.replace(&a, "");
+        let c = subshell_re.replace(&b, "");
+        let words: Vec<&str> = c.split_whitespace().collect();
+        let program = words.first().copied().unwrap_or("");
+        saw_program = true;
+        if program == "git" {
+            if !READ_ONLY_GIT_SUBCOMMANDS.contains(&words.get(1).copied().unwrap_or("")) {
+                return false;
+            }
+            continue;
+        }
+        if !READ_ONLY_SHELL_PROGRAMS.contains(&program) {
+            return false;
+        }
+        if program == "sed" && words.iter().any(|word| sed_i_re.is_match(word) || *word == "--in-place") {
+            return false;
+        }
+        if program == "find" && words.iter().any(|word| matches!(*word, "-delete" | "-exec" | "-execdir" | "-ok")) {
+            return false;
+        }
+    }
+    saw_program
+}
+
+// Shell commands that plainly write to the workspace: a file redirection or
+// heredoc, an in-place sed, or a program whose job is to create/move/remove
+// files. Flash writes whole files through `cat > f <<'EOF'`, and such a loop
+// has persisted something even though no PATCH ran. Mirrors the TS
+// WRITING_SHELL_PROGRAMS.
+const WRITING_SHELL_PROGRAMS: [&str; 14] =
+    ["chmod", "chown", "cp", "dd", "install", "ln", "mkdir", "mv", "patch", "rm", "rmdir", "tee", "touch", "truncate"];
+const WRITING_GIT_SUBCOMMANDS: [&str; 15] = [
+    "add", "am", "apply", "checkout", "cherry-pick", "commit", "merge", "mv", "rebase", "reset", "restore", "revert", "rm", "stash", "switch",
+];
+
+/// True when a BASH command plainly writes to the workspace (see WRITING_SHELL_PROGRAMS).
+pub fn is_writing_shell_command(command: &str) -> bool {
+    let [redirect_re, segment_re, _for_re, wrapper_re, keyword_re, sed_i_re] = shell_res();
+    let stripped = redirect_re.replace_all(command, " ");
+    if stripped.contains('>') || stripped.contains("<<") {
+        return true;
+    }
+    let [assign_subshell_re, env_assign_re, subshell_re] = assignment_res();
+    for raw_segment in segment_re.split(&stripped) {
+        let without_wrapper = wrapper_re.replace(raw_segment.trim(), "");
+        let without_keyword = keyword_re.replace(&without_wrapper, "");
+        let a = assign_subshell_re.replace(&without_keyword, "");
+        let b = env_assign_re.replace(&a, "");
+        let c = subshell_re.replace(&b, "");
+        let words: Vec<&str> = c.split_whitespace().collect();
+        let program = words.first().copied().unwrap_or("");
+        if WRITING_SHELL_PROGRAMS.contains(&program) {
+            return true;
+        }
+        if program == "git" && WRITING_GIT_SUBCOMMANDS.contains(&words.get(1).copied().unwrap_or("")) {
+            return true;
+        }
+        if program == "sed" && words.iter().any(|word| sed_i_re.is_match(word) || *word == "--in-place") {
+            return true;
+        }
+    }
+    false
+}
+
+/// The BASH command text from a raw tool input, or None.
+pub fn extract_bash_command(raw_input: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(raw_input).ok()?;
+    parsed.get("command").and_then(Value::as_str).map(str::to_string)
+}
+
+/// The nudge appended to a read-only result when a loop keeps reading without persisting.
+pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: i64) -> String {
+    format!(
+        "[harness] {read_only_calls} read-only calls this loop (cycle {cycle}/{max_cycles}) and nothing written or recorded yet. What this loop has read is dropped when the loop ends — act on it now: PATCH the change you can already make, record the facts you need with remember/observe, or finish_task blocked with what is missing."
+    )
+}
+
 // Workspace-relative file paths a goal names explicitly ("NEW FILE
 // src/lib/widget.ts", "update `drip/src/cli/entry.rs`"). Requires a directory
 // separator so prose like "v1.2" or "README.md" never counts. Mirrors the TS
@@ -483,6 +629,37 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
     false
 }
 
+fn heredoc_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"<<-?\s*(?:'([^']+)'|"([^"]+)"|(\w+))"#).expect("heredoc regex"))
+}
+
+/// A command with its heredoc bodies removed (`cat > f <<'EOF' … EOF` keeps
+/// only the `cat > f <<'EOF'` line). Flash writes whole files through BASH
+/// heredocs, and a body that merely *mentions* "bun test" or "cargo check"
+/// must not record the write as the run's verification.
+pub fn strip_heredoc_bodies(command: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut terminator: Option<String> = None;
+    for line in command.split('\n') {
+        if let Some(word) = &terminator {
+            if line.trim() == word {
+                terminator = None;
+            }
+            continue;
+        }
+        kept.push(line);
+        if let Some(caps) = heredoc_re().captures(line) {
+            terminator = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .or_else(|| caps.get(3))
+                .map(|m| m.as_str().to_string());
+        }
+    }
+    kept.join("\n")
+}
+
 pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<String> {
     // BASH_ASYNC is excluded: its "success" is the launch, not the tests — an
     // async test run would record as passed the moment it started.
@@ -503,7 +680,7 @@ pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<
         return if command.is_empty() { None } else { Some(command) };
     }
 
-    if verification_pattern_matches(&command) {
+    if verification_pattern_matches(&strip_heredoc_bodies(&command)) {
         Some(command)
     } else {
         None
@@ -571,6 +748,54 @@ mod loop_helpers_tests {
             messages[2].content,
             Some(TransportContent::Text("hottest result".to_string()))
         );
+    }
+
+    // test/harness-feedback.test.ts "classifies the shell commands flash reads with as read-only"
+    #[test]
+    fn read_only_shell_commands_are_classified_like_the_ts() {
+        for command in [
+            "ls drip/src/tools/builtin/ && ls drip/ 2>/dev/null; ls tools/ 2>/dev/null",
+            "wc -l drip/src/tools/builtin/*.rs",
+            "cat tools/read-tool.ts tools/dir-tool.ts",
+            "cat tools/grep-tool.ts | sed -n '1,80p'; echo ===; grep -n \"name:\" tools/*.ts",
+            "for f in grep dir patch; do echo \"=== $f ===\"; awk '/pub fn definition\\(\\)/,/^}/' drip/src/tools/builtin/$f.rs; done",
+            "n=$(grep -n \"fn definition\" drip/src/tools/builtin/bash.rs | cut -d: -f1); sed -n \"$n,$((n+80))p\" drip/src/tools/builtin/bash.rs",
+            "test -s drip/docs/TOOLS.md && grep -c \"^## \" drip/docs/TOOLS.md",
+            "git log --oneline -5 | head -3",
+            "rg -n 'fn main' src/ 2>&1 | head",
+            "find . -name '*.rs' | wc -l",
+        ] {
+            assert!(is_read_only_shell_command(command), "{command}");
+        }
+        for command in [
+            "mkdir -p drip/docs && cat > drip/docs/TOOLS.md <<'EOF'\n# x\nEOF",
+            "sed -i '' 's/a/b/' src/x.ts",
+            "sed -ni 's/a/b/p' src/x.ts",
+            "cargo test 2>&1 | tail -20",
+            "echo hi > out.txt",
+            "find . -name '*.tmp' -delete",
+            "git commit -am wip",
+            "cat a.ts | tee b.ts",
+            "python3 -c 'print(1)'",
+            "",
+        ] {
+            assert!(!is_read_only_shell_command(command), "{command}");
+        }
+        for command in [
+            "mkdir -p drip/docs && cat > drip/docs/TOOLS.md <<'EOF'\n# x\nEOF",
+            "sed -i '' 's/a/b/' src/x.ts",
+            "echo hi > out.txt",
+            "git add -A && git commit -m wip",
+            "cat a.ts | tee b.ts",
+            "for f in a b; do touch $f; done",
+        ] {
+            assert!(is_writing_shell_command(command), "{command}");
+        }
+        for command in ["cargo test 2>&1 | tail -20", "cat tools/read-tool.ts", "git status", "python3 -c 'print(1)'", ""] {
+            assert!(!is_writing_shell_command(command), "{command}");
+        }
+        assert_eq!(extract_bash_command(r#"{"command":"ls"}"#).as_deref(), Some("ls"));
+        assert_eq!(extract_bash_command("{"), None);
     }
 
     // test/harness-feedback.test.ts "unnamed-path PATCH note"
@@ -644,6 +869,18 @@ mod loop_helpers_tests {
         assert!(!detect_empty_test_run("cargo check", "running 0 tests"));
         assert!(!detect_empty_test_run("bun run typecheck", "No tests found"));
         assert!(!detect_empty_test_run("attest run", "no tests ran"));
+    }
+
+    // test/harness-verify-gate.test.ts "a heredoc body that mentions a test runner is not a verification"
+    #[test]
+    fn heredoc_bodies_do_not_make_a_write_a_verification() {
+        let write = "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'\n# Tools\nit detects bun test, vitest, pytest, cargo test\nEOF";
+        assert_eq!(strip_heredoc_bodies(write), "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'");
+        let raw = serde_json::json!({ "command": write }).to_string();
+        assert_eq!(extract_verification_command("BASH", &raw), None);
+        let real = "cat > t.sh <<EOF\necho hi\nEOF\ncargo test";
+        assert_eq!(extract_verification_command("BASH", &serde_json::json!({ "command": real }).to_string()).as_deref(), Some(real));
+        assert_eq!(strip_heredoc_bodies("cargo test"), "cargo test");
     }
 
     #[test]
@@ -911,8 +1148,14 @@ pub struct LoopScope {
     pub hot_read_only_results: HashMap<String, (usize, String)>,
     pub used_tool_call_ids: HashSet<String>,
     pub affordable_cycles: i64,
+    /// The cycle currently running (1-based; 0 before the first begins).
+    pub cycle: i64,
     pub task_finished: bool,
     pub made_progress: bool,
+    /// Successful READ/GREP/DIR calls so far this loop, and whether anything
+    /// has been written or recorded — the read-only nudge's inputs.
+    pub read_only_calls_this_loop: i64,
+    pub persisted_this_loop: bool,
     pub verification_stuck_this_loop: bool,
     pub narration_nudge_used: bool,
     pub truncation_nudge_used: bool,
@@ -1893,8 +2136,11 @@ impl HarnessRun {
             hot_read_only_results: HashMap::new(),
             used_tool_call_ids: HashSet::new(),
             affordable_cycles,
+            cycle: 0,
             task_finished: false,
             made_progress: false,
+            read_only_calls_this_loop: 0,
+            persisted_this_loop: false,
             verification_stuck_this_loop: false,
             narration_nudge_used: false,
             truncation_nudge_used: false,
@@ -1984,6 +2230,7 @@ impl HarnessRun {
     /// continuation message + fold for later cycles. Returns false when the
     /// cycle must not run (budget exhausted / aborted).
     pub fn begin_cycle(&mut self, scope: &mut LoopScope, cycle: i64) -> bool {
+        scope.cycle = cycle;
         if self
             .options
             .signal
@@ -2745,6 +2992,7 @@ impl HarnessRun {
                 });
                 scope.task_finished = scope.task_finished || outcome.task_finished;
                 scope.made_progress = scope.made_progress || outcome.state_changed;
+                scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
                 scope
                     .transport_messages
                     .push(crate::harness::transport::TransportRequestMessage {
@@ -2782,6 +3030,7 @@ impl HarnessRun {
                     .unwrap_or(false)
             {
                 scope.made_progress = true;
+                scope.persisted_this_loop = true;
                 self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
@@ -2917,11 +3166,55 @@ impl HarnessRun {
                 scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
             }
 
+            let bash_command = if tool_name == "BASH" { Some(extract_bash_command(&raw_input).unwrap_or_default()) } else { None };
+            let read_only_bash = bash_command.as_deref().is_some_and(is_read_only_shell_command);
+
+            // A shell write (`cat > f <<'EOF'`, `sed -i`, `mv`) persists as
+            // much as a PATCH does for the read-only accounting.
+            if !execution.failed && bash_command.as_deref().is_some_and(is_writing_shell_command) {
+                scope.persisted_this_loop = true;
+            }
+
+            if (deduped_tool || read_only_bash) && !execution.failed {
+                scope.read_only_calls_this_loop += 1;
+                if !scope.persisted_this_loop && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
+                    tool_content = format!(
+                        "{tool_content}\n\n{}",
+                        build_read_only_loop_nudge(scope.read_only_calls_this_loop, scope.cycle, scope.affordable_cycles)
+                    );
+                    // Surfaced in the event stream so transcript audits can see
+                    // when the nudge fired and what the model did next.
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData {
+                            r#loop: Some(self.state.r#loop),
+                            tool_name: Some(tool_name.clone()),
+                            ..Default::default()
+                        }),
+                        detail: format!(
+                            "read-only nudge: {} read-only calls this loop (cycle {}/{}) with nothing written or recorded",
+                            scope.read_only_calls_this_loop, scope.cycle, scope.affordable_cycles
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+            }
+
             // A new file at a path the goal never named gets one line of
             // feedback while it is still cheap to move.
             if !execution.failed && tool_name == "PATCH" {
                 if let Some(note) = build_unnamed_path_note(&self.state.goal, &execution.tool_content) {
                     tool_content = format!("{tool_content}\n\n{note}");
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData {
+                            r#loop: Some(self.state.r#loop),
+                            tool_name: Some(tool_name.clone()),
+                            ..Default::default()
+                        }),
+                        detail: format!("unnamed-path note: {}", note.trim_start_matches("[harness] ")),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
                 }
             }
 

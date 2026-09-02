@@ -19,7 +19,7 @@ fn sort_json_value(value: Value) -> Value {
 			// Map keeps insertion order, so nothing sorts nested objects for us.
 			let mut sorted_entries: Vec<(String, Value)> =
 				map.into_iter().map(|(key, value)| (key, sort_json_value(value))).collect();
-			sorted_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+			sorted_entries.sort_by(|(left_key, _), (right_key, _)| crate::tools::helpers::locale_compare(left_key, right_key));
 			Value::Object(sorted_entries.into_iter().collect())
 		}
 		other => other,

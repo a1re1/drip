@@ -313,7 +313,7 @@ fn grep_files(
     }
 }
 
-/// Port of walk — recursive directory walker. Uses sorted entries (localeCompare → sort_unstable).
+/// Port of walk — recursive directory walker. Entries sort by localeCompare.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     current_path: &Path,
@@ -336,10 +336,8 @@ fn walk(
     };
 
     let mut entries: Vec<_> = read_dir.flatten().collect();
-    entries.sort_unstable_by(|a, b| {
-        a.file_name()
-            .to_string_lossy()
-            .cmp(&b.file_name().to_string_lossy())
+    entries.sort_by(|a, b| {
+        crate::tools::helpers::locale_compare(&a.file_name().to_string_lossy(), &b.file_name().to_string_lossy())
     });
 
     for entry in entries {

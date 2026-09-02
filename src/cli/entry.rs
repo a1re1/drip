@@ -83,6 +83,23 @@ fn resolve_tools_path(requested: &str) -> String {
     requested.to_string()
 }
 
+/// JS truthiness for an optional string flag: `--prompt ""` counts as absent.
+fn non_empty(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|text| !text.is_empty())
+}
+
+/// `Number.prototype.toFixed(2)`: an exact half rounds up, where Rust's `{:.2}`
+/// rounds it to even (131072 bytes is 0.125 MB → "0.13", not "0.12").
+fn to_fixed_2(value: f64) -> String {
+    let scaled = value * 100.0;
+
+    if scaled.fract() == 0.5 {
+        format!("{:.2}", scaled.ceil() / 100.0)
+    } else {
+        format!("{value:.2}")
+    }
+}
+
 fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinition>, String> {
     if tools_path != "./tools" && !Path::new(tools_path).exists() {
         return Err(format!(
@@ -1067,7 +1084,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
     }
 
     if cli_args.undo_last {
-        if cli_args.goal.is_some() || cli_args.prompt.is_some() {
+        if non_empty(&cli_args.goal) || non_empty(&cli_args.prompt) {
             eprintln!("--undo-last only reverts edits — run goals separately.");
             return 1;
         }
@@ -1126,7 +1143,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--wait", cli_args.wait),
     ];
     let active_modes: Vec<&str> = exclusive_modes.iter().filter(|(_, active)| *active).map(|(name, _)| *name).collect();
-    let has_goal_like = cli_args.goal.is_some() || cli_args.prompt.is_some() || cli_args.tui;
+    // JS truthiness: `--prompt ""` is no goal at all (the empty-goal error comes later).
+    let has_goal_like = non_empty(&cli_args.goal) || non_empty(&cli_args.prompt) || cli_args.tui;
 
     if active_modes.len() > 1 {
         eprintln!("Pass one of {} — they are separate modes.", active_modes.join(", "));
@@ -1171,7 +1189,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
         }
 
         let older_than_days = cli_args.older_than.unwrap_or(14);
-        let older_than_ms = older_than_days * 24 * 60 * 60 * 1000;
+        // Saturate rather than overflow: JS keeps an absurd day count as a
+        // float and simply reaps everything.
+        let older_than_ms = older_than_days.saturating_mul(24 * 60 * 60 * 1000);
         let index = open_session_index(&project.index_db_path);
         let plan = collect_gc_plan(&index, &project, older_than_ms, &chrono::Utc::now);
         let result = execute_gc_plan(&plan, cli_args.dry_run);
@@ -1220,7 +1240,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             return 0;
         }
 
-        let mb = |bytes: u64| format!("{:.2}", bytes as f64 / 1_048_576.0);
+        let mb = |bytes: u64| to_fixed_2(bytes as f64 / 1_048_576.0);
 
         println!(
             "GC{}: {} session(s), {} MB eligible",
@@ -1462,7 +1482,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
     // headless runner; --prompt exists so scripted callers avoid shell-quoting a
     // positional). Supplying both is ambiguous, so it errors instead of one
     // silently winning.
-    if cli_args.prompt.is_some() && cli_args.goal.is_some() {
+    if non_empty(&cli_args.prompt) && non_empty(&cli_args.goal) {
         eprintln!("Provide the goal either as a positional argument or via --prompt, not both.");
         return 1;
     }
@@ -1645,11 +1665,17 @@ pub async fn main(argv: Vec<String>) -> i32 {
             };
 
             let line = json!({ "at": now_iso(), "text": text }).to_string();
-            let _ = std::fs::OpenOptions::new()
+            // A message that could not be queued is a failed --send (exit 1), as
+            // appendFileSync throwing is in lci — not a silent "Queued".
+            if let Err(error) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&paths.inbox_path)
-                .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()));
+                .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()))
+            {
+                eprintln!("Could not queue the message at {}: {error}", paths.inbox_path);
+                return 1;
+            }
             // Queued vs consumed matter to followers: the harness emits an
             // operator-message event only when a running goal picks this up.
             let _ = append_transcript_entry(
@@ -1961,4 +1987,27 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
     }
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{non_empty, to_fixed_2};
+
+    #[test]
+    fn non_empty_follows_js_truthiness() {
+        assert!(!non_empty(&None));
+        assert!(!non_empty(&Some(String::new())));
+        assert!(non_empty(&Some(" ".to_string())));
+        assert!(non_empty(&Some("goal".to_string())));
+    }
+
+    #[test]
+    fn to_fixed_2_rounds_an_exact_half_up_like_js() {
+        assert_eq!(to_fixed_2(0.125), "0.13");
+        assert_eq!(to_fixed_2(0.375), "0.38");
+        assert_eq!(to_fixed_2(1.005), "1.00");
+        assert_eq!(to_fixed_2(0.0), "0.00");
+        assert_eq!(to_fixed_2(12.3456), "12.35");
+        assert_eq!(to_fixed_2(131072.0 / 1_048_576.0), "0.13");
+    }
 }

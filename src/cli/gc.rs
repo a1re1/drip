@@ -130,7 +130,7 @@ pub fn collect_gc_plan(
     older_than_ms: i64,
     now: &dyn Fn() -> DateTime<Utc>,
 ) -> GcPlan {
-    let cutoff = now().timestamp_millis() - older_than_ms;
+    let cutoff = now().timestamp_millis().saturating_sub(older_than_ms);
 
     // Every registry: the project's own index plus the legacy pre-move index
     // when it still exists on disk.

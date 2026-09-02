@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::cli::review_report::{
     build_skipped_synthesis_report, build_synthesis_prompt, build_unit_review_prompt, confidence_from_counts,
     format_file_report, looks_like_file_report, looks_like_synthesis_report, parse_file_report, pick_report_body,
-    plan_retry_units, plan_review_units, review_child_budget, should_skip_synthesis, split_unit_report,
+    chunk_oversized_units, plan_retry_units, plan_review_units, review_child_budget, unit_part_label, should_skip_synthesis, split_unit_report,
     unit_review_task_title, with_computed_confidence, DiffFile, FileReport, ReportBodySources, ReviewSynthesisMode,
     ReviewUnit, ReviewUnitKind, RetryRun, SkippedSynthesisArgs, SkippedSynthesisFile, SynthesisPromptArgs,
     SynthesisSkipFile, UnitPromptFile, UnitReviewPromptArgs, MAX_INLINE_FILE_LINES, REVIEW_TOOL_NAMES,
@@ -108,6 +108,8 @@ pub struct ReviewCommandArgs {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileReviewResult {
     pub path: String,
+    /// `"2/4"` when this row is one chunk of an oversized file.
+    pub part: Option<String>,
     /// The report body the child produced, or an error description.
     pub report: String,
     pub rating: Option<String>,
@@ -202,6 +204,9 @@ pub struct ReviewOutcomeFile {
     pub p0: u32,
     pub p1: u32,
     pub p2: u32,
+    /// `"2/4"` when this row is one chunk of an oversized file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
     pub path: String,
     pub rating: Option<String>,
     pub session_id: Option<String>,
@@ -475,6 +480,7 @@ fn outcome_files(files: &[FileReviewResult]) -> Vec<ReviewOutcomeFile> {
             p0: file.p0,
             p1: file.p1,
             p2: file.p2,
+            part: file.part.clone(),
             path: file.path.clone(),
             rating: file.rating.clone(),
             session_id: file.session_id.clone(),
@@ -509,6 +515,7 @@ fn errored_file(path: &str, description: &str) -> FileReviewResult {
         p0: 0,
         p1: 0,
         p2: 0,
+        part: None,
         path: path.to_string(),
         rating: None,
         rating_derived: false,
@@ -626,7 +633,7 @@ impl ReviewContext<'_> {
             .iter()
             .map(|path| UnitPromptFile {
                 path,
-                diff: self.diffs.get(path).map(String::as_str).unwrap_or(""),
+                diff: unit.part.as_ref().map(|part| part.diff.as_str()).or_else(|| self.diffs.get(path).map(String::as_str)).unwrap_or(""),
                 content: self.contents.get(path).map(String::as_str),
             })
             .collect();
@@ -672,6 +679,7 @@ impl ReviewContext<'_> {
                             p0: parsed.p0,
                             p1: parsed.p1,
                             p2: parsed.p2,
+                            part: unit_part_label(&unit),
                             path,
                             rating: parsed.rating,
                             rating_derived: parsed.rating_derived,
@@ -801,7 +809,7 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
         .iter()
         .filter_map(|path| diffs.get(path).map(|diff| DiffFile { path: path.as_str(), diff_lines: count_diff_lines(diff) }))
         .collect();
-    let units = plan_review_units(&diff_files);
+    let units = chunk_oversized_units(plan_review_units(&diff_files), |path| diffs.get(path).cloned().unwrap_or_default());
     let context = ReviewContext {
         args: &args,
         contents,
@@ -890,7 +898,7 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     file_results.sort_by_key(|file| order.get(file.path.as_str()).copied().unwrap_or(0));
 
-    let file_reports: Vec<String> = file_results.iter().map(|file| format_file_report(&file.path, &file.report)).collect();
+    let file_reports: Vec<String> = file_results.iter().map(|file| format_file_report(&file.path, &file.report, file.part.as_deref())).collect();
     let counts = sum_counts(&file_results);
     let confidence = confidence_from_counts(counts.p0, counts.p1);
     let counts_report = FileReport { rating: None, rating_derived: false, p0: counts.p0, p1: counts.p1, p2: counts.p2 };
@@ -1114,7 +1122,7 @@ mod tests {
             confidence: 5,
             counts: ReviewCounts::default(),
             exit_code: 0,
-            files: vec![ReviewOutcomeFile { errored: false, p0: 0, p1: 0, p2: 1, path: "a.rs".into(), rating: Some("⚠️".into()), session_id: Some("s1".into()) }],
+            files: vec![ReviewOutcomeFile { errored: false, p0: 0, p1: 0, p2: 1, part: None, path: "a.rs".into(), rating: Some("⚠️".into()), session_id: Some("s1".into()) }],
             report: "r".into(),
             timing: ReviewTiming { synthesis_ms: 1, total_ms: 3, units_ms: 2 },
             units: vec![ReviewUnitResult {

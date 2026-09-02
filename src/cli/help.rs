@@ -46,10 +46,11 @@ OPTIONS
 	                              one holistic review. Read-only: it never edits, commits, or posts
 	                              to GitHub. Changed files are planned into units — docs/manifests
 	                              in one, a source file with its tests, small same-directory files
-	                              together (<=3 files, <=400 diff lines), big files alone — and each
-	                              unit gets one budgeted, time-boxed, read-only child session (an
-	                              errored or incomplete unit is retried once); the JSON stays per
-	                              file. Findings are P0 (blocks), P1 (important), or P2 (fix before
+	                              together (<=3 files, <=400 diff lines), big files alone, a file
+	                              over 800 diff lines as hunk chunks reviewed in parallel — and
+	                              each unit gets one budgeted, time-boxed, read-only child session
+	                              (an errored or incomplete unit is retried once); the JSON stays
+	                              per file (chunks carry "part": "i/n"). Findings are P0 (blocks), P1 (important), or P2 (fix before
 	                              merge) — nothing below P2 is reported — and the confidence
 	                              score (5/5 down to 1/5) is computed from the P0/P1 counts, not by
 	                              a model. Exits 0 when no P0/P1 findings remain, 4 when some do,

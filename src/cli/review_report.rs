@@ -313,8 +313,15 @@ pub fn looks_like_synthesis_report(text: &str) -> bool {
 
 // The per-file section header. The template already opens with "### File:",
 // so a body that carries it is used as-is rather than headed twice.
-pub fn format_file_report(path: &str, body: &str) -> String {
+pub fn format_file_report(path: &str, body: &str, part: Option<&str>) -> String {
     let trimmed = body.trim();
+
+    // A chunk's block is re-headed with its part label: three "### File: big.rs"
+    // blocks in a row would read as duplicates to the synthesis pass.
+    if let Some(part) = part {
+        let body = Regex::new(r"^###\s*File:[^\n]*\n?").unwrap().replace(trimmed, "");
+        return format!("### File: {path} [{part}]\n{body}");
+    }
 
     if Regex::new(r"^###\s*File:").unwrap().is_match(trimmed) {
         trimmed.to_string()
@@ -339,16 +346,126 @@ pub enum ReviewUnitKind {
     Code,
 }
 
+/// One chunk of an oversized single-file unit: the header plus a run of
+/// consecutive hunks, and where it sits in the file's sequence (1-based).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewUnitPart {
+    pub diff: String,
+    pub index: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReviewUnit {
     pub kind: ReviewUnitKind,
     pub label: String,
     pub paths: Vec<String>,
     pub diff_lines: u32,
+    /// Set when this unit is one chunk of a file too big for one child.
+    pub part: Option<ReviewUnitPart>,
 }
 
 pub const MAX_UNIT_FILES: usize = 3;
 pub const MAX_UNIT_DIFF_LINES: u32 = 400;
+
+// A single file whose diff is more than twice the unit limit is split into
+// chunks of at most MAX_UNIT_DIFF_LINES: one child per chunk, in parallel,
+// each on a diff it can actually finish inside its budget. Below this the
+// oversized child budget covers it.
+pub const CHUNK_FILE_DIFF_LINES: u32 = 2 * MAX_UNIT_DIFF_LINES;
+
+/// `"2/4"` for a chunked unit, else None.
+pub fn unit_part_label(unit: &ReviewUnit) -> Option<String> {
+    unit.part.as_ref().map(|part| format!("{}/{}", part.index, part.total))
+}
+
+/// Splits a unified diff into its header (everything before the first "@@")
+/// and one entry per hunk.
+pub fn split_diff_hunks(diff: &str) -> (String, Vec<String>) {
+    let lines: Vec<&str> = diff.strip_suffix('\n').unwrap_or(diff).split('\n').collect();
+    let Some(first_hunk) = lines.iter().position(|line| line.starts_with("@@")) else {
+        return (diff.to_string(), Vec::new());
+    };
+    let header = lines[..first_hunk].join("\n");
+    let mut hunks: Vec<String> = Vec::new();
+
+    for line in &lines[first_hunk..] {
+        if line.starts_with("@@") || hunks.is_empty() {
+            hunks.push((*line).to_string());
+        } else if let Some(last) = hunks.last_mut() {
+            last.push('\n');
+            last.push_str(line);
+        }
+    }
+
+    (header, hunks)
+}
+
+/// Replaces every single-path code unit whose diff exceeds CHUNK_FILE_DIFF_LINES
+/// with consecutive-hunk chunks of at most MAX_UNIT_DIFF_LINES (a lone hunk
+/// bigger than that stays whole). Units that do not qualify pass through
+/// untouched, in order.
+pub fn chunk_oversized_units(units: Vec<ReviewUnit>, diff_of: impl Fn(&str) -> String) -> Vec<ReviewUnit> {
+    let mut out: Vec<ReviewUnit> = Vec::new();
+
+    for unit in units {
+        let Some(path) = unit.paths.first().cloned() else {
+            out.push(unit);
+            continue;
+        };
+
+        if unit.kind != ReviewUnitKind::Code || unit.paths.len() != 1 || unit.diff_lines <= CHUNK_FILE_DIFF_LINES {
+            out.push(unit);
+            continue;
+        }
+
+        let (header, hunks) = split_diff_hunks(&diff_of(&path));
+
+        if hunks.len() < 2 {
+            out.push(unit);
+            continue;
+        }
+
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        let mut group_lines: u32 = 0;
+
+        for hunk in hunks {
+            let hunk_lines = hunk.split('\n').count() as u32;
+
+            match groups.last_mut() {
+                Some(current) if group_lines + hunk_lines <= MAX_UNIT_DIFF_LINES => {
+                    current.push(hunk);
+                    group_lines += hunk_lines;
+                }
+                _ => {
+                    groups.push(vec![hunk]);
+                    group_lines = hunk_lines;
+                }
+            }
+        }
+
+        if groups.len() < 2 {
+            out.push(unit);
+            continue;
+        }
+
+        let total = groups.len();
+
+        for (i, group) in groups.into_iter().enumerate() {
+            let diff = format!("{header}\n{}\n", group.join("\n"));
+
+            out.push(ReviewUnit {
+                diff_lines: diff.split('\n').count() as u32,
+                kind: ReviewUnitKind::Code,
+                label: format!("{path} [{}/{total}]", i + 1),
+                part: Some(ReviewUnitPart { diff, index: i + 1, total }),
+                paths: vec![path.clone()],
+            });
+        }
+    }
+
+    out
+}
 
 // Prose and manifests need a skim, not a code review, so they all land in one
 // unit regardless of size. Case-insensitive on the extension; manifest names
@@ -492,6 +609,7 @@ pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
             label: "docs & manifests".to_string(),
             paths: docs.iter().map(|file| file.path.to_string()).collect(),
             diff_lines: docs.iter().map(|file| file.diff_lines).sum(),
+            part: None,
         });
     }
 
@@ -549,6 +667,7 @@ pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
                     label: unit_label(std::slice::from_ref(&file.path.to_string())),
                     paths: vec![file.path.to_string()],
                     diff_lines: file.diff_lines,
+                    part: None,
                 });
             }
             continue;
@@ -560,6 +679,7 @@ pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
             label: unit_label(&paths),
             paths,
             diff_lines: group_diff_lines,
+            part: None,
         });
     }
 
@@ -682,8 +802,18 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
         "## What this change is trying to achieve (the intent — judge whether the change serves this goal, not only whether it is correct)".to_string(),
         args.context.to_string(),
         String::new(),
-        if many { "## The diffs under review (one per file)".to_string() } else { "## The diff under review".to_string() },
+        if many {
+            "## The diffs under review (one per file)".to_string()
+        } else if let Some(part) = &args.unit.part {
+            format!("## The diff under review — part {} of {} of this file's change", part.index, part.total)
+        } else {
+            "## The diff under review".to_string()
+        },
     ];
+    if args.unit.part.is_some() {
+        lines.push("Only the hunks below are yours; the file's other hunks are reviewed by sibling children. Report findings in these hunks (or invariants they break elsewhere), not in hunks you cannot see.".to_string());
+        lines.push(String::new());
+    }
     lines.extend(diffs);
     lines.push("## Method".to_string());
 
@@ -763,7 +893,7 @@ pub fn delivery_checklist(paths: &[String]) -> String {
 
 pub fn unit_review_task_title(unit: &ReviewUnit) -> String {
     if unit.paths.len() == 1 {
-        file_review_task_title(unit.paths.first().map(String::as_str).unwrap_or(&unit.label))
+        file_review_task_title(if unit.part.is_some() { &unit.label } else { unit.paths.first().map(String::as_str).unwrap_or(&unit.label) })
     } else {
         format!(
             "Review {}: {} — read them in full, grep their callers and tests, then finish_task completed with one \"### File:\" block per file as the summary",
@@ -1031,15 +1161,20 @@ pub fn plan_retry_units(runs: &[RetryRun<'_>], diff_lines_of: &dyn Fn(&str) -> u
                 original_index,
                 reason: format!("no \"### File:\" block for {}", run.missing.join(", ")),
                 retry_of: run.unit.label.clone(),
-                unit: ReviewUnit {
-                    diff_lines: run.missing.iter().map(|path| diff_lines_of(path)).sum(),
-                    kind: run.unit.kind,
-                    label: if run.missing.len() == 1 {
-                        run.missing.first().cloned().unwrap_or_else(|| run.unit.label.clone())
-                    } else {
-                        format!("{} — {} skipped files", run.unit.label, run.missing.len())
-                    },
-                    paths: run.missing.to_vec(),
+                unit: if run.unit.part.is_some() {
+                    run.unit.clone()
+                } else {
+                    ReviewUnit {
+                        diff_lines: run.missing.iter().map(|path| diff_lines_of(path)).sum(),
+                        kind: run.unit.kind,
+                        label: if run.missing.len() == 1 {
+                            run.missing.first().cloned().unwrap_or_else(|| run.unit.label.clone())
+                        } else {
+                            format!("{} — {} skipped files", run.unit.label, run.missing.len())
+                        },
+                        paths: run.missing.to_vec(),
+                        part: None,
+                    }
                 },
             });
         }
@@ -1135,5 +1270,104 @@ mod tests {
         assert_eq!(derived.rating.as_deref(), Some("⚠️"));
         assert!(derived.rating_derived);
         assert_eq!(confidence_from_counts(derived.p0, derived.p1), 5);
+    }
+
+    fn fake_diff(hunks: usize, lines_per_hunk: usize) -> String {
+        let mut lines = vec!["diff --git a/src/big.rs b/src/big.rs".to_string(), "--- a/src/big.rs".to_string(), "+++ b/src/big.rs".to_string()];
+
+        for h in 0..hunks {
+            lines.push(format!("@@ -{},{lines_per_hunk} +{},{lines_per_hunk} @@", h * 100 + 1, h * 100 + 1));
+            for i in 1..lines_per_hunk {
+                lines.push(format!("+hunk {h} line {i}"));
+            }
+        }
+
+        format!("{}\n", lines.join("\n"))
+    }
+
+    fn big_unit(diff: &str) -> ReviewUnit {
+        ReviewUnit {
+            diff_lines: diff.split('\n').count() as u32,
+            kind: ReviewUnitKind::Code,
+            label: "src/big.rs".into(),
+            paths: vec!["src/big.rs".into()],
+            part: None,
+        }
+    }
+
+    #[test]
+    fn split_diff_hunks_keeps_the_header_and_one_entry_per_hunk() {
+        let (header, hunks) = split_diff_hunks(&fake_diff(3, 4));
+
+        assert_eq!(header, "diff --git a/src/big.rs b/src/big.rs\n--- a/src/big.rs\n+++ b/src/big.rs");
+        assert_eq!(hunks.len(), 3);
+        assert_eq!(hunks[1], "@@ -101,4 +101,4 @@\n+hunk 1 line 1\n+hunk 1 line 2\n+hunk 1 line 3");
+        assert_eq!(split_diff_hunks("no hunks here"), ("no hunks here".to_string(), Vec::new()));
+    }
+
+    #[test]
+    fn chunks_a_single_oversized_code_file_into_consecutive_hunk_parts() {
+        let diff = fake_diff(10, 100);
+        let unit = big_unit(&diff);
+
+        assert!(unit.diff_lines > CHUNK_FILE_DIFF_LINES);
+
+        let parts = chunk_oversized_units(vec![unit], |_| diff.clone());
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.iter().map(|part| part.label.as_str()).collect::<Vec<_>>(), ["src/big.rs [1/3]", "src/big.rs [2/3]", "src/big.rs [3/3]"]);
+        assert_eq!(parts.iter().map(unit_part_label).collect::<Vec<_>>(), [Some("1/3".into()), Some("2/3".into()), Some("3/3".into())]);
+        assert!(parts.iter().all(|part| part.diff_lines <= MAX_UNIT_DIFF_LINES + 4));
+        let first = parts[0].part.as_ref().expect("part");
+        assert!(first.diff.starts_with("diff --git a/src/big.rs b/src/big.rs\n"));
+        assert!(first.diff.contains("+hunk 3 line 99"));
+        assert!(!first.diff.contains("+hunk 4 line 1"));
+        let last = parts[2].part.as_ref().expect("part");
+        assert!(last.diff.contains("+hunk 9 line 99"));
+        assert!(!last.diff.contains("+hunk 7 line 1"));
+    }
+
+    #[test]
+    fn leaves_small_grouped_docs_and_single_hunk_units_untouched() {
+        let small = ReviewUnit { diff_lines: 30, kind: ReviewUnitKind::Code, label: "src/small.rs".into(), paths: vec!["src/small.rs".into()], part: None };
+        let group = ReviewUnit { diff_lines: 1000, kind: ReviewUnitKind::Code, label: "src (2 files)".into(), paths: vec!["src/a.rs".into(), "src/b.rs".into()], part: None };
+        let docs = ReviewUnit { diff_lines: 1000, kind: ReviewUnitKind::Docs, label: "docs & manifests".into(), paths: vec!["README.md".into()], part: None };
+        let one_hunk = fake_diff(1, 1000);
+        let units = vec![small, group, docs, big_unit(&one_hunk)];
+        let labels: Vec<String> = units.iter().map(|unit| unit.label.clone()).collect();
+
+        let out = chunk_oversized_units(units, |_| one_hunk.clone());
+
+        assert_eq!(out.iter().map(|unit| unit.label.clone()).collect::<Vec<_>>(), labels);
+        assert!(out.iter().all(|unit| unit.part.is_none()));
+    }
+
+    #[test]
+    fn prompts_a_part_child_with_its_slice_only() {
+        let diff = fake_diff(10, 100);
+        let parts = chunk_oversized_units(vec![big_unit(&diff)], |_| diff.clone());
+        let first = &parts[0];
+        let slice = first.part.as_ref().expect("part").diff.clone();
+        let files = [UnitPromptFile { path: "src/big.rs", diff: &slice, content: None }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "make the big file bigger", files: &files, unit: first });
+
+        assert!(prompt.contains("part 1 of 3"));
+        assert!(prompt.contains("Only the hunks below are yours"));
+        assert!(prompt.contains("+hunk 0 line 1"));
+        assert!(!prompt.contains("+hunk 9 line 1"));
+        assert!(unit_review_task_title(first).contains("src/big.rs [1/3]"));
+    }
+
+    #[test]
+    fn retries_a_part_unit_whole_keeping_its_slice() {
+        let diff = fake_diff(10, 100);
+        let parts = chunk_oversized_units(vec![big_unit(&diff)], |_| diff.clone());
+        let missing = vec!["src/big.rs".to_string()];
+        let runs = [RetryRun { errored: false, missing: &missing, unit: &parts[1] }];
+        let retries = plan_retry_units(&runs, &|_| 1000);
+
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].unit.label, "src/big.rs [2/3]");
+        assert_eq!(retries[0].unit.part, parts[1].part);
     }
 }

@@ -48,6 +48,7 @@ pub fn create_harness_state(goal: &str) -> HarnessState {
 		operator_messages: None,
 		last_verification: None,
 		mutations_since_verification: None,
+		workspace_edits: None,
 		verifications: None,
 		verification_streak: None,
 		iteration: 0,

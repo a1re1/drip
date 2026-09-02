@@ -1550,11 +1550,14 @@ pub fn apply_harness_op(
             }
 
             // Edit honesty gate: a task whose title reads as a code change ("add …",
-            // "fix …", "port …") completed without a single workspace edit while it
-            // was active is the small-model false completion seen in delegation
-            // lanes (finish_task completed, zero PATCH calls). ONE bounce names it;
-            // a second unchanged finish_task is accepted — the change may already
-            // exist, or the task turned out to be analysis only.
+            // "fix …", "port …") completed while NOTHING in the run has edited the
+            // workspace is the small-model false completion seen in delegation lanes
+            // (finish_task completed, zero PATCH calls). ONE bounce names it; a
+            // second unchanged finish_task is accepted — the change may already
+            // exist, or the task turned out to be analysis only. Scoped to the whole
+            // run, not the task: small models routinely do the work inside the
+            // planning loop (no current task to footprint) and then walk the ledger
+            // as formalities — bouncing those cost two extra calls per A/B run.
             if status == FinishTaskStatus::Completed
                 && is_current_task
                 && !target_edit_nudged.unwrap_or(false)
@@ -1562,7 +1565,8 @@ pub fn apply_harness_op(
                 let edited_workspace = target_footprint
                     .iter()
                     .flatten()
-                    .any(|entry| entry.starts_with("edited "));
+                    .any(|entry| entry.starts_with("edited "))
+                    || state.workspace_edits.unwrap_or(0) > 0;
 
                 if !edited_workspace && looks_like_build_task(&target_title) {
                     if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
@@ -1570,7 +1574,7 @@ pub fn apply_harness_op(
                     }
                     return HarnessOpOutcome {
                         text: format!(
-                            "harness: not accepted yet — this task reads like a code change (\"{}\") but no workspace edit landed while it was active. Make the change now (PATCH), then finish_task. If the task genuinely needs no edit (already in place, or analysis only), call finish_task again unchanged and it will be accepted.",
+                            "harness: not accepted yet — this task reads like a code change (\"{}\") but no workspace edit has landed in this run. Make the change now (PATCH), then finish_task. If the task genuinely needs no edit (already in place, or analysis only), call finish_task again unchanged and it will be accepted.",
                             crate::harness::telemetry::truncate_text(&target_title, 80)
                         ),
                         state_changed: true,
@@ -2156,13 +2160,35 @@ mod apply_harness_op_tests {
         let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done"}"#).unwrap();
         let bounced = apply_harness_op(&mut state, op, &ctx);
         assert!(!bounced.task_finished);
-        assert!(bounced.text.contains("no workspace edit landed"));
+        assert!(bounced.text.contains("no workspace edit has landed in this run"));
         assert_eq!(state.tasks[0].edit_nudged, Some(true));
 
         let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"already in place"}"#).unwrap();
         let accepted = apply_harness_op(&mut state, op, &ctx);
         assert!(accepted.task_finished);
         assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
+    /// Planning-loop work: the run edited the workspace before the task was
+    /// active, so the task has no footprint but is accepted without a bounce.
+    #[test]
+    fn finish_task_accepts_a_build_task_when_the_run_edited_elsewhere() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op("plan_tasks", r#"{"tasks": ["fix the clamp bound in src/lib.rs"]}"#)
+            .expect("plan_tasks input parses");
+        apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].activations = Some(1);
+        state.workspace_edits = Some(1);
+        let ctx = HarnessOpContext {
+            current_task_id: Some("task-1".to_string()),
+            ..HarnessOpContext::default()
+        };
+
+        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"fixed during planning"}"#).unwrap();
+        let accepted = apply_harness_op(&mut state, op, &ctx);
+        assert!(accepted.task_finished);
+        assert_eq!(state.tasks[0].edit_nudged, None);
     }
 
     /// recorded on state, and the loop ends.

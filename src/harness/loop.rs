@@ -2595,6 +2595,7 @@ impl HarnessRun {
             {
                 scope.made_progress = true;
                 self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
+                self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
 
             let verification_command = extract_verification_command(&tool_name, &raw_input);

@@ -276,6 +276,9 @@ pub struct HarnessState {
 	/// Successful workspace mutations since the last verification ran — when > 0 the lastVerification result is stale.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub mutations_since_verification: Option<i64>,
+	/// Successful workspace mutations over the whole run (never reset) — the edit gate's "did anything change at all" signal.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub workspace_edits: Option<i64>,
 	/// Bounded timeline (newest last) of the goal's verification runs.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verifications: Option<Vec<HarnessVerificationRecord>>,
@@ -309,6 +312,7 @@ impl Default for HarnessState {
 			operator_messages: None,
 			last_verification: None,
 			mutations_since_verification: None,
+			workspace_edits: None,
 			verifications: None,
 			verification_streak: None,
 			iteration: 0,

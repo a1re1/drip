@@ -1,0 +1,5 @@
+{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["add a greeting line to hello.txt"]}}]}
+{"toolCalls":[{"name":"PATCH","arguments":{"path":"hello.txt","content":"hello\nhi there\n"}}]}
+{"content":"Planned and applied the edit."}
+{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Greeting line already added during planning."}}]}
+{"content":"Appended a greeting line to hello.txt."}

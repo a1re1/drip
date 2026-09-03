@@ -52,8 +52,8 @@ pub fn find_journal_root(start_dir: &Path) -> PathBuf {
             git_root = Some(dir.clone());
         }
 
-        // Path::parent() returns None at the filesystem root where the TS
-        // loop's dirname(dir) === dir check fires — fall back the same way.
+        // Path::parent() returns None at the filesystem root, ending the climb the
+        // same way a dirname(dir) === dir check would — fall back to the git root.
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
             None => return git_root.unwrap_or_else(|| start_dir.to_path_buf()),
@@ -85,10 +85,9 @@ pub fn append_patch_journal(
         Err(_) => return, // Journaling is best-effort: an unwritable .drip must not fail the edit.
     };
 
-    // TS: mkdirSync(dirname, {recursive}) + appendFileSync — a true O_APPEND
-    // append, so concurrent writers never clobber each other and a read error
-    // can never discard the prior undo history. Best-effort: an unwritable
-    // .drip must not fail the edit.
+    // The append mode is a true O_APPEND append, so concurrent writers never
+    // clobber each other and a read error can never discard the prior undo
+    // history. Best-effort: an unwritable .drip must not fail the edit.
     if let Some(parent) = journal_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -98,7 +97,7 @@ pub fn append_patch_journal(
     }
 }
 
-/// Input to [`append_patch_journal`] — the TS call-site object shape.
+/// Input to [`append_patch_journal`] — one patch to record.
 #[derive(Debug, Clone)]
 pub struct AppendPatchJournalEntry {
     pub path: String,
@@ -202,8 +201,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // Port of makeTempRoot + the anchor dir from test/patch-journal.test.ts.
-    // Anchor discovery in the temp root so tests never climb into a real
+    // A temp workspace root with .drip/ pre-created, so anchor discovery
+    // lands inside the temp dir and tests never climb into a real
     // repo above tmp.
     fn make_root() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -211,7 +210,6 @@ mod tests {
         root
     }
 
-    // it("writes atomically without leaving temp files")
     #[test]
     fn writes_atomically_without_leaving_temp_files() {
         let root = make_root();
@@ -250,7 +248,6 @@ mod tests {
         assert!(!subdir.join(".drip").exists());
     }
 
-    // it("undoes edits in reverse order and deletes files a patch created")
     #[test]
     fn undoes_edits_in_reverse_order_and_deletes_files_a_patch_created() {
         let root = make_root();
@@ -292,7 +289,6 @@ mod tests {
         assert_eq!(undo_last_patches(root.path(), 1), vec![UndoOutcome::Empty]);
     }
 
-    // it("refuses to undo a file that changed after the patch")
     #[test]
     fn refuses_to_undo_a_file_that_changed_after_the_patch() {
         let root = make_root();

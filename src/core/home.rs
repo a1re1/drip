@@ -153,8 +153,7 @@ use std::borrow::Cow;
 pub fn project_slug(cwd: &str) -> String {
     let slug: String = match resolve(cwd).to_str() {
         // Fast path: the resolved cwd is valid UTF-8 — collapse each run of
-        // non-alphanumeric characters to a single dash, exactly like the
-        // TypeScript regex `/[^A-Za-z0-9]+/g`.
+        // non-alphanumeric characters to a single dash.
         Some(path) => collapse_non_alnum_runs(path).into_owned(),
         // Non-UTF-8 paths are mapped through a lossy conversion before
         // collapsing, so every cwd yields a slug.
@@ -168,9 +167,8 @@ pub fn project_slug(cwd: &str) -> String {
     }
 }
 
-// The Rust analogue of the TS regex `.replace(/[^A-Za-z0-9]+/g, "-")`: one dash
-// per maximal run of non-alphanumeric bytes, so "weird name (v2)" slugs with
-// two dashes, not one per character.
+// One dash per maximal run of non-alphanumeric bytes, so "weird name (v2)"
+// slugs with two dashes, not one per character.
 fn collapse_non_alnum_runs(path: &str) -> Cow<'_, str> {
     let bytes = path.as_bytes();
     let mut out = String::with_capacity(path.len());
@@ -516,7 +514,7 @@ pub fn ensure_drip_project(project: &DripProject) -> DripProject {
 mod tests {
     use super::*;
 
-    // realpath'd temp root — the analogue of the TS tests' makeTempRoot.
+    // A realpath'd temp root for the home tests.
     fn temp_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap().join(tag);

@@ -242,8 +242,7 @@ impl WatchApp {
         if !Path::new(&self.project.index_db_path).exists() {
             return;
         }
-        // app.ts wraps openSessionIndex in try/catch; the Rust opener panics
-        // on a broken file, so the catch is a catch_unwind.
+        // The opener panics on a broken file, so the guard is a catch_unwind.
         let path = self.project.index_db_path.clone();
         self.index = std::panic::catch_unwind(move || open_session_index(&path)).ok();
     }
@@ -375,7 +374,7 @@ impl WatchApp {
             return;
         }
 
-        // The TS wraps the listing in try/catch (an index wiped mid-run):
+        // A listing panic (an index wiped mid-run) must not kill the tick:
         // drop the index and re-open next tick, showing empty lists meanwhile.
         let project = self.project.clone();
         let records: Vec<SessionRecord> = match std::panic::catch_unwind(move || list_all_sessions(&project, Some(200), true)) {

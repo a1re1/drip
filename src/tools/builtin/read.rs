@@ -14,7 +14,7 @@ const MAX_LIMIT: i64 = 1000;
 const SIZE_LIMIT_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
 const LINE_CLAMP_CHARS: usize = 2000;
 
-// TS type ReadToolInput.
+// Parsed arguments for one read call.
 pub struct ReadToolInput {
     pub absolute_path: PathBuf,
     pub display_path: String,
@@ -23,7 +23,7 @@ pub struct ReadToolInput {
     pub offset: i64,
 }
 
-// TS type ReadToolResult (isDirectory is `boolean | undefined`).
+// Result of one read call (is_directory is Some only for directory reads).
 #[derive(Debug)]
 pub struct ReadToolResult {
     pub absolute_path: PathBuf,
@@ -47,7 +47,7 @@ pub struct ReadToolExecution {
     pub output_text: String,
 }
 
-/// Port of inferLanguage (module-private in TS).
+/// Maps a file extension to its language key, or None for unknown types.
 fn infer_language(path: &Path) -> Option<String> {
     let extension = path.extension()?.to_str()?.to_lowercase();
 
@@ -120,7 +120,7 @@ pub fn definition() -> Value {
     })
 }
 
-/// Port of the prepare stage.
+/// The prepare stage.
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<ReadToolPrepared> {
     let args = tool_arguments(args)?;
     let cwd = ctx.cwd.to_string_lossy().to_string();
@@ -149,9 +149,8 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<ReadToolPrepared> {
     })
 }
 
-/// Port of the execute stage (renamed from `execute` because the
-/// whole-pipeline entry point below owns that name per the builtin/mod.rs
-/// contract).
+/// The execute stage (named `execute_prepared`: the whole-pipeline entry
+/// point below owns `execute` per the builtin/mod.rs contract).
 pub fn execute_prepared(prepared: &ReadToolPrepared) -> Result<ReadToolExecution> {
     let input = &prepared.input;
 
@@ -261,7 +260,7 @@ pub fn execute_prepared(prepared: &ReadToolPrepared) -> Result<ReadToolExecution
         data: ReadToolResult {
             absolute_path: input.absolute_path.clone(),
             end_line,
-            // The TS file branch leaves isDirectory undefined.
+            // File reads leave is_directory unset.
             is_directory: None,
             start_line,
             text,
@@ -274,7 +273,7 @@ pub fn execute_prepared(prepared: &ReadToolPrepared) -> Result<ReadToolExecution
     })
 }
 
-/// Port of the complete stage.
+/// The complete stage.
 pub fn complete(prepared: &ReadToolPrepared, result: &ReadToolResult) -> ToolCompletion {
     let display_path = &prepared.input.display_path;
 
@@ -307,8 +306,7 @@ pub fn complete(prepared: &ReadToolPrepared, result: &ReadToolResult) -> ToolCom
         blocks: vec![ToolCompletionBlock {
             code: result.text.clone(),
             description: header,
-            // inferLanguage's undefined maps to "" — the TS block simply
-            // omits the language key there.
+            // Unknown extensions map to "" — no language key is emitted for them.
             language: infer_language(&result.absolute_path).unwrap_or_default(),
             path: result.absolute_path.clone(),
         }],
@@ -316,9 +314,8 @@ pub fn complete(prepared: &ReadToolPrepared, result: &ReadToolResult) -> ToolCom
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
-/// execute path reports that error).
+/// The transcript's display string for this call — or None when the
+/// arguments do not parse (the execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)
 }
@@ -343,9 +340,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// createTempDir from tools/test/test-helpers.ts (mkdtemp in the system
-    /// tmpdir). The TempDir guard is returned so the dir stays alive for the
-    /// test body like cleanupTempDirs' afterEach would.
+    /// A temp directory under the system tmpdir. The TempDir guard is returned
+    /// so the dir stays alive for the test body and is removed on drop.
     fn create_temp_dir(prefix: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
             .prefix(prefix)
@@ -362,7 +358,6 @@ mod tests {
         }
     }
 
-    // it("reads file contents and returns a completion block with header and line numbers")
     #[test]
     fn reads_file_contents_and_returns_a_completion_block_with_header_and_line_numbers() {
         let (_temp, cwd) = create_temp_dir("read-tool-");
@@ -391,7 +386,6 @@ mod tests {
         assert!(!completion.tool_content.contains("File continues"));
     }
 
-    // it("returns a directory listing (not an error) when pointed at a directory")
     #[test]
     fn returns_a_directory_listing_not_an_error_when_pointed_at_a_directory() {
         let (_temp, cwd) = create_temp_dir("read-tool-dir-");
@@ -423,7 +417,6 @@ mod tests {
         assert!(!completion.tool_content.contains("Read lines"));
     }
 
-    // it("still errors for a missing (non-existent) path")
     #[test]
     fn still_errors_for_a_missing_non_existent_path() {
         let (_temp, cwd) = create_temp_dir("read-tool-missing-");
@@ -435,7 +428,6 @@ mod tests {
         assert!(error.to_string().contains("does not exist"));
     }
 
-    // it("uses default offset=1 and default limit when not provided")
     #[test]
     fn uses_default_offset_1_and_default_limit_when_not_provided() {
         let (_temp, cwd) = create_temp_dir("read-tool-defaults-");
@@ -458,7 +450,6 @@ mod tests {
         assert!(result.data.text.contains("5\tline5"));
     }
 
-    // it("pages with offset and limit, returns correct numbered lines")
     #[test]
     fn pages_with_offset_and_limit_returns_correct_numbered_lines() {
         let (_temp, cwd) = create_temp_dir("read-tool-paging-");
@@ -479,7 +470,6 @@ mod tests {
         assert_eq!(result.data.text, "4\tline4\n5\tline5\n6\tline6");
     }
 
-    // it("includes a continue footer when more lines remain")
     #[test]
     fn includes_a_continue_footer_when_more_lines_remain() {
         let (_temp, cwd) = create_temp_dir("read-tool-footer-");
@@ -505,7 +495,6 @@ mod tests {
             .contains("File continues — call READ again with offset 6 to keep reading"));
     }
 
-    // it("does not include a footer when all lines are read")
     #[test]
     fn does_not_include_a_footer_when_all_lines_are_read() {
         let (_temp, cwd) = create_temp_dir("read-tool-no-footer-");
@@ -523,7 +512,6 @@ mod tests {
         assert!(!completion.tool_content.contains("File continues"));
     }
 
-    // it("errors when offset is past end of file, naming the actual line count")
     #[test]
     fn errors_when_offset_is_past_end_of_file_naming_the_actual_line_count() {
         let (_temp, cwd) = create_temp_dir("read-tool-offset-error-");
@@ -539,7 +527,6 @@ mod tests {
         assert!(error.contains("1 line"));
     }
 
-    // it("fails with a helpful message when the file does not exist")
     #[test]
     fn fails_with_a_helpful_message_when_the_file_does_not_exist() {
         let (_temp, cwd) = create_temp_dir("read-tool-missing-");
@@ -551,9 +538,7 @@ mod tests {
         assert!(error.to_string().contains("does not exist"));
     }
 
-    // describe("size guard")
     //
-    // it("refuses files larger than 5 MB with a helpful error mentioning size, GREP, and head/tail")
     #[test]
     fn refuses_files_larger_than_5_mb_with_a_helpful_error() {
         // Write a file that is just over 5 MB
@@ -566,8 +551,8 @@ mod tests {
         let ctx = stage_context(&cwd);
         let prepared = prepare(&json!({"path": "large.txt"}), &ctx).unwrap();
 
-        // The TS suite calls execute four times to assert four facets of the
-        // same rejection (the tool is pure, so the message is identical).
+        // Four facets asserted against one rejection (the tool is pure, so the
+        // message is identical every call).
         let error = execute_prepared(&prepared).unwrap_err().to_string();
         assert!(error.contains("too large to read directly"));
         // Error should mention the size in MB
@@ -578,7 +563,6 @@ mod tests {
         assert!(error.contains("head/tail") || error.contains("BASH"));
     }
 
-    // it("allows files larger than 5 MB when force: true is passed")
     #[test]
     fn allows_files_larger_than_5_mb_when_force_true_is_passed() {
         let (_temp, cwd) = create_temp_dir("read-tool-large-force-");
@@ -595,9 +579,7 @@ mod tests {
         assert!(result.data.total_lines >= 1);
     }
 
-    // describe("binary detection")
     //
-    // it("refuses binary files (NUL bytes) even when force: true is passed")
     #[test]
     fn refuses_binary_files_even_when_force_true_is_passed() {
         let (_temp, cwd) = create_temp_dir("read-tool-binary-");
@@ -618,9 +600,7 @@ mod tests {
         assert!(error.to_lowercase().contains("binary"));
     }
 
-    // describe("line clamp")
     //
-    // it("truncates lines longer than 2000 chars with a '[line truncated: N chars total]' suffix")
     #[test]
     fn truncates_lines_longer_than_2000_chars_with_a_suffix() {
         let (_temp, cwd) = create_temp_dir("read-tool-clamp-");
@@ -643,9 +623,7 @@ mod tests {
         assert_ne!(line_content, "x".repeat(10_000));
     }
 
-    // describe("normal files unchanged")
     //
-    // it("reads a normal text file without modification")
     #[test]
     fn reads_a_normal_text_file_without_modification() {
         let (_temp, cwd) = create_temp_dir("read-tool-normal-");

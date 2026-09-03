@@ -32,8 +32,8 @@ pub fn format_transcript_entry_line(entry: &TranscriptEntry) -> String {
 		),
 		TranscriptEntry::Info(entry) => format!("--- {}", entry.text),
 		TranscriptEntry::Error(entry) => format!("!!! {}", entry.text),
-		// The TS switch falls through to `--- ${JSON.stringify(entry)}` for any
-		// entry type it does not name explicitly (the skill entry).
+		// Any entry type not named above (the skill entry) falls back to the
+		// whole entry serialized as JSON after the "--- " marker.
 		_ => format!("--- {}", serde_json::to_string(entry).unwrap()),
 	}
 }
@@ -93,8 +93,8 @@ pub fn read_appended_jsonl_lines(path: &Path, from_offset: u64) -> AppendedJsonl
 
 	AppendedJsonlLines {
 		lines,
-		// Byte length of the consumed prefix through its newline — the UTF-8
-		// byte count matches the TS Buffer.byteLength over the same slice.
+		// Byte length of the consumed prefix through its newline — offsets are
+		// always UTF-8 byte counts.
 		next_offset: from_offset + (last_newline_index + 1) as u64,
 	}
 }
@@ -141,8 +141,7 @@ pub fn read_inbox_messages(inbox_path: &Path, consumed_count: usize) -> Vec<Stri
 		.collect()
 }
 
-// The TS try/catch around JSON.parse plus the object-with-string-type guard:
-// a malformed line, a non-object, or a `type` outside the transcript enum
+// A malformed line, a non-object, or a `type` outside the transcript enum
 // all parse as None.
 pub fn parse_transcript_line(line: &str) -> Option<TranscriptEntry> {
 	let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -308,8 +307,7 @@ mod tests {
 		);
 		assert_eq!(format_transcript_entry_line(&entry), "=== goal: ship it");
 
-		// event — iteration is zero-padded to 3 columns like the TS
-		// String(n).padStart(3, " ").
+		// event — iteration is zero-padded to 3 columns.
 		let entry = parse(
 			"{\"type\":\"event\",\"at\":\"t\",\"goalId\":\"g1\",\"iteration\":7,\"kind\":\"tool-call\",\"detail\":\"ran bash\"}",
 		);

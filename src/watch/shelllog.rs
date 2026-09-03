@@ -1,5 +1,5 @@
 // Shell stdout/stderr discovery + tailing for the drilled-in Shells view.
-// Ported from sub-zero's shelllog.ts. A shell process has no transcript to
+// A shell process has no transcript to
 // tail, but its stdout/stderr are often redirected to files — `lsof -p <pid>`
 // names the file behind each open fd (there is no /proc/<pid>/fd on macOS),
 // so we discover fds 1/2 and tail the regular files behind them. Pure parsing
@@ -83,8 +83,7 @@ pub fn stdout_stderr_files(fds: &[LsofFd]) -> Vec<String> {
 // read the captured stdout even when the exit status is non-zero rather than
 // discarding a good result.
 pub fn read_shell_log_files(pid: i64) -> Vec<String> {
-    // Like the TS `stdio: ["ignore", "pipe", "ignore"]`: capture stdout, drop
-    // lsof's stderr warnings.
+    // Capture stdout and drop lsof's stderr warnings.
     match Command::new("lsof")
         .args(["-p", &pid.to_string()])
         .stdin(std::process::Stdio::null())
@@ -116,14 +115,14 @@ fn read_full(file: &mut File, buf: &mut [u8], offset: u64) {
 // trailing partial line is buffered as BYTES — not a decoded string — so a
 // multibyte UTF-8 character split across two poll reads survives whole rather
 // than decoding into replacement chars. Resets when the file shrinks
-// (truncation / rotation). `skip_to_newline` (the TS `skipToNewline`) discards
+// (truncation / rotation). `skip_to_newline` discards
 // bytes up to the first newline before emitting anything, used to skip an
 // unrecoverable mid-line head left by a bounded seed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineFollower {
     pub path: String,
     pub(crate) offset: u64,
-    pub(crate) buffer: Vec<u8>, // the TS `private leftover`
+    pub(crate) buffer: Vec<u8>, // leftover partial line
     pub(crate) skip_to_newline: bool,
 }
 
@@ -133,7 +132,7 @@ impl LineFollower {
         LineFollower::with_start(path, 0, false)
     }
 
-    /// Full constructor — the TS `new LineFollower(path, startOffset, skipToNewline)`.
+    /// Full constructor.
     pub fn with_start(path: &str, start_offset: u64, skip_to_newline: bool) -> LineFollower {
         LineFollower {
             path: path.to_string(),
@@ -321,7 +320,7 @@ zsh      4242  tyler    3u    PIPE   0x9ab      0    0 ->somepipe
     fn parse_lsof_sample() {
         let fds = parse_lsof(SAMPLE_LSOF);
         // The header row passes the >=9 guard and is kept (it is filtered
-        // later by the REG/fd checks), matching the TS behavior.
+        // later by the REG/fd checks).
         assert_eq!(fds.len(), 6);
         assert_eq!(fds[1].fd, "cwd");
         assert_eq!(fds[1].type_, "DIR");

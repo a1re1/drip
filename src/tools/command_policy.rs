@@ -6,14 +6,13 @@
 // {"allowCommands": ["<substring>"]}) or DRIP_ALLOW_DESTRUCTIVE=1 (set by
 // --allow-destructive) which downgrades blocks to warnings.
 //
-// This file also carries two small ports the tool layer needs alongside the
+// This file also carries two helpers the tool layer needs alongside the
 // policy:
-//   - src/web/command-credentials.ts (cmd: credential resolution; the TS
-//     module wires resolveCommandCredential into web/settings.ts via
-//     setCommandCredentialResolver — drip has no web/settings module yet, so
-//     the resolver registration is deferred until that module is ported)
-//   - src/harness/redact.ts (buildRedactor, exercised by
-//     test/command-policy.test.ts's "secret redaction" describe block)
+//   - cmd: credential resolution. resolve_command_credential runs the
+//     referenced command and returns its trimmed stdout as the token;
+//     core/inference.rs resolves "cmd" credential references through it.
+//   - build_redactor: the exact-value + token-pattern scrubber the harness
+//     loop applies to tool output; tested by the redaction tests below
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -25,11 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use regex::Regex;
 use serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// src/tools/command-policy.ts
-// ---------------------------------------------------------------------------
-
-/// port of CommandPolicyVerdict: `{ verdict: "allow" } | { rule, verdict: "block", why }`.
+/// Policy verdict for a command: allowed, or blocked by a named rule with
+/// a human-readable reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandPolicyVerdict {
     Allow,
@@ -37,7 +33,7 @@ pub enum CommandPolicyVerdict {
 }
 
 impl CommandPolicyVerdict {
-    /// The TS tests assert `.verdict` string equality; this ports that field.
+    /// The verdict as a string: "allow" or "block".
     pub fn verdict(&self) -> &'static str {
         match self {
             CommandPolicyVerdict::Allow => "allow",
@@ -52,9 +48,9 @@ struct PolicyRule {
     why: &'static str,
 }
 
-// node's path.resolve: join to the base, then lexically normalize (drop ".",
-// resolve "..", collapse duplicate separators). Node never touches the
-// filesystem here, so neither does the port.
+// Lexical path resolution: join to the base, then normalize (drop ".",
+// resolve "..", collapse duplicate separators) without touching the
+// filesystem.
 fn node_resolve(base: &str, target: &str) -> PathBuf {
     let joined: PathBuf = if Path::new(target).is_absolute() {
         PathBuf::from(target)
@@ -68,11 +64,11 @@ fn node_resolve(base: &str, target: &str) -> PathBuf {
         match component {
             Component::RootDir => stack.push("/".to_string()),
             Component::CurDir => {}
-            // Windows drive prefixes never occur on the Unix targets the TS
-            // tests and drip run on; node's resolve has no equivalent case here.
+            // Windows drive prefixes never occur on the Unix targets drip
+            // runs on, so those components are skipped here.
             Component::Prefix(_) => {}
             Component::ParentDir => {
-                // At the root, ".." resolves to the root (node clamps "/..").
+                // At the root, ".." resolves to the root.
                 if stack.len() > 1 {
                     stack.pop();
                 }
@@ -122,7 +118,7 @@ fn has_dangerous_rm_target(command: &str, workspace_root: &str) -> bool {
 
             let resolved = node_resolve(workspace_root, target).to_string_lossy().into_owned();
 
-            // String prefix comparison matches the TS resolved.startsWith().
+            // Containment is a plain string prefix comparison on the resolved path.
             if !resolved.starts_with(&workspace) {
                 return true;
             }
@@ -293,7 +289,7 @@ pub fn evaluate_command_policy(command: &str, workspace_root: &str) -> CommandPo
     CommandPolicyVerdict::Allow
 }
 
-/// port of formatPolicyRefusal(command, { rule, why }) — the caller passes the
+/// Formats the refusal message for a blocked command; the caller passes the
 /// Block variant's fields.
 pub fn format_policy_refusal(command: &str, rule: &str, why: &str) -> String {
     [
@@ -312,10 +308,10 @@ pub fn allow_destructive_enabled() -> bool {
     std::env::var("DRIP_ALLOW_DESTRUCTIVE").ok().as_deref() == Some("1")
 }
 
-// The prepare-stage gate shared by src/tools/bash-tool.ts:449-460 and
-// tools/verify-tool.ts:305-309: evaluate the policy; a blocked command is
-// refused with the formatted refusal unless --allow-destructive downgrades
-// the block to a warning (the command still runs, so the gate returns Ok).
+// The prepare-stage gate shared by the bash and verify tools: evaluate the
+// policy; a blocked command is refused with the formatted refusal unless
+// --allow-destructive downgrades the block to a warning (the command still
+// runs, so the gate returns Ok).
 pub fn enforce_command_policy(command: &str, workspace_root: &str) -> Result<(), String> {
     match evaluate_command_policy(command, workspace_root) {
         CommandPolicyVerdict::Allow => Ok(()),
@@ -330,9 +326,6 @@ pub fn enforce_command_policy(command: &str, workspace_root: &str) -> Result<(),
     }
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
 // Resolves a "cmd:" credential reference by running a shell command and using
 // its stdout as the token. The result is cached in-process for a short TTL so
 // a long run does not fork a subprocess on every model request; the command is
@@ -341,14 +334,14 @@ pub fn enforce_command_policy(command: &str, workspace_root: &str) -> Result<(),
 // persisting them to disk. Such tools usually cache and regenerate the token
 // near expiry themselves, so this TTL only bounds how often we shell out.
 const DEFAULT_TTL_SECONDS: i64 = 60;
-// The TS hands the command to execSync with a 15s timeout. Rust's
-// Command::output() cannot time out; hanging commands will be bounded once
-// this wiring moves onto the child_process.rs spawn-with-timeout helper.
+// The command runs with a 15s timeout. Command::output() cannot time out;
+// hanging commands will be bounded once this wiring moves onto the
+// child_process.rs spawn-with-timeout helper.
 const COMMAND_TIMEOUT_MS: u64 = 15_000;
 
-// Allowed crate: the TS runs the command through the shell (execSync); there
-// is no shell-builtin printf in Rust, so shell_words splits the line exactly
-// like a shell would and it executes directly.
+// shell_words: the credential line is a full shell command and there is no
+// shell-builtin printf in Rust, so shell_words splits the line exactly like
+// a shell would and the program executes directly.
 use shell_words;
 
 #[derive(Clone)]
@@ -382,7 +375,7 @@ fn resolve_ttl_seconds() -> i64 {
     }
 }
 
-/// The TS default argument `Date.now()`.
+/// Current wall-clock time in milliseconds since the Unix epoch.
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -438,10 +431,10 @@ pub fn resolve_command_credential(command: &str, now: i64) -> anyhow::Result<Str
     }
 }
 
-// The TS uses execSync with stdio ["ignore", "pipe", "pipe"] and a 15s
+// The command runs with stdin closed, stdout/stderr piped, and a 15s
 // timeout; stderr is captured so it never leaks into the run's output.
-// execSync kills the command when its timeout lapses; the poll loop below
-// reproduces that bound with std alone (Command::output() cannot time out).
+// A command that outlives the timeout is killed; the poll loop below
+// provides that bound (Command::output() cannot time out).
 // Credential commands emit a token (well under the pipe buffer), so the
 // unserviced stdout pipe cannot deadlock them the way it would a chatty
 // process.
@@ -493,9 +486,6 @@ pub fn clear_command_credential_cache() {
     credential_cache().lock().unwrap().clear();
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
 // Secret redaction at the tool-output choke point. Tool output flows into
 // four persistent/streamed places (model context, state telemetry, transcript
 // events, the NDJSON stream); one pass here keeps credentials out of all of
@@ -528,8 +518,8 @@ fn token_regexes() -> &'static Vec<Regex> {
 /// Values shorter than this are too collision-prone to scrub verbatim.
 const MIN_SECRET_LENGTH: usize = 8;
 
-/// port of buildRedactor(secrets): returns a closure scrubbing exact managed
-/// values by name (longest first) plus the high-signal token patterns.
+/// Returns a closure scrubbing exact managed values by name (longest first)
+/// plus the high-signal token patterns.
 pub fn build_redactor(secrets: impl IntoIterator<Item = (String, String)>) -> impl Fn(&str) -> String {
     // Longest values first so a secret that contains another (or a shared
     // prefix) never leaves a partial behind.
@@ -559,14 +549,11 @@ pub fn build_redactor(secrets: impl IntoIterator<Item = (String, String)>) -> im
         redacted
     }
 }
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // makeTempRoot from test/fixtures.ts.
+    // A fresh temporary workspace directory for each policy test.
     fn make_workspace() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
@@ -596,7 +583,6 @@ mod tests {
         std::env::remove_var("DRIP_ALLOW_DESTRUCTIVE");
     }
 
-    // it("blocks rm -rf outside the workspace but allows it inside")
     #[test]
     fn blocks_rm_rf_outside_the_workspace_but_allows_it_inside() {
         clear_repo_policy_cache();
@@ -614,7 +600,6 @@ mod tests {
         assert_eq!(evaluate_command_policy(&format!("rm -rf {ws}/dist"), &ws).verdict(), "allow");
     }
 
-    // it("blocks history-destroying git commands but not normal git")
     #[test]
     fn blocks_history_destroying_git_commands_but_not_normal_git() {
         clear_repo_policy_cache();
@@ -633,7 +618,6 @@ mod tests {
         assert_eq!(evaluate_command_policy("git checkout -- src/one-file.ts", &ws).verdict(), "allow");
     }
 
-    // it("blocks sudo, pipe-to-shell, device writes, and dotfile redirects")
     #[test]
     fn blocks_sudo_pipe_to_shell_device_writes_and_dotfile_redirects() {
         clear_repo_policy_cache();
@@ -675,7 +659,6 @@ mod tests {
 
     // --- secret redaction ---------------------------------------------------
 
-    // it("scrubs exact managed values by name, longest first")
     #[test]
     fn scrubs_exact_managed_values_by_name_longest_first() {
         let redact = build_redactor([
@@ -692,7 +675,6 @@ mod tests {
         assert_eq!(redact("a tiny word"), "a tiny word");
     }
 
-    // it("scrubs high-signal token patterns regardless of configuration")
     #[test]
     fn scrubs_high_signal_token_patterns_regardless_of_configuration() {
         let redact = build_redactor(Vec::<(String, String)>::new());
@@ -703,14 +685,11 @@ mod tests {
         assert_eq!(redact("plain output stays intact"), "plain output stays intact");
     }
 }
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod credentials_tests {
     use super::*;
 
-    // The TS afterEach(() => clearCommandCredentialCache()).
+    // Each test clears the credential cache on entry and on exit.
     // The credential cache is process-global and cargo runs tests in
     // parallel: serialize the credential tests so one test's clear_cache()
     // cannot wipe another test's cached token mid-run (flaky failure).
@@ -723,7 +702,6 @@ mod credentials_tests {
         clear_command_credential_cache();
     }
 
-    // it("runs the command and trims its output")
     #[test]
     fn runs_the_command_and_trims_its_output() {
         let _guard = lock_credential_cache();
@@ -733,7 +711,6 @@ mod credentials_tests {
         clear_cache();
     }
 
-    // it("caches within the TTL and re-runs the command once it lapses")
     #[test]
     fn caches_within_the_ttl_and_re_runs_once_it_lapses() {
         let _guard = lock_credential_cache();
@@ -754,7 +731,6 @@ mod credentials_tests {
         clear_cache();
     }
 
-    // it("reuses the last good token when a refresh fails")
     #[test]
     fn reuses_the_last_good_token_when_a_refresh_fails() {
         let _guard = lock_credential_cache();
@@ -773,7 +749,6 @@ mod credentials_tests {
         clear_cache();
     }
 
-    // it("throws a helpful error when the command fails and nothing is cached")
     #[test]
     fn throws_when_the_command_fails_and_nothing_is_cached() {
         let _guard = lock_credential_cache();
@@ -786,7 +761,6 @@ mod credentials_tests {
         clear_cache();
     }
 
-    // it("rejects an empty command")
     #[test]
     fn rejects_an_empty_command() {
         let _guard = lock_credential_cache();

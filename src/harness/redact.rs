@@ -60,12 +60,11 @@ static TOKEN_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
 /// Values shorter than this are too collision-prone to scrub verbatim.
 const MIN_SECRET_LENGTH: usize = 8;
 
-/// Port of `buildRedactor(secrets: Record<string, string>): (text: string) => string`.
+/// Builds a redactor closure over the env.vars name→value map.
 ///
-/// `secrets` is the env.vars name→value map; pass it as ordered (name, value)
-/// pairs so the TS `Object.entries` ordering stays diffable. The returned
-/// closure applies the exact-value pass (longest first) followed by the
-/// token-pattern pass.
+/// `secrets` is passed as ordered (name, value) pairs — source-file order is
+/// significant for diffing. The returned closure applies the exact-value
+/// pass (longest first) followed by the token-pattern pass.
 pub fn build_redactor(
     secrets: Vec<(String, String)>,
 ) -> impl Fn(&str) -> String {
@@ -105,8 +104,6 @@ pub fn build_redactor(
 mod tests {
     use super::*;
 
-    // test/command-policy.test.ts > "secret redaction"
-    // > "scrubs exact managed values by name, longest first"
     #[test]
     fn scrubs_exact_managed_values_by_name_longest_first() {
         let redact = build_redactor(vec![
@@ -126,14 +123,12 @@ mod tests {
         assert_eq!(redact("a tiny word"), "a tiny word");
     }
 
-    // test/command-policy.test.ts > "secret redaction"
-    // > "scrubs high-signal token patterns regardless of configuration"
     #[test]
     fn scrubs_high_signal_token_patterns_regardless_of_configuration() {
         let redact = build_redactor(vec![]);
 
-        // The TS inputs are the already-redacted markers themselves (the
-        // suite dogfoods its own output shape); `toContain` survives that.
+        // The inputs are already-redacted markers; they must survive
+        // being redacted again.
         assert!(
             redact("key=[redacted:anthropic-key]").contains("[redacted:anthropic-key]"),
             "anthropic-key marker must survive"

@@ -18,14 +18,14 @@ use crate::tools::types::{
 // Sub-delegation (backlog G3): drip could not safely spawn drip — a BASH-spawned
 // child loses the harness credentials to the env scrub, holds no parent link,
 // and escapes --stop. DELEGATE runs the child goal IN-PROCESS through the same
-// runSessionGoal choreography instead: it inherits the resolved inference
+// run_session_goal choreography instead: it inherits the resolved inference
 // config directly, chains the parent's abort signal, and lands its own
 // session (transcript, result.json, lease) beside the parent's.
 
 const MAX_CHILD_ITERATIONS: i64 = 20;
 const DEFAULT_CHILD_ITERATIONS: i64 = 10;
 
-/// delegate-tool.ts:18 — `DelegateToolWiring`. Tool definitions are not
+/// Wiring for the DELEGATE tool. Tool definitions are not
 /// clonable (boxed stage closures), so the child pack arrives as a factory
 /// that builds the parent's tools afresh; the session index is reopened per
 /// child (rusqlite connections are not shareable across the boxed closure).
@@ -43,7 +43,7 @@ pub struct DelegateToolWiring {
     pub tools: Arc<dyn Fn() -> Vec<ChatToolDefinition>>,
 }
 
-/// delegate-tool.ts:34 — `buildDelegateTool(wiring)`.
+/// Builds the DELEGATE tool from the wiring.
 pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
     let wiring = Arc::new(wiring);
 

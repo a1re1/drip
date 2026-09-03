@@ -1,15 +1,13 @@
-// Only the types tools/types.ts and its sibling modules import are ported
-// here (ChatRole, ChatTag, block/message/context types, ChatRuntimeContext).
-// The helper functions at the bottom of the TS file (serializeChatMessage*,
-// getChatMessageForContext, …) belong to the harness/UI layer and are
-// ported when their consumers land.
+// The shared wire/runtime types only (ChatRole, ChatTag, block/message/context
+// types, ChatRuntimeContext). The serializer helpers (serializeChatMessage*,
+// getChatMessageForContext, …) belong to the harness/UI layer and are not
+// provided here.
 //
-// Field names serialize exactly as the TypeScript field names (already
-// camelCase): Rust fields are snake_case + #[serde(rename_all =
-// "camelCase")]. Optional fields are Option<T> + skip_serializing_if =
-// "Option::is_none" — JSON.stringify drops `undefined` keys, and the port
-// must match that. Fields typed `string | null` in TS keep their null
-// (Option with #[serde(default)], no skip).
+// Field names serialize as camelCase: Rust fields are snake_case with
+// #[serde(rename_all = "camelCase")]. Optional fields are Option<T> plus
+// skip_serializing_if = "Option::is_none" — absent fields are omitted from
+// the JSON entirely. Fields that must serialize null when missing use
+// Option with #[serde(default)] and no skip.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +24,6 @@ pub enum ChatRole {
     User,
 }
 
-// export type ToolCallStatus = "completed" | "failed" | "running"
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ToolCallStatus {
     #[serde(rename = "completed")]
@@ -220,7 +217,7 @@ pub struct WorkingFileContext {
     pub exists: bool,
     pub path: String,
     pub scope: WorkingFileScope,
-    // `text: string | null` is always present in TS — None serializes as null.
+    // `text` always serializes (null when missing) — None serializes as null.
     #[serde(default)]
     pub text: Option<String>,
 }

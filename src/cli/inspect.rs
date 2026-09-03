@@ -3,13 +3,10 @@
 // events (with structured data since v0.33), state, and the run record —
 // without pulling thousands of raw JSONL lines into a driver's context.
 //
-// Imports from inspect.ts:
-//   loadHarnessState — ported inline below from src/harness/state.ts
-//     (drip/src/core/state.rs is still a stub owned by another port lane;
-//     drip/src/cli/state_summary.rs carries the full inline with the loop
-//     clock backfill — only the verifications trail is consumed here).
-//   loadRunRecord — drip/src/cli/run_record.rs
-//   readTranscript + TranscriptEventEntry — drip/src/cli/transcript.rs
+// Reused modules: run-record loading (crate::cli::run_record), transcript
+// reading (crate::cli::transcript); the harness-state loader is inlined
+// below — state_summary.rs carries the same parse with the loop-clock
+// backfill, but only the verifications trail is consumed here.
 
 use std::path::Path;
 
@@ -43,11 +40,11 @@ pub struct InspectRateLimited {
 	pub total_wait_seconds: f64,
 }
 
-// Field order matches the TS object literal (newGoalReport) so --json output
-// is byte-identical: endedAt, eventCounts, goal, goalId, operatorMessages,
-// rateLimited, reason, startedAt, toolStats, wallSeconds. `reason` and
-// `wallSeconds` are string|null / number|null in TS — None serializes as
-// null, never skipped.
+// Field order in the serialized --json object: endedAt, eventCounts, goal,
+// goalId, operatorMessages, rateLimited, reason, startedAt, toolStats,
+// wallSeconds — stable keys keep the output deterministic across runs.
+// `reason` and `wallSeconds` are nullable: None serializes as null, never
+// skipped.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectGoalReport {
@@ -69,8 +66,7 @@ pub struct InspectLastRun {
 	pub reason: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stop_latency_ms: Option<i64>,
-	// TS: `usage: record.usage` — an undefined usage is dropped by
-	// JSON.stringify, so None is skipped here too.
+	// usage: None is skipped rather than serialized as null.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub usage: Option<HarnessRunUsage>,
 }
@@ -186,7 +182,7 @@ fn record_event(report: &mut InspectGoalReport, entry: &crate::cli::transcript::
 	}
 }
 
-// TS: /waiting (\d+(?:\.\d+)?)s/.exec(entry.detail)?.[1]
+// Extracts the seconds value from a "waiting Ns" detail suffix, as a float.
 fn rx_waiting_seconds(detail: &str) -> Option<f64> {
 	let idx = detail.find("waiting ")? + "waiting ".len();
 	let rest = &detail[idx..];
@@ -374,11 +370,11 @@ pub fn format_inspect_report(report: &InspectReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// loadHarnessState (inlined from src/harness/state.ts)
-// Missing file -> None; a file present but malformed raises the TS error
-// string verbatim. state_summary.rs carries the full inline with the loop
+// load_harness_state
+// Missing file -> None; a malformed file raises the harness-state error
+// string verbatim. state_summary.rs carries the same parse with the loop
 // clock backfill; inspect only consumes the verifications trail, so the
-// shape guard + parse are all that is ported here.
+// shape guard + parse are all that is needed here.
 // ---------------------------------------------------------------------------
 
 fn is_harness_state(value: &serde_json::Value) -> bool {
@@ -399,8 +395,8 @@ fn load_harness_state(state_path: &Path) -> Option<HarnessState> {
 
 	let content = match std::fs::read_to_string(state_path) {
 		Ok(c) => c,
-		// Unreadable file: TS JSON.parse would throw; surface it as the same
-		// error path.
+		// An unreadable file surfaces through the same error path as a malformed
+		// one.
 		Err(_) => panic!("The file at {} is not a valid harness state file.", state_path.display()),
 	};
 
@@ -416,7 +412,7 @@ fn load_harness_state(state_path: &Path) -> Option<HarnessState> {
 	serde_json::from_value(value).ok()
 }
 
-// Ports of the four it() blocks in test/cli-inspect.test.ts.
+// --- fixture helpers and the four report scenarios ---
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -442,7 +438,7 @@ mod tests {
 		root
 	}
 
-	// appendFileSync(transcriptPath, `${JSON.stringify(entry)}\n`)
+	// Appends one event to the transcript file.
 	fn write_entry(transcript_path: &Path, entry: serde_json::Value) {
 		use std::io::Write;
 		let mut file = std::fs::OpenOptions::new()
@@ -453,9 +449,8 @@ mod tests {
 		writeln!(file, "{}", entry).unwrap();
 	}
 
-	// makeFixture() from test/cli-inspect.test.ts: seven transcript entries,
-	// a state.json with a two-entry verification trail, and a result.json
-	// built by buildRunRecord.
+	// Shared fixture: seven transcript entries, a state.json with a two-entry
+	// verification trail, and a result.json built by build_run_record.
 	fn make_fixture() -> (PathBuf, PathBuf, PathBuf) {
 		let root = make_temp_root("drip-inspect-");
 		let transcript_path = root.join("transcript.jsonl");
@@ -590,7 +585,6 @@ mod tests {
 		}
 	}
 
-	// it("aggregates per-goal wall time, tool stats, waits, and steering latency")
 	#[test]
 	fn aggregates_per_goal_wall_time_tool_stats_waits_and_steering_latency() {
 		let fixture = make_fixture();
@@ -614,7 +608,6 @@ mod tests {
 		assert_eq!(goal.event_counts.get("tool-call"), Some(&1));
 	}
 
-	// it("carries the verification timeline and last-run economics")
 	#[test]
 	fn carries_the_verification_timeline_and_last_run_economics() {
 		let fixture = make_fixture();
@@ -636,7 +629,6 @@ mod tests {
 		assert_eq!(last_run.stop_latency_ms, Some(900));
 	}
 
-	// it("formats a readable report")
 	#[test]
 	fn formats_a_readable_report() {
 		let fixture = make_fixture();
@@ -651,7 +643,6 @@ mod tests {
 		assert!(text.contains("stop latency 900ms"));
 	}
 
-	// it("reports an empty session gracefully")
 	#[test]
 	fn reports_an_empty_session_gracefully() {
 		let root = make_temp_root("drip-inspect-");

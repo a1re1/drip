@@ -1,6 +1,6 @@
-// The async/tmux half of the TS file (BASH_ASYNC, session naming, tmux
-// probes) is ported in this file (below the sync half) and in
-// drip/src/tools/async_jobs.rs, which ports src/tools/async-jobs.ts.
+// The async/tmux half (BASH_ASYNC, session naming, tmux
+// probes) lives in this file (below the sync half) and in
+// drip/src/tools/async_jobs.rs.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,10 +33,10 @@ pub struct BashToolResult {
     pub timed_out: bool,
 }
 
-/// Port of getOptionalStringArgument (this tool's own local version): undefined
-/// → None; non-strings and whitespace-only strings reject with the shared
-/// "Expected … to be a non-empty string." error; otherwise the value is
-/// trimmed.
+/// Optional-string argument getter (this tool's own local version):
+/// undefined → None; non-strings and whitespace-only strings reject with
+/// the shared "Expected … to be a non-empty string." error; otherwise the
+/// value is trimmed.
 pub fn get_optional_string_argument(
     args: &BashToolInput,
     key: &str,
@@ -58,7 +58,7 @@ pub fn get_optional_string_argument(
     Ok(Some(trimmed.to_string()))
 }
 
-/// Port of clampSyncTimeoutMs: undefined → 120000, otherwise floored and
+/// Timeout clamping: undefined → 120000, otherwise floored and
 /// clamped to [1000, 3600000].
 pub fn clamp_sync_timeout_ms(value: Option<f64>) -> u64 {
     match value {
@@ -67,7 +67,7 @@ pub fn clamp_sync_timeout_ms(value: Option<f64>) -> u64 {
     }
 }
 
-// buildStatusLine's no-match special case: grep-family commands exit 1 when
+// Status-line no-match special case: grep-family commands exit 1 when
 // they find nothing, which is an answer for the model rather than a failure.
 fn is_search_no_match(command: &str, result: &BashToolResult) -> bool {
     let pattern = Regex::new(r"^\s*(?:command\s+)?(?:rg|grep|egrep|fgrep)\b").unwrap();
@@ -78,7 +78,7 @@ fn is_search_no_match(command: &str, result: &BashToolResult) -> bool {
         && pattern.is_match(command)
 }
 
-/// Port of buildStatusLine(command, result, timeoutMs).
+/// Builds the model-facing status line for a finished run.
 pub fn build_status_line(
     command: &str,
     result: &BashToolResult,
@@ -111,7 +111,7 @@ pub fn build_status_line(
     "exit code 0".to_string()
 }
 
-/// Port of buildSyncSummary(result, displayCwd, timeoutMs).
+/// Builds the one-line summary sentence for a finished run.
 pub fn build_sync_summary(
     result: &BashToolResult,
     display_cwd: &str,
@@ -135,8 +135,8 @@ pub fn build_sync_summary(
     format!("Command completed successfully in {display_cwd}.")
 }
 
-/// Port of definition() → buildTransportTools' {type: "function", function: …}
-/// envelope (the name stays "BASH" verbatim).
+/// definition(): the {type: "function", function: …} envelope
+/// (the name stays "BASH" verbatim).
 pub fn definition() -> Value {
     json!({
         "type": "function",
@@ -166,8 +166,8 @@ pub fn definition() -> Value {
     })
 }
 
-/// Port of the prepare stage: parse → command/cwd/timeoutMs → resolve and
-/// format the paths → policy gate → displayInput.
+/// The prepare stage: parse → command/cwd/timeout_ms → resolve and
+/// format the paths → policy gate → display_input.
 pub fn prepare(raw_input: &str, ctx: &ToolCtx) -> Result<BashToolPrepared> {
     let args = parse_tool_arguments(raw_input)?;
 
@@ -181,9 +181,9 @@ pub fn prepare(raw_input: &str, ctx: &ToolCtx) -> Result<BashToolPrepared> {
     let display_cwd = format_tool_path(&workspace_root, &absolute_cwd);
     let timeout_ms = clamp_sync_timeout_ms(timeout_argument);
 
-    // The TS prepare calls evaluateCommandPolicy itself (not the shared
-    // enforceCommandPolicy helper) so the --allow-destructive override prints
-    // its notice: policy violations refuse here, before anything runs.
+    // The prepare stage calls evaluate_command_policy itself (not the shared
+    // enforce_command_policy helper) so the --allow-destructive override
+    // prints its notice: policy violations refuse here, before anything runs.
     match evaluate_command_policy(&command, &workspace_root) {
         crate::tools::command_policy::CommandPolicyVerdict::Block { rule, why } => {
             if allow_destructive_enabled() {
@@ -216,7 +216,7 @@ pub struct BashToolPreparedInput {
     pub timeout_ms: u64,
 }
 
-/// What the prepare stage returns: { input, displayInput } plus the resolved
+/// What the prepare stage returns: { input, display_input } plus the resolved
 /// absolute cwd the execute/complete stages reuse.
 pub struct BashToolPrepared {
     pub input: BashToolPreparedInput,
@@ -224,21 +224,21 @@ pub struct BashToolPrepared {
     pub display_input: String,
 }
 
-/// What the execute stage returns: { data, outputText }.
+/// What the execute stage returns: { data, output_text }.
 pub struct BashToolExecution {
     pub data: BashToolResult,
     pub output_text: String,
 }
 
-/// Port of the execute stage: runCapturedProcess over `bash -lc`, output via
-/// buildCombinedOutput.
+/// The execute stage: run_captured_process over `bash -lc`, output via
+/// build_combined_output.
 pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution> {
     let absolute_cwd = prepared.absolute_cwd.to_string_lossy().to_string();
     let result = run_captured_process(&CapturedProcessArgs {
         command: "bash",
         cwd: Some(absolute_cwd.as_str()),
-        // The TS call site passes no env overrides; runCapturedProcess builds
-        // the scrubbed child environment itself (buildChildProcessEnv).
+        // No env overrides here; run_captured_process builds the scrubbed
+        // child environment itself (build_child_process_env).
         env: None,
         process_args: &["-lc".to_string(), prepared.input.command.clone()],
         timeout_ms: Some(prepared.input.timeout_ms),
@@ -256,8 +256,8 @@ pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution
         timed_out: result.timed_out,
     };
 
-    // TS: outputText: buildSyncSummary(result, prepared.input.displayCwd,
-    // prepared.input.timeoutMs) — the summary sentence, not the raw output.
+    // output_text is the summary sentence from build_sync_summary, not the
+    // raw output.
     let output_text = build_sync_summary(&data, &prepared.input.display_cwd, prepared.input.timeout_ms);
 
     Ok(BashToolExecution {
@@ -266,13 +266,13 @@ pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution
     })
 }
 
-/// Port of the complete stage: status line + summary + one completion block.
+/// The complete stage: status line + summary + one completion block.
 pub fn complete(prepared: &BashToolPrepared, execution: &BashToolExecution) -> ToolCompletion {
     let result = &execution.data;
     let display_cwd = &prepared.input.display_cwd;
     let status_line = build_status_line(&result.command, result, prepared.input.timeout_ms);
-    // Port of the TS complete stage: blocks/toolContent render
-    // result.data.output (raw combined output), never the summary outputText.
+    // The completion block renders result.output (raw combined output),
+    // never the summary output_text.
     let output_block = if result.output.is_empty() {
         "[no output]"
     } else {
@@ -292,7 +292,7 @@ pub fn complete(prepared: &BashToolPrepared, execution: &BashToolExecution) -> T
     }
 }
 
-/// tools/bash-tool.ts:462 — `<cwd>\n<command>`.
+/// `<cwd>` then `<command>` on the next line.
 pub fn display_input(raw_input: &str, ctx: &ToolCtx) -> Option<String> {
     prepare(raw_input, ctx).ok().map(|prepared| prepared.display_input)
 }
@@ -322,8 +322,8 @@ pub fn execute(raw_input: &str, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
-/// Port of asyncBashTool's definition (tools/bash-tool.ts:567-590) — the
-/// BASH_ASYNC function envelope, strings verbatim; the name stays "BASH_ASYNC".
+/// The BASH_ASYNC tool definition — the function envelope, strings
+/// verbatim; the name stays "BASH_ASYNC".
 pub fn async_definition() -> Value {
     json!({
         "type": "function",
@@ -359,18 +359,15 @@ pub fn async_definition() -> Value {
 
 #[cfg(test)]
 mod tests {
-    // Port of the synchronous half of tools/test/bash-tool.test.ts (the
-    // "BASH tool" describe). The "BASH_ASYNC tool" describe (tmux sessions)
-    // and the "BASH stop interruption" test are skipped — the async half of
-    // the TS file is not ported here (see the comment at the top of this
-    // file); drip's child_process.rs covers the process-group kill
-    // semantics.
+    // Synchronous-half tests. The async half (tmux sessions, the
+    // stop-interruption path) is covered in src/tools/async_jobs.rs;
+    // drip's child_process.rs covers the process-group kill semantics.
     use super::*;
     use serde_json::{json, Value};
     use std::time::Instant;
     use tempfile::TempDir;
 
-    /// Port of createStageContext(createTempDir(...)) from test-helpers.ts:
+    /// A ToolCtx rooted at the temp dir:
     /// the context slice built-ins receive is just the cwd here.
     fn stage_context(temp: &TempDir) -> ToolCtx {
         ToolCtx {
@@ -379,7 +376,7 @@ mod tests {
         }
     }
 
-    /// The TS execute stage's status ternary (tools/bash-tool.ts:414-417);
+    /// The execute stage's status ternary:
     /// the Rust pipeline keeps it in execute(), per-stage tests reuse it.
     fn ts_status(execution: &BashToolExecution) -> bool {
         let result = &execution.data;
@@ -389,7 +386,7 @@ mod tests {
                 && !is_search_no_match(&result.command, result))
     }
 
-    /// prepare → execute → complete, the three await calls each TS test makes.
+    /// prepare → execute → complete, the three stage calls each test makes.
     fn run_stages(ctx: &ToolCtx, args: Value) -> (BashToolExecution, ToolCompletion) {
         let prepared = prepare(&args.to_string(), ctx).expect("prepare should succeed");
         let execution = execute_prepared(&prepared).expect("execute should succeed");

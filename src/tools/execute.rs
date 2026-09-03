@@ -3,12 +3,11 @@
 // way and naming every failure (missing tool, JSON-argument parse errors,
 // stage errors) back to the model through a failed tool-call block.
 //
-// Rust adaptations (the drip stage closures are sync boxed fns returning
-// Result<_, String>): a TS `throw` is `Err(String)`, and each stage call is
-// an internal helper returning Result so `?` mirrors the TS try/catch: any
-// Err falls into build_failure_result exactly like the TS catch block.
-// TS `error instanceof Error ? error.message : "Tool execution failed."`
-// collapses here to `error.is_empty()` — stages always hand back a message.
+// Adaptations (the drip stage closures are sync boxed fns returning
+// Result<_, String>): a stage failure is `Err(String)`, and each stage call
+// is an internal helper returning Result so `?` short-circuits: any Err
+// falls into build_failure_result, like a catch block. A missing message
+// collapses to `error.is_empty()` — stages always hand back a message.
 
 use serde_json::Value;
 
@@ -20,9 +19,9 @@ use crate::tools::types::{
     ChatToolResult, ChatToolRuntimeServices,
 };
 
-// type ToolExecutionContext = { callId, history, message, rawInput,
-//   runtimeContext, services, tool, toolName } — request shape for
-// executeToolCall.
+// Request shape for execute_tool_call: call id, conversation history, the
+// triggering message, raw argument JSON, runtime context, runtime services,
+// the resolved tool, and its name.
 pub struct ToolExecutionContext<'a> {
     pub call_id: &'a str,
     pub history: &'a [ChatMessage],
@@ -34,20 +33,19 @@ pub struct ToolExecutionContext<'a> {
     pub tool_name: &'a str,
 }
 
-// export type ExecutedToolCall = { blocks: ChatMessageBlock[]; toolContent: string }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecutedToolCall {
     pub blocks: Vec<ChatMessageBlock>,
     pub tool_content: String,
 }
 
-// function normalizeToolTag(toolName)
+// Normalizes a tool name into the "tool:<lowercased name>" tag.
 pub fn normalize_tool_tag(tool_name: &str) -> String {
     format!("tool:{}", tool_name.trim().to_lowercase())
 }
 
-// function serializeTag(tag) — string tags serialize as themselves,
-// structured tags as their JSON form; this is the dedupe key for mergeTags.
+// String tags serialize as themselves, structured tags as their JSON form;
+// this is the dedupe key for merge_tags.
 fn serialize_tag(tag: &ChatTag) -> String {
     match tag {
         ChatTag::Text(text) => text.clone(),
@@ -55,8 +53,8 @@ fn serialize_tag(tag: &ChatTag) -> String {
     }
 }
 
-// function mergeTags(...tagGroups: Array<ChatTag[] | undefined>)
-// Dedupe by serializeTag key in first-seen order; None when nothing survives.
+// Merges the tag groups, deduplicating by the serialize_tag key in
+// first-seen order; None when nothing survives.
 pub fn merge_tags(tag_groups: &[Option<Vec<ChatTag>>]) -> Option<Vec<ChatTag>> {
     let mut merged_tags: Vec<ChatTag> = Vec::new();
     let mut seen_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -84,7 +82,9 @@ pub fn merge_tags(tag_groups: &[Option<Vec<ChatTag>>]) -> Option<Vec<ChatTag>> {
     }
 }
 
-// function serializeBlocks(blocks)
+// Serializes blocks for display: each block's non-empty parts are joined
+// with newlines, the block texts are joined with blank lines, and empty
+// results are dropped.
 fn serialize_blocks(blocks: &[ChatMessageBlock]) -> String {
     let block_texts: Vec<String> = blocks
         .iter()
@@ -133,7 +133,7 @@ fn serialize_blocks(blocks: &[ChatMessageBlock]) -> String {
     block_texts.join("\n\n")
 }
 
-// `Status: ${job.status}` — the job's wire status string.
+// The job's wire status string, rendered after "Status: ".
 fn async_job_status_text(job: &ChatAsyncToolJob) -> &'static str {
     match job.status {
         crate::tools::types::ChatAsyncToolJobStatus::Completed => "completed",
@@ -142,7 +142,8 @@ fn async_job_status_text(job: &ChatAsyncToolJob) -> &'static str {
     }
 }
 
-// function formatAsyncJobOutput(toolName, job)
+// Formats the async-job acknowledgement shown to the model: job id, target
+// tool, current status, log path, and how to follow along.
 fn format_async_job_output(tool_name: &str, job: &ChatAsyncToolJob) -> String {
     [
         format!("Started async job {} for {}.", job.id, tool_name),
@@ -154,12 +155,11 @@ fn format_async_job_output(tool_name: &str, job: &ChatAsyncToolJob) -> String {
     .join("\n")
 }
 
-// function buildFailureResult(args): ExecutedToolCall
+// Builds the failed tool-call block reported back to the model.
 fn build_failure_result(call_id: &str, error: &str, raw_input: &str, tool_name: &str) -> ExecutedToolCall {
     let output = if error.is_empty() {
-        // TS default branch: `error instanceof Error ? error.message :
-        // "Tool execution failed."` — unreachable when stages always hand
-        // back a message, kept for parity.
+        // Default branch: unreachable when stages always hand back a
+        // message, kept as a stable fallback string.
         "Tool execution failed.".to_string()
     } else {
         error.to_string()
@@ -179,7 +179,7 @@ fn build_failure_result(call_id: &str, error: &str, raw_input: &str, tool_name: 
     }
 }
 
-// function buildToolCallBlock(args): ToolCallBlock
+// Assembles a tool-call block, merging the tool's tag with the stage tags.
 #[allow(clippy::too_many_arguments)]
 fn build_tool_call_block(
     call_id: &str,
@@ -205,7 +205,7 @@ fn build_tool_call_block(
     }
 }
 
-// function addToolTags(toolName, blocks)
+// Stamps every block with the tool's tag.
 fn add_tool_tags(tool_name: &str, blocks: &[ChatMessageBlock]) -> Vec<ChatMessageBlock> {
     let tool_tag = normalize_tool_tag(tool_name);
 
@@ -229,8 +229,8 @@ fn add_tool_tags(tool_name: &str, blocks: &[ChatMessageBlock]) -> Vec<ChatMessag
         .collect()
 }
 
-// Stage call helpers — each maps one TS `await tool.<stage>(...)` whose throw
-// the surrounding try/catch turns into a failure result.
+// Stage call helpers — each runs one stage whose failure the surrounding
+// dispatch turns into a failure result.
 fn run_prepare(
     tool: &ChatToolDefinition,
     args: &ToolExecutionContext<'_>,
@@ -259,7 +259,7 @@ fn run_execute(
         services: args.services.clone(),
     })?;
 
-    // if (tool.mode === "async" && !result.asyncJob) { throw new Error(...) }
+    // An async tool must return async-job metadata from execute.
     if tool.mode == crate::tools::types::ChatToolMode::Async && result.async_job.is_none() {
         return Err(format!(
             "Async tool \"{}\" must return asyncJob metadata from execute().",
@@ -287,8 +287,6 @@ fn run_complete(
     })
 }
 
-// export async function executeToolCall(args: ToolExecutionContext):
-// Promise<ExecutedToolCall>
 pub fn execute_tool_call(args: ToolExecutionContext<'_>) -> ExecutedToolCall {
     let Some(tool) = args.tool else {
         return build_failure_result(
@@ -358,8 +356,8 @@ pub fn execute_tool_call(args: ToolExecutionContext<'_>) -> ExecutedToolCall {
     }
 }
 
-// TS derives the tool-call block status as `result.status ?? result.asyncJob?.status`;
-// the job's status string maps onto ToolCallStatus directly.
+// The tool-call block status falls back to the async job's status when the
+// result carries none; the job's status maps onto ToolCallStatus directly.
 fn async_job_status_to_tool_call_status(job: &ChatAsyncToolJob) -> ToolCallStatus {
     match job.status {
         crate::tools::types::ChatAsyncToolJobStatus::Running => ToolCallStatus::Running,
@@ -369,7 +367,7 @@ fn async_job_status_to_tool_call_status(job: &ChatAsyncToolJob) -> ToolCallStatu
 }
 
 // Unused when callers build their own inputs; kept so the JSON-argument
-// parse-failure path has a named constructor with the exact TS message.
+// parse-failure path has a named constructor with a stable message.
 pub fn parse_tool_arguments(raw_input: &str) -> Result<Value, String> {
     serde_json::from_str::<Value>(raw_input)
         .map_err(|error| format!("Failed to parse tool arguments as JSON: {}", error))

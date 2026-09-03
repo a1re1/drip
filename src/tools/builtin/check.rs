@@ -1,8 +1,8 @@
 // drip spawns `bunx tsc --noEmit --pretty false -p <tsconfig>` (with
 // `npx tsc` as the fallback when bunx is missing) and parses the emitted
-// `file(line,col): error TSxxxx: message` lines into the same
-// DiagnosticEntry { file, line, message } shape. Everything the model sees —
-// scope filtering, summary lines, error strings — matches the TS tool.
+// `file(line,col): error TSxxxx: message` lines into
+// DiagnosticEntry { file, line, message } values. Everything the model sees —
+// scope filtering, summary lines, and error strings — is part of that output.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -12,14 +12,14 @@ use std::process::Command;
 use super::{ToolCompletion, ToolCompletionBlock, ToolCtx, ToolOutcome};
 use crate::tools::helpers::resolve_tool_path;
 
-/// TS type CheckToolInput.
+/// The tool's input type.
 #[derive(Debug)]
 pub struct CheckToolInput {
     pub path: Option<PathBuf>,
     pub workspace_root: PathBuf,
 }
 
-/// TS type DiagnosticEntry.
+/// One diagnostic entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiagnosticEntry {
     pub file: String,
@@ -27,7 +27,7 @@ pub struct DiagnosticEntry {
     pub message: String,
 }
 
-/// TS type CheckToolResult.
+/// The tool's result payload.
 #[derive(Debug, Clone)]
 pub struct CheckToolResult {
     pub diagnostics: Vec<DiagnosticEntry>,
@@ -36,14 +36,14 @@ pub struct CheckToolResult {
     pub total_errors: usize,
 }
 
-/// What the prepare stage returns: { input, displayInput }.
+/// What the prepare stage returns: the parsed input and its display string.
 #[derive(Debug)]
 pub struct CheckToolPrepared {
     pub input: CheckToolInput,
     pub display_input: String,
 }
 
-/// What the execute stage returns: { data, outputText }.
+/// What the execute stage returns: the result payload and the output text.
 #[derive(Debug)]
 pub struct CheckToolExecution {
     pub data: CheckToolResult,
@@ -73,7 +73,7 @@ pub fn definition() -> Value {
     })
 }
 
-/// Port of the prepare stage. Parses the raw arguments, resolves the target
+/// The prepare stage. Parses the raw arguments, resolves the target
 /// file (if any) and keeps the workspace root from the context cwd.
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<CheckToolPrepared> {
     // The pack hands the raw JSON string; a pre-parsed object is accepted too
@@ -92,7 +92,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<CheckToolPrepared> {
         }
     };
 
-    // check-tool.ts:231 — the trimmed path as given, not the resolved one.
+    // The trimmed path as given, not the resolved one.
     let display_input = match &raw_path {
         Some(raw_path) => format!("{{ path: \"{raw_path}\" }}"),
         None => "{}".to_string(),
@@ -107,8 +107,8 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<CheckToolPrepared> {
     })
 }
 
-/// Port of the execute stage. Runs tsc over the workspace tsconfig and maps
-/// its output into the same DiagnosticEntry shape the TS tool produces.
+/// The execute stage. Runs tsc over the workspace tsconfig and maps
+/// its output into DiagnosticEntry values.
 pub fn execute_prepared(prepared: &CheckToolPrepared) -> Result<CheckToolExecution> {
     // Locate tsconfig
     let start_dir = match &prepared.input.path {
@@ -140,9 +140,9 @@ pub fn execute_prepared(prepared: &CheckToolPrepared) -> Result<CheckToolExecuti
     })
 }
 
-/// Focused-vs-project scope filtering from the TS execute stage. With a
+/// Focused-vs-project scope filtering, as the execute stage does it. With a
 /// target path, diagnostics in that file stay in `diagnostics` (display
-/// paths relative to the workspace root, matching the TS output) and the
+/// paths relative to the workspace root) and the
 /// rest are counted in `elsewhere_count`; without one, everything is kept
 /// and scope is "project".
 fn scope_result(
@@ -151,8 +151,8 @@ fn scope_result(
     workspace_root: &Path,
     cwd: &Path,
 ) -> CheckToolResult {
-    // TS maps every diagnostic file to its display path (relative to the
-    // workspace root when it startsWith it) as diagnostics are collected, so
+    // Maps every diagnostic file to its display path (relative to the
+    // workspace root when it starts with it) as diagnostics are collected, so
     // apply display_file_path before filtering.
     let root_display = workspace_root.to_string_lossy().to_string();
     let all_diags: Vec<DiagnosticEntry> = all_diags
@@ -198,7 +198,7 @@ fn scope_result(
     }
 }
 
-/// Port of findTsconfig: walk up from `start_dir` looking for tsconfig.json.
+/// Walk up from `start_dir` looking for tsconfig.json.
 /// Falls back to `workspace_root/tsconfig.json` if not found.
 fn find_tsconfig(start_dir: &Path, workspace_root: &Path) -> Result<PathBuf> {
     // Don't walk above workspace root
@@ -239,8 +239,8 @@ fn find_tsconfig(start_dir: &Path, workspace_root: &Path) -> Result<PathBuf> {
     ))
 }
 
-/// Normalize a path for the startDir/root comparison the TS port does via
-/// resolve(): make it absolute (cwd-relative inputs are already resolved by
+/// Normalize a path for the `start_dir`/root comparison: make it absolute
+/// (cwd-relative inputs are already resolved by
 /// the time this runs) so `dir == root` checks line up.
 fn resolve_workspace_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -336,7 +336,7 @@ fn split_location(location: &str) -> Option<(String, i64)> {
 }
 
 /// Make a diagnostic path relative to the workspace root when possible — the
-/// display path formatDiagnostic produces.
+/// display path reported for a diagnostic.
 fn display_file_path(file: &str, workspace_root: &str) -> String {
     if file.starts_with(workspace_root) {
         let relative = file
@@ -348,7 +348,7 @@ fn display_file_path(file: &str, workspace_root: &str) -> String {
     file.to_string()
 }
 
-/// Port of the complete stage.
+/// The complete stage.
 pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolCompletion {
     let lead_line = format!("CHECK: {} error(s) in {}", result.total_errors, result.scope);
     let mut lines: Vec<String> = vec![lead_line.clone()];
@@ -383,20 +383,20 @@ pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolC
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
+/// The transcript's display string for this call — the `display_input` field
+/// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
-/// to the model-facing failure text (buildFailureResult shape).
+/// to the model-facing failure text.
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     let outcome = prepare(args, ctx).and_then(|prepared| {
         let execution = execute_prepared(&prepared)?;
         let completion = complete(&prepared, &execution.data);
-        // check-tool.ts: status is "failed" once any error was found, and the
+        // Status is "failed" once any error was found, and the
         // tool message is the completion's diagnostic listing, not the lead line.
         Ok(ToolOutcome {
             text: completion.tool_content,
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(file, "/elsewhere/lib.rs");
     }
 
-    /// Port of the focused-mode scope filtering from the TS execute stage:
+    /// The focused-mode scope filtering from the execute stage:
     /// a diagnostic in the scoped file stays in `diagnostics`, everything
     /// else is counted in elsewhere_count.
     #[test]

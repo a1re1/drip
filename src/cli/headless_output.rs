@@ -18,8 +18,7 @@ pub struct HeadlessContinuation {
     pub suggested_max_iterations: Option<i64>,
 }
 
-/// Field order follows the TS object literal in headlessResultPayload (the
-/// serialized key order is part of the contract).
+/// Serialized key order is part of the stdout/result.json contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadlessResultPayload {
@@ -120,7 +119,7 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
             "drip --resume {} --prompt {}{} --json",
             args.session_id_prefix,
             shell_quote(&record.goal),
-            // JS truthiness: a 0 cap prints nothing, like undefined.
+            // A cap of 0 prints nothing, same as no cap at all.
             match suggested_max_iterations {
                 Some(cap) if cap != 0 => format!(" --max-iterations {cap}"),
                 _ => String::new(),

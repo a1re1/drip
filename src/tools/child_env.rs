@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-/// The child environment is a plain name→value map (mirrors NodeJS.ProcessEnv,
-/// which the TS builds as `{ ...process.env, ...overrides }`). BTreeMap keeps
-/// the iteration order deterministic for tests.
+/// The child environment is a plain name→value map layered over the parent
+/// process environment plus explicit overrides. BTreeMap keeps the iteration
+/// order deterministic for tests.
 pub type ChildProcessEnv = BTreeMap<String, String>;
 
 fn scrub_names_from_env() -> Vec<String> {
@@ -60,12 +60,11 @@ pub fn build_env_unset_arguments() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    // port of test/child-env.test.ts
     use super::*;
 
     // Serializes the env-mutating tests; std::env is process-global and the
-    // test harness runs tests on parallel threads (the TS suite restores the
-    // touched keys in afterEach; the mutex plays the same role here).
+    // test harness runs tests on parallel threads, so concurrent tests would
+    // otherwise see each other's env edits.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const TOUCHED_KEYS: [&str; 4] = [
@@ -166,8 +165,8 @@ mod tests {
 
     #[test]
     fn build_env_unset_arguments_lists_each_scrub_name_then_the_marker() {
-        // The TS buildEnvUnsetArguments has no dedicated test file; the test/
-        // suite exercises it via the harness tools. Assert the documented
+        // build_env_unset_arguments is otherwise only exercised indirectly,
+        // through the harness tools' env plumbing. Assert the documented
         // shape here so the `env -u NAME…` contract stays pinned.
         lock_env!(_guard);
 

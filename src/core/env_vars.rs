@@ -35,8 +35,8 @@ pub const ENV_VARS_TEMPLATE: &str = "# drip credential store — KEY=value lines
      # CEREBRAS_API_KEY=csk-...\n\
      # ZAI_API_KEY=...            (Z.AI / GLM — https://z.ai/manage-apikey/apikey-list)\n";
 
-// Insertion order of the file (TS objects preserve it; BTreeMap would sort).
-// Ported tests assert template/parse ordering, so keep a Vec-backed map.
+// Insertion order matters (BTreeMap would sort): tests assert the
+// template/parse ordering, so keep a Vec-backed map.
 pub type Vars = Vec<(String, String)>;
 
 pub fn get<'a>(vars: &'a Vars, key: &str) -> Option<&'a str> {
@@ -116,8 +116,8 @@ pub fn load_merged_env(
     env_vars_path: &Path,
     process_env: Option<&BTreeMap<String, String>>,
 ) -> BTreeMap<String, String> {
-    // env-vars.ts:90 defaults processEnv to process.env: the file overlays
-    // the live environment, it does not replace it.
+    // A missing process_env defaults to the live process environment: the
+    // file overlays it, it does not replace it.
     let mut merged = process_env.cloned().unwrap_or_else(|| std::env::vars().collect());
 
     for (k, v) in load_env_vars(env_vars_path).unwrap_or_default() {

@@ -1,8 +1,7 @@
-// Faithful port: the TS helper names are kept in snake_case so the two files
-// can be diffed side by side. TransportRequestMessage carries the same wire
-// fields (camelCase JSON) as the TS type; `anthropic_content` mirrors the
-// internal `anthropicContent` bookkeeping field and is stripped from payload
-// messages exactly like the TS buildTransportRequestPayload does.
+// Transport request/response types and payload builders for the
+// OpenAI-compatible wire. TransportRequestMessage carries the wire fields
+// (camelCase JSON); `anthropic_content` is the internal bookkeeping field,
+// stripped from payload messages by build_transport_request_payload.
 use crate::harness::chat_types::{
     ChatMessage, ChatRoleTag, ChatRuntimeContext, WorkingFileScope,
     serialize_chat_message_for_context,
@@ -30,8 +29,8 @@ pub enum TransportContent {
     Parts(Vec<TransportContentPart>),
 }
 
-// Wire field names stay exactly as the TS type spells them: tool_call_id and
-// tool_calls are snake_case on the OpenAI-compatible wire (no camelCase rename).
+// Wire field names: tool_call_id and tool_calls are snake_case on the
+// OpenAI-compatible wire (no camelCase rename).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransportRequestMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,8 +158,9 @@ pub struct OpenAICompatibleToolCall {
     pub tool_type: Option<String>, // "function"
 }
 
-// TS wire field names stay snake_case here (tool_choice, prompt_cache_key,
-// reasoning_effort) — no camelCase rename, unlike the ChatMessage types.
+// OpenAI-compatible wire field names stay snake_case (tool_choice,
+// prompt_cache_key, reasoning_effort) — no camelCase rename, unlike the
+// ChatMessage types.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransportRequestPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -510,7 +510,7 @@ mod tests {
 
         let text = transport_content_to_text(Some(&content));
 
-        // TS: `url.slice(0, 40)` — exactly 40 characters of the data URL.
+        // Exactly 40 characters of the data URL are kept.
         assert_eq!(
             text,
             "look\n[image: data:image/png;base64,0123456789abcdefgh...]"
@@ -579,8 +579,8 @@ mod tests {
         assert!(json["messages"][0].get("anthropicContent").is_none());
         assert!(json["messages"][0].get("anthropic_content").is_none());
 
-        // Empty prompt_cache_key / blank reasoning effort are omitted, like the
-        // TS truthiness checks.
+        // Empty prompt_cache_key / blank reasoning effort are omitted
+        // (truthiness check).
         let payload = build_transport_request_payload(BuildTransportRequestPayloadArgs {
             messages: Vec::new(),
             model: "m".to_string(),

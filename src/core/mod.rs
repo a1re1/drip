@@ -1,6 +1,5 @@
-// There is no src/core directory in the TS tree: home/config/env-vars/
-// sessions/lease live under src/cli/, state/types under src/harness/.
-// Each child names its actual TS source.
+// Core building blocks: home layout, settings/config, env vars,
+// session/lease storage, and harness state/types.
 pub mod backfill;
 pub mod config;
 pub mod env_vars;

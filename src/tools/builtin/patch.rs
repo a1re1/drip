@@ -78,11 +78,11 @@ pub fn definition() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Shared input/result types (port of the TS PatchToolInput/FileEntry shapes)
+// Shared input/result types
 // ---------------------------------------------------------------------------
 
-/// Port of FileEntry — one entry in a multi-file transaction. Mirrors
-/// single-file validation rules.
+/// One entry in a multi-file transaction, validated by the same rules as
+/// single-file edits.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     /// Raw path from user input
@@ -93,15 +93,14 @@ pub struct FileEntry {
     pub content: Option<String>,
 }
 
-/// Port of PatchToolResult — what execute() hands complete().
+/// What execute() hands complete():
 #[derive(Debug, Clone)]
 pub struct PatchToolResult {
     pub diff: String,
     pub summary: String,
 }
 
-/// Port of ResolvedEntry — validated state for one entry after the
-/// validation pass.
+/// Validated state for one entry after the validation pass.
 #[derive(Debug, Clone)]
 pub struct ResolvedEntry {
     pub absolute_path: String,
@@ -123,8 +122,7 @@ pub struct ResolvedEntry {
 // Pure text helpers
 // ---------------------------------------------------------------------------
 
-/// Port of the countOccurrences helper (count of non-overlapping matches,
-/// same as text.split(find).length - 1).
+/// Count of non-overlapping matches of `find` in `text`.
 pub fn count_occurrences(text: &str, find: &str) -> usize {
     if find.is_empty() {
         return 0;
@@ -132,8 +130,8 @@ pub fn count_occurrences(text: &str, find: &str) -> usize {
     text.matches(find).count()
 }
 
-/// Port of matchLineNumbers — 1-based line numbers where the find text
-/// starts, for honest summaries and actionable multi-site errors.
+/// 1-based line numbers where the find text starts, for honest summaries
+/// and actionable multi-site errors.
 pub fn match_line_numbers(text: &str, find: &str) -> Vec<usize> {
     let mut lines: Vec<usize> = Vec::new();
     let mut search_from = 0usize;
@@ -151,7 +149,7 @@ pub fn match_line_numbers(text: &str, find: &str) -> Vec<usize> {
     lines
 }
 
-/// Port of findIncompleteOverwriteError. A full-content overwrite of a large
+/// Guard against incomplete overwrites: a full-content overwrite of a large
 /// existing file must look like a complete file, not an abridged
 /// reconstruction. Elision markers and drastic shrinks are rejected with the
 /// file untouched; find/replace remains the escape hatch for genuinely large
@@ -193,7 +191,7 @@ const DUPLICATE_GUARD_MIN_APPENDED: usize = 20;
 const DUPLICATE_GUARD_MIN_LINE_CHARS: usize = 12;
 const DUPLICATE_GUARD_RATIO: f64 = 0.8;
 
-/// Port of findDuplicatedCopyError. The other small-model overwrite failure:
+/// Guard against duplicated-copy overwrites, the other small-model failure:
 /// "content" = the existing file followed by a second (often lightly edited)
 /// copy of it — the model meant to change a hunk and instead appended the
 /// whole file again. The tail of such a write is made almost entirely of
@@ -238,8 +236,8 @@ pub fn find_duplicated_copy_error(old_text: &str, new_text: &str) -> Option<Stri
 const SHRINK_GUARD_MIN_LINES: usize = 200;
 const SHRINK_GUARD_KEEP_RATIO: usize = 2; // oldLines * 0.5 == oldLines / 2
 
-/// Port of the ELISION_MARKER_PATTERN regex from patch-tool.ts. The TS keeps
-/// a module-level compiled pattern; Rust needs it as a lazy static.
+/// The elision-marker pattern, compiled once as a lazy static and shared
+/// across calls.
 fn elision_marker_pattern() -> &'static regex::Regex {
     use std::sync::OnceLock;
     static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
@@ -251,13 +249,12 @@ fn elision_marker_pattern() -> &'static regex::Regex {
     })
 }
 
-/// The TS guard tests `newText.match(ELISION_MARKER_PATTERN)` and uses the
-/// match text in the error — here we return the matched substring directly.
+/// Returns the matched elision-marker substring for use in the error text.
 fn find_elision_marker(text: &str) -> Option<String> {
     elision_marker_pattern().find(text).map(|m| m.as_str().to_string())
 }
 
-/// Port of buildUnifiedDiff.
+/// Unified old→new diff for `display_path`.
 pub fn build_unified_diff(display_path: &str, old_text: Option<&str>, new_text: &str) -> String {
     if let Some(old_text) = old_text {
         if old_text == new_text {
@@ -323,7 +320,7 @@ pub fn build_unified_diff(display_path: &str, old_text: Option<&str>, new_text: 
 }
 
 // ---------------------------------------------------------------------------
-// Prepare stage (port of patch-tool.ts prepare)
+// Prepare stage
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -537,7 +534,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 // Syntax gate
 // ---------------------------------------------------------------------------
 
-// Port of path.extname(filePath).toLowerCase() — returns "" when there is no
+// Lowercased extension including the leading dot; "" when there is no
 // extension (including dotfiles like ".json").
 fn path_extension(file_path: &str) -> String {
     std::path::Path::new(file_path)
@@ -552,15 +549,16 @@ pub const SYNTAX_CHECKED_EXTENSIONS: &[&str] = &[
 
 // .json targets are validated with a small built-in JSON syntax scan below.
 // Returns the first syntax error in the text, or None when it parses (or when
-// the file type has no checker available). Uses the TypeScript transpiler's
-// syntactic diagnostics because it runs under both Bun and Node; if the
-// dependency is unavailable in the host project, the gate degrades to a no-op.
+// the file type has no checker available). Syntax checking runs the text
+// through the host project's transpiler (spawned via `bun -e`) and reports
+// its first diagnostic; if the dependency is unavailable in the host project,
+// the gate degrades to a no-op.
 pub fn find_syntax_error(file_path: &str, text: &str) -> Option<String> {
     let extension = path_extension(file_path);
 
     if extension == ".json" {
-        // TS: JSON.parse(text) → the parser's message on failure. serde_json's
-        // message wording differs from V8's; the gate semantics are identical.
+        // On failure, surface serde_json's parser message — the gate only
+        // needs to know whether the text parses.
         return match serde_json::from_str::<serde_json::Value>(text) {
             Ok(_) => None,
             Err(error) => Some(error.to_string()),
@@ -1121,8 +1119,8 @@ pub fn complete(prepared: &PatchToolPrepared, result: &PatchToolResult) -> ToolC
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
+/// The transcript's display string for this call — the `display_input` value
+/// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &serde_json::Value, ctx: &ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)

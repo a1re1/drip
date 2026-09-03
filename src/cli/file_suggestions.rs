@@ -1,4 +1,4 @@
-// tmux-session suggestions belong to the web chat and are not ported).
+// Suggests file paths for the entry prompt's @-completions.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

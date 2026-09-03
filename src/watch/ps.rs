@@ -1,6 +1,6 @@
 // Process discovery for the Shells pane — which commands the focused running
-// session is executing. Ported from sub-zero's ps.ts: parse `ps` output, walk
-// the parent/child table to a session pid's descendants. Pure and testable;
+// session is executing. Parses `ps` output and walks the parent/child
+// table to a session pid's descendants. Pure and testable;
 // only list_processes touches the system.
 
 use std::collections::{HashMap, HashSet};

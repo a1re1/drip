@@ -1,7 +1,6 @@
 // Settings are a flat map of string -> string (IndexMap keeps JSON object key
 // order stable across load/save). Profile lists are stored as JSON-string-
-// encoded settings values, exactly like the TS original. The shipped defaults
-// are embedded byte-exact from getDefaultWebSettingValues().
+// encoded settings values. The shipped defaults are embedded byte-exact.
 #![allow(non_snake_case)]
 
 use anyhow::{anyhow, bail, Result};
@@ -12,7 +11,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Setting ids (settings.ts 17-27)
+// Setting ids
 // ---------------------------------------------------------------------------
 
 pub const ACTIVE_INFERENCE_PROFILE_SETTING_ID: &str = "runtime.active_profile_id";
@@ -27,7 +26,7 @@ pub const ROLE_BINDINGS_SETTING_ID: &str = "runtime.role_bindings";
 pub const DEFAULT_MAX_CONTEXT_TOKENS: i64 = 64000;
 pub const OPENAI_REASONING_EFFORT_VALUES: [&str; 5] = ["none", "low", "medium", "high", "xhigh"];
 
-// Byte-exact shipped defaults (getDefaultWebSettingValues()).
+// Byte-exact shipped defaults.
 pub const MODEL_PROFILES_DEFAULT_JSON: &str = include_str!("defaults/model_profiles.json");
 pub const SYSTEM_PROMPT_PROFILES_DEFAULT_JSON: &str =
     include_str!("defaults/system_prompt_profiles.json");
@@ -35,7 +34,7 @@ pub const STORED_API_KEYS_DEFAULT_JSON: &str = include_str!("defaults/stored_api
 pub const OTHER_SETTINGS_DEFAULT_JSON: &str = include_str!("defaults/other_settings.json");
 
 // ---------------------------------------------------------------------------
-// InferenceProviderId (settings.ts:29)
+// InferenceProviderId
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -91,8 +90,8 @@ impl InferenceProviderId {
 // default_setting_values()
 // ---------------------------------------------------------------------------
 
-/// getDefaultWebSettingValues(): the shipped defaults as a settings map, with
-/// the profile lists JSON-string-encoded like the TS original.
+/// The shipped defaults as a settings map, with the profile lists
+/// JSON-string-encoded.
 pub fn default_setting_values() -> IndexMap<String, String> {
     let mut settings: IndexMap<String, String> =
         serde_json::from_str(OTHER_SETTINGS_DEFAULT_JSON).expect("embedded other_settings parses");
@@ -112,7 +111,7 @@ pub fn default_setting_values() -> IndexMap<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Profile types (settings.ts 63-110)
+// Profile types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,7 +127,7 @@ pub struct InferenceModelProfile {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    // TS stores this as number OR string ("64000"); accept both on read.
+    // Stored as a number or a numeric string ("64000"); accept both on read.
     #[serde(default, deserialize_with = "de_max_context_tokens", skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,7 +186,7 @@ pub struct SystemPromptProfile {
 }
 
 // ---------------------------------------------------------------------------
-// normalize helpers (settings.ts 513-660)
+// normalize helpers
 // ---------------------------------------------------------------------------
 
 fn str_field<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -214,7 +213,7 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
             provider
         ));
     }
-    // TS: a number or a numeric string, positive integer only; anything else
+    // A number or a numeric string, positive integer only; anything else
     // is `Inference profile "<id>" must use a positive integer for max context tokens.`
     let max_context_tokens = match obj.get("maxContextTokens") {
         None | Some(Value::Null) => None,
@@ -254,7 +253,7 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
         Some(Value::Object(map)) => {
             let mut headers = IndexMap::new();
             for (key, value) in map {
-                // Blank values are dropped, not sent (TS normalizeHeaders).
+                // Blank values are dropped, not sent.
                 if let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) {
                     headers.insert(key.clone(), value.to_string());
                 }
@@ -334,8 +333,8 @@ pub fn normalize_system_prompt_profile(
     })
 }
 
-/// parseSettingsJsonArray(): decode a JSON-string-encoded settings value into
-/// an array, with the TS error messages verbatim.
+/// Decodes a JSON-string-encoded settings value into an array; the error
+/// messages are part of the contract.
 pub fn parse_settings_json_array(label: &str, raw: &str) -> Result<Vec<Value>> {
     let parsed: Value = serde_json::from_str(raw)
         .map_err(|_| anyhow!("{} must be a valid JSON array.", label))?;
@@ -349,7 +348,8 @@ fn check_duplicate_ids(ids: &[String], label: &str) -> Result<()> {
     let mut seen = HashSet::new();
     for id in ids {
         if !seen.insert(id.clone()) {
-            // TS: `Inference profile "x" is duplicated.` / `System prompt profile ...` / `Stored API key ...`
+            // Same message shape for every profile kind (model, system prompt,
+            // stored API key).
             return Err(anyhow!("{} \"{}\" is duplicated.", label, id));
         }
     }
@@ -440,7 +440,7 @@ pub fn parse_stored_api_key_entries(
 }
 
 // ---------------------------------------------------------------------------
-// Editable profiles (settings.ts 806-1010)
+// Editable profiles
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -649,7 +649,7 @@ pub fn serialize_editable_system_prompt_profiles(
 }
 
 // ---------------------------------------------------------------------------
-// mergeMissingDefault* (settings.ts 1106-1160)
+// merge_missing_default_* helpers
 // ---------------------------------------------------------------------------
 
 pub fn merge_missing_default_inference_profiles(raw_value: Option<&str>) -> String {
@@ -703,7 +703,7 @@ pub fn merge_missing_default_system_prompt_profiles(raw_value: Option<&str>) -> 
 }
 
 // ---------------------------------------------------------------------------
-// CLI layer (src/cli/config.ts)
+// CLI layer
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -894,9 +894,8 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     })
 }
 
-// settings.ts normalizeWebSettingValues(): the result carries exactly the
-// known setting ids, each defaulting to its definition default and
-// overwritten only where the input holds a string.
+// The result carries exactly the known setting ids, each defaulting to its
+// definition default and overwritten only where the input holds a string.
 fn normalize_web_setting_values(input: &Value) -> IndexMap<String, String> {
     let mut normalized = default_setting_values();
     if let Some(object) = input.as_object() {
@@ -917,7 +916,7 @@ pub fn save_cli_config(path: &Path, config: &CliConfig) -> Result<()> {
     Ok(())
 }
 
-// cli/config.ts:81 — resolveCliInference(config, env?) → resolveInferenceConfig(settings, {env}).
+// Resolves the inference config from the CLI config's settings.
 pub fn resolve_cli_inference(
     config: &CliConfig,
     env: Option<&std::collections::HashMap<String, String>>,
@@ -936,7 +935,7 @@ pub fn list_cli_system_prompt_profiles(
 }
 
 pub fn get_active_cli_profile_id(settings: &IndexMap<String, String>) -> String {
-    // TS: settings[id]?.trim() || defaults[id] — never a hardcoded literal.
+    // settings[id].trim(), falling back to defaults[id] — never a hardcoded literal.
     settings
         .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
         .map(|value| value.trim().to_string())
@@ -998,7 +997,7 @@ pub fn set_active_cli_system_prompt(mut config: CliConfig, prompt_profile_id: &s
 }
 
 // ---------------------------------------------------------------------------
-// Tests (ported from test/web-settings.test.ts + test/cli-env-vars.test.ts)
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1124,7 +1123,7 @@ mod tests {
     }
 
     // Both upgrades: a non-JSON model_profiles value leaves settings unchanged
-    // (the TS try/catch returns early).
+    // (parsing fails and the upgrade returns early).
     #[test]
     fn test_upgrade_functions_non_json_noop() {
         for upgrade in [

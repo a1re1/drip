@@ -1,5 +1,4 @@
-// The TS module provides two runtimes that BASH_ASYNC (tools/bash-tool.ts)
-// rides on:
+// This module provides two runtimes that BASH_ASYNC rides on:
 //
 //   1. TmuxSessionManager — an in-memory registry of tmux sessions with a
 //      liveness probe (`tmux has-session` + `display-message -p #{pane_dead}`)
@@ -24,12 +23,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 
-/// Port of TMUX_SESSION_START_GRACE_MS: how long a session may keep benefiting
-/// from the doubt when `tmux has-session` cannot see it yet (the tmux server
-/// registers sessions asynchronously).
+/// How long a session may keep benefiting from the doubt when `tmux
+/// has-session` cannot see it yet (the tmux server registers sessions
+/// asynchronously).
 pub const TMUX_SESSION_START_GRACE_MS: u64 = 10_000;
 
-/// Port of formatError's non-Error fallback.
+/// Fallback message used when a failure carries no error text.
 pub const UNKNOWN_ASYNC_TOOL_FAILURE: &str = "Unknown async tool failure.";
 
 use crate::tools::types::{
@@ -56,7 +55,7 @@ fn parse_status(text: &str) -> Option<ChatAsyncToolJobStatus> {
     }
 }
 
-/// Port of ProcessResult — the shape runProcess hands back.
+/// The shape the process runner hands back.
 #[derive(Debug, Clone)]
 pub struct ProcessResult {
     pub exit_code: Option<i32>,
@@ -64,7 +63,7 @@ pub struct ProcessResult {
     pub stdout: String,
 }
 
-/// Port of normalizeLine: logger.line always writes a terminated line.
+/// Ensures the text ends with exactly one trailing newline.
 pub fn normalize_line(text: &str) -> String {
     if text.ends_with('\n') {
         text.to_string()
@@ -73,7 +72,7 @@ pub fn normalize_line(text: &str) -> String {
     }
 }
 
-/// Port of formatCommand: `[command, ...args].join(" ").trim()`.
+/// Formats `[command, ...args].join(" ").trim()`.
 pub fn format_command(command: &str, args: &[String]) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(command.to_string());
@@ -81,8 +80,8 @@ pub fn format_command(command: &str, args: &[String]) -> String {
     parts.join(" ").trim().to_string()
 }
 
-/// Port of tailText: CRLF is normalized, a single trailing newline does not
-/// count as a line, and the last `lines` lines are kept.
+/// CRLF is normalized, a single trailing newline does not count as a line,
+/// and the last `lines` lines are kept.
 pub fn tail_text(text: &str, lines: usize) -> String {
     let normalized_text = text.replace("\r\n", "\n");
     let mut normalized_lines: Vec<&str> = normalized_text.split('\n').collect();
@@ -95,14 +94,14 @@ pub fn tail_text(text: &str, lines: usize) -> String {
     normalized_lines[start..].join("\n")
 }
 
-/// Port of formatError for anyhow errors (the Error.message branch; the
-/// non-Error fallback lives in UNKNOWN_ASYNC_TOOL_FAILURE).
+/// Formats an anyhow error (the Error.message branch; the non-Error fallback
+/// lives in UNKNOWN_ASYNC_TOOL_FAILURE).
 pub fn format_error(error: &anyhow::Error) -> String {
     error.to_string()
 }
 
-/// Port of truncateText (the async-jobs logger / bash-tool preview share it):
-/// cap at `max_length`, with `...` replacing the tail.
+/// Caps the string at `max_length` characters, with `...` replacing the tail
+/// (the async-jobs logger / bash-tool preview share it).
 pub fn truncate_text(value: &str, max_length: usize) -> String {
     if value.len() <= max_length {
         return value.to_string();
@@ -116,7 +115,7 @@ pub fn truncate_text(value: &str, max_length: usize) -> String {
     format!("{}...", &value[..end])
 }
 
-/// Port of compactWhitespace: runs of whitespace collapse to one space.
+/// Runs of whitespace collapse to one space.
 pub fn compact_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -131,37 +130,37 @@ pub fn default_jobs_root(cwd: &Path) -> PathBuf {
     cwd.join(".drip").join("async-tools")
 }
 
-/// Port of `join(this.jobsRoot, `${id}.log`)`.
+/// The per-job log path: `<jobs_root>/<id>.log`.
 pub fn log_path_for(jobs_root: &Path, id: &str) -> PathBuf {
     jobs_root.join(format!("{id}.log"))
 }
 
-/// Port of createJob's id: `randomUUID()` (TS: node:crypto randomUUID).
+/// The job id: a random UUID.
 pub fn create_job_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Port of the manager's bookkeeping timestamps (ISO strings so the sort in
-/// list_sessions stays lexicographic like the TS localeCompare on ISO dates).
+/// The manager's bookkeeping timestamps: ISO strings, so the sort in
+/// list_sessions stays lexicographic on the date text.
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// Port of `Date.now() - Date.parse(startedAt)`: None means the TS NaN case
-/// (unparseable date), which isFinite() rejects.
+/// Milliseconds elapsed since the session's started_at; None means the
+/// timestamp was unparseable and the age cannot be trusted.
 pub fn session_age_ms(started_at: &str) -> Option<i64> {
     let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
     let elapsed = chrono::Utc::now() - started.with_timezone(&chrono::Utc);
     Some(elapsed.num_milliseconds())
 }
 
-/// Port of getRecord's error: `Async job "${jobId}" was not found.`
+/// The error text for an unknown job id: `Async job "…" was not found.`
 pub fn job_not_found_message(job_id: &str) -> String {
     format!("Async job \"{job_id}\" was not found.")
 }
 
-/// Port of buildChildProcessEnv (tools/child-env.ts): the child inherits the
-/// harness environment with the request's overrides applied on top.
+/// The child inherits the harness environment with the request's overrides
+/// applied on top.
 pub fn build_child_process_env(overrides: Option<&BTreeMap<String, String>>) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
 
@@ -174,10 +173,9 @@ pub fn build_child_process_env(overrides: Option<&BTreeMap<String, String>>) -> 
     env
 }
 
-/// Port of runProcess (debt audit C1): tmux control commands go through the
-/// shared capture core (runCapturedProcess) so they gain the kill-tree +
-/// stop-terminator semantics the other tools already have. Default timeout is
-/// 5s, matching the TS default argument.
+/// Tmux control commands go through the shared capture core so they gain the
+/// kill-tree + stop-terminator semantics the other tools already have.
+/// Default timeout is 5s.
 pub fn run_process(command: &str, args: &[&str]) -> Result<ProcessResult> {
     let owned_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
@@ -202,14 +200,14 @@ pub fn run_process(command: &str, args: &[&str]) -> Result<ProcessResult> {
 // ---------------------------------------------------------------------------
 // Log appends
 //
-// TS serializes appends through a per-record writeQueue; here a single lock
-// gives every append the same happens-before ordering, so `[finish]` always
-// lands after the queued output exactly like the awaited writeQueue did.
+// Appends are serialized through a single lock, giving every append the same
+// happens-before ordering, so `[finish]` always lands after the queued output
+// of the streaming readers.
 // ---------------------------------------------------------------------------
 
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
-/// Port of the logger's append: `appendFile(logPath, text, "utf8")`.
+/// Appends raw text to the log file (created if missing).
 fn append_to_log(log_path: &str, text: &str) {
     let _guard = LOG_LOCK
         .lock()
@@ -220,8 +218,8 @@ fn append_to_log(log_path: &str, text: &str) {
     }
 }
 
-/// Port of ChatAsyncToolLogger — the handle background jobs write their log
-/// lines through. The write-queue ordering is provided by LOG_LOCK.
+/// The handle background jobs write their log lines through. The append
+/// ordering is provided by LOG_LOCK.
 #[derive(Debug, Clone)]
 pub struct JobLogger {
     pub job_id: String,
@@ -236,25 +234,24 @@ impl JobLogger {
         }
     }
 
-    /// Port of logger.append: raw text goes to the log verbatim.
+    /// Appends raw text to the log verbatim.
     pub fn append(&self, text: &str) {
         append_to_log(&self.log_path, text);
     }
 
-    /// Port of logger.line: append(normalizeLine(text)).
+    /// Appends the text terminated with a newline.
     pub fn line(&self, text: &str) {
         self.append(&normalize_line(text));
     }
 
-    /// Port of logger.log: an alias for line.
+    /// An alias for line.
     pub fn log(&self, text: &str) {
         self.line(text);
     }
 }
 
-/// Port of the TS AsyncJobRecord minus the promise machinery: the live job
-/// snapshot plus the settle-once flag (Rust expresses waitPromise as a
-/// Condvar the manager signals on finish).
+/// The per-job record: the live job snapshot plus the settle-once flag
+/// (waiters block on a Condvar the manager signals when a job finishes).
 #[derive(Debug, Clone)]
 pub struct AsyncJobRecord {
     pub job: ChatAsyncToolJob,
@@ -277,7 +274,7 @@ impl AsyncToolJobManager {
         }
     }
 
-    /// Port of getJob: null when the id is unknown.
+    /// Returns None when the id is unknown.
     pub fn get_job(&self, job_id: &str) -> Option<ChatAsyncToolJob> {
         self.records
             .lock()
@@ -287,9 +284,9 @@ impl AsyncToolJobManager {
             .map(|record| record.job.clone())
     }
 
-    /// Port of createJob: mkdir the jobs root, mint the id/log path/started_at,
-    /// truncate the log file to empty, register the record, and hand back the
-    /// job snapshot.
+    /// Creates the jobs root, mints the id/log path/started_at, truncates the
+    /// log file to empty, registers the record, and hands back the job
+    /// snapshot.
     pub fn create_job(
         &self,
         command: Option<String>,
@@ -328,10 +325,9 @@ impl AsyncToolJobManager {
         Ok(job)
     }
 
-    /// Port of startCommand: log the start banner, spawn the child with piped
-    /// stdio streaming into the log, and return the still-running job. Spawn
-    /// failures settle the job as failed (Node emits them through the 'error'
-    /// event) and the job is still returned.
+    /// Logs the start banner, spawns the child with piped stdio streaming into
+    /// the log, and returns the still-running job. Spawn failures settle the
+    /// job as failed, and the job is still returned.
     pub fn start_command(
         self: &Arc<Self>,
         command: &str,
@@ -386,7 +382,7 @@ impl AsyncToolJobManager {
                     let status = child.wait();
 
                     // Join the readers first so their appends are queued
-                    // before the [finish] line, like the awaited writeQueue.
+                    // before the [finish] line.
                     if let Some(handle) = out_thread {
                         let _ = handle.join();
                     }
@@ -418,9 +414,9 @@ impl AsyncToolJobManager {
         Ok(job)
     }
 
-    /// Port of startTask: log the start header, then run `run` on a background
-    /// thread — completion settles the job as completed with exitCode 0 and an
-    /// error settles it as failed, mirroring the promise chain.
+    /// Logs the start header, then runs `run` on a background thread —
+    /// completion settles the job as completed with exit code 0 and an error
+    /// settles it as failed.
     pub fn start_task<F>(
         self: &Arc<Self>,
         cwd: &str,
@@ -452,9 +448,8 @@ impl AsyncToolJobManager {
         Ok(job)
     }
 
-    /// Port of tailJob: lines clamp to [1, 400], the pending write queue is
-    /// drained first (here: appends are already serialized), and the log is
-    /// tail-trimmed.
+    /// Lines clamp to [1, 400] and the log is tail-trimmed; appends are
+    /// serialized, so the log is complete when read.
     pub fn tail_job(&self, job_id: &str, lines: i64) -> Result<ChatAsyncToolTailResult> {
         let record = self.get_record(job_id)?;
         let normalized_lines = lines.clamp(1, 400) as usize;
@@ -470,9 +465,8 @@ impl AsyncToolJobManager {
         })
     }
 
-    /// Port of waitForJob: an already-settled job returns completed
-    /// immediately; otherwise block until finishJob signals the Condvar or the
-    /// (non-negative) timeout elapses.
+    /// An already-settled job returns completed immediately; otherwise block
+    /// until the job settles or the (non-negative) timeout elapses.
     pub fn wait_for_job(&self, job_id: &str, timeout_ms: i64) -> Result<ChatAsyncToolWaitResult> {
         let mut guard = self
             .records
@@ -490,8 +484,7 @@ impl AsyncToolJobManager {
             bail!("{}", job_not_found_message(job_id));
         }
 
-        // normalizedTimeoutMs = Math.max(0, Math.floor(timeoutMs)); a zero
-        // timeout behaves like the TS setTimeout(0) race — it expires at once.
+        // Negative timeouts clamp to zero; a zero timeout expires at once.
         let normalized_timeout_ms = timeout_ms.max(0) as u64;
         if normalized_timeout_ms == 0 {
             let record = guard
@@ -505,12 +498,10 @@ impl AsyncToolJobManager {
         }
 
         // wait_timeout_while re-checks the predicate on every wakeup and before
-        // the first wait, mirroring the TS while-loop's re-read of
-        // asyncJobs.get(jobId).status each iteration; predicate polarity is
-        // "keep waiting while still Running" (missing ids would spin forever,
-        // so a vanished job falls through to the timeout result).
-        // wait_timeout_while blocks WHILE the predicate holds: keep waiting
-        // as long as the job is still running.
+        // the first wait; predicate polarity is "keep waiting while still
+        // Running" (missing ids would spin forever, so a vanished job falls
+        // through to the timeout result). It blocks while the predicate holds:
+        // keep waiting as long as the job is still running.
         let still_running = |state: &mut Vec<AsyncJobRecord>| {
             state
                 .iter()
@@ -543,10 +534,10 @@ impl AsyncToolJobManager {
         });
     }
 
-    /// Port of finishJob: settle-once — only the first finish wins, the record
-    /// gains error/exitCode/finishedAt/status, and the `[error]`/`[finish]`
-    /// lines are appended after the queued output. Returns the settled job
-    /// snapshot (resolveWait's argument), or None for an unknown id.
+    /// Settle-once: only the first finish wins, the record gains
+    /// error/exit_code/finished_at/status, and the `[error]`/`[finish]` lines
+    /// are appended after the queued output. Returns the settled job snapshot,
+    /// or None for an unknown id.
     pub fn finish_job(
         &self,
         job_id: &str,
@@ -568,8 +559,8 @@ impl AsyncToolJobManager {
 
         record.settled = true;
         record.job.error = error;
-        // TS finishJob sets exitCode: number | null (null when the process
-        // ended without a status) — never absent once settled.
+        // A settled job always records an exit code; the inner None means the
+        // process ended without a status.
         record.job.exit_code = Some(exit_code);
         record.job.finished_at = Some(now_iso());
         record.job.status = status;
@@ -582,7 +573,7 @@ impl AsyncToolJobManager {
             }
         }
 
-        // TS: `exitCode=${record.job.exitCode}` prints "null" for null.
+        // A null exit code prints as "null" in the finish line.
         let exit_code_text = match record.job.exit_code.flatten() {
             Some(code) => code.to_string(),
             None => "null".to_string(),
@@ -600,7 +591,7 @@ impl AsyncToolJobManager {
         Some(settled_job)
     }
 
-    /// Port of getRecord: throws `Async job "…" was not found.` for unknown ids.
+    /// Errors with `Async job "…" was not found.` for unknown ids.
     pub fn get_record(&self, job_id: &str) -> Result<AsyncJobRecord> {
         self.records
             .lock()
@@ -612,8 +603,8 @@ impl AsyncToolJobManager {
     }
 }
 
-/// Streaming half of startCommand: each stdout/stderr chunk is appended to the
-/// log as it arrives (TS: `child.stdout.on("data", chunk => logger.append(...))`).
+/// Streaming half of start_command: each stdout/stderr chunk is appended to
+/// the log as it arrives.
 fn read_pipe_into_log(pipe: &mut impl Read, logger: &JobLogger) {
     let mut buffer = [0u8; 8192];
 
@@ -628,11 +619,11 @@ fn read_pipe_into_log(pipe: &mut impl Read, logger: &JobLogger) {
     }
 }
 
-/// Port of isSessionRunning's probe decision, kept pure so the tmux-free path
-/// is testable. The caller feeds back whether each tmux probe exited 0 (and
-/// the pane_dead stdout when both did); a failed probe only counts as "still
-/// starting" during the 10s grace window (TS: Number.isFinite(age) && age <
-/// grace — a negative age from clock skew still passes isFinite).
+/// The tmux liveness-probe decision, kept pure so the tmux-free path is
+/// testable. The caller feeds back whether each tmux probe exited 0 (and the
+/// pane_dead stdout when both did); a failed probe only counts as "still
+/// starting" during the 10s grace window — a negative age from clock skew
+/// still counts as inside it.
 pub fn is_session_probe_running(
     has_session_ok: bool,
     pane_probe_ok: bool,
@@ -646,7 +637,7 @@ pub fn is_session_probe_running(
     session_age_ms.is_some_and(|age| age < TMUX_SESSION_START_GRACE_MS as i64)
 }
 
-/// Port of TmuxSessionManager — an in-memory registry of tmux sessions.
+/// An in-memory registry of tmux sessions.
 pub struct TmuxSessionManager {
     sessions: Mutex<Vec<ChatTmuxSession>>,
 }
@@ -658,7 +649,6 @@ impl TmuxSessionManager {
         }
     }
 
-    /// Port of registerSession.
     pub fn register_session(&self, session: ChatTmuxSession) {
         self.sessions
             .lock()
@@ -666,8 +656,8 @@ impl TmuxSessionManager {
             .push(session);
     }
 
-    /// Port of getSession: null when unknown or no longer running (a dead
-    /// session is dropped from the registry).
+    /// Returns None when unknown or no longer running (a dead session is
+    /// dropped from the registry).
     pub fn get_session(&self, session_name: &str) -> Option<ChatTmuxSession> {
         let running = {
             let mut sessions = self
@@ -689,8 +679,8 @@ impl TmuxSessionManager {
         running
     }
 
-    /// Port of listSessions: live sessions only, newest first, dead ones
-    /// dropped from the registry.
+    /// Lists live sessions only, newest first; dead ones are dropped from
+    /// the registry.
     pub fn list_sessions(&self) -> Vec<ChatTmuxSession> {
         let mut sessions = self
             .sessions
@@ -711,10 +701,10 @@ impl TmuxSessionManager {
         active_sessions
     }
 
-    /// Port of isSessionRunning: `tmux has-session -t <name>`, then
-    /// `tmux display-message -p -t <name>:0.0 #{pane_dead}`; a session is
-    /// running when pane_dead is 0. Probe failures fall back to the 10s start
-    /// grace window; a thrown spawn error returns false like the TS catch.
+    /// Runs `tmux has-session -t <name>`, then `tmux display-message -p -t
+    /// <name>:0.0 #{pane_dead}`; a session is running when pane_dead is 0.
+    /// Probe failures fall back to the 10s start grace window; a spawn error
+    /// returns false.
     fn is_session_running(&self, session: &ChatTmuxSession) -> bool {
         let age = session_age_ms(&session.started_at);
 
@@ -775,8 +765,7 @@ impl ChatAsyncToolLogger for JobLogger {
 }
 
 /// The runtime trait is implemented on `Arc<AsyncToolJobManager>` because the
-/// start methods spawn threads that hold an Arc to the manager (TS: the
-/// closures capture `this`).
+/// start methods spawn threads that hold an Arc to the manager.
 impl ChatAsyncToolRuntime for Arc<AsyncToolJobManager> {
     fn get_job(&self, job_id: &str) -> Option<ChatAsyncToolJob> {
         AsyncToolJobManager::get_job(self, job_id)
@@ -828,7 +817,6 @@ impl ChatTmuxSessionRuntime for TmuxSessionManager {
     }
 }
 
-/// Port of CreateChatToolRuntimeServicesOptions.
 #[derive(Debug, Clone, Default)]
 pub struct CreateChatToolRuntimeServicesOptions {
     pub cwd: Option<PathBuf>,
@@ -924,11 +912,11 @@ mod tests {
         assert!(is_session_probe_running(true, true, "0", None));
         assert!(!is_session_probe_running(true, true, "1", None));
         // A failed probe inside the grace window → still starting; outside →
-        // gone. Negative ages pass the TS isFinite check.
+        // gone. Negative ages count as inside the grace window.
         assert!(is_session_probe_running(false, true, "", Some(1_000)));
         assert!(is_session_probe_running(true, false, "", Some(-500)));
         assert!(!is_session_probe_running(false, true, "", Some(60_000)));
-        // Unparseable startedAt is the TS NaN case → not running.
+        // Unparseable startedAt yields no age → not running.
         assert!(!is_session_probe_running(false, true, "", None));
     }
 
@@ -1024,7 +1012,7 @@ mod tests {
             .create_job(None, "/tmp", "wait on me", "BASH_ASYNC")
             .unwrap();
 
-        // Zero timeout on a running job → the TS setTimeout(0) race expires.
+        // Zero timeout on a running job → the wait expires at once.
         let pending = AsyncToolJobManager::wait_for_job(&manager, &job.id, 0).unwrap();
         assert!(!pending.completed);
 

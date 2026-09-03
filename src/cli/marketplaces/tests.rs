@@ -1,11 +1,6 @@
-// ported tests of test/cli-marketplaces.test.ts (module-level cases)
-//
-// Rust adaptations: makeTempRoot uses a tempfile::tempdir with a "drip-" prefix
-// (the prefix only feeds the TS fixture name; TempDir owns/removes the dir).
-// loadMarketplacesFile/saveMarketplacesFile return Result in Rust, so tests
-// unwrap where the TS calls were infallible. The TS tests file
-// test/cli-marketplaces-headless.test.ts is a subprocess CLI-dispatch suite —
-// those cases are listed as deferred to the main.rs port.
+// Module-level marketplace tests. Temp roots are tempfile::tempdir with a
+// "drip-" prefix (TempDir owns/removes the dir); load/save return Result, so
+// tests unwrap. CLI-dispatch cases live with the entry-point tests.
 use super::*;
 use crate::core::home::open_drip_home;
 use std::fs;

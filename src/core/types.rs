@@ -1,17 +1,17 @@
-// Serde port of every type in the harness state contract. Field names
-// serialize exactly as the TypeScript field names (they are already
-// camelCase there): Rust fields are snake_case + #[serde(rename_all =
-// "camelCase")], with explicit renames for reserved words (`type`, `loop`).
-// Optional fields are Option<T> + skip_serializing_if = "Option::is_none" —
-// JSON.stringify drops `undefined` keys, and the port must match that.
-// String-literal unions become fieldless enums with explicit serde renames.
+// Serde definitions for every type in the harness state contract. Field
+// names serialize in camelCase: Rust fields are snake_case +
+// #[serde(rename_all = "camelCase")], with explicit renames for reserved
+// words (`type`, `loop`). Optional fields are Option<T> +
+// skip_serializing_if = "Option::is_none" so missing keys are omitted from
+// the JSON. String-literal unions become fieldless enums with explicit
+// serde renames.
 //
-// Known deviations:
-// - `version: 1` (a literal in TS) becomes a plain u8, always serialized.
-// - Seconds fields (waitSeconds / rateLimitWaitSeconds) are f64: the TS code
-//   parses fractional waits ("waiting 2.5s"). All other numbers are integers.
-// - Record<string, T> maps are IndexMap (insertion-ordered, matching JS
-//   object key order for byte-identical state files), not HashMap.
+// Notes:
+// - `version` is a plain u8, always serialized.
+// - Seconds fields (waitSeconds / rateLimitWaitSeconds) are f64 so
+//   fractional waits ("waiting 2.5s") parse. All other numbers are integers.
+// - Record<string, T> maps are IndexMap (insertion-ordered, keeping JSON
+//   key order stable for byte-identical state files), not HashMap.
 #![allow(clippy::upper_case_acronyms)]
 
 use indexmap::IndexMap;
@@ -474,9 +474,8 @@ pub struct HarnessEventData {
 	pub sent_at: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub status: Option<String>,
-	// toolName before taskId: every TS emit site that carries both spreads
-	// `taskId` last ({ callId, loop, toolName, ...taskId }), and the NDJSON
-	// text is the contract.
+	// toolName before taskId: NDJSON field order is the contract (taskId
+	// last when both are present).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub tool_name: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -622,7 +621,7 @@ mod tests {
 		assert_eq!(back, task);
 	}
 
-	/// String-literal unions must round-trip their exact TS spellings.
+	/// String-literal unions must round-trip their exact spellings.
 	#[test]
 	fn union_enums_round_trip_exact_strings() {
 		assert_eq!(
@@ -643,8 +642,8 @@ mod tests {
 		);
 	}
 
-	/// The state contract: `type`/`loop` reserved-word renames, version
-	/// literal, and defaults matching the TS constants.
+	/// The state contract: `type`/`loop` reserved-word renames, the version
+	/// literal, and the default values.
 	#[test]
 	fn state_serializes_type_loop_and_version_one() {
 		let state = HarnessState {

@@ -6,17 +6,16 @@
 // hanging on survivors, and a process-wide terminator registry so a stop
 // signal to drip interrupts every in-flight child.
 //
-// Rust implementation notes (a faithful port of the TS promise machinery):
-// - The TS `close` event resolves once the child exits AND the stdio pipes
-//   reach EOF; a still-open pipe (a surviving grandchild) delays the result.
-//   The Rust poll loop breaks on child exit and then joins the reader
-//   threads, bounded so survivors cannot hang the result.
-// - The TS killTree signals the negative pid (the whole process group) and
-//   falls back to the direct child kill; `kill_tree` below does the same.
+// Rust implementation notes:
+// - The result waits for the child to exit and for the reader threads to
+//   drain the stdio pipes; a still-open pipe (a surviving grandchild) only
+//   delays the result up to the bounded join, never hangs it.
+// - `kill_tree` below signals the negative pid (the whole process group) and
+//   falls back to the direct child kill when the group is gone.
 // - A real POSIX signal handler may only touch atomics, so `on_stop_signal`
 //   just sets STOP_SIGNAL_FIRED; the poll loop of each in-flight child
-//   observes it and terminates, so the TS semantics (a stop signal to drip
-//   interrupts every in-flight child) still hold.
+//   observes it and terminates, so a stop signal to drip interrupts every
+//   in-flight child.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -139,10 +138,10 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
 
     let pid = child.id();
 
-    // The terminator registered for this child mirrors TS `terminateNow`:
-    // on an external stop the poll loop SIGTERMs the group, SIGKILLs after
-    // 1s, and settles after 1.5s with whatever was captured. The flag keeps
-    // the closure atomic-handler-safe; the deadlines live in the poll loop.
+    // The terminator registered for this child: on an external stop the poll
+    // loop SIGTERMs the group, SIGKILLs after 1s, and settles after 1.5s
+    // with whatever was captured. The flag keeps the closure safe to call
+    // from a real signal handler; the deadlines live in the poll loop.
     let terminate_now = Arc::new(AtomicBool::new(false));
     let terminator_flag = Arc::clone(&terminate_now);
     let terminator = Box::new(move || {
@@ -198,9 +197,8 @@ fn spawn_detached(
     command_builder.spawn()
 }
 
-/// The TS killTree: signal the negative pid (the whole process group) first,
-/// and fall through to the direct kill when the group is gone or the child is
-/// not the leader.
+/// Signal the negative pid (the whole process group) first, and fall through
+/// to the direct kill when the group is gone or the child is not the leader.
 fn kill_tree(child: &mut Child, signal: i32) {
     let pid = child.id() as i32;
     // process.kill(-pid, signal) — the group kill.
@@ -249,12 +247,12 @@ fn wait_with_pipes(
     let poll_interval = Duration::from_millis(25);
     let started = Instant::now();
 
-    // Poll until the child has exited AND both pipes hit EOF (Node's `close`
-    // event: a grandchild that inherited the pipes keeps the result open
-    // after the shell itself exits), or a settle deadline passes, or an
+    // Poll until the child has exited AND both pipes hit EOF (a grandchild
+    // that inherited the pipes keeps them open after the shell itself
+    // exits), or a settle deadline passes, or an
     // external stop fires. The timeout keeps running after the exit, so a
     // `sleep 30 &` left holding stdout is group-killed and reported as
-    // timedOut with the shell's own exit code (measured 2026-09-02).
+    // timed_out with the shell's own exit code (measured 2026-09-02).
     let mut exited: Option<(Option<i32>, Option<String>)> = None;
     let outcome = loop {
         if STOP_SIGNAL_FIRED.load(Ordering::SeqCst) {
@@ -276,7 +274,7 @@ fn wait_with_pipes(
         let now = Instant::now();
 
         if terminate_now.load(Ordering::SeqCst) && !killed_by_external_stop {
-            // terminateNow: group SIGTERM, SIGKILL after 1s, settle after
+            // External stop: group SIGTERM, SIGKILL after 1s, settle after
             // 1.5s with whatever was captured.
             killed_by_external_stop = true;
             kill_tree(child, libc::SIGTERM);
@@ -378,7 +376,7 @@ fn signal_name(signal: i32) -> &'static str {
 }
 
 /// A pipe drained by a reader thread into a shared buffer, so the captured
-/// text survives even when the join gives up on survivors — the TS promise
+/// text survives even when the join gives up on survivors and the result
 /// settles with whatever was captured while a pipe may still be open.
 struct CapturedPipe {
     buffer: Arc<Mutex<Vec<u8>>>,
@@ -513,9 +511,9 @@ mod tests {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` ignores TERM (and `sleep` inherits the ignore across exec), so
         // only the SIGKILL escalation 1s after the SIGTERM reaps it. Measured
-        // (2026-09-02): {exitCode: null,
-        // signal: "SIGKILL", timedOut: true} in ~1.3s — the signal reported
-        // is the one that actually reaped the child, not the one first sent.
+        // (2026-09-02): { exit_code: None, signal: Some("SIGKILL"),
+        // timed_out: true } in ~1.3s — the signal reported is the one that
+        // actually reaped the child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
         let args = CapturedProcessArgs {
             command: "/bin/sh",
@@ -536,9 +534,9 @@ mod tests {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` exits at once but the backgrounded sleeps hold the stdio pipes,
         // so the result cannot settle until the timeout group-kills them.
-        // Measured (2026-09-02): {exitCode: 0, signal: null,
-        // timedOut: true} in ~0.3s — the shell's own exit code survives, and
-        // timedOut records that the kill is what freed the pipes.
+        // Measured (2026-09-02): { exit_code: Some(0), signal: None,
+        // timed_out: true } in ~0.3s — the shell's own exit code survives, and
+        // timed_out records that the kill is what freed the pipes.
         let process_args = owned(&["-c", "sleep 30 & sleep 30 & echo started"]);
         let args = CapturedProcessArgs {
             command: "/bin/sh",
@@ -586,7 +584,7 @@ mod tests {
         };
         let error = run_captured_process(&args).expect_err("spawn should fail");
 
-        // The TS path rejects with the spawn error.
+        // The spawn error surfaces as the call's Err.
         assert!(
             error.contains("No such file"),
             "unexpected error: {error}"

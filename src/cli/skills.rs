@@ -911,7 +911,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests ported from test/cli-skills-lint.test.ts
+    // --- lint scenarios ---
     // -----------------------------------------------------------------------
 
     // --- collectSkillFiles ---
@@ -1228,7 +1228,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests ported from test/cli-skills-params.test.ts
+    // --- parameter-coercion scenarios ---
     // -----------------------------------------------------------------------
 
     // --- Frontmatter args block parsing ---

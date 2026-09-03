@@ -1,10 +1,7 @@
-// Imports from state-summary.ts:
-//   countTaskStats, deriveVerificationSummary — ported in drip/src/cli/run_record.rs
-//   loadHarnessState — ported inline below from src/harness/state.ts:516-536
-//     (drip/src/core/state.rs is still a stub owned by another port lane)
-//   readInboxMessages — ported inline here (from src/cli/follow.ts) since follow.rs
-//     is not yet a drip module; the helper is small and has no other consumer this wave.
-//   checkLease — ported in drip/src/core/lease.rs
+// Assembles the operator-facing state summary. Reused helpers live in their
+// drip homes: the tally/verification derivations in run_record.rs, lease
+// checks in core::lease. The inbox reader and the harness-state loader are
+// small and local to this module, so they are defined below.
 
 use std::path::Path;
 
@@ -15,12 +12,10 @@ use crate::cli::run_record::{count_task_stats, derive_verification_summary};
 use crate::core::lease::check_lease;
 use crate::core::types::{HarnessState, HarnessTask, HarnessTaskStatus};
 // ---------------------------------------------------------------------------
-// loadHarnessState (inlined from src/harness/state.ts:516-536)
-// Loads + shape-validates a harness state file: missing file -> None; a file
-// present but malformed raises the TS error string verbatim. Backfills the
-// loop clock for state files written before task loops existed. NOTE:
-// drip/src/core/state.rs is still a stub owned by another port lane; once it
-// lands its load_harness_state, this private copy should delegate to it.
+// Loads + shape-validates a harness state file: a missing file is None; a
+// file present but malformed is an error naming the path. Backfills the loop
+// clock for state files written before task loops existed. NOTE: core/state.rs
+// owns the shared loader once it lands; this private copy stands in for now.
 // ---------------------------------------------------------------------------
 
 fn is_harness_state(value: &serde_json::Value) -> bool {
@@ -41,7 +36,7 @@ fn load_harness_state(state_path: &Path) -> Result<Option<HarnessState>, String>
 
     let content = match std::fs::read_to_string(state_path) {
         Ok(c) => c,
-        // Unreadable file: TS loadHarnessState would throw the read error.
+        // An unreadable file surfaces the IO error; only a missing file is None.
         Err(error) => {
             return Err(format!(
                 "Could not read harness state at {}: {error}",
@@ -52,7 +47,7 @@ fn load_harness_state(state_path: &Path) -> Result<Option<HarnessState>, String>
 
     let mut state: HarnessState = match serde_json::from_str(&content) {
         Ok(s) => s,
-        // Corrupt JSON: TS JSON.parse throws before the shape check.
+        // Corrupt JSON is a hard error, same as a malformed shape below.
         Err(error) => {
             return Err(format!(
                 "Could not read harness state at {}: {error}",
@@ -81,9 +76,9 @@ fn load_harness_state(state_path: &Path) -> Result<Option<HarnessState>, String>
 
 
 // ---------------------------------------------------------------------------
-// readInboxMessages (inlined from src/cli/follow.ts:readInboxMessages)
-// Reads JSONL records from inboxPath, skips the first consumedCount entries,
-// returns the `text` field of each remaining parsed record.
+// read_inbox_messages: reads JSONL records from inboxPath, skips the first
+// consumedCount entries, and returns the `text` field of each remaining
+// parsed record.
 // ---------------------------------------------------------------------------
 
 fn read_inbox_messages(inbox_path: &Path, consumed_count: usize) -> Vec<String> {
@@ -104,9 +99,9 @@ fn read_inbox_messages(inbox_path: &Path, consumed_count: usize) -> Vec<String> 
     let complete = &content[..last_newline];
     let mut messages: Vec<String> = Vec::new();
 
-    // readInboxEntries slices readJsonlRecords(...) output, and readJsonlRecords
-    // (src/lib/fs.ts) yields one record per non-blank complete line (unparseable
-    // lines still count as records, surfacing as an empty text), so the consumed
+    // Slicing read_jsonl_records output — one record per non-blank complete
+    // line (unparseable lines still count as records, surfacing as an empty
+    // text) — so the consumed count indexes non-blank lines, not raw line numbers.
     // count indexes non-blank lines — not raw line numbers.
     let mut kept = 0usize;
     for line in complete.split('\n') {
@@ -131,9 +126,8 @@ fn read_inbox_messages(inbox_path: &Path, consumed_count: usize) -> Vec<String> 
 // buildStateSummaryJson
 // ---------------------------------------------------------------------------
 
-/// task.status in state-summary.ts is already the wire string ("in_progress"
-/// etc., src/harness/types.ts:1); drip models it as the HarnessTaskStatus enum,
-/// so serialize it back to its TS spelling.
+/// Serialize a HarnessTaskStatus back to its wire spelling ("in_progress"
+/// and friends).
 fn harness_task_status_json(status: crate::core::types::HarnessTaskStatus) -> String {
     serde_json::to_value(status)
         .ok()

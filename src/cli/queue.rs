@@ -161,11 +161,11 @@ pub struct DrainOutcome {
 
 // In Rust we use a synchronous callback (no async runtime needed for the
 // drain logic; async callers wrap this in tokio::task::spawn_blocking or
-// call async equivalents themselves).  The TS version is async because
-// runGoal was async; the Rust port accepts a closure returning Result<i32>.
+// call async equivalents themselves).  all drain logic is synchronous, so the closure
+// returns Result<i32>; no async runtime is needed.
 // The LiveRunError name-check becomes an explicit flag in the error type.
 // The abort signal is a closure re-checked at the top of every lap (mirrors
-// the TS `while (!args.signal?.aborted)` loop condition).
+// `while (!signal.aborted)` loop condition).
 
 pub struct LiveRunError(pub String);
 
@@ -206,14 +206,14 @@ pub fn drain_queued_goals(
 /// Errors that drain_queued_goals recognises.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DrainError {
-    /// Equivalent to TS `error.name === "LiveRunError"` — stops the drain.
+    /// The live-run failure: stops the drain.
     LiveRunError(String),
-    /// Any other error — re-thrown in TS; returned as `Err` here.
+    /// Any other error — returned as `Err`.
     Other(String),
 }
 
 // ---------------------------------------------------------------------------
-// Tests — ports of test/cli-queue.test.ts
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -227,7 +227,6 @@ mod tests {
         (dir, path)
     }
 
-    // it("appends, reports positions, and drains in order via the cursor")
     #[test]
     fn appends_reports_positions_and_drains_in_order_via_the_cursor() {
         let (_dir, queue_path) = make_queue_path();
@@ -255,7 +254,6 @@ mod tests {
         assert_eq!(third.goal, "third goal");
     }
 
-    // it("skips malformed lines without stalling the queue")
     #[test]
     fn skips_malformed_lines_without_stalling_the_queue() {
         let (_dir, queue_path) = make_queue_path();
@@ -278,7 +276,6 @@ mod tests {
         assert!(take_next_queued_goal(&queue_path).is_none());
     }
 
-    // it("runs queued goals in order, last exit code wins, and picks up mid-drain enqueues")
     #[test]
     fn runs_queued_goals_in_order_last_exit_code_wins_and_picks_up_mid_drain_enqueues() {
         let (_dir, queue_path) = make_queue_path();
@@ -309,7 +306,6 @@ mod tests {
         assert_eq!(outcome, DrainOutcome { exit_code: 0, ran_goals: 3 });
     }
 
-    // it("stops draining on a LiveRunError-shaped refusal and on abort")
     #[test]
     fn stops_draining_on_live_run_error_refusal_and_on_abort() {
         let (_dir, queue_path) = make_queue_path();
@@ -342,8 +338,8 @@ mod tests {
         assert_eq!(aborted_outcome, DrainOutcome { exit_code: 2, ran_goals: 0 });
     }
 
-    // TS re-throws non-LiveRunError errors instead of swallowing them; the
-    // Rust port returns them as Err(DrainError::Other) rather than panicking.
+    // Non-live-run errors are returned instead of swallowed; the
+    // drain returns them as Err(DrainError::Other) rather than panicking.
     #[test]
     fn other_errors_are_returned_not_panicked() {
         let (_dir, queue_path) = make_queue_path();

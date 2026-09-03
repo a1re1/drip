@@ -4,11 +4,10 @@
 // resolved by the caller (the CLI composes skills and model profiles into this
 // runtime shape) so the harness itself stays free of skill and config formats.
 //
-// Port note — ModelRoute: this is the serializable role-definition shape
-// (headers as an ordered map, fallback chained by value) from
-// model-call.ts:40-51. The live transport route with its `refreshHeaders`
-// closure is harness::model_call::ModelRoute; cli::roles converts between
-// the two when a role's model is resolved.
+// ModelRoute is the serializable role-definition shape (headers as an
+// ordered map, fallback chained by value). The live transport route with
+// its `refreshHeaders` closure is harness::model_call::ModelRoute;
+// cli::roles converts between the two when a role's model is resolved.
 
 use std::collections::HashSet;
 
@@ -17,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::types::HarnessTask;
 
-/// Port of src/harness/model-call.ts `ModelRoute` (see the module note above).
+/// The serializable role-definition route (see the module note above).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRoute {
@@ -38,10 +37,9 @@ pub struct ModelRoute {
 	pub url: String,
 }
 
-/// Per-role loop budget overrides (cycles, rounds, hot window, result caps) —
-/// the TS `Partial<HarnessLoopConfig>` shape: every field independently
-/// optional, serialized exactly like the full config (camelCase, and dropped
-/// entirely when absent so JSON.stringify's undefined-drop still matches).
+/// Per-role loop budget overrides (cycles, rounds, hot window, result caps):
+/// every field independently optional, serialized exactly like the full
+/// config (camelCase, and dropped entirely when absent).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialHarnessLoopConfig {
@@ -178,7 +176,7 @@ pub fn filter_tools_for_role<T: NamedTool>(tools: Vec<T>, role: Option<&HarnessR
 	tools.into_iter().filter(|tool| allowed.contains(tool.name())).collect()
 }
 
-/// The TS generic bound `ToolType extends { name: string }`.
+/// Tool types usable by the filter must expose a name.
 pub trait NamedTool {
 	fn name(&self) -> &str;
 }

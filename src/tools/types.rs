@@ -1,11 +1,10 @@
-// Serde port of the tool-definition contract. TS field names are already
-// camelCase; Rust fields are snake_case with #[serde(rename_all = "camelCase")]
-// so the wire format matches the TS types byte for byte. The TS generics
-// (TInput/TResult) are erased at runtime — `prepared.input` /
-// `execute` `result.data` are `serde_json::Value`, and the closures the TS
-// pack passes in are typed in Rust as Box<dyn FnMut(...)> with fallible
-// returns (JS `throw` -> `Err(String)`; Rust cannot panic across a tool
-// boundary the way a thrown Error surfaces as a failed block).
+// The tool-definition contract. Wire fields stay camelCase: Rust fields are
+// snake_case with #[serde(rename_all = "camelCase")] so the wire format
+// matches the schema byte for byte. Generics are erased at runtime —
+// `prepared.input` / `execute` `result.data` are `serde_json::Value`, and
+// the stage closures are typed as Box<dyn FnMut(...)> with fallible returns
+// (a stage failure is `Err(String)`; Rust cannot panic across a tool
+// boundary, where a thrown error would surface as a failed block).
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,7 @@ pub struct ChatToolParameters {
 
 impl ChatToolParameters {
     // Schema construction helper: `type: "object"` is the only allowed value,
-    // so every TS literal fills it in identically.
+    // so every tool's schema literal fills it in identically.
     pub fn object() -> Self {
         Self {
             additional_properties: None,
@@ -95,7 +94,7 @@ pub struct ChatAsyncToolJob {
 }
 
 impl ChatAsyncToolJob {
-    /// TS cloneJob(job) — a structural copy.
+    /// A structural copy of the job.
     pub fn clone_job(&self) -> Self {
         self.clone()
     }
@@ -259,11 +258,10 @@ pub struct ChatToolCompleteRequest<'a> {
     pub services: ChatToolRuntimeServices,
 }
 
-// export type ChatToolDefinition<TInput, TResult> = { ... } — the three
-// lifecycle stages are boxed closures over `Value`, erasing the TS generics.
-// TS may hand back a Promise from any stage; Rust always returns fallibly, so
-// the harness treats `Err` exactly like a JS throw and `Ok` like a return
-// value (async tools may additionally spawn work via services.asyncJobs).
+// The three lifecycle stages are boxed closures over `Value`, erasing the
+// input/result generics. Stages are fallible: the harness treats `Err` as a
+// thrown error and `Ok` as a return value (async tools may additionally
+// spawn work via services.asyncJobs).
 impl std::fmt::Debug for ChatToolDefinition {
     // The stage closures are opaque; name + mode are what tests and logs need.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -326,8 +324,8 @@ mod tests {
         parameters
     }
 
-    // Every definition carries the shared field set from types.ts:145-151
-    // (mutatesWorkspace comment), name, parameters, prepare.
+    // Every definition carries the shared field set — mutatesWorkspace, name,
+    // parameters, prepare.
     fn stub_definition() -> ChatToolDefinition {
         ChatToolDefinition {
             name: "STUB".to_string(),
@@ -369,8 +367,8 @@ mod tests {
         let parameters = object_parameters();
         let encoded = serde_json::to_value(&parameters).unwrap();
 
-        // The TS type literally spells `type: "object"` (types.ts:8); the
-        // serde rename means the serialized shape is identical.
+        // The schema literally spells `type: "object"`; the serde rename
+        // means the serialized shape is identical.
         assert_eq!(
             encoded,
             serde_json::json!({
@@ -435,8 +433,8 @@ mod tests {
 
     #[test]
     fn define_sync_tool_normalizes_the_mode() {
-        // harness-test-utils.ts builds every fixture with defineSyncTool;
-        // mode must come out "sync" even if the struct was built otherwise.
+        // Sync fixtures are built with defineSyncTool; mode must come out
+        // "sync" even if the struct was built otherwise.
         let mut definition = stub_definition();
         definition.mode = ChatToolMode::Async;
         let definition = define_sync_tool(definition);
@@ -457,8 +455,7 @@ mod tests {
 
     #[test]
     fn sync_tool_stages_run_prepare_execute_complete() {
-        // Mirrors inspectTool in test/harness-test-utils.ts:7 — the three
-        // stages pass prepared input through execute to complete.
+        // The three stages pass prepared input through execute to complete.
         let mut definition = stub_definition();
         definition.name = "INSPECT".to_string();
         definition.parameters = {
@@ -545,8 +542,8 @@ mod tests {
 
     #[test]
     fn a_throwing_stage_surfaces_as_an_error_result() {
-        // Mirrors failingTool in test/harness-test-utils.ts:87 — execute
-        // throws; the Rust port surfaces the same shape via Err.
+        // A failing stage surfaces the same shape: execute throws and the
+        // error arrives via Err.
         let mut definition = stub_definition();
         definition.name = "FAILS".to_string();
         definition.execute = Box::new(|_request| {
@@ -597,8 +594,9 @@ mod tests {
 
     #[test]
     fn chat_tools_module_holds_default_and_named_tool_lists() {
-        // ChatToolsModule = { default?, tools? } (types.ts:183-186); drip
-        // only loads the built-in pack, so both arms stay optional.
+        // A tools module carries an optional default list and an optional
+        // named "tools" list; drip only loads the built-in pack, so both
+        // arms stay optional.
         let module = ChatToolsModule {
             default: None,
             tools: Some(vec![]),

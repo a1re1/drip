@@ -1,10 +1,8 @@
 // Image attachment discovery/copying into the session images/ dir: data-URL
 // encoding, osascript clipboard hex parsing, and the size/type limits with
-// their exact error strings. The TS module is self-contained (node:fs,
-// node:path, node:child_process), so this port only needs std + base64.
+// their exact error strings. Only std + base64 are needed.
 
 use std::path::{Path, PathBuf};
-
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use regex::Regex;
@@ -69,8 +67,6 @@ pub fn image_data_url(bytes: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes))
 }
 
-// function parseClipboardImageHex(output: string): Uint8Array | null
-//
 // osascript prints clipboard image data as «data PNGf89504E47...» — the
 // payload is hex between the four-character class code and the closing
 // guillemet.
@@ -155,10 +151,9 @@ pub fn capture_clipboard_image_with(
     Some(save_attachment(images_dir, &bytes, "image/png", ".png"))
 }
 
-// export function captureClipboardImage(imagesDir: string) — macOS only; on
-// other platforms the TS runner returns null before spawning anything. The
-// 64 MB maxBuffer guard does not apply to the Rust port: we read the pipe
-// directly and the payload is bounded by the clipboard itself.
+// Captures the clipboard image (macOS only); on other platforms this
+// returns None before spawning anything. The payload is read directly from
+// the pipe and is bounded by the clipboard itself.
 #[cfg(target_os = "macos")]
 pub fn capture_clipboard_image(images_dir: &Path) -> Option<GoalImageAttachment> {
     use std::process::Command;
@@ -266,7 +261,6 @@ mod tests {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
-    // it("parses osascript clipboard hex output")
     #[test]
     fn parses_osascript_clipboard_hex_output() {
         let hex = hex_of(&PNG_BYTES);
@@ -279,7 +273,6 @@ mod tests {
         assert_eq!(parse_clipboard_image_hex("«data PNGfabc»"), None);
     }
 
-    // it("captures a clipboard image via an injected clipboard command")
     #[test]
     fn captures_a_clipboard_image_via_an_injected_clipboard_command() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -297,7 +290,6 @@ mod tests {
         assert_eq!(capture_clipboard_image_with(&images_dir, || None), None);
     }
 
-    // it("builds attachments from pasted data URLs and image file paths")
     #[test]
     fn builds_attachments_from_pasted_data_urls_and_image_file_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -335,7 +327,6 @@ mod tests {
         );
     }
 
-    // it("classifies pasted text that carries an image payload")
     #[test]
     fn classifies_pasted_text_that_carries_an_image_payload() {
         assert_eq!(

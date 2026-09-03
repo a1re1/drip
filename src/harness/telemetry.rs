@@ -1,8 +1,8 @@
 // Tool-output telemetry: canonicalized keys so key order does not split
 // records, end-keeping truncation (verdicts live at the END of verification
 // output), per-loop reinforcement, warm-context promotion, decay/eviction.
-// The harness state types live in drip/src/core/types.rs (port of
-// src/harness/types.ts); this module works on those shared types.
+// The harness state types live in crate::core::types; this module works
+// on those shared types.
 use crate::core::types::{HarnessState, HarnessTelemetryConfig, PromotedContextEntry, ToolTelemetryRecord};
 use serde_json::Value;
 
@@ -160,8 +160,8 @@ pub fn run_telemetry_maintenance(
 	let mut expired: Vec<PromotedContextEntry> = Vec::new();
 	let mut promoted: Vec<PromotedContextEntry> = Vec::new();
 
-	// TS iterates a copy while splicing the live list, so every entry decays
-	// once per maintenance run even when one expires mid-pass.
+	// Decay runs over a snapshot while splicing the live list, so every
+	// entry decays once per maintenance run even when one expires mid-pass.
 	let promoted_snapshot: Vec<PromotedContextEntry> = state.promoted_context.clone();
 	for entry in promoted_snapshot {
 		let index = state
@@ -205,7 +205,7 @@ pub fn run_telemetry_maintenance(
 		state.promoted_context.push(entry.clone());
 		promoted.push(entry);
 		state.telemetry.insert(key.clone(), record);
-		// TS clears iterationsUsed after promotion — the recency window
+		// iterationsUsed is cleared after promotion — the recency window
 		// restarts so re-promotion counts distinct loops afresh.
 		if let Some(live) = state.telemetry.get_mut(&key) {
 			live.iterations_used = Vec::new();
@@ -259,7 +259,6 @@ fn create_harness_state(goal: &str) -> HarnessState {
 
 #[cfg(test)]
 mod tests {
-	// port of test/harness-telemetry.test.ts
 	use super::{
 		canonicalize_tool_input, create_harness_state, record_tool_telemetry,
 		run_telemetry_maintenance, tool_telemetry_key, RecordToolTelemetryArgs, RunTelemetryMaintenanceArgs,
@@ -303,7 +302,6 @@ mod tests {
 		}
 	}
 
-	// it("canonicalizes tool inputs so key order does not split telemetry")
 	#[test]
 	fn canonicalizes_tool_inputs_so_key_order_does_not_split_telemetry() {
 		assert_eq!(canonicalize_tool_input(r#"{"b":1,"a":{"d":2,"c":3}}"#), r#"{"a":{"c":3,"d":2},"b":1}"#);
@@ -311,7 +309,6 @@ mod tests {
 		assert_eq!(tool_telemetry_key("READ", r#"{"b":1,"a":2}"#), tool_telemetry_key("READ", r#"{"a":2,"b":1}"#));
 	}
 
-	// it("does not promote a result reached for in only one task loop")
 	#[test]
 	fn does_not_promote_a_result_reached_for_in_only_one_task_loop() {
 		let config = config();
@@ -325,7 +322,6 @@ mod tests {
 		assert!(state.promoted_context.is_empty());
 	}
 
-	// it("promotes a result reached for across the threshold of distinct task loops")
 	#[test]
 	fn promotes_a_result_reached_for_across_the_threshold_of_distinct_task_loops() {
 		let config = config();
@@ -344,7 +340,6 @@ mod tests {
 		assert_eq!(state.promoted_context[0].ttl, config.base_ttl);
 	}
 
-	// it("decays unused promoted entries and expires them at zero ttl")
 	#[test]
 	fn decays_unused_promoted_entries_and_expires_them_at_zero_ttl() {
 		let config = config();
@@ -369,7 +364,6 @@ mod tests {
 		assert!(state.promoted_context.is_empty());
 	}
 
-	// it("doubles the ttl on each re-promotion like a strengthening pathway")
 	#[test]
 	fn doubles_the_ttl_on_each_re_promotion_like_a_strengthening_pathway() {
 		let config = config();
@@ -400,7 +394,6 @@ mod tests {
 		assert_eq!(state.promoted_context[0].ttl, 6);
 	}
 
-	// it("refreshes ttl and output when a promoted result is reached for again")
 	#[test]
 	fn refreshes_ttl_and_output_when_a_promoted_result_is_reached_for_again() {
 		let config = config();
@@ -429,7 +422,6 @@ mod tests {
 		assert_eq!(state.promoted_context[0].ttl, 6);
 	}
 
-	// it("caps ttl at maxTtl and promoted entries at maxPromotedEntries")
 	#[test]
 	fn caps_ttl_at_max_ttl_and_promoted_entries_at_max_promoted_entries() {
 		let tight_config = HarnessTelemetryConfig {
@@ -472,7 +464,6 @@ mod tests {
 		}
 	}
 
-	// it("does not promote when earlier uses fall outside the recency window")
 	#[test]
 	fn does_not_promote_when_earlier_uses_fall_outside_the_recency_window() {
 		let window_config = HarnessTelemetryConfig {
@@ -499,7 +490,6 @@ mod tests {
 		assert!(state.promoted_context.is_empty());
 	}
 
-	// it("truncates oversized outputs keeping both ends and canonicalizes nested arrays")
 	#[test]
 	fn truncates_oversized_outputs_keeping_both_ends_and_canonicalizes_nested_arrays() {
 		let truncating_config = HarnessTelemetryConfig {

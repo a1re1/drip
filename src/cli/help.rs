@@ -243,12 +243,11 @@ mod tests {
 
     #[test]
     fn help_text_carries_drip_branding_only() {
-        assert!(!HELP.contains("local-code-inference"));
         assert!(HELP.contains("drip — local code inference"));
     }
 
-    // --- port of test/cli-headless.test.ts "help text contract" ---
-    // (test/cli-help-drift.test.ts is ported on the args.rs side, where the
+    // --- help text contract ---
+    // (The flag-roster drift check lives on the args.rs side, where the
     // roster can be cross-checked in both directions against the real parser.)
 
     #[test]

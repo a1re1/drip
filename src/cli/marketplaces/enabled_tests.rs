@@ -1,5 +1,5 @@
-// Tests for the enable/disable key functions (port of the TS lines 480-585
-// behaviors): isMarketplaceKeyEnabled precedence, setMarketplaceKeyEnabled
+// Tests for the enable/disable key functions: is_marketplace_key_enabled
+// precedence, set_marketplace_key_enabled
 // round-trip through a temp home, and the empty-registry skill listing.
 use super::*;
 use crate::core::home::open_drip_home;

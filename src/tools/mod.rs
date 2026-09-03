@@ -1,4 +1,4 @@
-// The built-in tool pack lives in builtin/ (port of src/tools/framework-tools.ts).
+// The built-in tool pack lives in builtin/.
 pub mod async_jobs;
 pub mod builtin;
 pub mod catalog;

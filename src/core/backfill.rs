@@ -7,9 +7,9 @@
 // session whose directory already sits in its target home while its row is
 // still in the source index, and applying that half-done move finishes it.
 //
-// NOTE (port): projectSlug delegates to the canonical
+// NOTE: slug computation delegates to the canonical
 // crate::core::home::project_slug (imported above; it collapses each RUN of
-// non-alphanumerics to one dash, like the TS regex /[^A-Za-z0-9]+/g).
+// non-alphanumerics to one dash).
 // nearestGitAncestor stays a private copy: backfill takes a deleted
 // <repo>/.worktrees/<name> root at its word (see backfill_target_root), a
 // wrinkle home's resolver does not share.
@@ -33,12 +33,12 @@ pub struct BackfillMove {
     pub to_slug: String,
 }
 
-// projectSlug: delegated to the canonical crate::core::home::project_slug
+// Slug computation: delegated to the canonical crate::core::home::project_slug
 // (see module NOTE) — the old per-char private copy diverged from home's
 // run-collapsing slug (each RUN of non-alphanumerics must fold to ONE dash)
 // and has been deleted.
 
-// against the process cwd (tests only pass absolute paths, matching TS).
+// Relative paths resolve against the process cwd (tests only pass absolute paths).
 fn resolve_path(path: &str) -> String {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -121,9 +121,8 @@ fn backfill_target_root(cwd: &str) -> Option<String> {
     nearest_git_ancestor(cwd)
 }
 
-// /^(.*[\\/]\.worktrees[\\/][^\\/]+)/ — the innermost `/.worktrees/<name>`
-// prefix of the path. Greedy `.*` picks the LAST one (innermost), matching
-// the TS regex.
+// Matches the innermost `/.worktrees/<name>` prefix of the path; the greedy
+// `.*` picks the LAST occurrence (innermost).
 fn find_worktree_prefix(cwd: &str) -> Option<String> {
     let norm = cwd.replace('\\', "/");
     let last = norm.rfind("/.worktrees/")?;
@@ -135,11 +134,11 @@ fn find_worktree_prefix(cwd: &str) -> Option<String> {
     Some(norm[..last + "/.worktrees/".len() + name.len()].to_string())
 }
 
-// Restored port of the TS planFromMeta closure (backfill.ts:50): only
-// sessions with a parseable, self-describing session.json are relocated — cwd
-// decides the target home, so a legacy session whose directory lost its
-// metadata cannot be placed. The directory is only moved when its metadata id
-// matches the directory name; the target is the session's own worktree slug.
+// Only sessions with a parseable, self-describing session.json are
+// relocated — cwd decides the target home, so a legacy session whose
+// directory lost its metadata cannot be placed. The directory is only moved
+// when its metadata id matches the directory name; the target is the
+// session's own worktree slug.
 fn plan_from_meta(moves: &mut Vec<BackfillMove>, from_slug: &str, from_dir: &Path, projects_dir: &Path) {
     let meta_text = match fs::read_to_string(from_dir.join("session.json")) {
         Ok(text) => text,
@@ -297,7 +296,7 @@ struct IndexSessionRow {
 }
 
 // load_session_row: SELECT by column name (SELECT * ordering is an
-// implementation detail; the TS reads fields off the row object by name).
+// implementation detail).
 fn load_session_row(db: &Connection, id: &str) -> Option<IndexSessionRow> {
     let mut stmt = db
         .prepare(
@@ -522,8 +521,8 @@ mod tests {
 
     // Slug parity: backfill computes slugs through the canonical
     // crate::core::home::project_slug (each RUN of non-alphanumerics collapses
-    // to one dash, like the TS /[^A-Za-z0-9]+/g), so a cwd like
-    // 'my--repo/a  b' yields the same slug from backfill as from home.
+    // to one dash), so a cwd like 'my--repo/a  b' yields the same slug from
+    // backfill as from home.
     #[test]
     fn backfill_slug_matches_the_canonical_home_project_slug() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -553,7 +552,7 @@ mod tests {
         assert!(!project_slug(&cwd).contains("  "));
     }
 
-    // Path join over string parts; mirrors node:path join in the TS tests.
+    // Path join over string parts.
     // (macros must be defined before use inside the module)
     macro_rules! join {
         ($base:expr $(, $part:expr)*) => {{
@@ -564,7 +563,6 @@ mod tests {
         }};
     }
 
-    // it("relocates sessions keyed by the repo into their checkout's home")
     #[test]
     fn relocates_sessions_keyed_by_the_repo_into_their_checkouts_home() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -729,7 +727,6 @@ mod tests {
         assert!(plan_session_backfill(&home_root).is_empty());
     }
 
-    // it("re-applies a move interrupted between the index and the rename without losing the row")
     #[test]
     fn re_applies_a_move_interrupted_between_the_index_and_the_rename() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -792,7 +789,6 @@ mod tests {
         assert!(plan_session_backfill(&home_root).is_empty());
     }
 
-    // it("refuses to overwrite an existing session directory")
     #[test]
     fn refuses_to_overwrite_an_existing_session_directory() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -830,7 +826,7 @@ mod tests {
         assert!(result.is_err(), "expected a panic containing sess-1");
     }
 
-    // Path join over string parts; mirrors node:path join in the TS tests.
+    // Path join over string parts.
     macro_rules! join {
         ($base:expr $(, $part:expr)*) => {{
             #[allow(unused_mut)]

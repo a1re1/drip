@@ -64,8 +64,8 @@ fn file_header_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?m)^###\s*File:").unwrap())
 }
 
-/// The per-file header with its path captured — the split regex in
-/// review-report.ts:602. `file_header_re` above is the plain line-finder.
+/// The per-file header with its path captured; the regex used when a
+/// path must be split out. `file_header_re` above is the plain line-finder.
 fn file_header_path_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?m)^###\s*File:\s*(.+?)\s*$").unwrap())
@@ -76,8 +76,8 @@ fn section_start_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?m)^## Confidence Score[^\n]*\n").unwrap())
 }
 
-// JS string .length counts UTF-16 code units; the 200-char hasReport threshold
-// is compared against that, so count the same way (astral emojis count as 2).
+// Counts a string the way a UTF-16 length would: the 200-char hasReport threshold
+// is compared against that count, so astral-plane chars count as 2.
 fn js_length(s: &str) -> usize {
     s.chars().map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 }).sum()
 }
@@ -184,8 +184,8 @@ pub fn file_review_task_title(path: &str) -> String {
 
 pub const SYNTHESIS_TASK_TITLE: &str = "Synthesize the per-file reports into one holistic review, then finish_task completed with the complete report as the summary";
 
-// (ts buildFileReviewPrompt delegates to buildUnitReviewPrompt, defined past
-// line 340 — ported with part 2.)
+// (build_file_review_prompt delegates to build_unit_review_prompt, defined
+// later in this module.)
 
 pub struct SynthesisPromptArgs<'a> {
     pub base_ref: &'a str,
@@ -501,7 +501,7 @@ pub fn is_docs_path(path: &str) -> bool {
 // The pairing key that lets a source file share a unit with its test:
 // strip a leading src/ or test(s)/ segment, drop the extension and a trailing
 // .test/.spec suffix, then flatten the remaining segments with "-".
-// "src/cli/roles.ts" and "test/cli-roles.test.ts" both reduce to "cli-roles".
+// "src/cli/roles.rs" and its test file both reduce to "cli-roles".
 pub fn review_unit_key(path: &str) -> String {
     let segments: Vec<&str> = path.split('/').collect();
     let stripped: Vec<&str> = if segments[0] == "src" || segments[0] == "test" || segments[0] == "tests" {
@@ -601,7 +601,7 @@ pub fn unit_label(paths: &[String]) -> String {
 // per file. Source files and their tests travel together while they fit the
 // diff budget — a reviewer should see a change and its tests in one prompt —
 // but a group over MAX_UNIT_DIFF_LINES splits into one unit per file: the
-// benchmark's 851-line settings.ts + test pair exhausted even the oversized
+// benchmark's 851-line settings pair exhausted even the oversized
 // six-cycle budget without delivering a report, twice in one run
 // (docs/review-mode.md, Results).
 pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
@@ -1042,8 +1042,8 @@ pub fn split_unit_report(report: &str, paths: &[String]) -> Vec<(String, Option<
         let start = *start;
         let end = matches.get(i + 1).map_or(report.len(), |(next_start, _)| *next_start);
         // Exact first; otherwise a suffix match at a path-segment boundary, and
-        // only when exactly one candidate matches — "a.ts" against a bundled
-        // src/a.ts + test/a.ts pair is ambiguous and must not bind to either.
+        // only when exactly one candidate matches — "a" against a bundled
+        // src/a + test/a pair is ambiguous and must not bind to either.
         let by_suffix: Vec<&String> = paths
             .iter()
             .filter(|candidate| candidate.as_str() != named && (candidate.ends_with(&format!("/{named}")) || named.ends_with(&format!("/{}", candidate))))
@@ -1119,7 +1119,7 @@ pub struct ExtractedFinding {
 
 fn extract_findings_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // The TS pattern uses `(?!\d)` after the level; the regex crate has no
+    // The pattern wants `(?!\d)` after the level; the regex crate has no
     // look-around, so extract_findings re-checks the character after it.
     RE.get_or_init(|| Regex::new(r"(?m)^\s*[-*]\s*\**(P[012])\**[:\s—–-]*(.*)$").unwrap())
 }
@@ -1175,7 +1175,7 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
     // The table is built from what the per-file reviewers reported, so it is
     // true under --synthesis never with real findings — not a hardcoded "no
     // findings" beside a 1/5 confidence stamp. A file whose section never
-    // bound carries the whole unit report as its body (see review.ts); its
+    // bound carries the whole unit report as its body; its
     // findings belong to sibling files and are not re-attributed here.
     let bound = |file: &SkippedSynthesisFile<'_>| file.rating.is_some() && !file.report.unwrap_or("").starts_with('(');
     let mut table_rows: Vec<String> = Vec::new();
@@ -1527,7 +1527,7 @@ mod tests {
         assert!(out.iter().all(|unit| unit.part.is_none()));
     }
 
-    // test/cli-review.test.ts "inlines a big file as numbered excerpts around its hunks instead of whole"
+    // Inlines a big file as numbered excerpts around its hunks instead of whole.
     #[test]
     fn inlines_a_big_file_as_numbered_excerpts_around_its_hunks() {
         let content = (1..=1000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n") + "\n";

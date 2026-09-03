@@ -8,26 +8,26 @@ use crate::tools::helpers::{
     resolve_tool_path,
 };
 
-// TS type DirToolInput.
+// DirToolInput: the parsed arguments for the dir tool.
 pub struct DirToolInput {
     pub absolute_path: PathBuf,
     pub display_path: String,
     pub max_depth: i64,
 }
 
-// TS type DirToolResult.
+// DirToolResult: one output row per entry.
 pub struct DirToolResult {
     pub entries: usize,
     pub tree: String,
 }
 
-/// What the prepare stage returns: { input, displayInput }.
+/// What the prepare stage returns: the parsed input and its display string.
 pub struct DirToolPrepared {
     pub input: DirToolInput,
     pub display_input: String,
 }
 
-/// What the execute stage returns: { data, outputText }.
+/// What the execute stage returns: the result payload and the output text.
 pub struct DirToolExecution {
     pub data: DirToolResult,
     pub output_text: String,
@@ -38,7 +38,7 @@ pub struct DirToolExecution {
 // (The ignore list itself is shared: see helpers.rs DEFAULT_IGNORED_DIRS,
 // which lists the harness dir.)
 
-/// Port of clampDepth: undefined → 4, otherwise floored and clamped to [1, 8].
+/// clamp_depth: None → 4, otherwise floored and clamped to [1, 8].
 pub fn clamp_depth(value: Option<f64>) -> i64 {
     match value {
         None => 4,
@@ -59,8 +59,8 @@ struct WalkState {
     budget_exhausted: bool,
 }
 
-/// Port of buildTree. The TS version is an async closure over mutable
-/// counters; here the recursion passes the shared state explicitly.
+/// build_tree. The recursion passes the shared state explicitly rather
+/// than closing over mutable counters.
 pub fn build_tree(path: &Path, max_depth: i64, root_label: &str) -> Result<DirToolResult> {
     let mut lines: Vec<String> = vec![root_label.to_string()];
     let mut state = WalkState::default();
@@ -82,9 +82,9 @@ pub fn build_tree(path: &Path, max_depth: i64, root_label: &str) -> Result<DirTo
     })
 }
 
-/// Port of the inner walk() recursion. read_dir matches Node's
-/// readdir(withFileTypes): symlinked directories report as symlinks, not
-/// directories, on both sides.
+/// The inner walk() recursion. With read_dir's file_type(), symlinked
+/// directories report as symlinks, not
+/// directories.
 fn walk(
     current_path: &Path,
     prefix: &str,
@@ -108,7 +108,7 @@ fn walk(
         visible_entries.push((name, is_dir));
     }
 
-    // Directories sort first, then names by localeCompare (ICU root order:
+    // Directories sort first, then names by locale_compare (ICU root order:
     // `hello.txt` before `NOTES.md`).
     visible_entries.sort_by(|left, right| {
         right
@@ -186,7 +186,7 @@ pub fn definition() -> Value {
     })
 }
 
-/// Port of the prepare stage.
+/// The prepare stage.
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<DirToolPrepared> {
     let args = tool_arguments(args)?;
     let cwd = ctx.cwd.to_string_lossy().to_string();
@@ -209,7 +209,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<DirToolPrepared> {
     })
 }
 
-/// Port of the execute stage (renamed from `execute` because the
+/// The execute stage (renamed from `execute` because the
 /// whole-pipeline entry point below owns that name per the builtin/mod.rs
 /// contract).
 pub fn execute_prepared(prepared: &DirToolPrepared) -> Result<DirToolExecution> {
@@ -232,10 +232,10 @@ pub fn execute_prepared(prepared: &DirToolPrepared) -> Result<DirToolExecution> 
     })
 }
 
-/// Port of the complete stage.
+/// The complete stage.
 pub fn complete(prepared: &DirToolPrepared, result: &DirToolResult) -> ToolCompletion {
     let input = &prepared.input;
-    // The TS ternary is load-bearing: formatting "." would render
+    // The ternary here is load-bearing: formatting "." would render
     // "Directory tree for .." with a double dot.
     let description = if input.display_path == "." {
         "Directory tree for .".to_string()
@@ -257,15 +257,15 @@ pub fn complete(prepared: &DirToolPrepared, result: &DirToolResult) -> ToolCompl
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
+/// The transcript's display string for this call — the `display_input` field
+/// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
-/// to the model-facing failure text (buildFailureResult shape).
+/// to the model-facing failure text.
 pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     let outcome = prepare(args, ctx).and_then(|prepared| {
         let execution = execute_prepared(&prepared)?;
@@ -284,9 +284,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// createTempDir from tools/test/test-helpers.ts (mkdtemp in the system
-    /// tmpdir). The TempDir guard is returned so the dir stays alive for the
-    /// test body like cleanupTempDirs' afterEach would.
+    /// Creates a temp dir (mkdtemp in the system tmpdir). The TempDir guard
+    /// is returned so the dir stays alive for the test body and is removed
+    /// on drop.
     fn create_temp_dir(prefix: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
             .prefix(prefix)
@@ -303,7 +303,6 @@ mod tests {
         }
     }
 
-    // it("builds a directory tree completion")
     #[test]
     fn builds_a_directory_tree_completion() {
         let (_temp, cwd) = create_temp_dir("dir-tool-");
@@ -318,14 +317,13 @@ mod tests {
         let completion = complete(&prepared, &result.data);
 
         assert!(result.output_text.contains("Listed"));
-        // toMatchObject({description, type: "completion"}) — the
-        // ToolCompletionBlock type is the "completion" block by construction.
+        // The "completion" type assertion is trivial (ToolCompletionBlock is
+        // that block by construction), so only the description is checked.
         assert_eq!(completion.blocks[0].description, "Directory tree for .");
         assert!(completion.blocks[0].code.contains("src"));
         assert!(completion.blocks[0].code.contains("index.ts"));
     }
 
-    // it("accepts numeric-string depth and cwd aliases")
     #[test]
     fn accepts_numeric_string_depth_and_cwd_aliases() {
         let (_temp, cwd) = create_temp_dir("dir-tool-alias-");
@@ -346,7 +344,6 @@ mod tests {
         assert!(result.output_text.contains("up to depth 2"));
     }
 
-    // it("truncates oversized directories with visible (+N more) markers")
     #[test]
     fn truncates_oversized_directories_with_visible_more_markers() {
         let (_temp, cwd) = create_temp_dir("dir-cap-");

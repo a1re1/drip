@@ -11,9 +11,9 @@ use serde_json::{json, Value};
 // Types
 // ---------------------------------------------------------------------------
 
-// TS type VerifyToolInput.
+// Input for the VERIFY tool: the command to run and an optional timeout.
 
-/// TS type VerifyVerdict — the structured verdict the execute stage produces
+/// The structured verdict the execute stage produces
 /// and complete() renders. `failed`/`timed_out` are what the harness records
 /// as lastVerification.failed, so a failing run must not read as a pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,9 +28,8 @@ pub struct VerifyVerdict {
     pub timed_out: bool,
 }
 
-/// Port of `Omit<VerifyVerdict, "exitCode" | "output" | "timedOut">` — the
-/// shape parseVerifyOutput returns before the execute stage fills in the
-/// process-dependent fields.
+/// The shape `parse_verify_output` returns before the execute stage fills in
+/// the process-dependent fields (exit_code, output, timed_out).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifyParsed {
     pub runner: String,
@@ -77,7 +76,6 @@ pub fn definition() -> Value {
 // ---------------------------------------------------------------------------
 
 /// Extract up to N non-empty lines from text that match a predicate.
-/// (TS default `max = 5`; every call site uses the default.)
 fn extract_lines(text: &str, predicate: impl Fn(&str) -> bool, max: usize) -> Vec<String> {
     let mut results: Vec<String> = Vec::new();
 
@@ -242,7 +240,7 @@ fn parse_pytest(output: &str) -> Option<VerifyVerdict> {
 }
 
 // python unittest: "Ran N tests in 0.002s" then "OK", "OK (skipped=1)" or
-// "FAILED (failures=1, errors=2, skipped=1)" (tools/verify-tool.ts parseUnittest).
+// "FAILED (failures=1, errors=2, skipped=1)".
 fn parse_unittest(output: &str) -> Option<VerifyVerdict> {
     let ran_match = Regex::new(r"(?m)^Ran (\d+) tests? in [\d.]+s$")
         .unwrap()
@@ -357,7 +355,7 @@ fn parse_go_test(output: &str) -> Option<VerifyVerdict> {
     })
 }
 
-// tsc: count "error TS" lines
+// tsc: count the compiler error lines in the output
 fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
     let error_line_re = Regex::new(r"error TS\d+").unwrap();
     let error_lines: Vec<&str> = output
@@ -365,8 +363,9 @@ fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
         .filter(|line| error_line_re.is_match(line))
         .collect();
 
-    // tsc has no explicit success output — we recognize it by "error TS" presence
-    // OR by the command having been tsc and producing no output (checked by caller)
+    // tsc has no explicit success output — this parser returns None unless the
+    // output contains compiler error lines; a clean pass (tsc command, no
+    // errors) is detected separately by command hint (see parse_tsc_clean)
     if error_lines.is_empty() && !output.contains("error TS") {
         return None;
     }
@@ -391,13 +390,14 @@ fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
     })
 }
 
-// tsc clean pass: no "error TS" but command was tsc — detect by command hint
+// tsc clean pass: command was tsc and the output has no compiler errors —
+// detect by command hint
 fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
     if !Regex::new(r"\btsc\b").unwrap().is_match(command) {
         return None;
     }
     if Regex::new(r"error TS\d+").unwrap().is_match(output) {
-        return None; // handled by parseTsc
+        return None; // handled by parse_tsc
     }
 
     // tsc exits 0 with no output on clean pass
@@ -413,7 +413,7 @@ fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
     })
 }
 
-/// Port of parseVerifyOutput — pure, no process execution. Tries each runner
+/// Pure, no process execution: tries each runner
 /// parser in order and returns the first match's counts; falls back to the
 /// tsc-clean-pass check (recognized by the command text), then to the
 /// "unknown" runner.
@@ -461,12 +461,11 @@ pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — ported from tools/test/verify-tool.test.ts (the parseVerifyOutput
-// cases; the end-to-end cases there drive real processes and belong to the
-// harness loop instead)
+// Tests for parse_verify_output (the pure parsing cases; end-to-end cases
+// that drive real processes belong to the harness loop instead)
 // ---------------------------------------------------------------------------
 
-// ===================== VERIFY tool stages (ported from TS verifyTool) =====================
+// ===================== VERIFY tool stages =====================
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MIN_TIMEOUT_MS: u64 = 1_000;
@@ -603,9 +602,9 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
-/// execute path reports that error).
+/// The transcript's display string for this call — the `display_input` value
+/// prepare() produces — or None when the arguments do not parse (the execute
+/// path reports that error).
 pub fn display_input(args: &serde_json::Value, ctx: &super::ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)
 }

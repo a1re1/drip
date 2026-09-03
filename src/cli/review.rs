@@ -3,7 +3,7 @@
 // pool), retry what the first pass did not deliver once, then synthesize one
 // report unless every unit came back clean.
 //
-// Concurrency model. The TS runs its children as concurrent promises on one
+// Concurrency model. Children run concurrently on one
 // event loop sharing one SessionIndex. A child's run future is not `Send`
 // here (tool closures are plain `Box<dyn Fn>`, the index wraps a rusqlite
 // connection), so each pool lane is an OS thread that opens its own index on
@@ -272,7 +272,7 @@ fn default_read_head(cwd: &str) -> Result<String, String> {
 
 // The children read the working tree while the diff is `<base>...HEAD`: a
 // checkout in this worktree mid-review makes them judge one tree against
-// another diff and report phantom findings (review.ts assertHeadUnchanged).
+// another diff and report phantom findings, so this is asserted.
 pub fn assert_head_unchanged(start_head: &str, current_head: &str) -> Result<(), String> {
     if start_head == current_head {
         return Ok(());
@@ -403,7 +403,7 @@ where
     results.into_inner().unwrap().into_iter().map(|result| result.expect("pool lane filled every slot")).collect()
 }
 
-// review-report.ts timeboxed(): a child signal that fires after `ms` or when
+// A child signal that fires after `ms` or when
 // the parent aborts; `release` stops the watcher once the child has ended.
 struct Timebox {
     signal: AbortSignal,

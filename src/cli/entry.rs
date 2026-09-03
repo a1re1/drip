@@ -75,9 +75,9 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// main.tsx:62 — `resolveToolsPath(requested)`. drip ships only the built-in
-/// pack (drip/PLAN.md known deviation): the default "./tools" resolves to it
-/// and any other path is refused by `load_tools`.
+/// Resolves the `--tools` path. drip ships only the built-in tool pack:
+/// the default "./tools" resolves to it and any other path is refused
+/// by `load_tools`.
 fn resolve_tools_path(requested: &str) -> String {
     requested.to_string()
 }
@@ -101,8 +101,8 @@ fn to_fixed_2(value: f64) -> String {
 
 fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinition>, String> {
     if tools_path != "./tools" {
-        // A missing pack is an error; a pack that exists is a TypeScript
-        // module, which drip cannot load.
+        // A missing pack is an error; a pack that exists is still refused,
+        // since drip only loads the built-in tool pack.
         crate::tools::loader::resolve_tools_entry_path(tools_path)?;
 
         return Err(format!(
@@ -405,9 +405,9 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
     println!("Full reference:    drip --help");
 }
 
-/// main.tsx:963-1052 — the --review branch: resolve both lanes' routes,
-/// stream progress to stderr, print the report (or the JSON object) and exit
-/// with the review's contractual code.
+/// Runs the --review branch: resolve both lanes' routes, stream progress
+/// to stderr, print the report (or the JSON object) and exit with the
+/// review's contractual code.
 fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, project: &DripProject, cwd: &str) -> i32 {
     // Both routes are resolved here, where the config (and any --profile
     // override) is already settled, through resolve_cli_inference so each
@@ -559,11 +559,10 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     }
 }
 
-/// Installs SIGINT/SIGTERM handlers that fire `on_signal` once per kind —
-/// `process.once(...)` in main.tsx. Node restores the default disposition once
-/// the one-shot listener is consumed, so a second Ctrl-C kills a run that is
-/// stuck past its safe point; tokio keeps capturing, so the default is put
-/// back by hand after the first delivery.
+/// Installs SIGINT/SIGTERM handlers that fire `on_signal` once per kind.
+/// A second Ctrl-C must kill a run that is stuck past its safe point, so
+/// after the first delivery the default disposition is restored by hand
+/// instead of staying captured.
 fn install_stop_signals(on_signal: impl Fn() + Send + Sync + 'static) {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -607,8 +606,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         eprintln!("mention: {issue}");
     }
 
-    // fetch-tool.ts:228 reads the env var, so an operator export counts as
-    // much as the flag (which entry sets into the env for children).
+    // The env var counts as much as the flag (which entry sets into the
+    // env for children), so an operator export enables networking too.
     let allow_net = args.cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
     let tools_path = resolve_tools_path(&args.cli_args.tools_path);
     let loaded_tools = match load_tools(&tools_path, allow_net) {
@@ -1004,7 +1003,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     }
 }
 
-/// main.tsx:613 — `main()`. Returns the process exit code.
+/// Runs the CLI. Returns the process exit code.
 pub async fn main(argv: Vec<String>) -> i32 {
     let cli_args = parse_cli_args(&argv);
 
@@ -1395,8 +1394,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
         let paths = session_paths_for(&project, &record);
 
-        // main.tsx:936-946 wraps every --state shape in one try/catch: a
-        // corrupt state.json is the same error message whichever view asked.
+        // Every --state shape shares one load path, so a corrupt state.json
+        // produces the same error message whichever view asked.
         if let Err(error) = load_harness_state(Path::new(&paths.state_path)) {
             eprintln!("Could not read harness state at {}: {error}", paths.state_path);
             return 1;

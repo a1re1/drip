@@ -1,4 +1,4 @@
-//! Slash command registry and parser, ported 1:1 from src/cli/commands.ts.
+//! Slash command registry and parser.
 
 /// Static specification of a slash command.
 pub struct SlashCommandSpec {
@@ -7,7 +7,7 @@ pub struct SlashCommandSpec {
     pub name: &'static str,
 }
 
-/// The available slash commands, in the same order as the TypeScript source.
+/// The available slash commands, in display order.
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         args: None,

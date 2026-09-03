@@ -1,6 +1,6 @@
-// Rust adaptation: `now` becomes an explicit `&dyn Fn() -> DateTime<Utc>`
-// parameter (no TS default-arg trick), and the sqlite handles are the
-// core::sessions types. Field names and report shapes match the TS exactly.
+// `now` is an explicit `&dyn Fn() -> DateTime<Utc>` parameter so callers —
+// tests especially — control the clock, and the sqlite handles are the
+// core::sessions types.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use crate::core::sessions::{open_session_index, SessionIndex};
 // Types
 // ---------------------------------------------------------------------------
 
-/// TS: GcSessionEntry — recursive size of one eligible session directory.
+/// GcSessionEntry — recursive size of one eligible session directory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GcSessionEntry {
     pub bytes: u64,
@@ -23,35 +23,35 @@ pub struct GcSessionEntry {
     pub id: String,
 }
 
-/// TS: GcPlan.
+/// GcPlan — every eligible session plus the combined byte count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GcPlan {
     pub sessions: Vec<GcSessionEntry>,
     pub total_bytes: u64,
 }
 
-/// TS: GcResult.
+/// GcResult — sessions compacted and bytes deleted by one pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GcResult {
     pub compacted_sessions: u64,
     pub deleted_bytes: u64,
 }
 
-/// TS: sweepAsyncJobLogs return shape.
+/// SweepResult — return shape of sweep_async_job_logs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SweepResult {
     pub deleted_bytes: u64,
     pub deleted_files: u64,
 }
 
-/// TS: reapOrphanTmuxSessions return shape.
+/// ReapResult — return shape of reap_orphan_tmux_sessions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReapResult {
     pub killed: Vec<String>,
     pub kept: Vec<String>,
 }
 
-/// TS: GcOptions — CLI-facing knobs.
+/// GcOptions — CLI-facing knobs.
 #[derive(Debug, Clone)]
 pub struct GcOptions {
     pub older_than_ms: i64,
@@ -73,7 +73,7 @@ impl Default for GcOptions {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// TS: dirBytes — recursively sum the byte sizes of every file in a tree.
+/// Recursively sums the byte sizes of every file in a tree.
 pub fn dir_bytes(dir: &str) -> u64 {
     let mut total = 0u64;
 
@@ -97,8 +97,8 @@ pub fn dir_bytes(dir: &str) -> u64 {
     total
 }
 
-/// TS: lastNLines — split on newline, keep the last `n` non-empty lines,
-/// rejoin with a trailing newline.
+/// Splits on newline, keeps the last `n` non-empty lines, rejoins with a
+/// trailing newline.
 pub fn last_n_lines(text: &str, n: usize) -> String {
     let kept: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
     let start = kept.len().saturating_sub(n);
@@ -115,12 +115,13 @@ pub fn last_n_lines(text: &str, n: usize) -> String {
 // collectGcPlan
 // ---------------------------------------------------------------------------
 
-/// TS: collectGcPlan — inspect the session index and return the sessions
+/// collect_gc_plan — inspect the session index and return the sessions
 /// eligible for GC. Cheap: no mutations, only size accounting.
 ///
-/// Mirrors the TS gates exactly:
+/// Gates:
 /// - status != "active" (the SQL WHERE clause)
-/// - no live lease (checkLease alive → skip)
+/// - no live lease (check_lease alive → skip)
+/// - updatedAt older than now - olderThanMs
 /// - updatedAt older than now - olderThanMs
 pub fn collect_gc_plan(
     index: &SessionIndex,
@@ -134,8 +135,7 @@ pub fn collect_gc_plan(
     // when it still exists on disk.
     let mut registries: Vec<(&rusqlite::Connection, &str)> = vec![(&index.conn, &project.sessions_dir)];
 
-    // The legacy pre-move registry gets its own handle on its own db file
-    // (TS gc.ts:96-101).
+    // The legacy pre-move registry gets its own handle on its own db file.
     let legacy_index = match (
         project.legacy_index_db_path.as_deref(),
         project.legacy_sessions_dir.as_deref(),
@@ -170,7 +170,7 @@ pub fn collect_gc_plan(
         }
     }
 
-    // TS gc.ts:115 — close the legacy index once its rows are fetched.
+    // Close the legacy index once its rows are fetched.
     drop(legacy_index);
 
     let mut sessions: Vec<GcSessionEntry> = Vec::new();
@@ -189,7 +189,7 @@ pub fn collect_gc_plan(
             let dir = PathBuf::from(sessions_dir).join(&id);
 
             // Liveness gate — a live lease means the session is running;
-            // never touch it (TS gc.ts:125-128).
+            // never touch it.
             let lease_path = dir.join("lease.json");
             if check_lease(Path::new(&lease_path), now).alive() {
                 continue;
@@ -214,13 +214,13 @@ pub fn collect_gc_plan(
 
 const TRANSCRIPT_KEEP_LINES: usize = 200;
 
-/// TS: lastNLines.
+/// Delegates to last_n_lines.
 fn last_n_lines_ts(text: &str, n: usize) -> String {
     last_n_lines(text, n)
 }
 
-/// TS: executeGcPlan — delete images/ and *.log per session, truncate
-/// transcript.jsonl to its last 200 lines. Dry run touches nothing.
+/// Deletes images/ and *.log per session, and truncates transcript.jsonl to
+/// its last 200 lines. Dry run touches nothing.
 pub fn execute_gc_plan(plan: &GcPlan, dry_run: bool) -> GcResult {
     let mut deleted_bytes: u64 = 0;
     let mut compacted_sessions: u64 = 0;
@@ -295,16 +295,16 @@ pub fn execute_gc_plan(plan: &GcPlan, dry_run: bool) -> GcResult {
 // sweepAsyncJobLogs
 // ---------------------------------------------------------------------------
 
-/// TS: sweepAsyncJobLogs — settled async-job logs under <root>/async-tools
-/// older than the cutoff.
+/// Deletes settled async-job logs under <root>/async-tools that are older
+/// than the cutoff.
 pub fn sweep_async_job_logs(
     project: &DripProject,
     older_than_ms: i64,
     dry_run: bool,
     now: &dyn Fn() -> DateTime<Utc>,
 ) -> SweepResult {
-    // TS: join(args.project.root, "async-tools") — the dir hangs off the
-    // project root, there is no dedicated DripProject field.
+    // The async-tools dir hangs off the project root; there is no dedicated
+    // DripProject field for it.
     let dir = PathBuf::from(&project.root).join("async-tools");
     let now_ms = now().timestamp_millis();
     let mut deleted_bytes: u64 = 0;
@@ -350,10 +350,9 @@ pub fn sweep_async_job_logs(
 // reapOrphanTmuxSessions
 // ---------------------------------------------------------------------------
 
-/// TS: reapOrphanTmuxSessions — kill drip-prefixed tmux sessions older than
-/// the cutoff. Deferred to the CLI layer in the TS (child_process); here the
-/// caller supplies the listing and kill callbacks so the logic is testable
-/// without a tmux server.
+/// Kills drip-prefixed tmux sessions older than the cutoff. The caller
+/// supplies the listing and kill callbacks so the logic is testable without
+/// a tmux server.
 pub fn reap_orphan_tmux_sessions(
     listing: &str,
     older_than_ms: i64,
@@ -393,7 +392,7 @@ pub fn reap_orphan_tmux_sessions(
             continue;
         }
 
-        // TS: dry run never invokes tmux kill-session.
+        // Dry run never invokes tmux kill-session.
         if dry_run {
             killed.push(name);
             continue;

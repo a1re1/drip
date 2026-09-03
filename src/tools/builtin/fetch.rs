@@ -13,14 +13,14 @@ const ELISION_MARKER: &str = "\n...[content elided — size cap reached]...\n";
 // Tags to strip entirely (including content between open/close tags)
 const BLOCK_TAGS: [&str; 5] = ["script", "style", "nav", "header", "footer"];
 
-// TS type FetchToolInput.
+// FetchToolInput: the parsed arguments for the fetch tool.
 #[derive(Debug)]
 pub struct FetchToolInput {
     pub max_bytes: i64,
     pub url: String,
 }
 
-// TS type FetchToolResult.
+// FetchToolResult: the fetched body plus response metadata.
 #[derive(Debug)]
 pub struct FetchToolResult {
     pub body: String,
@@ -29,14 +29,14 @@ pub struct FetchToolResult {
     pub status: u16,
 }
 
-/// What the prepare stage returns: { input, displayInput }.
+/// What the prepare stage returns: the parsed input and its display string.
 #[derive(Debug)]
 pub struct FetchToolPrepared {
     pub input: FetchToolInput,
     pub display_input: String,
 }
 
-/// Port of the execute stage: { data, outputText }.
+/// What the execute stage returns: the result data plus the output text.
 #[derive(Debug)]
 pub struct FetchToolExecution {
     pub data: FetchToolResult,
@@ -47,8 +47,8 @@ pub struct FetchToolExecution {
 // HTML stripping
 // ---------------------------------------------------------------------------
 
-/// Port of stripHtml. Removes block-level tags and their content, removes the
-/// remaining tags, decodes common HTML entities, then collapses whitespace.
+/// Removes block-level tags and their content, removes the remaining tags,
+/// decodes common HTML entities, then collapses whitespace.
 pub fn strip_html(html: &str) -> String {
     let mut text = html.to_string();
 
@@ -86,8 +86,7 @@ pub fn strip_html(html: &str) -> String {
     text.trim().to_string()
 }
 
-/// Regex::replace_all with a literal replacement (no `$group` expansion — the
-/// TS code replaces with plain strings).
+/// Regex::replace_all with a literal replacement (no `$group` expansion).
 fn replace_all(text: &str, re: &regex::Regex, replacement: &str) -> String {
     re.replace_all(text, regex::NoExpand(replacement)).into_owned()
 }
@@ -96,10 +95,9 @@ fn replace_all(text: &str, re: &regex::Regex, replacement: &str) -> String {
 // Size cap (ends-kept: keep the end, elide from the front)
 // ---------------------------------------------------------------------------
 
-/// Port of capBytes: keep the last maxBytes bytes of the text (ends-kept),
-/// prefixing the elision marker when truncation happened. A cut landing inside
-/// a multi-byte sequence is replaced with U+FFFD, exactly like the TS
-/// TextDecoder(fatal: false).
+/// Keep the last maxBytes bytes of the text (ends-kept), prefixing the elision
+/// marker when truncation happened. A cut landing inside a multi-byte sequence
+/// is replaced with U+FFFD, matching lossy UTF-8 decoding.
 pub fn cap_bytes(text: &str, max_bytes: usize) -> String {
     let encoded = text.as_bytes();
 
@@ -178,16 +176,16 @@ pub fn definition() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// URL parsing (node's `new URL` for the cases prepare hits)
+// URL parsing for the cases prepare hits (absolute URLs with a scheme)
 // ---------------------------------------------------------------------------
 
-/// Port of `new URL(url)` + `parsed.protocol` for the scheme guard. Returns
-/// the protocol without the trailing colon ("http", "https", "ftp", "file",
-/// "data", ...) or None when the URL does not parse at all (the TS catch).
+/// Parse the scheme from a URL for the scheme guard. Returns the protocol
+/// without the trailing colon ("http", "https", "ftp", "file", "data", ...)
+/// or None when the URL does not parse at all.
 fn parse_url_scheme(url: &str) -> Option<String> {
     let colon = url.find(':')?;
 
-    // node's WHATWG URL: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ),
+    // WHATWG URL: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ),
     // and the scheme must start with a letter.
     let scheme = &url[..colon];
     let mut chars = scheme.chars();
@@ -210,7 +208,7 @@ fn parse_url_scheme(url: &str) -> Option<String> {
     Some(scheme.to_lowercase())
 }
 
-/// Port of the prepare stage.
+/// Validate arguments and build the prepared input for the fetch call.
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<FetchToolPrepared> {
     let args = tool_arguments(args)?;
 
@@ -276,8 +274,8 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<FetchToolPrepared> {
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Port of the execute stage: GET with timeout and redirect following, binary
-/// content-type refusal, HTML stripping, ends-kept size cap.
+/// GET with timeout and redirect following, binary content-type refusal,
+/// HTML stripping, ends-kept size cap.
 pub fn execute_prepared(prepared: &FetchToolPrepared) -> Result<FetchToolExecution> {
     let url = &prepared.input.url;
     let capped_max = prepared.input.max_bytes.min(MAX_MAX_BYTES) as usize;
@@ -330,8 +328,8 @@ pub fn execute_prepared(prepared: &FetchToolPrepared) -> Result<FetchToolExecuti
     })
 }
 
-/// Port of the complete stage. The header is the description AND the first
-/// line of the tool content.
+/// Build the final tool completion. The header is the description AND the
+/// first line of the tool content.
 pub fn complete(prepared: &FetchToolPrepared, result: &FetchToolResult) -> super::ToolCompletion {
     let header_line = format!(
         "FETCH {} {} {} ({} chars)",
@@ -355,9 +353,9 @@ pub fn complete(prepared: &FetchToolPrepared, result: &FetchToolResult) -> super
     }
 }
 
-/// The transcript's display string for this call — what the TS tool's prepare
-/// returns as `displayInput` — or None when the arguments do not parse (the
-/// execute path reports that error).
+/// The transcript's display string for this call — the prepare stage's
+/// display string — or None when the arguments do not parse (the execute path
+/// reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     prepare(args, ctx).ok().map(|prepared| prepared.display_input)
 }
@@ -446,8 +444,7 @@ mod tests {
         );
     }
 
-    // it("error message mentions how to enable (--allow-net flag)") — the
-    // refusal must name the env var and the CLI flag that enables network.
+    // The refusal must name the env var and the CLI flag that enables network.
     #[test]
     fn allow_net_refusal_message_mentions_how_to_enable() {
         let error = prepare(&json!({ "url": "https://example.com/" }), &stage_ctx(false))

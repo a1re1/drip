@@ -1,4 +1,3 @@
-// src/chat/types.ts is imported by tools/, harness/ and cli/ alike; the
-// model-call layer (src/chat/anthropic.ts, src/chat/transport.ts) is instead
-// ported under harness/ per PLAN.md.
+// Shared chat message types used across the crate; the model-call layer
+// (Anthropic + transport) lives under harness/.
 pub mod types;

@@ -3,9 +3,9 @@
 // resolved into the harness's runtime shape (HarnessRoleRuntime), the built-in
 // role presets ("reviewed", "research", "team", "planned"), and the --roles flag parser.
 //
-// NOTE on shared types: the minimal shapes roles.ts needs (role definitions,
-// presets, bindings) are defined here; model resolution goes through
-// core::inference (the port of settings.ts resolveModelProfileRoute) via
+// NOTE on shared types: the minimal role-definition, preset, and binding
+// shapes are defined here; model resolution goes through
+// core::inference via
 // resolve_model_profile_route at the bottom of this module.
 
 use std::collections::{HashMap, HashSet};
@@ -23,7 +23,7 @@ use crate::harness::roles::{
 };
 
 // ---------------------------------------------------------------------------
-// Setting-id constants (src/web/settings.ts)
+// Setting-id constants
 // ---------------------------------------------------------------------------
 
 pub const MODEL_PROFILES_SETTING_ID: &str = "runtime.model_profiles";
@@ -90,7 +90,7 @@ pub struct ResolvedRoleSetup {
 // Tool-name rosters and preset profile pins
 // ---------------------------------------------------------------------------
 
-// The workspace tool pack a role allowlist is validated against (tools/index.ts).
+// The workspace tool pack a role allowlist is validated against.
 // Harness ops (plan_tasks, finish_task, remember, ...) are deliberately absent:
 // the loop appends them to every role unconditionally, so naming them here only
 // produces a spurious "unknown tool(s)" issue on every preset run.
@@ -117,7 +117,7 @@ pub fn read_only_tool_names() -> Vec<&'static str> {
 // Flash (Z.AI) drafts, Kimi K3 (Moonshot) reviews, the pairing the fork
 // shipped; both lanes are served through OpenRouter, but the weights are still
 // different vendors'. Both ids are shipped defaults in the profile catalog
-// (src/web/settings.ts); --review reuses them as its per-file / synthesis defaults.
+// Both ids are shipped defaults in the profile catalog; --review reuses them
 pub const PRESET_FAST_PROFILE_ID: &str = "glm-5-3-flash";
 pub const PRESET_REVIEW_PROFILE_ID: &str = "kimi-k3";
 
@@ -329,7 +329,7 @@ pub fn builtin_role_preset_names() -> Vec<&'static str> {
 }
 
 /// Resolves a --roles value to its role setup: a built-in preset name first, then
-/// a path to a roles.json file. Lives here rather than inline in main.tsx so the
+/// a path to a roles.json file. Kept out of the CLI entry path so the
 /// flag's wiring — roles AND bindings, from both sources — is unit-testable.
 /// Returns the underlying read/parse error for a path that cannot be loaded.
 pub fn resolve_roles_flag(preset_or_path: &str) -> Result<RoleSetupSource> {
@@ -416,7 +416,7 @@ fn normalize_role_definition(
 
 	let mut r#loop = PartialHarnessLoopConfig::default();
 	let mut has_loop = false;
-	// `loop` must be a plain object, not an array (TS: typeof === "object" && !Array.isArray).
+	// `loop` must be a plain object, not an array must be a JSON object mapping, not an array.
 	if let Some(loop_input) = input.get("loop").filter(|v| v.is_object()) {
 		for field in ["hotToolResults", "maxCycles", "maxToolResultChars", "maxToolRoundsPerCycle"] {
 			if let Some(n) = loop_input.get(field).and_then(|v| v.as_f64()) {
@@ -489,7 +489,7 @@ fn normalize_bindings(value: Option<&serde_json::Value>) -> Option<HarnessRoleBi
 		.filter(|s| !s.is_empty())
 		.map(String::from);
 
-	// Matches the TS spread: an empty bindings object is dropped entirely.
+	// An empty bindings object is dropped entirely.
 	(planning.is_some() || task.is_some()).then_some(HarnessRoleBindings { planning, task })
 }
 
@@ -597,15 +597,15 @@ pub struct ResolveRoleSetupArgs<'a> {
 // shape: composed prompt material, tool allowlists, and model routes.
 //
 // `definition.model` resolution goes through resolve_model_profile_route at
-// the bottom of this module (core::inference, the port of settings.ts
-// resolveModelProfileRoute); an unresolvable profile reports the fallback
-// issue exactly like the TS.
+// the bottom of this module (core::inference); an unresolvable profile
+// reports the fallback issue to the caller,
+// same as any other validation problem.
 pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 	let mut issues: Vec<String> = Vec::new();
 	let config_source = load_roles_from_config(args.config, &mut issues);
 	let project_source = load_project_roles(&args.cwd, &mut issues);
 	// First definition per name wins in merge order (marketplace < config <
-	// project < extra), matching the TS Map.set overwrite direction: later
+	// project < extra), last write wins under a duplicate name: later
 	// sources replace earlier ones under the same key.
 	let mut definitions: indexmap::IndexMap<String, RoleDefinition> = indexmap::IndexMap::new();
 
@@ -756,7 +756,7 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 		}
 	}
 
-	// TS spreads { ...config.bindings, ...project.bindings, ...args.extraBindings } —
+	// Bindings are merged from config, project, and extra —
 	// later sources win, so extra > project > config.
 	let mut merged_bindings = HarnessRoleBindings {
 		planning: args
@@ -800,16 +800,16 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal ports of the src/cli/skills.ts helpers roles.ts uses
+// Minimal local helpers for reading skill files and their frontmatter,
 // ---------------------------------------------------------------------------
 
-// Port of skills.ts normalizeContent: strip a UTF-8 BOM, normalize CRLF to LF.
+// Normalizes skill file content: strip a UTF-8 BOM, normalize CRLF to LF.
 fn normalize_content(raw: &str) -> String {
 	let stripped = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
 	stripped.replace("\r\n", "\n")
 }
 
-/// Port of skills.ts loadSkillContent: reads the skill file, then resolves the
+/// Loads a skill's content: reads the skill file, then resolves the
 /// frontmatter args block. No args block → content verbatim; with one, missing
 /// required args error and `{{name}}` placeholders are substituted.
 pub fn load_skill_content(
@@ -897,16 +897,16 @@ pub fn load_skill_content(
 	})
 }
 
-/// Port of skills.ts SkillArgDef: required when default is absent.
+/// A skill argument definition; `name` is required when no default is given.
 #[derive(Debug, Clone, PartialEq)]
 struct SkillArgDef {
 	default: Option<String>,
 	name: String,
 }
 
-/// Port of the args-block half of skills.ts parseSkillFrontmatter: parse
+/// Skill frontmatter args-block parser: reads
 /// `args:` entries of the form `- name: value` / `- name` (string values only,
-/// matching the TS booleanLiteralOrString coercion).
+/// bare booleans are coerced to their string form).
 fn parse_skill_frontmatter_args(markdown: &str) -> Option<Vec<SkillArgDef>> {
 	let frontmatter = extract_frontmatter(markdown)?;
 	let mut defs: Vec<SkillArgDef> = Vec::new();
@@ -955,7 +955,7 @@ fn extract_frontmatter(markdown: &str) -> Option<String> {
 	Some(rest[..end].to_string())
 }
 
-// TS parses YAML-ish values; skills only ever author strings and booleans.
+// Skills only ever author plain strings and booleans, so no YAML parser.
 fn coerce_skill_arg_value(value: &str) -> Option<String> {
 	let value = value.trim();
 	let unquoted = value
@@ -971,11 +971,11 @@ fn coerce_skill_arg_value(value: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder until drip/src/web/settings.rs ports resolveModelProfileRoute
-// (src/web/settings.ts); see the resolve_role_setup note above.
+// Model-profile resolution lives in core::inference (see the
+// resolve_role_setup note above).
 // ---------------------------------------------------------------------------
 
-// settings.ts resolveModelProfileRoute, via core::inference; the resolved
+// Model-profile route resolution, via core::inference; the resolved
 // route is re-shaped into the serializable roles::ModelRoute (headers as an
 // ordered map, fallback chained recursively).
 fn resolve_model_profile_route(

@@ -52,9 +52,9 @@ pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 240_000;
 #[error("{0}")]
 pub struct ContextOverflowError(pub String);
 
-/// The call's failure surface. `ContextOverflow` mirrors the TS
-/// ContextOverflowError class (the caller checks the type to decide whether to
-/// fold the transcript); `Message` is a plain Error with a message.
+/// The call's failure surface. `ContextOverflow` is a typed variant the
+/// caller checks to decide whether to fold the transcript; `Message` is a
+/// plain error with a message.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelCallError {
     #[error("{0}")]
@@ -279,8 +279,8 @@ fn context_overflow_regex() -> &'static regex::Regex {
     REGEX.get_or_init(|| regex::Regex::new(r"(?i)context|token|length|too long|too large").unwrap())
 }
 
-/// String-level port of the TS classification (name + message + code + cause
-/// against the network-error regex). reqwest errors go through
+/// Network-error classification by string matching (name + message + code +
+/// cause against the network-error regex). reqwest errors go through
 /// `is_network_transport_error`, which first maps the config-shaped
 /// (builder) failures to "never heals".
 pub fn is_network_fetch_error(error: &(dyn std::error::Error + 'static)) -> bool {
@@ -291,10 +291,10 @@ pub fn is_network_fetch_error(error: &(dyn std::error::Error + 'static)) -> bool
         return false;
     }
 
-    // Node/undici says "fetch failed" + ECONN codes; Bun says "Unable to
-    // connect. Is the computer able to access the url?" with code
-    // ConnectionRefused/ConnectionClosed. reqwest's Display carries the cause
-    // chain (hyper/tcp error text), so walk it the way TS spreads
+    // Runtime error text varies ("fetch failed" + ECONN codes, "Unable to
+    // connect. Is the computer able to access the url?" with
+    // ConnectionRefused/ConnectionClosed). reqwest's Display carries the
+    // cause chain (hyper/tcp error text), so walk it and collect
     // name/message/code/cause into `details`.
     let mut details = message;
 
@@ -316,7 +316,7 @@ fn is_network_transport_error(error: &reqwest::Error) -> bool {
     }
 
     // reqwest's request-phase failures (connect refused/reset, DNS, I/O) are
-    // the Rust shape of the TS "fetch failed" TypeError.
+    // the "fetch failed" equivalent.
     if error.is_connect() || error.is_timeout() || error.is_request() {
         return true;
     }
@@ -324,10 +324,8 @@ fn is_network_transport_error(error: &reqwest::Error) -> bool {
     is_network_fetch_error(error)
 }
 
-/// The run's cancellation flag: the TS code threads an AbortSignal through
-/// fetch and every backoff sleep; here it is a shared AtomicBool the loop
-/// sets on --stop. `sleep_unless_aborted` and the in-flight request both
-/// observe it.
+/// The run's cancellation flag: a shared AtomicBool the loop sets on --stop.
+/// `sleep_unless_aborted` and the in-flight request both observe it.
 #[derive(Clone, Default)]
 pub struct AbortSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
@@ -352,8 +350,8 @@ pub async fn sleep_unless_aborted(ms: u64, signal: Option<&AbortSignal>) {
     }
 
     // Deliberately NOT detached: this is the retry backoff of a live run.
-    // Poll in slices so an abort cuts the wait short, the way the TS
-    // timer + abort listener resolves early.
+    // Poll in slices so an abort cuts the wait short instead of sleeping
+    // through the full backoff.
     let deadline = Instant::now() + Duration::from_millis(ms);
 
     while Instant::now() < deadline {
@@ -367,7 +365,7 @@ pub async fn sleep_unless_aborted(ms: u64, signal: Option<&AbortSignal>) {
 }
 
 pub type SleepFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-/// `(ms, signal) => Promise<void>` — the TS `sleepImpl` injection point.
+/// Injectable, abort-aware sleep used by the retry backoff.
 pub type SleepFn = Arc<dyn Fn(u64, Option<AbortSignal>) -> SleepFuture + Send + Sync>;
 
 fn default_sleep(ms: u64, signal: Option<AbortSignal>) -> SleepFuture {
@@ -406,14 +404,14 @@ pub struct ModelCallerDeps {
     pub sleep_impl: Option<SleepFn>,
     pub tool_route: Option<ModelRoute>,
     pub url: String,
-    /// Test seam: a pre-built reqwest client (the TS `fetchImpl` injection
-    /// point; the URL/server is the other half of that seam).
+    /// Test seam: a pre-built reqwest client (the URL/server is the other
+    /// half of that seam).
     pub http_client: Option<reqwest::Client>,
 }
 
-/// The TS `ModelCaller = (messages, callOptions) => Promise<...>` becomes a
-/// struct with an async `call_model` method so the resolved dependencies
-/// (client, timeout, sleep impl) live on it.
+/// Calls the model: `call_model` takes the messages and call options and
+/// returns the response; the resolved dependencies (client, timeout, sleep
+/// impl) live on the struct.
 pub struct ModelCaller {
     deps: ModelCallerDeps,
     http_client: reqwest::Client,
@@ -1212,8 +1210,7 @@ mod tests {
 
     /// HTTP/1.1 mock over a std TcpListener: accepts exactly `request_count`
     /// connections, serving the same canned response to each one, and returns a
-    /// handle whose join() yields the (request line, body) pairs it received
-    /// (the Rust stand-in for the TS tests' Bun.serve + fetchImpl stubs).
+    /// handle whose join() yields the (request line, body) pairs it received.
     /// `connection: close` on every response keeps reqwest from pooling, so
     /// each attempt opens a fresh connection for the accept loop to pick up.
     fn spawn_mock_server(

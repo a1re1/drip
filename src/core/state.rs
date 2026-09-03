@@ -1,16 +1,14 @@
 // Harness state helpers: create/load/save, the task ledger, memory notes,
 // observations, goal history, and the shared derivations (verification
-// summary, task stats). Function names are the TS names in snake_case so the
-// two files can be diffed side by side.
+// summary, task stats). Function names are snake_case.
 //
-// Port notes:
-// - `loadHarnessState` validates with the TS shape guards (ported literally
-//   over serde_json::Value) so the error string matches byte for byte; only
-//   after the guard does it deserialize into the typed structs.
-// - Mutating helpers that return the affected task in TS return Option<&mut>
-   // or a clone here; the mutation happens in place either way.
-// - reopen_blocked_tasks' TS default maxReopens = Number.POSITIVE_INFINITY is
-//   Option::None here.
+// Implementation notes:
+// - `load_harness_state` validates the raw JSON shape first (over
+//   serde_json::Value) and keeps the exact error text; only after the guard
+//   does it deserialize into the typed structs.
+// - Mutating helpers return Option<&mut> or a clone of the affected task;
+//   the mutation happens in place either way.
+// - reopen_blocked_tasks reopens without limit when no maximum is given.
 
 use std::path::Path;
 
@@ -27,7 +25,8 @@ VerificationSummary,
 };
 use crate::lib_fs::write_file_atomic;
 
-/// port of `export type HarnessTaskPlacement = "end" | "next";`
+/// Placement for newly added tasks: appended to the end of the list, or
+/// inserted just after the current task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessTaskPlacement {
 	End,
@@ -101,7 +100,7 @@ fn next_sequence_id(prefix: &str, existing_ids: &[String]) -> String {
 
 	for existing_id in existing_ids {
 		if let Some(rest) = existing_id.strip_prefix(needle.as_str()) {
-			// Mirrors the TS regex `^{prefix}-(\d+)$`.
+			// Matches ids of the form `{prefix}-<digits>`.
 			if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
 				if let Ok(sequence) = rest.parse::<i64>() {
 					highest_sequence = highest_sequence.max(sequence);
@@ -744,7 +743,7 @@ pub fn load_harness_state(state_path: &Path) -> anyhow::Result<Option<HarnessSta
 
 pub fn save_harness_state(state_path: &Path, state: &HarnessState) -> std::io::Result<()> {
 	let serialized = serde_json::to_string_pretty(state).expect("harness state serializes");
-	// JSON.stringify(state, null, 2) plus the trailing newline the TS appends.
+	// Pretty-printed JSON (two-space indent) plus a trailing newline.
 	write_file_atomic(state_path, &format!("{}\n", serialized), true)
 }
 
@@ -809,7 +808,7 @@ mod tests {
         }
     }
 
-    // port of it("creates empty state seeded with the goal")
+    // Creates empty state seeded with the goal.
     #[test]
     fn creates_empty_state_seeded_with_the_goal() {
         let state = create_harness_state("ship the feature");
@@ -822,7 +821,7 @@ mod tests {
         assert!(!is_goal_complete(&state));
     }
 
-    // port of it("adds tasks with sequential ids and skips blank titles")
+    // Adds tasks with sequential ids and skips blank titles.
     #[test]
     fn adds_tasks_with_sequential_ids_and_skips_blank_titles() {
         let mut state = create_harness_state("goal");
@@ -839,7 +838,7 @@ mod tests {
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
     }
 
-    // port of it("selects the current task preferring in-progress over pending")
+    // Selects the current task preferring in-progress over pending.
     #[test]
     fn selects_the_current_task_preferring_in_progress_over_pending() {
         let mut state = create_harness_state("goal");
@@ -851,7 +850,7 @@ mod tests {
         assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-2"));
     }
 
-    // port of it("resets ALL per-goal verification state at the goal boundary (pin the full reset list)")
+    // Resets ALL per-goal verification state at the goal boundary (pin the full reset list).
     #[test]
     fn resets_all_per_goal_verification_state_at_the_goal_boundary() {
         let mut state = create_harness_state("first goal");
@@ -882,7 +881,7 @@ mod tests {
         assert!(state.mutations_since_verification.is_none());
     }
 
-    // port of it("skips dependency-gated tasks until their dependencies are terminal")
+    // Skips dependency-gated tasks until their dependencies are terminal.
     #[test]
     fn skips_dependency_gated_tasks_until_their_dependencies_are_terminal() {
         let mut state = create_harness_state("deps goal");
@@ -921,7 +920,7 @@ mod tests {
         assert_eq!(get_current_task(&state2).map(|task| task.id.as_str()), Some("task-2"));
     }
 
-    // port of it("finishes the current task by default and named tasks by id")
+    // Finishes the current task by default and named tasks by id.
     #[test]
     fn finishes_the_current_task_by_default_and_named_tasks_by_id() {
         let mut state = create_harness_state("goal");
@@ -956,7 +955,7 @@ mod tests {
         assert!(is_goal_complete(&state));
     }
 
-    // port of it("inserts placement-next tasks after the current task, or at the front of the pending queue")
+    // Inserts placement-next tasks after the current task, or at the front of the pending queue.
     #[test]
     fn inserts_placement_next_tasks_after_the_current_task_or_at_the_front_of_the_pending_queue() {
         let mut state = create_harness_state("goal");
@@ -981,7 +980,7 @@ mod tests {
         assert_eq!(ids, ["task-1", "task-2", "task-3"]);
     }
 
-    // port of it("drops unfinished tasks with a reason and refuses finished ones")
+    // Drops unfinished tasks with a reason and refuses finished ones.
     #[test]
     fn drops_unfinished_tasks_with_a_reason_and_refuses_finished_ones() {
         let mut state = create_harness_state("goal");
@@ -1003,7 +1002,7 @@ mod tests {
         assert!(drop_task(&mut state, "task-1", "too late").is_none());
     }
 
-    // port of it("revises unfinished task titles and records the old title as a note")
+    // Revises unfinished task titles and records the old title as a note.
     #[test]
     fn revises_unfinished_task_titles_and_records_the_old_title_as_a_note() {
         let mut state = create_harness_state("goal");
@@ -1019,7 +1018,7 @@ mod tests {
         assert!(revise_task(&mut state, "task-99", "anything").is_none());
     }
 
-    // port of it("treats dropped tasks as finished for goal completion, but never all-dropped as complete")
+    // Treats dropped tasks as finished for goal completion, but never all-dropped as complete.
     #[test]
     fn treats_dropped_tasks_as_finished_for_goal_completion_but_never_all_dropped_as_complete() {
         let mut state = create_harness_state("goal");
@@ -1042,7 +1041,7 @@ mod tests {
         assert!(!is_goal_complete(&all_dropped));
     }
 
-    // port of it("appends non-empty task notes")
+    // Appends non-empty task notes.
     #[test]
     fn appends_non_empty_task_notes() {
         let mut state = create_harness_state("goal");
@@ -1054,7 +1053,7 @@ mod tests {
         assert_eq!(state.tasks[0].notes, ["found the config file"]);
     }
 
-    // port of it("manages shared memory notes")
+    // Manages shared memory notes.
     #[test]
     fn manages_shared_memory_notes() {
         let mut state = create_harness_state("goal");
@@ -1068,7 +1067,7 @@ mod tests {
         assert!(state.memory.is_empty());
     }
 
-    // port of it("round-trips state through the state file")
+    // Round-trips state through the state file.
     #[test]
     fn round_trips_state_through_the_state_file() {
         let temp = TempDir::new().unwrap();
@@ -1090,7 +1089,7 @@ mod tests {
         assert!(load_harness_state(&state_dir.join("missing.json")).unwrap().is_none());
     }
 
-    // port of it("rejects state files that are not valid harness state")
+    // Rejects state files that are not valid harness state.
     #[test]
     fn rejects_state_files_that_are_not_valid_harness_state() {
         let temp = TempDir::new().unwrap();
@@ -1120,7 +1119,7 @@ mod tests {
         assert!(error.to_string().contains("not a valid harness state file"));
     }
 
-    // port of it("archives the current goal's tasks into history on a follow-up and keeps memory")
+    // Archives the current goal's tasks into history on a follow-up and keeps memory.
     #[test]
     fn archives_the_current_goals_tasks_into_history_on_a_follow_up_and_keeps_memory() {
         let mut state = create_harness_state("first goal");
@@ -1163,7 +1162,7 @@ mod tests {
         assert!(!is_goal_complete(&state));
     }
 
-    // port of it("skips an empty history record when following up before any tasks were planned")
+    // Skips an empty history record when following up before any tasks were planned.
     #[test]
     fn skips_an_empty_history_record_when_following_up_before_any_tasks_were_planned() {
         let mut state = create_harness_state("first goal");
@@ -1174,7 +1173,7 @@ mod tests {
         assert_eq!(state.goal, "second goal");
     }
 
-    // port of it("reports unfinished tasks for anything not completed")
+    // Reports unfinished tasks for anything not completed.
     #[test]
     fn reports_unfinished_tasks_for_anything_not_completed() {
         let mut state = create_harness_state("goal");
@@ -1194,7 +1193,7 @@ mod tests {
         assert!(has_unfinished_tasks(&state));
     }
 
-    // port of it("backfills the loop counter from the iteration counter for pre-loop state files")
+    // Backfills the loop counter from the iteration counter for pre-loop state files.
     #[test]
     fn backfills_the_loop_counter_from_the_iteration_counter_for_pre_loop_state_files() {
         let temp = TempDir::new().unwrap();
@@ -1212,7 +1211,7 @@ mod tests {
         assert_eq!(loaded_state.r#loop, 7);
     }
 
-    // port of it("loads a pre-history state file with an empty history")
+    // Loads a pre-history state file with an empty history.
     #[test]
     fn loads_a_pre_history_state_file_with_an_empty_history() {
         let temp = TempDir::new().unwrap();
@@ -1231,9 +1230,8 @@ mod tests {
     // Fixture round-trip: a small real state.json from a real session must
     // survive load -> save with every field preserved (serde_json::Value
     // equality). The fixture is a legacy pre-observations/pre-loop file, so
-    // load backfills history/observations/loop exactly like the TS `??=`
-    // defaults in loadHarnessState; the round-trip expectation is the
-    // original with those defaults applied.
+    // load backfills history/observations/loop to empty defaults; the
+    // round-trip expectation is the original with those defaults applied.
     #[test]
     fn fixture_state_sample_round_trips_every_field() {
         let mut expected: Value =

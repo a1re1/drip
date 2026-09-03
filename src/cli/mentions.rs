@@ -2,10 +2,8 @@
 // the activation prompt can carry. Directory mentions become a bounded tree
 // listing.
 //
-// The TypeScript original pulls parseChatFileMentions /
-// resolveParsedChatFileMentions in from ../chat/file-references(.server).ts;
-// those live as private helpers in this module so the cli mod tree stays as
-// shipped (see the plan: only the listed modules are created).
+// The parser and resolver used here are private helpers of this module;
+// the cli mod tree keeps them alongside their only caller.
 
 use std::collections::HashSet;
 use std::fs;
@@ -15,9 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::types::{ChatContextFile, ChatContextFileLineRange};
 
-// --- src/chat/file-references.ts (inlined) ---
 
-// export type ParsedChatFileMention = { endLine?, mention, pathText, startLine? }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedChatFileMention {
     pub end_line: Option<usize>,
@@ -43,8 +39,8 @@ fn trim_trailing_mention_punctuation(value: &str) -> String {
         .to_string()
 }
 
-// JS /\s/ also matches U+FEFF; Rust's char::is_whitespace does not. The TS
-// tests never exercise U+FEFF, so char::is_whitespace is used directly.
+// U+FEFF is not matched by char::is_whitespace; that gap is acceptable
+// for mention scanning.
 fn is_whitespace_character(value: Option<char>) -> bool {
     match value {
         None => true,
@@ -52,11 +48,10 @@ fn is_whitespace_character(value: Option<char>) -> bool {
     }
 }
 
-// Full-fidelity port of the FILE_MENTION_PATTERN scan:
-// /(^|\s)@([A-Za-z0-9._/-]+)(?:#(\d+)(?::(\d+))?)?/g
-// matchAll with a non-overlapping global regex: scanning restarts at lastIndex,
-// i.e. just after the match — which includes the one-character (^|\s) group, so
-// a separator consumed as group 1 cannot also start the next match.
+// Scans for @path mentions with an optional #start:end line-range suffix
+// (@[A-Za-z0-9._/-]+). The scan restarts just after each match, and the
+// one-character boundary group counts as part of the match, so a
+// separator consumed there cannot also start the next match.
 pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
     let chars: Vec<char> = text.chars().collect();
     let is_mention_char =
@@ -65,14 +60,14 @@ pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
 
     let mut i = 0usize;
     while i < chars.len() {
-        // (?:^|\s) — group 1
+        // Whitespace-or-start boundary
         let boundary = i == 0 || is_whitespace_character(Some(chars[i - 1]));
         if !boundary || chars[i] != '@' {
             i += 1;
             continue;
         }
 
-        // group 2 — the path text
+        // The path text follows the @.
         let path_start = i + 1;
         let mut j = path_start;
         while j < chars.len() && is_mention_char(chars[j]) {
@@ -80,7 +75,7 @@ pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
         }
         let path_end = j;
 
-        // (?:#(\d+)(?::(\d+))?)? — optional line-range suffix
+        // An optional #start:end line-range suffix follows the path.
         let mut start_line_text: Option<String> = None;
         let mut end_line_text: Option<String> = None;
         if chars.get(j).is_some_and(|c| *c == '#') {
@@ -135,14 +130,13 @@ pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
             });
         }
 
-        // The scan restarts just after the whole match (regex lastIndex).
+    // The scan restarts just after the whole match.
         i = if j > i { j } else { i + 1 };
     }
 
     mentions
 }
 
-// buildChatContextFileLineRange
 pub fn build_chat_context_file_line_range(
     start_line: Option<usize>,
     end_line: Option<usize>,
@@ -155,9 +149,7 @@ pub fn build_chat_context_file_line_range(
     })
 }
 
-// getActiveChatFileMention. TS indexes are UTF-16 code units; the ported suite
-// does not exercise these helpers with non-ASCII text, so char indices with
-// clamping to [0, len] are used.
+// Cursor math uses char indices, clamped to [0, len].
 pub fn get_active_chat_file_mention(text: &str, cursor: usize) -> Option<ActiveChatFileMention> {
     let chars: Vec<char> = text.chars().collect();
     let safe_cursor = cursor.min(chars.len());
@@ -214,9 +206,7 @@ pub fn replace_active_chat_file_mention(
     out
 }
 
-// --- src/chat/file-references-server.ts (inlined) ---
 
-// export type ResolvedChatFileMentions = { files, issues }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedChatFileMentions {
     pub files: Vec<ChatContextFile>,
@@ -359,8 +349,7 @@ fn slice_lines(
 
     let clamped_end_line = resolved_end_line.min(lines.len());
 
-    // TS: lines.slice(startLine - 1, clampedEndLine) — a `#0` start yields
-    // slice(-1, 0) = [] (empty content), never an out-of-range index.
+    // A `#0` start yields empty content, never an out-of-range index.
     let content = if start_line == 0 || start_line > clamped_end_line {
         String::new()
     } else {
@@ -404,9 +393,8 @@ pub fn resolve_parsed_chat_file_mentions(
             continue;
         }
 
-        // The TS original wraps stat + readFile in one try/catch: ENOENT is
-        // reported as "could not be found", everything else as "could not be
-        // read".
+        // stat + read share one error path: a missing file is reported as
+        // "could not be found", everything else as "could not be read".
         let read_result = match fs::metadata(&absolute_path) {
             Ok(metadata) if metadata.is_dir() => {
                 issues.push(format!(
@@ -467,7 +455,6 @@ pub fn resolve_chat_file_mentions(text: &str, cwd: &str) -> ResolvedChatFileMent
     resolve_parsed_chat_file_mentions(&parse_chat_file_mentions(text), cwd)
 }
 
-// --- src/cli/mentions.ts ---
 
 const MAX_DIRECTORY_TREE_ENTRIES: usize = 200;
 const IGNORED_DIRECTORY_NAMES: [&str; 7] = [
@@ -491,7 +478,7 @@ fn walk_directory_tree(
         return;
     }
 
-    // JS readdirSync(...).sort() sorts by UTF-16 code units; for the ASCII
+// Directory entries sort by UTF-16 code units; for the ASCII
     // filenames this tree walk sees, Rust's byte sort matches.
     let mut entries: Vec<String> = match fs::read_dir(current_path) {
         Ok(entries) => entries
@@ -600,7 +587,6 @@ fn split_directory_mentions(
     }
 }
 
-// export type ResolvedGoalMentions = { contextBlock, files, issues, mentions }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedGoalMentions {
@@ -612,7 +598,7 @@ pub struct ResolvedGoalMentions {
 
 // Resolves @path and @path#start:end mentions in a goal into a context block
 // the activation prompt can carry. Directory mentions become a bounded tree
-// listing. (The TS export is async; the Rust port is synchronous.)
+// listing.
 pub fn resolve_goal_mentions(text: &str, cwd: &str) -> ResolvedGoalMentions {
     let mentions = parse_chat_file_mentions(text);
 
@@ -682,7 +668,6 @@ mod tests {
         fs::write(path, contents).expect("write file");
     }
 
-    // it("inlines mentioned files and directory trees into a context block")
     #[test]
     fn inlines_mentioned_files_and_directory_trees_into_a_context_block() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -714,7 +699,6 @@ mod tests {
         assert_eq!(build_goal_with_context("goal", None), "goal");
     }
 
-    // it("returns no context for mention-free goals")
     #[test]
     fn returns_no_context_for_mention_free_goals() {
         let root = tempfile::tempdir().expect("tempdir");

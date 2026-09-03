@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
-// Re-exported: sessions.ts re-uses the shared memory-note shape, and
-// backfill.rs tests import it via the sessions module.
+// Re-exported shared memory-note shape; backfill.rs tests import it via
+// the sessions module.
 pub use crate::core::types::HarnessMemoryNote;
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ pub struct SessionIndex {
 
 impl SessionIndex {
     pub fn close(self) {
-        // Connection is closed on Drop; explicit method matches TS API.
+        // The connection closes on Drop; this is an explicit close for clarity.
         drop(self.conn);
     }
 }
@@ -195,9 +195,9 @@ fn row_to_record(
 }
 
 // ---------------------------------------------------------------------------
-// CreateSessionArgs — matches TS createSession(index, { cwd, project, now? })
-// but takes `now` as a pre-formatted ISO string (backfill tests pass literal
-// strings; callers that want wall-clock time pass chrono's to_rfc3339()).
+// CreateSessionArgs takes `now` as a pre-formatted ISO string (backfill
+// tests pass literal strings; callers that want wall-clock time pass
+// chrono's to_rfc3339()).
 // ---------------------------------------------------------------------------
 
 pub struct CreateSessionArgs<'a> {
@@ -219,8 +219,8 @@ pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionR
     };
 
     let id = Uuid::new_v4().to_string();
-    // TS: args.project.slug ?? projectSlug(args.cwd) — an overridden/stubbed
-    // project without a slug must still key the row consistently.
+    // An overridden/stubbed project without a slug falls back to
+    // project_slug(args.cwd) so the row is still keyed consistently.
     let project_slug = if args.project.slug.is_empty() {
         crate::core::home::project_slug(&args.cwd)
     } else {
@@ -378,8 +378,8 @@ pub fn touch_session(index: &SessionIndex, session_id: &str, last_goal: Option<&
     touch_session_at(index, session_id, last_goal, status, None);
 }
 
-/// touchSession with the TS `patch.now` injection: tests pin timestamps
-/// through it; `None` uses the current time like the TS default.
+/// Timestamps are injected so tests can pin them; `None` uses the current
+/// time.
 pub fn touch_session_at(
     index: &SessionIndex,
     session_id: &str,
@@ -434,7 +434,7 @@ pub fn sync_session_memories(index: &SessionIndex, session_id: &str, notes: &[Ha
     use chrono::Utc;
     let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    // TS wraps DELETE + INSERTs in db.transaction(): a failed insert must not
+    // DELETE + INSERTs run in one transaction: a failed insert must not
     // leave the session's memory mirror truncated.
     let tx = index
         .conn
@@ -535,8 +535,7 @@ pub struct SessionPaths {
     pub transcript_path: String,
 }
 
-/// sessions.ts:123 — `sessionPaths(project, record)`: a pre-move record's own
-/// sessionsDir wins over the project's.
+/// A pre-move record's own sessionsDir wins over the project's.
 pub fn session_paths_for(project: &crate::core::home::DripProject, record: &SessionRecord) -> SessionPaths {
     session_paths(&ProjectPaths::from(project), &record.id, record.sessions_dir.as_deref())
 }
@@ -561,9 +560,9 @@ pub fn session_paths(project: &ProjectPaths, session_id: &str, sessions_dir_over
 }
 
 // ---------------------------------------------------------------------------
-// Multi-registry helpers — sessions.ts:228-361 (siblingWorktreeHomes,
-// openProjectIndexes, stamp, listAllSessions, latestAnySession,
-// resolveAnySessionRef, hasAnySessionIndex, hasAnyWorktreeSessionIndex)
+// Multi-registry helpers (sibling_worktree_homes, open_project_indexes,
+// stamp, list_all_sessions, latest_any_session, resolve_any_session_ref,
+// has_any_session_index, has_any_worktree_session_index)
 // ---------------------------------------------------------------------------
 
 use crate::core::home::DripProject;

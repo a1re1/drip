@@ -21,7 +21,8 @@ use crate::harness::r#loop::{run_solid_state_harness, EmitFn, OperatorInboxEntry
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
-/// runner.ts:19-62 — `CliGoalRunArgs`.
+/// Arguments for a goal run: working directory, goal text, and the prior
+/// goal context handed to the model.
 pub struct CliGoalRunArgs {
     pub cwd: String,
     pub goal: String,
@@ -64,7 +65,7 @@ pub struct CliGoalRunArgs {
     pub tool_services: Option<ChatToolRuntimeServices>,
 }
 
-/// runner.ts:64 — the `{ resumedUnfinished, state }` pair.
+/// Whether a previous run was resumed, with its harness state.
 pub struct PreparedGoalState {
     pub resumed_unfinished: bool,
     pub state: Option<HarnessState>,
@@ -74,7 +75,8 @@ pub struct PreparedGoalState {
 // of a finished one) archives the previous goal's tasks into history, while the
 // same goal with unfinished tasks resumes in place.
 pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> Result<PreparedGoalState, String> {
-    // runner.ts:72 lets loadHarnessState throw: a corrupt or foreign
+    // A corrupt or foreign state.json is allowed to abort the run here:
+    // fail loudly rather than silently replan over it and lose history.
     // state.json aborts the run instead of being replanned over and lost.
     let Some(mut existing_state) = load_harness_state(state_path).map_err(|error| error.to_string())? else {
         return Ok(PreparedGoalState {
@@ -248,7 +250,8 @@ pub fn seed_initial_state(goal: &str, seed_tasks: Option<&[String]>) -> Option<H
     Some(state)
 }
 
-/// runner.ts:243 — `runCliGoal(args)`.
+/// Runs a goal end to end: prepare state, spawn the harness loop, then
+/// record the outcome (see [`SessionGoalOutcome`]).
 pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, String> {
     let PreparedGoalState {
         resumed_unfinished,
@@ -432,7 +435,8 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Result of [`capture_workspace_baseline`] — the TS anonymous return shape
+/// Result of [`capture_workspace_baseline`]: the stash commit sha, a
+/// human note, and the status context line.
 /// `{ contextNote, note, sha }`.
 pub struct WorkspaceBaseline {
     pub context_note: String,
@@ -445,8 +449,8 @@ pub struct WorkspaceBaseline {
 // touching the worktree; pinning it under refs/drip/baseline/ gives the
 // operator a guaranteed restore point (git stash apply <sha>) at zero cost.
 //
-// TS returns a Promise; the Rust port runs the same blocking git calls
-// synchronously with identical observable behavior. Any failure (not a git
+// The git calls run synchronously and block the caller; any failure (not a
+// git repo, git unavailable) is best-effort: returns None instead of failing.
 // repo, git unavailable) is best-effort: returns None instead of failing.
 pub fn capture_workspace_baseline(cwd: &Path, session_id: &str) -> Option<WorkspaceBaseline> {
     let status = run_git(cwd, &["status", "--porcelain"])?;
@@ -519,7 +523,6 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    // it("pins a stash ref for dirty trees and skips clean ones")
     #[test]
     fn pins_a_stash_ref_for_dirty_trees_and_skips_clean_ones() {
         let root = tempfile::TempDir::with_prefix("drip-baseline-").unwrap();
@@ -551,7 +554,6 @@ mod tests {
         );
     }
 
-    // it("returns null outside a git repo instead of failing the run")
     #[test]
     fn returns_null_outside_a_git_repo_instead_of_failing_the_run() {
         let root = tempfile::TempDir::with_prefix("drip-baseline-").unwrap();

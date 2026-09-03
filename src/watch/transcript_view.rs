@@ -22,7 +22,7 @@ use crate::tui::markdown_ansi::render_markdown_ansi;
 use crate::tui::theme::event_label;
 use crate::watch::ansi::{c, color_enabled, strip_ansi, wrap_ansi};
 
-/// render.ts `RowCell`.
+/// One rendered cell of a pane row.
 #[derive(Debug, Clone, Default)]
 pub struct RowCell {
     /// Plain text (no ANSI). Colored after fit inside render_pane.

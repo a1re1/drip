@@ -13,7 +13,7 @@ use crate::tools::helpers::{
 
 use super::{ToolCtx, ToolOutcome};
 
-const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB — mirror of grep-tool.ts
+const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB cap for scanned files
 const BINARY_PROBE_SIZE: usize = 1024; // 1KB
 
 // ── internal types ────────────────────────────────────────────────────────────
@@ -47,8 +47,8 @@ struct GrepToolResult {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Port of matchesGlob: only the last segment of the glob pattern is used
-/// against the basename (the walk already recurses into dirs).
+/// Only the last segment of the glob pattern is used against the basename
+/// (the walk already recurses into dirs).
 fn matches_glob(filename: &str, glob: &str) -> bool {
     let last_segment = glob.split('/').last().unwrap_or(glob);
     // Escape regex metacharacters except * and ?, then translate those two
@@ -70,7 +70,7 @@ fn matches_glob(filename: &str, glob: &str) -> bool {
         .unwrap_or_else(|_| filename == glob)
 }
 
-/// Port of escapeRegex.
+/// Escape regex metacharacters so the pattern matches literally.
 fn escape_regex(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for ch in s.chars() {
@@ -85,7 +85,7 @@ fn escape_regex(s: &str) -> String {
     out
 }
 
-/// Port of renderWithContext.
+/// Render matches with context windows, `>` markers and `--` separators.
 fn render_with_context(lines: &[&str], match_indices: &[usize], context_lines: usize) -> Vec<String> {
     if match_indices.is_empty() {
         return vec![];
@@ -134,7 +134,7 @@ fn render_with_context(lines: &[&str], match_indices: &[usize], context_lines: u
 
 // ── prepare ───────────────────────────────────────────────────────────────────
 
-/// Port of grepTool.prepare — validates args, resolves paths, returns GrepToolInput.
+/// Validates args, resolves paths, and returns the prepared GrepToolInput.
 fn prepare(args: &serde_json::Map<String, Value>, ctx: &ToolCtx) -> Result<GrepToolInput> {
     // Validate required pattern
     let pattern = match args.get("pattern") {
@@ -207,8 +207,8 @@ fn prepare(args: &serde_json::Map<String, Value>, ctx: &ToolCtx) -> Result<GrepT
 
 // ── regex builder ─────────────────────────────────────────────────────────────
 
-/// Build a Regex from pattern+flags. The TS flags are i/m/s — map to regex crate
-/// flag syntax via inline (?flags) prefix.
+/// Build a Regex from pattern+flags. Flags are the characters i/m/s, applied
+/// as a regex crate inline (?flags) prefix.
 fn build_regex(pattern: &str, flags: &str) -> Result<Regex> {
     let prefix: String = if flags.is_empty() {
         String::new()
@@ -235,7 +235,7 @@ fn clamp_context(v: Option<f64>) -> usize {
     }
 }
 
-/// Port of grepFiles — walks a directory or grepping a single file.
+/// Grep a single file, or walk a directory tree.
 fn grep_files(
     root_path: &Path,
     regex: &Regex,
@@ -311,7 +311,7 @@ fn grep_files(
     }
 }
 
-/// Port of walk — recursive directory walker. Entries sort by localeCompare.
+/// Recursive directory walker. Entries sort by locale order.
 #[allow(clippy::too_many_arguments)]
 fn walk(
     current_path: &Path,
@@ -427,7 +427,7 @@ fn walk(
 
 // ── complete ──────────────────────────────────────────────────────────────────
 
-/// Port of grepTool.complete — format the final tool content string.
+/// Format the final tool content string.
 fn complete_output(input: &GrepToolInput, result: &GrepToolResult) -> String {
     let GrepToolResult { matches, pattern, total_matches, file_count, context: context_lines } = result;
     let showing = matches.len();
@@ -476,7 +476,7 @@ fn complete_output(input: &GrepToolInput, result: &GrepToolResult) -> String {
 
 // ── execute_prepared ──────────────────────────────────────────────────────────
 
-/// Port of grepTool.execute — runs grep and produces outputText.
+/// Runs the grep and produces the result plus output text.
 fn execute_prepared(input: &GrepToolInput) -> (GrepToolResult, String) {
     let final_pattern = if input.literal {
         escape_regex(&input.pattern)
@@ -526,7 +526,7 @@ fn execute_prepared(input: &GrepToolInput) -> (GrepToolResult, String) {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
-/// OpenAI function schema — mirrors grepTool parameters in grep-tool.ts.
+/// OpenAI function schema for the grep tool.
 pub fn definition() -> Value {
     json!({
         "type": "function",
@@ -574,7 +574,7 @@ pub fn definition() -> Value {
     })
 }
 
-/// tools/grep-tool.ts:488 — `pattern=<p> path=<display> [glob=<g>]`.
+/// Display string: `pattern=<p> path=<display> [glob=<g>]`.
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     let map = super::tool_arguments(args).ok()?;
     let input = prepare(&map, ctx).ok()?;
@@ -643,7 +643,6 @@ mod tests {
         prepare(&map, &ctx).unwrap_err().to_string()
     }
 
-    // it("finds matches with correct file:line: text format")
     #[test]
     fn finds_matches_with_correct_file_line_text_format() {
         let tmp = TempDir::new().unwrap();
@@ -663,7 +662,6 @@ mod tests {
             "tool_content={tool_content}");
     }
 
-    // it("returns line numbers correctly for multiple matches in the same file")
     #[test]
     fn returns_line_numbers_correctly_for_multiple_matches() {
         let tmp = TempDir::new().unwrap();
@@ -680,7 +678,6 @@ mod tests {
         assert!(tool_content.contains("3 match(es) in 1 file(s)"), "tc={tool_content}");
     }
 
-    // it("filters files by glob suffix")
     #[test]
     fn filters_files_by_glob_suffix() {
         let tmp = TempDir::new().unwrap();
@@ -692,7 +689,6 @@ mod tests {
         assert!(!tc.contains("b.md"), "tc={tc}");
     }
 
-    // it("no-match is not a failure — returns 'No matches for' message")
     #[test]
     fn no_match_is_not_a_failure() {
         let tmp = TempDir::new().unwrap();
@@ -707,7 +703,6 @@ mod tests {
         assert!(!outcome.failed, "no-match should not be failure");
     }
 
-    // it("ignores node_modules and other DEFAULT_IGNORED_DIRS")
     #[test]
     fn ignores_default_ignored_dirs() {
         let tmp = TempDir::new().unwrap();
@@ -719,7 +714,6 @@ mod tests {
         assert!(!tc.contains("node_modules"), "tc={tc}");
     }
 
-    // it("caps results at maxResults")
     #[test]
     fn caps_results_at_max_results() {
         let tmp = TempDir::new().unwrap();
@@ -730,7 +724,6 @@ mod tests {
         assert!(tc.contains("3 match(es)"), "tc={tc}");
     }
 
-    // it("skips binary files")
     #[test]
     fn skips_binary_files() {
         let tmp = TempDir::new().unwrap();
@@ -744,7 +737,6 @@ mod tests {
         assert!(tc.contains("text.ts"), "tc={tc}");
     }
 
-    // it("case-insensitive search with flags:\"i\"")
     #[test]
     fn case_insensitive_search_with_flags_i() {
         let tmp = TempDir::new().unwrap();
@@ -757,7 +749,6 @@ mod tests {
         assert!(tc.contains("hello.ts:3:"), "tc={tc}");
     }
 
-    // it("literal:true finds 'a.b(c)' verbatim and does not treat it as regex")
     #[test]
     fn literal_true_finds_verbatim_not_regex() {
         let tmp = TempDir::new().unwrap();
@@ -769,7 +760,6 @@ mod tests {
         assert!(!tc.contains("data.ts:1:"), "tc={tc}");
     }
 
-    // it("context:2 renders before/after lines with > marker and -- separators")
     #[test]
     fn context_renders_before_after_lines_with_marker() {
         let tmp = TempDir::new().unwrap();
@@ -792,7 +782,6 @@ mod tests {
         assert!(output_text.contains("  8: fig"), "out={output_text}");
     }
 
-    // it("context:2 renders -- separator between non-overlapping match groups")
     #[test]
     fn context_renders_separator_between_non_overlapping_groups() {
         let tmp = TempDir::new().unwrap();
@@ -810,7 +799,6 @@ mod tests {
         assert!(output_text.contains("--"), "out={output_text}");
     }
 
-    // it("invalid flags string throws a clear error")
     #[test]
     fn invalid_flags_string_throws_clear_error() {
         let tmp = TempDir::new().unwrap();
@@ -820,7 +808,6 @@ mod tests {
         assert!(err.to_lowercase().contains("flag"), "err={err}");
     }
 
-    // it("flags and literal compose: literal:true + flags:i does case-insensitive literal match")
     #[test]
     fn flags_and_literal_compose_case_insensitive_literal() {
         let tmp = TempDir::new().unwrap();
@@ -839,7 +826,6 @@ mod tests {
         assert!(!tc.contains("combo.ts:4:"), "tc={tc}");
     }
 
-    // it("matches path-style and wildcard globs on the basename")
     #[test]
     fn matches_path_style_and_wildcard_globs_on_basename() {
         let tmp = TempDir::new().unwrap();
@@ -860,7 +846,6 @@ mod tests {
         assert!(tc_alpha.contains("alpha.md"), "alpha tc={tc_alpha}");
     }
 
-    // it("throws an error for an invalid regex pattern")
     #[test]
     fn throws_error_for_invalid_regex_pattern() {
         let tmp = TempDir::new().unwrap();
@@ -869,7 +854,6 @@ mod tests {
         assert!(err.contains("Invalid regex pattern"), "err={err}");
     }
 
-    // it("throws an error when pattern is missing")
     #[test]
     fn throws_error_when_pattern_is_missing() {
         let tmp = TempDir::new().unwrap();
@@ -878,7 +862,7 @@ mod tests {
         assert!(err.to_lowercase().contains("pattern"), "err={err}");
     }
 
-    // it("skips node_modules directories") — explicit node_modules/pkg/index.ts structure
+    // Explicit node_modules/pkg structure proves default-ignored dirs are skipped.
     #[test]
     fn skips_node_modules_directories() {
         let tmp = TempDir::new().unwrap();
@@ -895,7 +879,6 @@ mod tests {
         assert!(!tc.contains("node_modules"), "tc={tc}");
     }
 
-    // it("searches a specific file when path points to a file")
     #[test]
     fn searches_specific_file_when_path_points_to_file() {
         let tmp = TempDir::new().unwrap();

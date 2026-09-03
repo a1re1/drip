@@ -130,7 +130,7 @@ async fn plan_finish_summary_completes_the_run() {
     let expected = [
         "loop-start", "iteration-start", "inference", "harness-op", "inference", "model-text",
         "loop-start", "iteration-start", "inference", "task-finished",
-        // The summary call reports usage too (TS onUsage runs inside callModel).
+        // The summary call reports usage too, so it emits its own inference event.
         "inference", "run-summary", "run-complete",
     ];
     assert_eq!(kinds, expected, "event kinds");

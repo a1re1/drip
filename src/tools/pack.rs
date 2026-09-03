@@ -8,9 +8,9 @@
 //
 // Sync wrapping runs the whole builtin pipeline inside the execute stage:
 // the prepare stage only records the raw input. That is invisible to the
-// harness — it consumes `toolContent` and the tool-call block status only —
+// harness — it consumes `tool_content` and the tool-call block status only —
 // and both are identical: a builtin failure text is "ERROR: <message>"
-// (buildFailureResult), so the adapter strips the prefix and returns `Err`,
+// so the adapter strips the prefix and returns `Err`,
 // letting execute_tool_call rebuild exactly the same failure result.
 
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use crate::tools::types::{
     ChatToolRuntimeServices, ChatTmuxSession,
 };
 
-/// The names of the built-in pack in tools/index.ts order.
+/// The names of the built-in pack, in registration order.
 pub const BUILTIN_TOOL_NAMES: [&str; 9] = [
     "READ",
     "PATCH",
@@ -45,7 +45,7 @@ pub const BUILTIN_TOOL_NAMES: [&str; 9] = [
     "CHECK",
 ];
 
-/// main.tsx:327 — `const PLAN_MODE_TOOLS = new Set(["READ", "GREP", "DIR"])`.
+/// The tools readable while plan mode is active.
 pub const PLAN_MODE_TOOLS: [&str; 3] = ["READ", "GREP", "DIR"];
 
 /// Splits a builtin `definition()` envelope
@@ -69,11 +69,11 @@ fn tool_ctx(cwd: &str, allow_net: bool) -> ToolCtx {
 }
 
 /// Converts a builtin ToolOutcome into the execute-stage result. A thrown
-/// error (the "ERROR: " text buildFailureResult produces) becomes
+/// error (the "ERROR: " text a builtin failure carries) becomes
 /// `Err(message)` so execute_tool_call rebuilds the identical failure
 /// result; a stage that *finished* with status "failed" (BASH non-zero exit,
 /// VERIFY failing tests, CHECK errors) keeps its report text as the tool
-/// message and only marks the block failed, exactly as the TS stages do.
+/// message and only marks the block failed.
 fn outcome_to_result(outcome: ToolOutcome) -> Result<ChatToolResult, String> {
     if outcome.failed {
         if let Some(message) = outcome.text.strip_prefix("ERROR: ") {
@@ -93,9 +93,9 @@ fn outcome_to_result(outcome: ToolOutcome) -> Result<ChatToolResult, String> {
     })
 }
 
-/// How a tool's call is shown in the transcript and the TUI — the TS tool's
-/// `displayInput`, derived from the parsed arguments. Falls back to the raw
-/// input when the arguments do not parse; execute reports that error.
+/// How a tool's call is shown in the transcript and the TUI, derived from
+/// the parsed arguments. Falls back to the raw input when the arguments do
+/// not parse; execute reports that error.
 type DisplayInput = fn(&str, &ToolCtx) -> Option<String>;
 
 /// Wraps one builtin module as a sync ChatToolDefinition.
@@ -150,7 +150,7 @@ macro_rules! value_display {
 }
 
 // ---------------------------------------------------------------------------
-// BASH_ASYNC — tools/bash-tool.ts:473-624
+// BASH_ASYNC — the async variant of BASH, backed by a tmux session
 // ---------------------------------------------------------------------------
 
 fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPreparedInput, String> {
@@ -325,7 +325,7 @@ fn async_bash_complete(request: ChatToolCompleteRequest<'_>) -> Result<ChatToolC
     })
 }
 
-/// tools/bash-tool.ts:473 — `export const asyncBashTool = defineAsyncTool(...)`.
+/// The BASH_ASYNC tool definition.
 pub fn async_bash_tool() -> ChatToolDefinition {
     let (name, description, parameters) = split_definition(&builtin::bash::async_definition());
 
@@ -342,7 +342,7 @@ pub fn async_bash_tool() -> ChatToolDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// src/tools/framework-tools.ts — ASYNC_TAIL / ASYNC_WAIT
+// ASYNC_TAIL / ASYNC_WAIT — helpers around async background tool jobs
 // ---------------------------------------------------------------------------
 
 fn clamp_lines(value: Option<f64>) -> i64 {
@@ -399,7 +399,7 @@ fn join_present(parts: Vec<String>) -> String {
     parts.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
-/// framework-tools.ts:50-105 — asyncTailTool.
+/// The ASYNC_TAIL tool: read the latest lines from an async job's log.
 pub fn async_tail_tool() -> ChatToolDefinition {
     define_sync_tool(ChatToolDefinition {
         name: "ASYNC_TAIL".to_string(),
@@ -484,7 +484,7 @@ pub fn async_tail_tool() -> ChatToolDefinition {
     })
 }
 
-/// framework-tools.ts:107-180 — asyncWaitTool.
+/// The ASYNC_WAIT tool: wait for an async job to finish, with an optional timeout.
 pub fn async_wait_tool() -> ChatToolDefinition {
     define_sync_tool(ChatToolDefinition {
         name: "ASYNC_WAIT".to_string(),
@@ -605,7 +605,7 @@ pub fn async_wait_tool() -> ChatToolDefinition {
     })
 }
 
-/// framework-tools.ts:182 — `getFrameworkToolDefinitions()`.
+/// All framework tool definitions: ASYNC_TAIL and ASYNC_WAIT.
 pub fn get_framework_tool_definitions() -> Vec<ChatToolDefinition> {
     vec![async_tail_tool(), async_wait_tool()]
 }
@@ -622,7 +622,7 @@ pub fn builtin_tool_pack(allow_net: bool) -> Vec<ChatToolDefinition> {
         sync_tool(builtin::read::definition(), false, allow_net, value_display!(read), value_runner(builtin::read::execute)),
         sync_tool(builtin::patch::definition(), true, allow_net, value_display!(patch), value_runner(builtin::patch::execute)),
         sync_tool(builtin::dir::definition(), false, allow_net, value_display!(dir), value_runner(builtin::dir::execute)),
-        // Only PATCH declares mutatesWorkspace (patch-tool.ts:401); a BASH
+        // Only PATCH declares mutates_workspace; a BASH
         // call is not progress for the stall accounting.
         sync_tool(
             builtin::bash::definition(),
@@ -694,7 +694,7 @@ mod tests {
         (executed.tool_content, failed)
     }
 
-    /// The tool-call block's `input` for one call — the TS tool's displayInput.
+    /// The tool-call block's `input` for one call, as derived by `display`.
     fn display_of(name: &str, raw_input: &str, cwd: &std::path::Path) -> String {
         let tools = builtin_tool_pack(false);
         let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions { cwd: Some(cwd.to_path_buf()), jobs_root: None });
@@ -735,14 +735,14 @@ mod tests {
         assert_eq!(display_of("GREP", r#"{"pattern":"hi","path":".","glob":"*.txt"}"#, cwd), "pattern=hi path=. glob=*.txt");
         assert_eq!(display_of("VERIFY", r#"{"command":"true"}"#, cwd), "command=true");
         assert_eq!(display_of("BASH", r#"{"command":"true"}"#, cwd), ".\ntrue");
-        // FETCH's prepare refuses without --allow-net (as the TS prepare throws), so
-        // the block falls back to the raw input there; with net the TS formula shows.
+        // FETCH's prepare refuses without --allow-net, so the block falls back to
+        // the raw input there; with net the "GET url (max N bytes)" formula shows.
         assert_eq!(display_of("FETCH", r#"{"url":"https://example.com/x"}"#, cwd), r#"{"url":"https://example.com/x"}"#);
         assert_eq!(
             builtin::fetch::display_input(&Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()), &tool_ctx(&cwd.to_string_lossy(), true)),
             Some("GET https://example.com/x (max 100 bytes)".to_string())
         );
-        // A failed execution (no tsconfig here) shows the raw input, as buildFailureResult does in TS.
+        // A failed execution (no tsconfig here) shows the raw input.
         assert_eq!(display_of("CHECK", r#"{"path":"hello.txt"}"#, cwd), r#"{"path":"hello.txt"}"#);
         assert_eq!(
             builtin::check::display_input(&Value::String(r#"{"path":" hello.txt "}"#.into()), &tool_ctx(&cwd.to_string_lossy(), false)),

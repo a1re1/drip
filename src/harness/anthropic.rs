@@ -112,7 +112,7 @@ pub enum AnthropicContentBlock {
     ToolUse(AnthropicToolUseBlock),
     ToolResult(AnthropicToolResultBlock),
     /// Native blocks the harness never constructs (e.g. thinking blocks)
-    /// replay verbatim as raw JSON, exactly like the TS cast does.
+    /// replay verbatim as raw JSON.
     Raw(Value),
 }
 
@@ -542,7 +542,7 @@ pub struct AnthropicTranslatedResponse {
 // only the uncached remainder, so prompt_tokens re-adds the cache read/write
 // counts — the ledger's promptTokens keeps meaning "tokens the model saw".
 pub fn translate_anthropic_response(data: &Value) -> AnthropicTranslatedResponse {
-    // TS reads `data ?? {}`: null/undefined degrades to an empty body.
+    // A null body degrades to an empty response.
     if data.is_null() {
         return AnthropicTranslatedResponse::default();
     }
@@ -664,13 +664,10 @@ pub fn translate_anthropic_response(data: &Value) -> AnthropicTranslatedResponse
 
 #[cfg(test)]
 mod tests {
-    // Ports of the pure (non-network) tests in test/anthropic-transport.test.ts:
-    // the "isAnthropicNativeProvider", "buildAnthropicMessagesUrl",
-    // "buildAnthropicHeaders", "buildAnthropicRequestPayload" and
-    // "translateAnthropicResponse" describes. The "shipped Claude profiles on
-    // OpenRouter" describe needs the web/settings route resolver (another
-    // lane's module) and the "createModelCaller with the claude provider"
-    // describe needs the reqwest caller — both are deferred to task-10.
+    // Pure (non-network) tests for native-provider detection, the messages
+    // URL, header building, request-payload building, and response
+    // translation. The route resolver and the reqwest-backed caller are
+    // not covered in this module.
     use super::*;
     use crate::harness::transport::{
         OpenAICompatibleFunctionDefinition, OpenAICompatibleRequestTool,
@@ -706,7 +703,6 @@ mod tests {
         }
     }
 
-    // it("routes only the claude provider natively")
     #[test]
     fn routes_only_the_claude_provider_natively() {
         assert!(is_anthropic_native_provider(Some("claude")));
@@ -714,7 +710,6 @@ mod tests {
         assert!(!is_anthropic_native_provider(None));
     }
 
-    // it("swaps the chat-completions suffix for /messages")
     #[test]
     fn swaps_the_chat_completions_suffix_for_messages() {
         assert_eq!(
@@ -723,7 +718,6 @@ mod tests {
         );
     }
 
-    // it("appends /messages to a bare base URL and leaves an existing /messages URL alone")
     #[test]
     fn appends_messages_to_a_bare_base_url_and_leaves_an_existing_messages_url_alone() {
         assert_eq!(
@@ -736,7 +730,6 @@ mod tests {
         );
     }
 
-    // it("converts the shared Bearer credential to x-api-key and stamps the API version")
     #[test]
     fn converts_the_shared_bearer_credential_to_x_api_key_and_stamps_the_api_version() {
         let headers = build_anthropic_headers(&[
@@ -744,9 +737,9 @@ mod tests {
             ("content-type".to_string(), "application/json".to_string()),
         ]);
 
-        // TS asserts with toEqual on an object (order-insensitive); the
-        // builder's insertion order is content-type, then x-api-key, then
-        // anthropic-version — same keys, same values.
+        // The assertion is order-insensitive; the builder's insertion
+        // order is content-type, then x-api-key, then anthropic-version —
+        // same keys, same values.
         assert_eq!(
             headers,
             vec![
@@ -757,7 +750,6 @@ mod tests {
         );
     }
 
-    // it("never clobbers an explicit x-api-key or anthropic-version from the profile")
     #[test]
     fn never_clobbers_an_explicit_x_api_key_or_anthropic_version_from_the_profile() {
         let headers = build_anthropic_headers(&[
@@ -783,7 +775,6 @@ mod tests {
         assert!(headers.iter().all(|(name, _)| name != "Authorization"));
     }
 
-    // it("passes a non-bearer authorization header through untouched")
     #[test]
     fn passes_a_non_bearer_authorization_header_through_untouched() {
         let headers = build_anthropic_headers(&[(
@@ -800,7 +791,6 @@ mod tests {
         );
     }
 
-    // it("hoists system messages with a cache breakpoint on the last block and enables automatic caching")
     #[test]
     fn hoists_system_messages_with_a_cache_breakpoint_on_the_last_block() {
         let messages = vec![
@@ -893,7 +883,6 @@ mod tests {
         );
     }
 
-    // it("omits every cache_control marker when caching is off (one-shot summary calls)")
     #[test]
     fn omits_every_cache_control_marker_when_caching_is_off() {
         let payload = build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
@@ -921,7 +910,6 @@ mod tests {
         assert_eq!(payload.tools, None);
     }
 
-    // it("translates assistant tool calls to tool_use blocks and degrades unparseable arguments to an empty input")
     #[test]
     fn translates_assistant_tool_calls_to_tool_use_blocks() {
         let payload = build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
@@ -974,7 +962,6 @@ mod tests {
         );
     }
 
-    // it("merges consecutive tool results and trailing user text into a single alternating user turn")
     #[test]
     fn merges_consecutive_tool_results_and_trailing_user_text() {
         let payload = build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
@@ -1038,7 +1025,6 @@ mod tests {
         );
     }
 
-    // it("replays anthropicContent blocks verbatim instead of re-deriving from text + tool_calls")
     #[test]
     fn replays_anthropic_content_blocks_verbatim() {
         let native_blocks = vec![
@@ -1072,7 +1058,7 @@ mod tests {
             tools: None,
         });
 
-        // TS: expect(payload.messages[1]).toEqual({ content: nativeBlocks, role: "assistant" })
+        // messages[1] carries the native blocks as an assistant message.
         assert_eq!(payload.messages[1], AnthropicMessage {
             content: native_blocks.iter().cloned().map(AnthropicContentBlock::Raw).collect(),
             role: AnthropicRole::Assistant,
@@ -1086,7 +1072,6 @@ mod tests {
         ]);
     }
 
-    // it("converts image parts: data URLs to base64 sources, http URLs to url sources")
     #[test]
     fn converts_image_parts_data_urls_to_base64_sources() {
         let payload = build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
@@ -1140,7 +1125,6 @@ mod tests {
         );
     }
 
-    // it("maps content blocks to an OpenAI-shaped choice and re-adds cache tokens to prompt usage")
     #[test]
     fn maps_content_blocks_to_an_openai_shaped_choice() {
         let translated = translate_anthropic_response(&json!({
@@ -1195,7 +1179,6 @@ mod tests {
         );
     }
 
-    // it("attaches the raw native blocks for verbatim replay")
     #[test]
     fn attaches_the_raw_native_blocks_for_verbatim_replay() {
         let content = vec![
@@ -1221,7 +1204,6 @@ mod tests {
         );
     }
 
-    // it("maps the native error envelope onto the shared error shape")
     #[test]
     fn maps_the_native_error_envelope_onto_the_shared_error_shape() {
         let translated = translate_anthropic_response(&json!({
@@ -1241,7 +1223,6 @@ mod tests {
         assert!(translated.choices.is_none());
     }
 
-    // it("returns no choices for a non-message body so the protocol guard fires")
     #[test]
     fn returns_no_choices_for_a_non_message_body() {
         assert!(translate_anthropic_response(&json!({})).choices.is_none());

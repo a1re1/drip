@@ -983,7 +983,7 @@ impl TuiApp {
             }
             "state" => {
                 // A corrupt state file comes back as the loader's error text,
-                // which the TS surfaces through pushError.
+                // which is surfaced as an error entry.
                 let summary = format_state_summary(Path::new(&self.paths.state_path));
                 if summary.starts_with("Could not read harness state at ") || summary.starts_with("The file at ") {
                     self.push_error(summary);
@@ -1302,7 +1302,7 @@ impl TuiApp {
                     return;
                 }
             };
-            // Insertion-ordered like the TS Map.
+            // Insertion-ordered.
             let mut order: Vec<String> = Vec::new();
             let mut referenced_by: HashMap<String, Vec<String>> = HashMap::new();
             for profile in &profiles {

@@ -1,5 +1,5 @@
-// The TS helpers are fs/promises-based; the Rust port uses std::fs (blocking),
-// which is equivalent for a single-threaded-per-call tool execution model.
+// Filesystem helpers run on std::fs (blocking), which is equivalent to async
+// fs for a single-threaded-per-call tool execution model.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -7,10 +7,10 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Result};
 
-const BINARY_PROBE_SIZE: usize = 1024; // 1KB — mirror of grep-tool.ts isBinaryBuffer
+const BINARY_PROBE_SIZE: usize = 1024; // 1KB — the binary-probe window
 
 /// Returns true if the buffer contains a NUL byte in the first 1 KB,
-/// indicating a binary file. Mirrors the same check in tools/grep-tool.ts.
+/// indicating a binary file.
 pub fn is_binary_buffer(buffer: &[u8]) -> bool {
     let probe_len = buffer.len().min(BINARY_PROBE_SIZE);
     buffer[..probe_len].contains(&0)
@@ -53,8 +53,8 @@ const CWD_ALIASES: &[&str] = &[
     "workspace",
 ];
 
-/// Port of parseToolArguments: parses a JSON object out of the raw model
-/// string, rejecting non-objects with the model-facing error text.
+/// Parses a JSON object out of the raw model string, rejecting non-objects
+/// with the model-facing error text.
 pub fn parse_tool_arguments(raw_input: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
     let trimmed_input = raw_input.trim();
 
@@ -71,7 +71,7 @@ pub fn parse_tool_arguments(raw_input: &str) -> Result<serde_json::Map<String, s
     }
 }
 
-/// Port of getRequiredStringArgument.
+/// Extracts a required, non-empty string argument.
 pub fn get_required_string_argument(
     args: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -88,7 +88,7 @@ pub fn get_required_string_argument(
     Ok(text)
 }
 
-/// Port of getOptionalNumberArgument.
+/// Extracts an optional numeric argument.
 pub fn get_optional_number_argument(
     args: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -111,10 +111,10 @@ pub fn get_optional_number_argument(
     }
 }
 
-/// `Number(text)` for an already-trimmed, non-empty string: the decimal
-/// literal forms, `Infinity` with an optional sign, and the unsigned `0x`/`0o`/
-/// `0b` prefixes. Rust's `f64::from_str` differs on both sides — it takes
-/// `nan`/`inf`/`infinity` (JS: NaN) and rejects the hex/octal/binary forms.
+/// Numeric-literal parsing for an already-trimmed, non-empty string: the
+/// decimal forms, `Infinity` with an optional sign, and the unsigned
+/// `0x`/`0o`/`0b` prefixes. Rust's `f64::from_str` differs — it takes
+/// `nan`/`inf`/`infinity` and rejects the hex/octal/binary forms.
 pub fn js_number(text: &str) -> Option<f64> {
     static DECIMAL: OnceLock<regex::Regex> = OnceLock::new();
     let decimal = DECIMAL.get_or_init(|| regex::Regex::new(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$").unwrap());
@@ -134,7 +134,7 @@ pub fn js_number(text: &str) -> Option<f64> {
 
     if let Some(radix) = radix {
         // Accumulate in f64 so a literal past u64::MAX stays a large finite
-        // float, as Number() gives, instead of an overflow error.
+        // float instead of hitting an overflow error.
         let digits = &text[2..];
 
         if digits.is_empty() {
@@ -153,8 +153,9 @@ pub fn js_number(text: &str) -> Option<f64> {
     }
 }
 
-/// Port of resolveToolPath: alias strings resolve to the cwd itself; relative
-/// paths resolve against the cwd; absolute paths pass through unchanged.
+/// Resolves a tool path argument: alias strings resolve to the cwd itself;
+/// relative paths resolve against the cwd; absolute paths pass through
+/// unchanged.
 pub fn resolve_tool_path(cwd: &str, path_value: &str) -> PathBuf {
     let normalized_path = path_value.trim();
 
@@ -164,17 +165,16 @@ pub fn resolve_tool_path(cwd: &str, path_value: &str) -> PathBuf {
 
     let candidate = Path::new(normalized_path);
     if candidate.is_absolute() {
-        // node: isAbsolute(p) ? p : resolve(cwd, p) — absolute input passes
-        // through unnormalized; only the relative branch goes through
-        // path.resolve's lexical normalization.
+        // Absolute input passes through unnormalized; only the relative
+        // branch goes through lexical normalization.
         candidate.to_path_buf()
     } else {
         absolute_normalize(&Path::new(cwd).join(candidate))
     }
 }
 
-/// Port of path.relative for the cases the tool paths hit: both paths on the
-/// same root; produces `../`-prefixed components when the target escapes cwd.
+/// Relative-path computation for the cases the tool paths hit: both paths on
+/// the same root; produces `../`-prefixed components when the target escapes cwd.
 /// Returns an absolute path string when a relative form would be meaningless
 /// (diverging roots on Windows).
 fn path_relative(from: &Path, to: &Path) -> PathBuf {
@@ -211,8 +211,8 @@ fn components_after_root(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Lexically normalize a path against the process cwd (mirror of node
-/// path.resolve's normalization: collapses . and .. without touching the fs).
+/// Lexically normalize a path against the process cwd: collapses . and ..
+/// without touching the filesystem.
 fn absolute_normalize(path: &Path) -> PathBuf {
     let base = if path.is_absolute() {
         PathBuf::new()
@@ -233,7 +233,7 @@ fn absolute_normalize(path: &Path) -> PathBuf {
     result
 }
 
-/// Port of formatToolPath: display `target_path` relative to `cwd` when it
+/// Displays `target_path` relative to `cwd` when it
 /// lives underneath, `.` when it is the cwd itself, and the absolute path
 /// when it escapes upward.
 pub fn format_tool_path(cwd: &str, target_path: &Path) -> String {
@@ -251,7 +251,7 @@ pub fn format_tool_path(cwd: &str, target_path: &Path) -> String {
     }
 }
 
-/// Port of countLines: an empty string still counts as one (trailing) line.
+/// Counts lines; an empty string still counts as one (trailing) line.
 pub fn count_lines(text: &str) -> usize {
     if text.is_empty() {
         1
@@ -260,8 +260,7 @@ pub fn count_lines(text: &str) -> usize {
     }
 }
 
-/// Port of getToolPathKind (the TS version is async over fs/promises; std::fs
-/// is used here — same syscall surface).
+/// Classifies a path as file, directory, missing, or other from its metadata.
 pub fn get_tool_path_kind(target_path: &Path) -> Result<ToolPathKind> {
     match std::fs::metadata(target_path) {
         Ok(metadata) => {
@@ -283,7 +282,7 @@ pub fn get_tool_path_kind(target_path: &Path) -> Result<ToolPathKind> {
     }
 }
 
-/// Port of assertReadableFilePath.
+/// Asserts the path is a readable file.
 pub fn assert_readable_file_path(target_path: &Path, display_path: &str) -> Result<()> {
     match get_tool_path_kind(target_path)? {
         ToolPathKind::File => Ok(()),
@@ -296,7 +295,7 @@ pub fn assert_readable_file_path(target_path: &Path, display_path: &str) -> Resu
     }
 }
 
-/// Port of assertPatchTargetPath.
+/// Asserts the path is patchable: a file, or missing so PATCH can create it.
 pub fn assert_patch_target_path(target_path: &Path, display_path: &str) -> Result<ToolPathKind> {
     match get_tool_path_kind(target_path)? {
         kind @ (ToolPathKind::File | ToolPathKind::Missing) => Ok(kind),
@@ -311,7 +310,7 @@ pub fn assert_patch_target_path(target_path: &Path, display_path: &str) -> Resul
     }
 }
 
-/// Port of assertDirectoryPath.
+/// Asserts the path is a directory.
 pub fn assert_directory_path(target_path: &Path, display_path: &str) -> Result<()> {
     match get_tool_path_kind(target_path)? {
         ToolPathKind::Directory => Ok(()),
@@ -324,11 +323,10 @@ pub fn assert_directory_path(target_path: &Path, display_path: &str) -> Result<(
     }
 }
 
-// --- localeCompare -----------------------------------------------------------
+// --- locale_compare ----------------------------------------------------------
 //
-// JS `String.prototype.localeCompare` under Bun is ICU root collation. The TS
-// tools sort directory listings, grep walks, @-mention suggestions and
-// canonical JSON keys with it, and a model sees that order (`DIR` puts
+// Directory listings, grep walks, @-mention suggestions and canonical JSON
+// keys sort with ICU root collation, and a model sees that order (`DIR` puts
 // `hello.txt` before `NOTES.md`; byte order would not). This is the subset of
 // the root collation the workspace names actually exercise: three levels —
 // primary (whitespace < ICU punctuation order < digits < letters, case and
@@ -383,7 +381,7 @@ fn collation_elements(ch: char, out: &mut Vec<(u32, bool, bool)>) {
     }
 }
 
-/// Port of `left.localeCompare(right)` (ICU root collation, see above).
+/// Compares two strings under ICU root collation (see above).
 pub fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     if left == right {
@@ -498,7 +496,8 @@ mod tests {
         assert_eq!(js_number("0o17"), Some(15.0));
         assert_eq!(js_number("Infinity"), Some(f64::INFINITY));
         assert_eq!(js_number("-Infinity"), Some(f64::NEG_INFINITY));
-        // Rust's parser would take these; Number() gives NaN.
+        // Rust's f64 parser would accept these spellings; this grammar
+        // rejects all of them.
         assert_eq!(js_number("nan"), None);
         assert_eq!(js_number("inf"), None);
         assert_eq!(js_number("infinity"), None);
@@ -666,8 +665,8 @@ mod tests {
         );
     }
 
-    // The fixture is `[...names].sort((a, b) => a.localeCompare(b))` under Bun
-    // (ICU root); every adjacent pair must compare the same way here.
+    // The expected order is ICU root collation (see locale_compare); every
+    // adjacent pair must compare the same way here.
     #[test]
     fn locale_compare_matches_bun_icu_root_order() {
         let expected: Vec<&str> = vec![

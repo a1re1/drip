@@ -1,5 +1,6 @@
-// The TS file pulls `readJsonlRecords` from src/lib/fs.ts; drip's module tree
-// (PLAN.md Layout) has no lib/ module, so that helper is ported inline here as
+// Transcript JSONL reading: a small inline JSONL reader (blank lines
+// skipped, parse failures kept as raw-only records) plus the typed entry
+// model and its hand-rolled serializer below.
 // `read_jsonl_records`, with its provenance in its own comment.
 
 use std::fs;
@@ -74,7 +75,7 @@ pub struct TranscriptModelRoleRoute {
 	pub provider: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub reasoning_effort: Option<String>,
-	/// Last, as session-run.ts:107-112 spreads the route before `name`.
+	/// Serialized last, after the route, when present.
 	pub name: String,
 }
 
@@ -109,16 +110,14 @@ pub struct TranscriptSkillEntry {
 	pub name: String,
 }
 
-// The TS union discriminates on `type`; serde's internally-tagged enum plays
-// that role — the tag is parsed from the `type` field and each variant
-// carries only its own fields. `TranscriptNoteEntry` backs both "error" and
-// "info" (the TS note entry's type is `"error" | "info"`).
+// serde's internally-tagged enum discriminates on the `type` field; each
+// variant carries only its own fields. `TranscriptNoteEntry` backs both
+// "error" and "info".
 //
 // Serialization is hand-written (below) rather than derived: the derive puts
-// the tag first, but every TS call site builds the entry as an object literal
-// with alphabetically ordered keys — `type` lands last — and
-// `JSON.stringify` preserves that order, so a `tail -f` / `diff` of the two
-// harnesses' transcript.jsonl files only matches byte-for-byte when drip
+// the tag first, but the on-disk entries order their keys alphabetically —
+// `type` lands last — and byte-stable output keeps `tail -f` / `diff` of
+// transcript.jsonl files meaningful.
 // sorts the keys the same way.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type")]
@@ -170,9 +169,8 @@ impl Serialize for TranscriptEntry {
 			_ => return Err(serde::ser::Error::custom("transcript entry must serialize to an object")),
 		};
 		fields.insert("type".to_string(), serde_json::Value::String(self.tag().to_string()));
-		// Top-level keys in the order the TS object literals list them
-		// (alphabetical, byte-wise — the keys are all ASCII). Nested objects
-		// keep their own struct order, which already mirrors the TS shapes.
+		// Top-level keys are emitted in alphabetical order (all ASCII, so a
+		// byte-wise sort). Nested objects keep their own struct order.
 		let mut keys: Vec<String> = fields.keys().cloned().collect();
 		keys.sort();
 		let mut ordered = serde_json::Map::with_capacity(keys.len());
@@ -185,7 +183,8 @@ impl Serialize for TranscriptEntry {
 	}
 }
 
-/// Mirrors the TS `TRANSCRIPT_ENTRY_TYPES` Set — the discriminants
+/// The entry discriminants `read_transcript` accepts; every other line
+/// in the file is skipped.
 /// `read_transcript` accepts; every other line in the file is skipped.
 pub const TRANSCRIPT_ENTRY_TYPES: [&str; 7] = [
 	"error",
@@ -201,8 +200,8 @@ pub fn append_transcript_entry(
 	transcript_path: &Path,
 	entry: &TranscriptEntry,
 ) -> std::io::Result<()> {
-	// mkdirSync(dirname(transcriptPath), { recursive: true }) — dirname of a
-	// bare file name is "." in TS, where Path::parent gives "" instead.
+	// Create the parent directory too. A bare file name has no parent
+	// component: Path::parent then yields "", so "." is substituted.
 	if let Some(parent) = transcript_path.parent() {
 		let parent = if parent.as_os_str().is_empty() {
 			Path::new(".")
@@ -212,7 +211,7 @@ pub fn append_transcript_entry(
 		fs::create_dir_all(parent)?;
 	}
 
-	// appendFileSync(transcriptPath, `${JSON.stringify(entry)}\n`, "utf8")
+	// Appends the entry as one JSONL line.
 	let mut file = fs::OpenOptions::new()
 		.create(true)
 		.append(true)
@@ -224,7 +223,8 @@ pub fn append_transcript_entry(
 	)
 }
 
-/// One `{ parsed, raw }` record as returned by the TS `readJsonlRecords`:
+/// One JSONL record: `raw` is the line verbatim, `parsed` is the decoded
+/// value, or None when the line failed to parse.
 /// `raw` is the line verbatim, `parsed` is None when it failed JSON.parse.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonlRecord {
@@ -232,9 +232,8 @@ pub struct JsonlRecord {
 	pub raw: String,
 }
 
-// Thin adapter over crate::lib_fs::read_jsonl_records (the single port of
-// src/lib/fs.ts readJsonlRecords): a missing file reads as empty, any other
-// IO error surfaces like the TS readFileSync would.
+// Thin adapter over crate::lib_fs::read_jsonl_records: a missing file reads
+// as empty.
 pub fn read_jsonl_records(path: &Path) -> Vec<JsonlRecord> {
 	crate::lib_fs::read_jsonl_records::<serde_json::Value>(path)
 		.into_iter()
@@ -253,8 +252,9 @@ pub fn read_transcript(transcript_path: &Path) -> Vec<TranscriptEntry> {
 		// serde's Value::get mirrors the `"type" in parsed` lookup.
 		if let Some(entry_type) = parsed.get("type").and_then(|t| t.as_str()) {
 			if TRANSCRIPT_ENTRY_TYPES.contains(&entry_type) {
-				// The TS cast trusts the file; a tagged-enum deserialization
-				// of a malformed (yet known-typed) line would fail, so fall
+				// A malformed (yet known-typed) line must not poison the whole
+				// read, so fall back to skipping on a parse error, same as an
+				// unknown type.
 				// back to skipping on a parse error, same as an unknown type.
 				if let Ok(entry) = serde_json::from_value::<TranscriptEntry>(parsed.clone()) {
 					entries.push(entry);
@@ -319,7 +319,7 @@ mod tests {
 	use super::*;
 
 	fn make_temp_root() -> tempfile::TempDir {
-		// Port of test/fixtures.ts makeTempRoot: mkdtemp under the OS temp
+		// A temp dir under the OS temp location; TempDir removes it on drop.
 		// dir; TempDir removes it on drop (the vitest afterEach cleanup).
 		tempfile::tempdir().expect("makeTempRoot")
 	}
@@ -359,7 +359,6 @@ mod tests {
 		assert_eq!(keys, ["at", "data", "detail", "goalId", "iteration", "kind", "type"]);
 	}
 
-	// it("appends entries and replays them in order")
 	#[test]
 	fn appends_entries_and_replays_them_in_order() {
 		let root = make_temp_root();
@@ -386,7 +385,6 @@ mod tests {
 		assert_eq!(read_transcript(&transcript_path), vec![goal, event]);
 	}
 
-	// it("skips torn lines and unknown entry types")
 	#[test]
 	fn skips_torn_lines_and_unknown_entry_types() {
 		let root = make_temp_root();
@@ -400,7 +398,7 @@ mod tests {
 			}),
 		)
 		.unwrap();
-		// appendFileSync(transcriptPath, '{"type":"mystery","at":"x"}\n{"type":"goal","tor', "utf8")
+		// Feeds a truncated two-record line (the second record cut off mid-key).
 		let mut file = fs::OpenOptions::new().append(true).open(&transcript_path).unwrap();
 		file.write_all(b"{\"type\":\"mystery\",\"at\":\"x\"}\n{\"type\":\"goal\",\"tor").unwrap();
 

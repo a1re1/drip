@@ -109,7 +109,7 @@ pub struct RunSummaryMessagesArgs<'a> {
     pub workspace_changes: Option<String>,
 }
 
-/// prompt.ts buildToolUsageLine — names sorted by code point, zero counts dropped.
+/// Builds the tool-usage line — names sorted by code point, zero counts dropped.
 pub fn build_tool_usage_line(tool_usage: &std::collections::BTreeMap<String, u64>) -> String {
     let entries: Vec<String> = tool_usage
         .iter()
@@ -159,7 +159,7 @@ pub fn looks_like_question_goal(goal: &str) -> bool {
 pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMessageArgs<'_>) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    // Stable-first ordering (prompt.ts): the goal leads so the provider's
+    // Stable-first ordering: the goal leads so the provider's
     // prompt cache keeps hitting across cycles; the per-cycle fields sit just
     // above the instruction.
     sections.push(format!("goal: {}", state.goal));
@@ -648,7 +648,7 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
 }
 
 // ---------------------------------------------------------------------------
-// History / telemetry formatting helpers (ported from src/harness/prompt.ts)
+// History / telemetry formatting helpers
 // ---------------------------------------------------------------------------
 
 

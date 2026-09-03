@@ -1,9 +1,8 @@
-// Only the types + serialization helpers that chat/transport.ts (and the
-// harness model-call layer) need are ported. The remaining types.ts surface
-// (pinned/deleted/reply/retry context helpers, ChatRuntime,
-// getChatContextTargetId, editable-text accessors) is UI-facing — belongs to
-// the chat runtime, not the model transport layer; not ported here. All JSON
-// field names serialize camelCase-identical to the TS types.
+// The types + serialization helpers the transport and harness model-call
+// layers need. UI-facing surface (pinned/deleted/reply/retry context
+// helpers, ChatRuntime, getChatContextTargetId, editable-text accessors)
+// belongs to the chat runtime, not the model transport layer, and does not
+// live here. All JSON field names serialize camelCase.
 use serde::{Deserialize, Serialize};
 
 pub type ChatRole = ChatRoleTag;

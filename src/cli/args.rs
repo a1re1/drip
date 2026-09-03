@@ -21,9 +21,9 @@ impl ReviewSynthesis {
     }
 }
 
-/// Port of the TS `ParsedCliArgs` type (src/cli/args.ts:1-125). Booleans
-/// default to false; optional fields are Option. Field names mirror the TS
-/// names (snake_case here — this struct is never JSON-serialized).
+/// Parsed command-line arguments. Booleans default to false; optional
+/// fields are `Option`. Field names are snake_case here — this struct is
+/// never JSON-serialized.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCliArgs {
     pub continue_latest: bool,
@@ -250,18 +250,17 @@ fn take_session_ref(argv: &[String], index: usize) -> Option<String> {
 /// tokens are fatal; goals that genuinely start with "-" can be passed via
 /// --prompt, which takes its next token verbatim.
 ///
-/// Emulates `Number.parseInt(raw, 10)` followed by
-/// `String(parsed) === raw.trim()`: only a plain non-negative decimal literal
-/// (no sign, no leading zeros like "020", no trailing garbage, no overflow)
-/// round-trips through JS number formatting.
+/// Accepts only a plain non-negative decimal literal (no sign, no leading
+/// zeros like "020", no trailing garbage, no overflow); any other input
+/// yields `None`.
 fn parse_positive_int(raw: &str) -> Option<i64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
 
-    // JS: String(parseInt("020", 10)) === "020" is false → rejected. So any
-    // leading-zero literal must error, matching `String(parsed) === raw.trim()`.
+    // A leading-zero literal (e.g. "020") is not a plain decimal number, so
+    // it must be rejected.
     if trimmed.len() > 1 && trimmed.starts_with('0') {
         return None;
     }
@@ -519,7 +518,7 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.undo_last = true;
 
                 if let Some(next) = argv.get(index + 1) {
-                    // JS: /^\d+$/.test(next)
+                    // The next token must be digits only (no sign, no other characters).
                     if !next.is_empty() && next.bytes().all(|b| b.is_ascii_digit()) {
                         match next.parse::<i64>() {
                             Ok(value) if value > 0 => {
@@ -764,7 +763,7 @@ mod tests {
         parse_cli_args(&argv)
     }
 
-    // --- port of test/cli-headless.test.ts "strict argument validation" ---
+    // --- strict argument validation ---
 
     #[test]
     fn rejects_unknown_flags_instead_of_treating_them_as_goal_text() {
@@ -799,7 +798,7 @@ mod tests {
         assert!(!parse(&["--project-dir"]).errors.is_empty());
     }
 
-    // --- port of test/cli-headless.test.ts "skill flags" ---
+    // --- skill flags ---
 
     #[test]
     fn collects_repeatable_skill_names_and_parses_skills() {
@@ -812,7 +811,7 @@ mod tests {
         assert!(parse(&["--no-skills"]).no_skills);
     }
 
-    // --- port of test/cli-headless.test.ts "stop flag" ---
+    // --- stop flag ---
 
     #[test]
     fn parses_stop_with_and_without_a_session_ref() {
@@ -821,7 +820,7 @@ mod tests {
         assert_eq!(parse(&["--stop", "not a ref"]).stop_id, None);
     }
 
-    // --- port of test/cli-headless.test.ts "session-ref equals syntax" ---
+    // --- session-ref equals syntax ---
 
     #[test]
     fn attaches_refs_explicitly_with_flag_equals_ref() {
@@ -839,7 +838,7 @@ mod tests {
         assert!(!parse(&["--max-iterations=5"]).errors.is_empty());
     }
 
-    // --- port of test/cli-headless.test.ts "gc dry-run flag" + "result/wait flags" ---
+    // --- gc dry-run flag + result/wait flags ---
 
     #[test]
     fn parses_gc_with_dry_run_and_older_than() {
@@ -858,7 +857,7 @@ mod tests {
         assert_eq!(parse(&["--wait", "abc123"]).wait_id.as_deref(), Some("abc123"));
     }
 
-    // --- port of test/cli-gc.test.ts "Flag parsing" ---
+    // --- Flag parsing ---
 
     #[test]
     fn parses_gc_alone() {
@@ -934,12 +933,10 @@ mod tests {
         assert_eq!(parse(&["--max-iterations", "020"]).max_iterations, None);
     }
 
-    // --- port of test/cli-help-drift.test.ts (adapted): parser ↔ help text ---
-    // The TS drift test derives a flag roster from src/cli/args.ts and asserts
-    // each flag appears in CLI_HELP_TEXT. In Rust the parser is the source of
-    // truth, so the check runs in both directions: every flag HELP mentions is
-    // one the parser accepts (this test), and every flag the parser accepts is
-    // documented in HELP (help.rs::help_documents_every_cli_flag).
+    // --- parser ↔ help text drift ---
+    // The parser and the help text must agree in both directions: every flag
+    // HELP mentions is one the parser accepts (this test), and every flag the
+    // parser accepts is documented in HELP (help.rs::help_documents_every_cli_flag).
 
     #[test]
     fn every_flag_in_the_help_text_is_accepted_by_the_parser() {
@@ -949,8 +946,7 @@ mod tests {
         // lines count — lines whose trimmed text starts with "--" — because
         // prose paragraphs (e.g. the review-warnings blurb's "git push
         // --force / reset --hard") mention flag-shaped tokens that are not
-        // CLI flags. This mirrors the TS drift test's intent: its roster is
-        // derived from args.ts, never from prose. Splitting on whitespace
+        // CLI flags, never from prose. Splitting on whitespace
         // and slashes covers "--plugin-enable/--plugin-disable" and the
         // continuation indents under the USAGE block.
         let mut flags: Vec<String> = Vec::new();

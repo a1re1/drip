@@ -1,5 +1,4 @@
-// Children mirror the module tree in drip/PLAN.md; each child names the TS
-// file it ports in its header comment.
+// Children mirror the module tree in drip/PLAN.md.
 pub mod args;
 pub mod commands;
 pub mod delegate_tool;

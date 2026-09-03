@@ -1,6 +1,6 @@
 // Markdown → ANSI for line-oriented surfaces (the TUI timeline, dripw's
-// transcript pane). The TS renders through marked + marked-terminal; drip
-// carries a small renderer of its own covering what transcripts actually
+// transcript pane). drip carries a small renderer of its own covering what
+// transcripts actually
 // contain — headings, emphasis, inline code, fenced code, lists, quotes,
 // rules — so no markdown engine is pulled into the process. Known deviation:
 // the exact bytes differ from marked-terminal's; the structure and the SGR

@@ -1,5 +1,5 @@
-// Integration tests requiring runSolidStateHarness (test/harness-roles.test.ts)
-// are deferred until the harness loop is ported.
+// End-to-end integration tests that run the full harness loop are not
+// included here; this file covers the pure role-resolution layer.
 
 use std::collections::HashMap;
 
@@ -34,7 +34,6 @@ fn default_config() -> CliConfig {
 }
 
 // ---------------------------------------------------------------------------
-// describe("builtinRolePreset")
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -68,7 +67,6 @@ fn reviewed_preset_planning_role_cannot_patch() {
     assert!(!tools.contains(&"PATCH".to_string()));
 }
 
-// it("'planned' preset: a strong read-only architect plans, the fast author executes without a reviewer")
 #[test]
 fn planned_preset_strong_architect_plans_fast_author_executes() {
     let setup = builtin_role_preset("planned").unwrap();
@@ -222,7 +220,6 @@ fn every_preset_binds_both_loop_kinds_to_a_role_it_defines() {
 }
 
 // ---------------------------------------------------------------------------
-// describe("loadRolesFromFile")
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -254,7 +251,6 @@ fn load_roles_from_file_returns_no_bindings_for_file_omitting_the_block() {
 }
 
 // ---------------------------------------------------------------------------
-// describe("resolveRolesFlag")
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -323,7 +319,6 @@ fn resolve_roles_flag_reports_real_parse_error_not_preset_list_when_file_exists(
 }
 
 // ---------------------------------------------------------------------------
-// describe("role setup resolution")
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -504,7 +499,7 @@ fn resolve_role_setup_bad_json_in_settings_produces_issues() {
 }
 
 // ---------------------------------------------------------------------------
-// describe("--roles CLI flag parsing") — ported as arg-parser unit tests
+// --roles CLI flag parsing, exercised through the arg parser
 // ---------------------------------------------------------------------------
 
 #[test]

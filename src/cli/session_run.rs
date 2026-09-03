@@ -22,7 +22,7 @@ use crate::harness::r#loop::EmitFn;
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
-/// session-run.ts:15 — `LiveRunError`: another process holds the session lease.
+/// Another process currently holds the session lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveRunError {
     pub pid: i64,
@@ -45,7 +45,8 @@ impl std::fmt::Display for LiveRunError {
     }
 }
 
-/// session-run.ts:70 — what runSessionGoal can fail with: a live lease, or
+/// What [`run_session_goal`] can fail with: a live lease, or the harness
+/// run itself (an infrastructure error message).
 /// the harness run itself (an infrastructure error message).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionGoalError {
@@ -62,7 +63,8 @@ impl std::fmt::Display for SessionGoalError {
     }
 }
 
-/// session-run.ts:25 — `SessionGoalArgs`.
+/// Inputs to a session run: the session directory, the goal, and the model
+/// route override.
 pub struct SessionGoalArgs<'a> {
     pub cwd: String,
     pub goal: String,
@@ -97,7 +99,7 @@ pub struct SessionGoalArgs<'a> {
     pub tool_services: Option<ChatToolRuntimeServices>,
 }
 
-/// session-run.ts:60 — `SessionGoalOutcome`.
+/// How a session run ended: with a record, or with an error.
 pub struct SessionGoalOutcome {
     pub goal_id: String,
     /// Steering that arrived too late for this run; the session's next run consumes it.
@@ -115,7 +117,7 @@ pub fn current_pid() -> i64 {
     std::process::id() as i64
 }
 
-/// session-run.ts:74 — `runSessionGoal(args)`.
+/// Runs one goal against a session directory and returns how it ended.
 pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOutcome, SessionGoalError> {
     let paths = session_paths_for(args.project, args.session);
 

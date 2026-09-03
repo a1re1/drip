@@ -96,7 +96,7 @@ pub struct MarketplacePlugin {
 
 /// The provider-agnostic skill-file shape: a SKILL.md (or flat .md) with an
 /// optional frontmatter name and description. Marketplace plugins and local
-/// skill directories share this layout. (Private copy from skills.ts — see task notes.)
+/// skill directories share this layout. (Private copy of the skills.rs shape.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillFileEntry {
     pub description: String,
@@ -246,7 +246,7 @@ fn marketplace_root_dir(home: &DripHome, record: &MarketplaceRecord) -> PathBuf 
 }
 
 // ---------------------------------------------------------------------------
-// Git registry operations (port of marketplaces.ts lines 74-79, 160-250)
+// Git registry operations
 // ---------------------------------------------------------------------------
 
 /// Injectable `git` runner so tests (and callers) can stub out real git usage.
@@ -588,7 +588,7 @@ fn collect_agent_roles(agents_dir: &Path, marketplace_name: &str, plugin_name: &
 }
 
 // ---------------------------------------------------------------------------
-// Skill-file collection (private copy of skills.ts collectSkillFiles)
+// Skill-file collection (private copy of skills.rs collect_skill_files)
 // ---------------------------------------------------------------------------
 
 /// Normalize raw file content: strip UTF-8 BOM and convert CRLF to LF.

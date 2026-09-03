@@ -1,10 +1,9 @@
 // 495-512, 656-755, 1277-1334, 1368-1507): resolveInferenceConfig and the
 // helpers it composes. The settings parsers live in core/config.rs.
 //
-// The "cmd:" credential resolver is the port of src/web/command-credentials.ts
-// in tools/command_policy.rs; the TS registers it through
-// setCommandCredentialResolver so the browser bundle never shells out, and
-// drip has no browser, so the resolver is wired directly.
+// The "cmd:" credential resolver lives in tools/command_policy.rs and is
+// wired in directly: credentials resolve via shell-out from the CLI only —
+// there is no browser bundle to keep sandboxed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,10 +22,10 @@ use crate::harness::model_call::ModelRoute;
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const OPENROUTER_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 
-/// Header list (insertion-ordered, TS `Record<string, string>`).
+/// Header list (insertion-ordered).
 pub type Headers = Vec<(String, String)>;
 
-/// settings.ts:122 — `ResolvedModelRoute`.
+/// A resolved model route: base URL, model, headers, and optional fallback.
 #[derive(Clone)]
 pub struct ResolvedModelRoute {
     pub fallback_route: Option<Box<ResolvedModelRoute>>,
@@ -70,7 +69,7 @@ impl ResolvedModelRoute {
     }
 }
 
-/// settings.ts:143 — `ResolvedInferenceConfig = ResolvedModelRoute & {...}`.
+/// A resolved route plus the active system prompt and tool profile.
 #[derive(Clone, Debug)]
 pub struct ResolvedInferenceConfig {
     pub route: ResolvedModelRoute,
@@ -87,9 +86,9 @@ impl std::ops::Deref for ResolvedInferenceConfig {
     }
 }
 
-/// settings.ts:1368 — `ResolveInferenceOptions { env? }`: the env source for
-/// "env:NAME" references; the CLI passes its env.vars file merged over the
-/// process environment. `None` reads the process environment.
+/// The env source for "env:NAME" references: the CLI passes its env.vars
+/// file merged over the process environment. `None` reads the process
+/// environment.
 pub type EnvSource<'a> = Option<&'a HashMap<String, String>>;
 
 fn env_lookup(env: EnvSource<'_>, name: &str) -> Option<String> {
@@ -103,7 +102,7 @@ fn trim_trailing_slash(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
 
-/// settings.ts:354 — `getDefaultBaseUrl(provider)`.
+/// The default API base URL for a known provider.
 pub fn get_default_base_url(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1",
@@ -118,7 +117,7 @@ pub fn get_default_base_url(provider: &str) -> String {
     .to_string()
 }
 
-/// settings.ts:495 — `buildChatCompletionsUrl(baseUrl)`.
+/// Normalizes a base URL and appends the chat-completions path.
 pub fn build_chat_completions_url(base_url: &str) -> String {
     let normalized = trim_trailing_slash(base_url);
 
@@ -129,7 +128,7 @@ pub fn build_chat_completions_url(base_url: &str) -> String {
     format!("{normalized}/chat/completions")
 }
 
-/// settings.ts:505 — `supportsOpenAIReasoningEffort(profile)`.
+/// Whether the provider/model accepts an OpenAI-style reasoning-effort parameter.
 pub fn supports_openai_reasoning_effort(provider: &str, model: &str) -> bool {
     let model = model.trim();
 
@@ -146,7 +145,7 @@ pub enum ReferenceKind {
     Stored,
 }
 
-/// settings.ts:656 — `parseReferenceTarget(apiKeyRef, profileId)`.
+/// Parses an API-key reference target for a profile.
 pub fn parse_reference_target(api_key_ref: &str, profile_id: &str) -> Result<(ReferenceKind, String)> {
     let trimmed_ref = api_key_ref.trim();
 
@@ -179,7 +178,7 @@ pub fn parse_reference_target(api_key_ref: &str, profile_id: &str) -> Result<(Re
     Ok((ReferenceKind::Stored, stored_key_id.to_string()))
 }
 
-/// settings.ts:697 — `resolveStoredApiKey(settings, keyId, profileId)`.
+/// Looks up a stored API key entry by id.
 fn resolve_stored_api_key(settings: &IndexMap<String, String>, key_id: &str, profile_id: &str) -> Result<String> {
     let stored_keys = parse_stored_api_key_entries(settings)?;
     let matching_key = stored_keys
@@ -195,7 +194,7 @@ fn resolve_stored_api_key(settings: &IndexMap<String, String>, key_id: &str, pro
     Ok(key_value.to_string())
 }
 
-/// settings.ts:714 — `resolveProfileApiKey(profile, settings, env)`.
+/// Resolves the API key for a model profile.
 pub fn resolve_profile_api_key(
     profile: &InferenceModelProfile,
     settings: &IndexMap<String, String>,
@@ -238,7 +237,7 @@ pub fn resolve_profile_api_key(
         .filter(|value| !value.is_empty()))
 }
 
-/// settings.ts:1277 — `resolveActiveInferenceProfile(settings)`.
+/// Returns the currently active model profile.
 pub fn resolve_active_inference_profile(settings: &IndexMap<String, String>) -> Result<InferenceModelProfile> {
     let defaults = default_setting_values();
     let active_profile_id = settings
@@ -257,7 +256,7 @@ pub fn resolve_active_inference_profile(settings: &IndexMap<String, String>) -> 
         ))
 }
 
-/// settings.ts:1290 — `resolveActiveSystemPromptProfile(settings)`.
+/// Returns the currently active system-prompt profile.
 pub fn resolve_active_system_prompt_profile(settings: &IndexMap<String, String>) -> Result<SystemPromptProfile> {
     let defaults = default_setting_values();
     let active_prompt_id = settings
@@ -281,7 +280,7 @@ pub fn resolve_active_system_prompt_profile(settings: &IndexMap<String, String>)
 // profile catalog fails loudly, and a stale catalog that lacks the built-in
 // default tool profile falls back to the general model so settings saved
 // before routing existed keep working.
-/// settings.ts:1308 — `resolveActiveToolProfile(settings)`.
+/// Returns the currently active tool profile, if one is configured.
 pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Result<Option<InferenceModelProfile>> {
     let raw_value = settings.get(ACTIVE_TOOL_PROFILE_SETTING_ID);
 
@@ -308,7 +307,7 @@ pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Resul
     }
 }
 
-/// settings.ts:1331 — `resolveActiveProfileMaxContextTokens(settings)`.
+/// The active profile's max context tokens, or the crate default.
 pub fn resolve_active_profile_max_context_tokens(settings: &IndexMap<String, String>) -> Result<i64> {
     Ok(resolve_active_inference_profile(settings)?
         .max_context_tokens
@@ -322,7 +321,7 @@ pub fn resolve_active_profile_max_context_tokens(settings: &IndexMap<String, Str
 // route. A hop whose own route fails to resolve (missing credential on this
 // machine) is skipped in favour of ITS fallback, so a chain like
 // friendli → baseten → z.ai still reaches z.ai when only the z.ai key is set.
-/// settings.ts:1381 — `resolveFallbackRoute(...)`.
+/// Resolves the next usable route in a profile's fallback chain.
 fn resolve_fallback_route(
     profile: &InferenceModelProfile,
     settings: &IndexMap<String, String>,
@@ -355,8 +354,8 @@ fn build_headers(profile: &InferenceModelProfile, token: Option<&str>) -> Header
         .unwrap_or_default();
 
     if let Some(token) = token {
-        // TS object spread: an existing Authorization key keeps its position
-        // and takes the new value.
+        // An existing Authorization key keeps its position and takes the
+        // new value.
         if let Some(slot) = headers.iter_mut().find(|(key, _)| key == "Authorization") {
             slot.1 = format!("Bearer {token}");
         } else {
@@ -367,7 +366,7 @@ fn build_headers(profile: &InferenceModelProfile, token: Option<&str>) -> Header
     headers
 }
 
-/// settings.ts:1409 — `resolveProfileRoute(profile, settings, env, profiles?, visited)`.
+/// Resolves a profile's route, following fallback chains with cycle protection.
 fn resolve_profile_route_visited(
     profile: &InferenceModelProfile,
     settings: &IndexMap<String, String>,
@@ -402,7 +401,7 @@ fn resolve_profile_route_visited(
         let settings = settings.clone();
         let env = env.cloned();
 
-        // A failing command is the call's error, exactly as the TS closure throws:
+        // A failing command becomes the call's error, exactly as the closure raises it:
         // a request silently sent without Authorization would surface as a 401
         // with no hint of the real cause.
         Some(Arc::new(move || {
@@ -442,7 +441,7 @@ fn resolve_profile_route(
 // Resolves an arbitrary model profile id (e.g. a harness role's model) to a
 // callable route, honoring stored/env credential references like the active
 // and tool-calling profiles do.
-/// settings.ts:1455 — `resolveModelProfileRoute(settings, profileId, options?)`.
+/// Resolves the route for a named model profile.
 pub fn resolve_model_profile_route(
     settings: &IndexMap<String, String>,
     profile_id: &str,
@@ -457,7 +456,7 @@ pub fn resolve_model_profile_route(
     resolve_profile_route(profile, settings, env, Some(&profiles))
 }
 
-/// settings.ts:1470 — `resolveInferenceConfig(settings, options?)`.
+/// Resolves the full inference configuration from settings.
 pub fn resolve_inference_config(settings: &IndexMap<String, String>, env: EnvSource<'_>) -> Result<ResolvedInferenceConfig> {
     let profile = resolve_active_inference_profile(settings)?;
     let system_prompt_profile = resolve_active_system_prompt_profile(settings)?;
@@ -500,7 +499,7 @@ pub fn resolve_inference_config(settings: &IndexMap<String, String>, env: EnvSou
     })
 }
 
-/// settings.ts:1505 — `resolveInferenceUrl(settings)`.
+/// The inference endpoint URL from settings.
 pub fn resolve_inference_url(settings: &IndexMap<String, String>) -> Result<String> {
     Ok(resolve_inference_config(settings, None)?.url.clone())
 }

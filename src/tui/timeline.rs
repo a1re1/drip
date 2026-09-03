@@ -1,4 +1,4 @@
-//! Port of src/cli/ui/timeline.tsx (TimelineCellView) and src/cli/ui/repaint.ts.
+//! Timeline cell rendering and repaint scheduling for the TUI.
 //!
 //! The Ink components become pure functions that return already-painted ANSI
 //! rows: one String per terminal row, with no trailing newline.

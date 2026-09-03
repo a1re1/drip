@@ -1,5 +1,5 @@
-//! Pure render functions ported from the Ink UI components
-//! (composer.tsx, picker.tsx, status-bar.tsx). Each function returns one
+//! Pure render functions for the composer, picker and status bar. Each
+//! function returns one
 //! painted `String` per terminal row, with no trailing newline. Input
 //! handling is owned by the app; picker state is passed in.
 
@@ -45,7 +45,7 @@ pub fn boxed(rows: Vec<String>, width: usize, color: &str) -> Vec<String> {
     out
 }
 
-/// Composer render inputs, ported from `ComposerProps`.
+/// Composer render inputs.
 pub struct ComposerProps<'a> {
     pub attachments: &'a [GoalImageAttachment],
     pub cursor: usize,
@@ -154,7 +154,7 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     rows
 }
 
-/// Picker list item, ported from the Ink `Picker` `PickerItem` type.
+/// Picker list item.
 #[derive(Clone, Debug)]
 pub struct PickerItem {
     pub detail: Option<String>,
@@ -197,7 +197,7 @@ fn paint_bold_title(title: &str) -> String {
     crate::watch::ansi::c::bold(title)
 }
 
-/// Status bar render inputs, ported from `StatusBarProps`.
+/// Status bar render inputs.
 pub struct StatusBarProps<'a> {
     pub active_skill_names: &'a [String],
     pub cwd: &'a str,

@@ -1,35 +1,32 @@
-// The TypeScript loader dynamically imports a user tools module
-// (resolveToolsEntryPath + `await import(pathToFileURL(entryPath).href)`) and
-// validates the exported tool list. Rust has no dynamic TS import, and drip
-// only ships the built-in tool pack (drip/PLAN.md), so loadChatTools' import
-// step becomes a parameter: callers hand in an already-materialized
-// ChatToolsModule and load_chat_tools keeps the TS ordering (resolve the
-// entry path first, then run getChatTools).
+// Tools loader: resolves the entry path of a tools directory and validates
+// the exported tool list. drip only ships the built-in tool pack, so the
+// import step is a parameter: callers hand in an already-materialized
+// ChatToolsModule and load_chat_tools keeps the ordering (resolve the entry
+// path first, then run get_chat_tools).
 
 use std::path::{Path, PathBuf};
 
 use super::types::{ChatToolDefinition, ChatToolsModule};
 
-// const supportedToolEntries = ["index.tsx", "index.ts", "index.jsx", "index.js"];
+// Supported entry-file names for a tools directory.
 const SUPPORTED_TOOL_ENTRIES: [&str; 4] = ["index.tsx", "index.ts", "index.jsx", "index.js"];
 
-// function isToolDefinition(value: unknown): value is ChatToolDefinition —
-// every property the TS guard checks (string name/description, object
+// Every property the guard checks (string name/description, object
 // parameters, function-valued prepare/execute/complete) is enforced
-// statically by the Rust ChatToolDefinition (the stages are required boxed
-// closures), so the guard collapses to the type itself.
+// statically by ChatToolDefinition (the stages are required boxed closures),
+// so the guard collapses to the type itself.
 fn is_tool_definition(_tool: &ChatToolDefinition) -> bool {
     true
 }
 
-// function isToolList(value: unknown): value is ChatToolDefinition[]
+// True when every entry in the list is a valid tool definition.
 fn is_tool_list(tool_list: &[ChatToolDefinition]) -> bool {
     tool_list.iter().all(is_tool_definition)
 }
 
-// export function resolveToolsEntryPath(toolsPath: string): string —
-// existsSync + statSync().isFile() → Path::is_file(); the supported entry
-// candidates are probed in order under the directory form of the path.
+// Resolves the tools entry path: a direct file path wins; otherwise the
+// supported entry filenames are probed in order under the directory form
+// of the path.
 pub fn resolve_tools_entry_path(tools_path: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let absolute_path = resolve_from(&cwd, Path::new(tools_path));
@@ -53,7 +50,8 @@ pub fn resolve_tools_entry_path(tools_path: &str) -> Result<PathBuf, String> {
     ))
 }
 
-// node's resolve(cwd, toolsPath): absolute inputs stay as-is.
+// Path resolution against the cwd: absolute inputs stay as-is; relative
+// inputs join the cwd.
 fn resolve_from(cwd: &Path, tools_path: &Path) -> PathBuf {
     if tools_path.is_absolute() {
         tools_path.to_path_buf()
@@ -62,15 +60,11 @@ fn resolve_from(cwd: &Path, tools_path: &Path) -> PathBuf {
     }
 }
 
-// export function getChatTools(toolsModule: ChatToolsModule): ChatToolDefinition[]
-// ChatToolDefinition owns non-Clone boxed closures, so the module is consumed
-// by value and the winning list is moved out.
+// ChatToolDefinition owns non-Clone boxed closures, so the module is
+// consumed by value and the winning list is moved out.
 pub fn get_chat_tools(tools_module: ChatToolsModule) -> Result<Vec<ChatToolDefinition>, String> {
-    // const toolList = isToolList(toolsModule.default)
-    //   ? toolsModule.default
-    //   : isToolList(toolsModule.tools)
-    //     ? toolsModule.tools
-    //     : null;
+    // The default export wins when it is a tool list; otherwise the named
+    // "tools" export is used.
     let default_is_tool_list = tools_module
         .default
         .as_ref()
@@ -93,7 +87,6 @@ pub fn get_chat_tools(tools_module: ChatToolsModule) -> Result<Vec<ChatToolDefin
         );
     };
 
-    // const seenNames = new Set<string>();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for tool in &tool_list {
@@ -110,10 +103,9 @@ pub fn get_chat_tools(tools_module: ChatToolsModule) -> Result<Vec<ChatToolDefin
     Ok(tool_list)
 }
 
-// export async function loadChatTools(toolsPath: string): Promise<ChatToolDefinition[]>
-// The dynamic `await import(...)` half has no Rust equivalent — drip only
-// loads the built-in pack — so the module arrives already materialized and
-// the function keeps the TS ordering: entry resolution, then validation.
+// The module arrives already materialized — drip only loads the built-in
+// pack — so the function keeps the ordering: entry resolution, then
+// validation.
 pub fn load_chat_tools(
     tools_path: &str,
     tools_module: ChatToolsModule,
@@ -130,8 +122,8 @@ mod tests {
     };
     use super::*;
 
-    // const demoTool — from test/tool-loader.test.ts: sync DEMO tool with
-    // prepare → "{}", execute → "done", complete → no blocks.
+    // A sync DEMO test tool: prepare → "{}", execute → "done", complete →
+    // no blocks.
     fn demo_tool() -> ChatToolDefinition {
         define_sync_tool(ChatToolDefinition {
             name: "DEMO".to_string(),
@@ -162,7 +154,6 @@ mod tests {
         })
     }
 
-    // it("prefers a default export when present")
     #[test]
     fn prefers_a_default_export_when_present() {
         let tools = get_chat_tools(ChatToolsModule {
@@ -176,7 +167,6 @@ mod tests {
         assert_eq!(tools[0].description, "demo");
     }
 
-    // it("falls back to a named tools export")
     #[test]
     fn falls_back_to_a_named_tools_export() {
         let tools = get_chat_tools(ChatToolsModule {
@@ -190,7 +180,6 @@ mod tests {
         assert_eq!(tools[0].description, "demo");
     }
 
-    // it("resolves an index.ts file inside the provided tools directory")
     #[test]
     fn resolves_an_index_ts_file_inside_the_provided_tools_directory() {
         let tools_dir = tempfile::tempdir().expect("tempdir");
@@ -204,8 +193,8 @@ mod tests {
         assert_eq!(resolved, entry_path);
     }
 
-    // Rust addition covering the first TS throw site (error string verbatim):
-    // a module with neither export is refused.
+    // Covers the first refusal site (error string verbatim): a module with
+    // neither export is refused.
     #[test]
     fn modules_without_a_tool_list_are_refused() {
         let error = get_chat_tools(ChatToolsModule {
@@ -220,8 +209,8 @@ mod tests {
         );
     }
 
-    // Rust addition covering the second TS throw site (error string verbatim):
-    // duplicate tool names are refused.
+    // Covers the second refusal site (error string verbatim): duplicate tool
+    // names are refused.
     #[test]
     fn duplicate_tool_names_are_refused() {
         let error = get_chat_tools(ChatToolsModule {
@@ -236,8 +225,8 @@ mod tests {
         );
     }
 
-    // Rust addition covering the resolveToolsEntryPath throw site (error
-    // string verbatim, including the supported-entry roster).
+    // Covers the resolve_tools_entry_path refusal site (error string
+    // verbatim, including the supported-entry roster).
     #[test]
     fn no_tools_entry_error_lists_supported_entries() {
         let empty_dir = tempfile::tempdir().expect("tempdir");

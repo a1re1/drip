@@ -1,7 +1,5 @@
-// The helpers run-record.ts pulls from sibling modules are inlined here
-// (this module is their only consumer):
-//   - writeFileAtomic (src/lib/fs.ts) -> `write_file_atomic`
-//   - countTaskStats / deriveVerificationSummary (src/harness/state.ts)
+// Run-record IO: building, saving, and loading the per-goal run record, plus
+// wrappers over the shared task-tally and verification-summary derivations.
 //     -> `count_task_stats` / `derive_verification_summary`
 
 use std::fs;
@@ -65,7 +63,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 
 	RunRecord {
 		ended_at: args.ended_at.to_string(),
-		// TS spreads the field only when truthy, so an empty string drops too.
+		// An empty error message is dropped, same as a missing one.
 		error_message: args
 			.result
 			.error_message
@@ -74,7 +72,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 		goal: args.goal.to_string(),
 		goal_id: args.goal_id.to_string(),
 		iterations: args.result.iterations,
-		// TS spreads the field only when non-empty.
+		// An empty leaked-jobs list is dropped, same as a missing one.
 		leaked_jobs: args
 			.result
 			.leaked_jobs
@@ -97,7 +95,8 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 	}
 }
 
-// The TS record stores the reason union's literal string; round-trip through
+// The record stores the reason union's literal wire string; round-trip through
+// serde's rename table, the single source of those strings.
 // serde's rename table, the single source of the wire strings.
 fn run_reason_string(reason: &HarnessRunReason) -> String {
 	serde_json::to_value(reason)
@@ -132,21 +131,19 @@ pub fn load_run_record(path: &Path) -> Option<RunRecord> {
 	object.get("reason")?.as_str()?;
 	object.get("endedAt")?.as_str()?;
 
-	// TS casts the object after only gating reason/endedAt, so a hand-edited
-	// record that trims other fields would survive there. drip's struct is
-	// strict, so such a record reads as null — the same "no run recorded"
+	// Only reason/endedAt are gated before the struct parse, so a hand-edited
+	// record that trims other fields reads as null — the same "no run recorded"
+	// outcome as a torn file (no test observes the difference).
 	// outcome as a torn file (no test observes the difference).
 	serde_json::from_value(parsed).ok()
 }
 
-// Port of deriveVerificationSummary from src/harness/state.ts, inlined until
-// drip/src/harness/state.rs is ported.
+// Delegates to the shared verification-summary derivation in core::state.
 pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationSummary> {
 	crate::core::state::derive_verification_summary(state)
 }
 
-// Port of countTaskStats from src/harness/state.ts, inlined until
-// drip/src/harness/state.rs is ported.
+// Tally the state's tasks into blocked / completed / dropped counts.
 pub fn count_task_stats(tasks: &[HarnessTask]) -> TaskStats {
 	TaskStats {
 		blocked: tasks
@@ -177,7 +174,8 @@ mod tests {
 
 	use crate::core::types::HarnessVerificationRecord;
 
-	// The task literals in test/cli-run-record.test.ts only set seven fields;
+	// The test task literals only set seven fields; the rest are None here,
+	// matching the fixtures' omitted keys.
 	// the rest read as undefined there and None here.
 	fn make_task(id: &str, status: HarnessTaskStatus, title: &str) -> HarnessTask {
 		HarnessTask {
@@ -202,9 +200,9 @@ mod tests {
 		}
 	}
 
-	// makeRecord() from test/cli-run-record.test.ts. TS builds the state via
-	// createHarnessState("build the thing"); HarnessState::default() is the
-	// same shape (version 1, empty ledger, iteration/loop 0) with a blank
+	// Shared test fixture. HarnessState::default() matches the fixture's
+	// blank-slate state (version 1, empty ledger, iteration/loop 0) with an
+	// empty createdAt, so set a fixed ISO timestamp like the fixtures do.
 	// createdAt, so set a timestamp like now().toISOString() would.
 	fn make_record() -> RunRecord {
 		let mut state = HarnessState::default();
@@ -254,7 +252,6 @@ mod tests {
 		})
 	}
 
-	// it("captures the outcome fields a driver needs")
 	#[test]
 	fn captures_the_outcome_fields_a_driver_needs() {
 		let record = make_record();
@@ -284,7 +281,6 @@ mod tests {
 		assert_eq!(record.reason, "max-iterations");
 	}
 
-	// it("round-trips through save/load without leaving a temp file")
 	#[test]
 	fn round_trips_through_save_load_without_leaving_a_temp_file() {
 		let root = tempfile::TempDir::new().unwrap();
@@ -302,7 +298,6 @@ mod tests {
 		assert_eq!(entries, vec!["result.json".to_string()]);
 	}
 
-	// it("reads a missing or torn record as null instead of throwing")
 	#[test]
 	fn reads_a_missing_or_torn_record_as_null_instead_of_throwing() {
 		let root = tempfile::TempDir::new().unwrap();

@@ -19,11 +19,10 @@ pub fn merge_tool_definitions(tool_groups: Vec<Vec<ChatToolDefinition>>) -> Vec<
     merged_tools
 }
 
-// export async function resolveRuntimeToolCatalog(tools) — drip only ships the
-// built-in pack, so the dynamic `import("./framework-tools")` becomes a plain
-// parameter: the caller passes the framework definitions it already has (from
-// the built-in tool pack once it is ported; drip/src/tools/builtin/ is still
-// 1-line stubs). The TS Promise collapses to a synchronous return.
+// The framework definitions are a plain parameter rather than a dynamic
+// import: drip only ships the built-in tool pack, so the caller passes the
+// framework definitions it already has from that pack. The merge is
+// synchronous.
 pub fn resolve_runtime_tool_catalog(
     tools: Vec<ChatToolDefinition>,
     framework_tool_definitions: Vec<ChatToolDefinition>,
@@ -71,8 +70,8 @@ mod tests {
     use super::super::types::{define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters};
     use super::*;
 
-    // const readTool — the shared base definition from test/tool-catalog.test.ts:
-    // sync, prepare → empty display, execute → "read", complete → no blocks.
+    // The shared base READ definition the tests below reuse: sync, prepare →
+    // empty display, execute → "read", complete → no blocks.
     fn read_tool() -> ChatToolDefinition {
         define_sync_tool(ChatToolDefinition {
             name: "READ".to_string(),
@@ -106,7 +105,6 @@ mod tests {
         tool
     }
 
-    // it("keeps the full catalog when tool access is set to all")
     #[test]
     fn keeps_the_full_catalog_when_tool_access_is_set_to_all() {
         let catalog = filter_runtime_tool_catalog(FilterRuntimeToolCatalogArgs {
@@ -118,7 +116,6 @@ mod tests {
         assert_eq!(names, vec!["READ"]);
     }
 
-    // it("filters the catalog down to the selected tool names")
     #[test]
     fn filters_the_catalog_down_to_the_selected_tool_names() {
         let catalog = filter_runtime_tool_catalog(FilterRuntimeToolCatalogArgs {
@@ -130,11 +127,10 @@ mod tests {
         assert_eq!(names, vec!["READ"]);
     }
 
-    // it("includes framework async helper tools when async tools are present")
     //
-    // drip has no ported framework pack yet, so the test stands in for
-    // getFrameworkToolDefinitions() with stub ASYNC_TAIL/ASYNC_WAIT definitions
-    // carrying the same names.
+    // drip ships no framework pack, so the test stands in for the framework
+    // definitions with stub ASYNC_TAIL/ASYNC_WAIT definitions carrying the
+    // same names.
     #[test]
     fn includes_framework_async_helper_tools_when_async_tools_are_present() {
         let framework_tool_definitions = vec![stub_framework_tool("ASYNC_TAIL"), stub_framework_tool("ASYNC_WAIT")];

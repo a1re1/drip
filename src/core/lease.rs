@@ -1,6 +1,5 @@
-// TS notes kept for diffing: `now: () => Date` default params become explicit
-// `&dyn Fn() -> DateTime<Utc>` arguments (Rust has no default args); callers
-// that used the TS default pass `&chrono::Utc::now`.
+// Time is injected as a `&dyn Fn() -> DateTime<Utc>` argument (Rust has no
+// default args); callers that want the current time pass `&chrono::Utc::now`.
 
 use std::fs;
 use std::path::Path;
@@ -13,16 +12,16 @@ use serde::{Deserialize, Serialize};
 // --send, and double-launch guards distinguish "running right now" from
 // "crashed and left the index saying active".
 //
-// Field order matters: TS writes JSON.stringify({ heartbeatAt, pid, startedAt })
-// and serde serializes struct fields in declaration order.
+// Field order matters: serde serializes struct fields in declaration order
+// (heartbeatAt, pid, startedAt).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionLease {
     pub heartbeat_at: String,
     pub pid: i32,
-    // TS readLease only validates pid/heartbeatAt, so a hand-written lease
-    // without startedAt still parses; Option mirrors that loose read while
-    // writeLease always emits the field.
+    // A hand-written lease without startedAt still parses (only pid and
+    // heartbeatAt are required); Option mirrors that loose read while
+    // write_lease always emits the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
 }
@@ -47,7 +46,7 @@ pub fn write_lease(lease_path: &Path, now: &dyn Fn() -> DateTime<Utc>) -> std::i
         started_at: Some(started_at.unwrap_or(timestamp)),
     };
 
-    // Plain writeFileSync — no atomic rename in the TS either.
+    // A plain file write — no atomic rename.
     fs::write(
         lease_path,
         format!("{}\n", serde_json::to_string(&lease).expect("SessionLease serializes")),
@@ -60,8 +59,8 @@ pub fn read_lease(lease_path: &Path) -> Option<SessionLease> {
     }
 
     let contents = fs::read_to_string(lease_path).ok()?;
-    // The TS guard (parsed is an object with numeric pid and string
-    // heartbeatAt) is exactly what serde enforces on this struct; unknown
+    // Parsing only accepts an object with a numeric pid and a string
+    // heartbeatAt (exactly what serde enforces on this struct); unknown
     // fields are ignored, malformed JSON and wrong types read as null.
     serde_json::from_str(&contents).ok()
 }
@@ -81,10 +80,9 @@ pub fn clear_lease(lease_path: &Path) {
     let _ = fs::remove_file(lease_path);
 }
 
-// process.kill(pid, 0) in Node: signal 0 never delivers, and *any* failure —
-// ESRCH for a dead pid, EPERM for a live pid owned by someone else — throws,
-// so the TS try/catch reads both as "not alive". kill(2) returning 0 is the
-// only liveness signal.
+// kill(2) with signal 0 never delivers a signal; any failure — ESRCH for a
+// dead pid, EPERM for a live pid owned by someone else — reads as "not
+// alive". A zero return is the only liveness signal.
 fn process_alive(pid: i32) -> bool {
     // SAFETY: kill(2) with signal 0 performs a permission/liveness check only.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
@@ -135,8 +133,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    // Port of test/fixtures.ts makeTempRoot: mkdtemp under the OS temp dir;
-    // TempDir removes it on drop (the vitest afterEach cleanup).
+    // A throwaway temp dir; TempDir removes it on drop.
     fn make_lease_path() -> (tempfile::TempDir, std::path::PathBuf) {
         let root = tempfile::tempdir().expect("makeTempRoot");
         let lease_path = root.path().join("lease.json");
@@ -147,7 +144,6 @@ mod tests {
         move || Utc.with_ymd_and_hms(secs.0, secs.1, secs.2, secs.3, secs.4, secs.5).unwrap()
     }
 
-    // it("writes, reads, refreshes, and clears a lease for this process")
     #[test]
     fn writes_reads_refreshes_and_clears_a_lease_for_this_process() {
         let (_root, lease_path) = make_lease_path();
@@ -167,8 +163,8 @@ mod tests {
         assert_eq!(second.started_at.as_deref(), Some("2026-07-08T10:00:00.000Z"));
         assert_eq!(second.heartbeat_at, "2026-07-08T10:00:30.000Z");
 
-        // Byte parity with the TS writer: JSON.stringify({heartbeatAt, pid,
-        // startedAt}) + "\n", field order and camelCase keys included.
+        // Byte-exact expectation: the lease serialized with camelCase keys in
+        // field order (heartbeatAt, pid, startedAt) plus a trailing newline.
         assert_eq!(
             fs::read_to_string(&lease_path).unwrap(),
             format!(
@@ -181,7 +177,6 @@ mod tests {
         assert!(read_lease(&lease_path).is_none());
     }
 
-    // it("treats a live pid as alive through long heartbeat gaps, but not extreme staleness")
     #[test]
     fn treats_a_live_pid_as_alive_through_long_heartbeat_gaps_but_not_extreme_staleness() {
         let (_root, lease_path) = make_lease_path();
@@ -224,7 +219,6 @@ mod tests {
         }
     }
 
-    // it("clearLease only removes a lease owned by this process")
     #[test]
     fn clear_lease_only_removes_a_lease_owned_by_this_process() {
         let (_root, lease_path) = make_lease_path();
@@ -250,7 +244,6 @@ mod tests {
         assert!(read_lease(&lease_path).is_none());
     }
 
-    // it("treats garbage lease files as absent")
     #[test]
     fn treats_garbage_lease_files_as_absent() {
         let (_root, lease_path) = make_lease_path();

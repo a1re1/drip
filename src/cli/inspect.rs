@@ -1,6 +1,4 @@
-// port of src/cli/inspect.ts
-//
-// lci --inspect: answers "why did this run take 40 minutes and which tool
+// drip --inspect: answers "why did this run take 40 minutes and which tool
 // kept failing" from the artifacts a session already persists — transcript
 // events (with structured data since v0.33), state, and the run record —
 // without pulling thousands of raw JSONL lines into a driver's context.
@@ -432,7 +430,6 @@ mod tests {
 
 	static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
 
-	// makeTempRoot("lci-inspect-") from the TS test.
 	fn make_temp_root(prefix: &str) -> PathBuf {
 		let id = NEXT_TEMP_ID.fetch_add(1, Ordering::SeqCst);
 		let root = std::env::temp_dir().join(format!(
@@ -460,7 +457,7 @@ mod tests {
 	// a state.json with a two-entry verification trail, and a result.json
 	// built by buildRunRecord.
 	fn make_fixture() -> (PathBuf, PathBuf, PathBuf) {
-		let root = make_temp_root("lci-inspect-");
+		let root = make_temp_root("drip-inspect-");
 		let transcript_path = root.join("transcript.jsonl");
 		let state_path = root.join("state.json");
 		let result_path = root.join("result.json");
@@ -657,7 +654,7 @@ mod tests {
 	// it("reports an empty session gracefully")
 	#[test]
 	fn reports_an_empty_session_gracefully() {
-		let root = make_temp_root("lci-inspect-");
+		let root = make_temp_root("drip-inspect-");
 		let text = format_inspect_report(&build_inspect_report(&InspectPaths {
 			result_path: &root.join("r.json"),
 			state_path: &root.join("s.json"),

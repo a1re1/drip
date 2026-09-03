@@ -1,4 +1,3 @@
-// port of src/cli/watch (dripw)
 pub mod ansi;
 pub mod app;
 pub mod data;

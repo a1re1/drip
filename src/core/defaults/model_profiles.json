@@ -3,7 +3,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "glm-5-3-flash",
     "label": "GLM-5.3 Flash (OpenRouter)",
@@ -15,7 +15,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "glm-5-3",
     "label": "GLM-5.3 (OpenRouter)",
@@ -27,7 +27,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "kimi-k3",
     "label": "Kimi K3 (OpenRouter)",
@@ -39,7 +39,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "claude-opus-46",
     "label": "Claude Opus 4.6 (OpenRouter)",
@@ -51,7 +51,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "claude-sonnet-46",
     "label": "Claude Sonnet 4.6 (OpenRouter)",
@@ -63,7 +63,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "claude-haiku-45",
     "label": "Claude Haiku 4.5 (OpenRouter)",
@@ -75,7 +75,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "openai-gpt54",
     "label": "OpenAI GPT-5.4 (OpenRouter)",
@@ -87,7 +87,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "openai-gpt54-mini",
     "label": "OpenAI GPT-5.4 mini (OpenRouter)",
@@ -99,7 +99,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "openai-gpt54-nano",
     "label": "OpenAI GPT-5.4 nano (OpenRouter)",
@@ -111,7 +111,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "gemini-flash",
     "label": "Gemini 2.5 Flash (OpenRouter)",
@@ -123,7 +123,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "xai-grok-46",
     "label": "xAI Grok 4.6 (OpenRouter)",
@@ -135,7 +135,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "xai-grok-45",
     "label": "xAI Grok 4.5 (OpenRouter)",
@@ -147,7 +147,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "xai-grok-43",
     "label": "xAI Grok 4.3 (OpenRouter)",
@@ -159,7 +159,7 @@
     "apiKeyRef": "env:OPENROUTER_API_KEY",
     "baseUrl": "https://openrouter.ai/api/v1",
     "headers": {
-      "X-Title": "lci"
+      "X-Title": "drip"
     },
     "id": "gpt-oss-120b",
     "label": "GPT-OSS 120B (OpenRouter, fastest upstream)",

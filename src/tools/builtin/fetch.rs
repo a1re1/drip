@@ -1,5 +1,3 @@
-// port of tools/fetch-tool.ts
-
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -152,15 +150,12 @@ fn is_binary_content_type(content_type: &str) -> bool {
 // Tool definition
 // ---------------------------------------------------------------------------
 
-/// The OpenAI function definition lci sends for this tool (the
-/// {type: "function", function: {...}} envelope built by
-/// buildTransportTools in src/chat/runtime.ts).
+/// The OpenAI function definition drip sends for this tool (the
+/// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
     json!({
         "type": "function",
         "function": {
-            // The TS schema text says LCI_ALLOW_NET=1; in drip the user-visible
-            // product rename is DRIP_ALLOW_NET=1, matching the parity oracle.
             "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires DRIP_ALLOW_NET=1. Input: {url, maxBytes?}.",
             "name": "FETCH",
             "parameters": {
@@ -382,12 +377,11 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
-// port of tools/test/fetch-tool.test.ts
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // prepare() — scheme refusal (the LCI_ALLOW_NET gate is opened via the
+    // prepare() — scheme refusal (the DRIP_ALLOW_NET gate is opened via the
     // ToolCtx.allow_net flag in these tests).
 
     fn stage_ctx(allow_net: bool) -> ToolCtx {
@@ -463,8 +457,7 @@ mod tests {
         assert!(error.contains("--allow-net"), "{error}");
     }
 
-    // it("throws when LCI_ALLOW_NET is '0'") — in drip the gate is the
-    // boolean ctx.allow_net, so anything but enabled is refused.
+    // The gate is the boolean ctx.allow_net, so anything but enabled is refused.
     #[test]
     fn prepare_refuses_when_allow_net_not_exactly_enabled() {
         assert!(prepare(&json!({ "url": "https://example.com/" }), &stage_ctx(false)).is_err());

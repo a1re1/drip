@@ -1,5 +1,3 @@
-// port of src/cli/session-run.ts
-
 use std::path::Path;
 
 use crate::cli::follow::read_inbox_messages;

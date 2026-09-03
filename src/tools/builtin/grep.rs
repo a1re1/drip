@@ -1,5 +1,3 @@
-// port of tools/grep-tool.ts
-
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

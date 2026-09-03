@@ -1,5 +1,3 @@
-// port of src/harness/telemetry.ts
-//
 // Tool-output telemetry: canonicalized keys so key order does not split
 // records, end-keeping truncation (verdicts live at the END of verification
 // output), per-loop reinforcement, warm-context promotion, decay/eviction.
@@ -252,7 +250,6 @@ pub struct RunTelemetryMaintenanceArgs {
 	pub dynamic_tool_names: std::collections::HashSet<String>,
 }
 
-// port of the createHarnessState("goal") fixture the TS tests use — only the
 // fields telemetry touches (loop, promotedContext, telemetry).
 #[cfg(test)]
 fn create_harness_state(goal: &str) -> HarnessState {

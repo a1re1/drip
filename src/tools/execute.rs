@@ -1,5 +1,3 @@
-// port of src/tools/execute.ts
-//
 // Runs a single tool call through the three lifecycle stages defined in
 // types.rs (prepare → execute → complete), merging display tags along the
 // way and naming every failure (missing tool, JSON-argument parse errors,

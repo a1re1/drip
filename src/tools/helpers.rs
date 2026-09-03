@@ -1,5 +1,3 @@
-// port of src/tools/helpers.ts
-//
 // The TS helpers are fs/promises-based; the Rust port uses std::fs (blocking),
 // which is equivalent for a single-threaded-per-call tool execution model.
 

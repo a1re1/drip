@@ -1,5 +1,3 @@
-// port of src/cli/headless-output.ts
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

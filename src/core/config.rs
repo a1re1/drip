@@ -1,5 +1,3 @@
-// port of src/web/settings.ts (types, parsers, defaults, merge) + src/cli/config.ts (CLI layer).
-//
 // Settings are a flat map of string -> string (IndexMap keeps JSON object key
 // order stable across load/save). Profile lists are stored as JSON-string-
 // encoded settings values, exactly like the TS original. The shipped defaults

@@ -1,5 +1,3 @@
-// port of src/cli/gc.ts — GC helpers for expired session data.
-//
 // Rust adaptation: `now` becomes an explicit `&dyn Fn() -> DateTime<Utc>`
 // parameter (no TS default-arg trick), and the sqlite handles are the
 // core::sessions types. Field names and report shapes match the TS exactly.
@@ -363,7 +361,7 @@ pub fn reap_orphan_tmux_sessions(
     now_ms: i64,
     kill_session: &dyn Fn(&str) -> Result<(), String>,
 ) -> ReapResult {
-    let prefix = crate::tools::child_process::LCI_TMUX_PREFIX;
+    let prefix = crate::tools::child_process::TMUX_PREFIX;
     let mut killed: Vec<String> = Vec::new();
     let mut kept: Vec<String> = Vec::new();
 

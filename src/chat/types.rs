@@ -1,5 +1,3 @@
-// port of src/chat/types.ts
-//
 // Only the types tools/types.ts and its sibling modules import are ported
 // here (ChatRole, ChatTag, block/message/context types, ChatRuntimeContext).
 // The helper functions at the bottom of the TS file (serializeChatMessage*,

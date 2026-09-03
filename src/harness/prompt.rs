@@ -300,7 +300,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
                 args.repo_memory_dir.as_deref().unwrap()
             )
         } else {
-            "pages live in ~/.lci/projects/<slug>/memory/ (open with READ when relevant); save durable repo learnings with remember scope=repo.".to_string()
+            "pages live in ~/.drip/projects/<slug>/memory/ (open with READ when relevant); save durable repo learnings with remember scope=repo.".to_string()
         };
         sections.push(format!(
             "repo_memory (durable repo-level notes saved across sessions):\n{}\n{}",

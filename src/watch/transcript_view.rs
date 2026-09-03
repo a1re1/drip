@@ -1,5 +1,3 @@
-// port of src/cli/watch/transcript-view.ts
-//
 // Transcript entries → row cells for the dripw [0] pane.
 //
 // The pane used to print every event as `[iter] label <detail flattened to one

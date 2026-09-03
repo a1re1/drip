@@ -1,5 +1,3 @@
-// port of src/cli/lease.ts
-//
 // TS notes kept for diffing: `now: () => Date` default params become explicit
 // `&dyn Fn() -> DateTime<Utc>` arguments (Rust has no default args); callers
 // that used the TS default pass `&chrono::Utc::now`.

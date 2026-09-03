@@ -1,5 +1,3 @@
-// port of src/cli/env-vars.ts
-//
 // Dotenv-style credential store at <home>/env.vars: KEY=value lines read
 // before the process environment, owner-readable only (0600).
 
@@ -20,10 +18,10 @@ fn is_env_var_name(key: &str) -> bool {
     bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-pub const ENV_VARS_TEMPLATE: &str = "# lci credential store — KEY=value lines, read before the process environment.\n\
+pub const ENV_VARS_TEMPLATE: &str = "# drip credential store — KEY=value lines, read before the process environment.\n\
      # Model profiles reference these via \"apiKeyRef\": \"env:NAME\" in config.json,\n\
      # so tokens for every provider live here instead of shell profiles.\n\
-     # Set values with /env KEY=value inside lci, or edit this file directly.\n\
+     # Set values with /env KEY=value inside drip, or edit this file directly.\n\
      #\n\
      # Every shipped hosted profile routes through OpenRouter on this one key\n\
      # (https://openrouter.ai/settings/keys); bring your own vendor keys there.\n\
@@ -106,8 +104,8 @@ pub fn load_env_vars(env_vars_path: &Path) -> Result<Vars> {
     Ok(parse_env_vars(&fs::read_to_string(env_vars_path)?))
 }
 
-// The names (never the values) of the credentials this lci home manages, used
-// to scrub them from tool subprocess environments via LCI_SCRUB_ENV.
+// The names (never the values) of the credentials this drip home manages, used
+// to scrub them from tool subprocess environments via DRIP_SCRUB_ENV.
 pub fn list_env_var_names(env_vars_path: &Path) -> Result<Vec<String>> {
     Ok(load_env_vars(env_vars_path)?.into_iter().map(|(k, _)| k).collect())
 }

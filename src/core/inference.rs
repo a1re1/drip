@@ -1,4 +1,3 @@
-// port of src/web/settings.ts — the route-resolution half (lines 346-386,
 // 495-512, 656-755, 1277-1334, 1368-1507): resolveInferenceConfig and the
 // helpers it composes. The settings parsers live in core/config.rs.
 //
@@ -541,7 +540,7 @@ mod tests {
 
     #[test]
     fn resolves_env_credential_into_bearer_header_and_url() {
-        let profiles = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:MOCK_KEY","headers":{"X-Title":"lci"}}]"#;
+        let profiles = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:MOCK_KEY","headers":{"X-Title":"drip"}}]"#;
         let settings = settings_with(&[
             (MODEL_PROFILES_SETTING_ID, profiles),
             (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "mock"),
@@ -557,7 +556,7 @@ mod tests {
         assert_eq!(
             resolved.headers,
             vec![
-                ("X-Title".to_string(), "lci".to_string()),
+                ("X-Title".to_string(), "drip".to_string()),
                 ("Authorization".to_string(), "Bearer secret".to_string())
             ]
         );

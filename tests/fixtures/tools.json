@@ -253,7 +253,7 @@
     "type": "function",
     "function": {
       "name": "FETCH",
-      "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires LCI_ALLOW_NET=1. Input: {url, maxBytes?}.",
+      "description": "Fetch a URL via HTTP GET and return its text content. HTML is stripped of scripts/styles and collapsed. Requires DRIP_ALLOW_NET=1. Input: {url, maxBytes?}.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

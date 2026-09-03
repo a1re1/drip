@@ -1,12 +1,10 @@
-// port of tools/index.ts (the built-in pack), tools/bash-tool.ts:473-624
-// (asyncBashTool) and src/tools/framework-tools.ts (ASYNC_TAIL / ASYNC_WAIT).
+// The built-in tool pack, plus the async bash tool and the ASYNC_TAIL /
+// ASYNC_WAIT framework tools.
 //
-// lci ships its built-in tools as TypeScript modules under <repo>/tools/,
-// each a defineSyncTool/defineAsyncTool object with prepare/execute/complete
-// stages. drip's builtin/ modules expose the same behavior as plain functions
-// (definition() + execute(args, ctx)); this module wraps them back into
-// `ChatToolDefinition`s so the harness loop (execute_tool_call in
-// tools/execute.rs) drives them through the same three-stage pipeline.
+// The builtin/ modules expose each tool as plain functions (definition() +
+// execute(args, ctx)); this module wraps them into `ChatToolDefinition`s so
+// the harness loop (execute_tool_call in tools/execute.rs) drives them
+// through the prepare/execute/complete pipeline.
 //
 // Sync wrapping runs the whole builtin pipeline inside the execute stage:
 // the prepare stage only records the raw input. That is invisible to the
@@ -613,12 +611,12 @@ pub fn get_framework_tool_definitions() -> Vec<ChatToolDefinition> {
 }
 
 // ---------------------------------------------------------------------------
-// tools/index.ts — the built-in pack
+// The built-in pack
 // ---------------------------------------------------------------------------
 
-/// tools/index.ts — `[readTool, patchTool, dirTool, bashTool, asyncBashTool,
-/// grepTool, verifyTool, fetchTool, checkTool]`. `allow_net` is the
-/// LCI_ALLOW_NET=1 gate FETCH honors (main.tsx:707 sets it from --allow-net).
+/// The built-in pack, in declaration order: READ, PATCH, DIR, BASH, BASH_ASYNC,
+/// GREP, VERIFY, FETCH, CHECK. `allow_net` is the DRIP_ALLOW_NET=1 gate FETCH
+/// honors (set from --allow-net).
 pub fn builtin_tool_pack(allow_net: bool) -> Vec<ChatToolDefinition> {
     vec![
         sync_tool(builtin::read::definition(), false, allow_net, value_display!(read), value_runner(builtin::read::execute)),

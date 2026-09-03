@@ -1,5 +1,3 @@
-// port of src/cli/review-report.ts
-//
 // The pure half of --review: prompt construction, report parsing, and the
 // deterministic confidence table. Kept free of session/index imports (which
 // pull in sqlite) so this logic — the part where a bug silently corrupts a
@@ -1550,7 +1548,7 @@ mod tests {
         assert_eq!(render_excerpts("a\nb\nc\n", &[ExcerptWindow { start: 2, end: 2 }]), "Lines 2-2:\n2\tb");
     }
 
-    // test/cli-review.test.ts "shrinks excerpt context, then drops tail windows, to stay under the cap"
+    // Excerpt context shrinks first, then tail windows drop, to stay under the cap.
     #[test]
     fn shrinks_excerpt_context_then_drops_tail_windows() {
         let hunks = (0..10).map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 100 + 1, i * 100 + 1)).collect::<Vec<_>>().join("\n");

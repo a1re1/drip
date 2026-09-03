@@ -6,11 +6,8 @@ and exits with a structured result. The TUI (`drip --tui`) and the `dripw`
 watcher are monitors layered on the same session store — not the primary
 interface.
 
-drip is a Rust port of [lci](https://github.com/worldbreakstudios/local-code-inference)
-(TypeScript/Bun): same flags, same `--json` contract, same on-disk session
-format, same tool pack — checked scenario-by-scenario against lci with a
-differential harness. It compiles to a single static binary, starts in a few
-milliseconds, and needs no runtime.
+drip compiles to a single static binary, starts in a few milliseconds, and
+needs no runtime.
 
 ---
 
@@ -21,16 +18,6 @@ cargo install --path .        # puts `drip` and `dripw` on your PATH
 # or build in place:
 cargo build --release && ./target/release/drip "goal"
 ```
-
-Coming from lci? Copy your config, keys, skills, marketplaces and sessions
-across (nothing is moved or deleted; existing destination files are kept):
-
-```sh
-drip --migrate-from-lci --dry-run   # show the plan
-drip --migrate-from-lci             # ~/.lci → ~/.drip (or $LCI_HOME → $DRIP_HOME)
-```
-
----
 
 ## Quickstart
 
@@ -234,18 +221,6 @@ project root's path slug — the same scheme the memory bank uses. Repo-scoped
 data (`patches.jsonl`, `async-tools/`, `skills/`, `roles.json`, `plugins.json`)
 stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 `DRIP_PROJECT_DIR` / `--project-dir` pins the project root.
-
----
-
-## Relationship to lci
-
-lci is the reference implementation the port was checked against: the
-differential parity harness in the
-[local-code-inference](https://github.com/worldbreakstudios/local-code-inference)
-repo runs each scenario against both binaries and diffs the normalized
-artifacts — stdout, stderr, exit code, `state.json`, `transcript.jsonl`,
-`result.json`, session index rows, and every request the model saw. Each
-Rust module names the TypeScript file it ports in a header comment.
 
 ---
 

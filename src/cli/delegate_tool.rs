@@ -1,5 +1,3 @@
-// port of src/cli/delegate-tool.ts
-
 use std::sync::Arc;
 
 use serde_json::{json, Value};

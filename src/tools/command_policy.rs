@@ -1,5 +1,3 @@
-// port of src/tools/command-policy.ts
-//
 // Destructive-command policy for model-chosen shell commands. drip runs
 // headless in user repos: nothing between the model and `bash -lc` inspected
 // what was about to run. This gate blocks the small set of commands whose
@@ -307,9 +305,8 @@ pub fn format_policy_refusal(command: &str, rule: &str, why: &str) -> String {
     .join("\n")
 }
 
-// `process.env.LCI_ALLOW_DESTRUCTIVE === "1"` (renamed DRIP_ALLOW_DESTRUCTIVE
-// per the port rule): the shared override check used by the bash/verify tool
-// prepare stages. `--allow-destructive` sets the variable to exactly "1";
+// `DRIP_ALLOW_DESTRUCTIVE == "1"`: the shared override check used by the
+// bash/verify tool prepare stages. `--allow-destructive` sets the variable to exactly "1";
 // "0", unset, or any other value leaves blocks enforced.
 pub fn allow_destructive_enabled() -> bool {
     std::env::var("DRIP_ALLOW_DESTRUCTIVE").ok().as_deref() == Some("1")
@@ -334,7 +331,6 @@ pub fn enforce_command_policy(command: &str, workspace_root: &str) -> Result<(),
 }
 
 // ---------------------------------------------------------------------------
-// port of src/web/command-credentials.ts
 // ---------------------------------------------------------------------------
 
 // Resolves a "cmd:" credential reference by running a shell command and using
@@ -498,7 +494,6 @@ pub fn clear_command_credential_cache() {
 }
 
 // ---------------------------------------------------------------------------
-// port of src/harness/redact.ts
 // ---------------------------------------------------------------------------
 
 // Secret redaction at the tool-output choke point. Tool output flows into
@@ -566,7 +561,6 @@ pub fn build_redactor(secrets: impl IntoIterator<Item = (String, String)>) -> im
 }
 
 // ---------------------------------------------------------------------------
-// port of test/command-policy.test.ts
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
@@ -579,8 +573,8 @@ mod tests {
 
     // --- destructive-command policy ---------------------------------------
 
-    // --allow-destructive downgrade (TS: bash-tool.ts/verify-tool.ts prepare
-    // stages read LCI_ALLOW_DESTRUCTIVE === "1").
+    // --allow-destructive downgrade (the bash/verify prepare stages read
+    // DRIP_ALLOW_DESTRUCTIVE == "1").
     #[test]
     fn allow_destructive_downgrades_blocks_only_when_env_is_exactly_one() {
         std::env::remove_var("DRIP_ALLOW_DESTRUCTIVE");
@@ -659,7 +653,6 @@ mod tests {
         assert_eq!(evaluate_command_policy("bun test 2>&1 | tail -5", &ws).verdict(), "allow");
     }
 
-    // it("honors the repo allowlist in .lci/policy.json")
     #[test]
     fn honors_the_repo_allowlist_in_policy_json() {
         clear_repo_policy_cache();
@@ -712,7 +705,6 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// port of test/command-credentials.test.ts
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod credentials_tests {

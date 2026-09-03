@@ -1,10 +1,6 @@
-// Prompt-parity test: every prompt builder in drip::harness::prompt must
-// reproduce, byte for byte (after the lci→drip rename rule), the text the TS
-// oracle (src/harness/prompt.ts) produces for the fixture states dumped by
-// drip/parity/tools/dump-prompt.ts into tests/fixtures/prompt.json.
-//
-// Regenerate the fixture from the repo root:
-//   bun drip/parity/tools/dump-prompt.ts > drip/tests/fixtures/prompt.json
+// Prompt snapshot: the prompt builders in src/harness/prompt.rs must reproduce,
+// byte for byte, the text committed for each fixture state in
+// tests/fixtures/prompt.json.
 
 use drip::core::types::{HarnessRunReason, HarnessState};
 use drip::harness::prompt::{
@@ -15,25 +11,6 @@ use drip::harness::prompt::{
     DEFAULT_HARNESS_SYSTEM_PROMPT, RUN_SUMMARY_SYSTEM_PROMPT,
 };
 use serde_json::Value;
-
-const RENAMES: &[(&str, &str)] = &[("lciw", "dripw"), ("LCI_", "DRIP_"), ("LCI", "DRIP"), ("lci", "drip")];
-
-fn rename(text: &str) -> String {
-    let mut text = text.to_string();
-    for (from, to) in RENAMES {
-        text = text.replace(from, to);
-    }
-    text
-}
-
-fn rename_value(value: &Value) -> Value {
-    match value {
-        Value::String(s) => Value::String(rename(s)),
-        Value::Array(items) => Value::Array(items.iter().map(rename_value).collect()),
-        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), rename_value(v))).collect()),
-        other => other.clone(),
-    }
-}
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!("fixtures/prompt.json")).expect("fixture parses")
@@ -48,7 +25,7 @@ fn expect_str(fx: &Value, path: &[&str]) -> String {
     for p in path {
         v = &v[*p];
     }
-    rename(v.as_str().unwrap_or_else(|| panic!("fixture string at {path:?}")))
+    v.as_str().unwrap_or_else(|| panic!("fixture string at {path:?}")).to_string()
 }
 
 fn expect_value(fx: &Value, path: &[&str]) -> Value {
@@ -57,7 +34,7 @@ fn expect_value(fx: &Value, path: &[&str]) -> Value {
         v = &v[*p];
     }
     assert!(!v.is_null(), "fixture value at {path:?}");
-    rename_value(v)
+    v.clone()
 }
 
 fn check(name: &str, actual: &str, expected: &str) {

@@ -1,5 +1,3 @@
-// port of src/cli/sessions.ts
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -35,7 +33,7 @@ pub struct ProjectPaths {
 }
 
 impl From<&crate::core::home::DripProject> for ProjectPaths {
-    // The home.rs DripProject is the real LciProject port; ProjectPaths is the
+    // The home.rs DripProject is the full project record; ProjectPaths is the
     // subset the session store reads. Optional roots fall back to the slug
     // holder's `root` so a --project-dir override still keys consistently.
     fn from(project: &crate::core::home::DripProject) -> Self {
@@ -132,8 +130,8 @@ pub fn open_session_index(db_path: &str) -> SessionIndex {
     // connection closes; SQLite's default is to delete them, and a WAL
     // database without its -shm cannot be opened read-only (dripw, the parity
     // harness, and anything else that peeks at the index without write
-    // intent). Persisting the WAL files keeps the on-disk layout identical
-    // to lci's.
+    // intent). Persisting the WAL files keeps the on-disk layout stable
+    // across versions.
     persist_wal_files(&conn);
     // The CLI and the web server share one index; WAL permits cross-process
     // access but a busy timeout is what prevents spurious SQLITE_BUSY throws.

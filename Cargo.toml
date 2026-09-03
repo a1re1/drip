@@ -2,7 +2,7 @@
 name = "drip"
 version = "0.103.0"
 edition = "2021"
-description = "drip — Rust port of lci, a headless-first coding agent harness"
+description = "drip — a headless-first coding agent harness"
 
 # Binaries: `drip` (port of src/cli/main.tsx) and `dripw` (port of src/cli/watch/*).
 [[bin]]
@@ -13,9 +13,9 @@ path = "src/main.rs"
 name = "dripw"
 path = "src/bin/dripw.rs"
 
-# Dependency allowlist (drip/PLAN.md + port brief): serde, serde_json, anyhow,
-# thiserror, uuid, chrono, rusqlite (bundled), tokio, reqwest (rustls), regex,
-# dirs, shell-words, indexmap, libc, glob, walkdir, tempfile.
+# Dependency allowlist: serde, serde_json, anyhow, thiserror, uuid, chrono,
+# rusqlite (bundled), tokio, reqwest (rustls), regex, dirs, shell-words,
+# indexmap, libc, glob, walkdir, tempfile.
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -36,11 +36,8 @@ libc = "0.2"
 # patch_journal.rs: sha256 pre-image digests (node:crypto createHash("sha256") in the TS).
 sha2 = "0.10"
 # marketplaces.rs addedAt timestamps (new Date().toISOString() in the TS).
-# Added for --migrate-from-lci (drip-only, no TS counterpart): rusqlite
-# checkpoints the copied index.sqlite via PRAGMA wal_checkpoint(TRUNCATE);
-# walkdir walks the skills/marketplaces/sessions trees; dirs resolves the
-# cross-platform home directory. tempfile stages the index.sqlite copy in a
-# temp directory so the source database is never opened (migrate.rs).
+# walkdir walks the skills/marketplaces/sessions trees; tempfile stages
+# files that must never be written in place.
 walkdir = "2"
 tempfile = "3"
 # images.rs: data-URL base64 encoding/decoding (Buffer.toString("base64") in the TS).

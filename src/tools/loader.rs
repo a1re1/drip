@@ -1,5 +1,3 @@
-// port of src/tool-loader.ts
-//
 // The TypeScript loader dynamically imports a user tools module
 // (resolveToolsEntryPath + `await import(pathToFileURL(entryPath).href)`) and
 // validates the exported tool list. Rust has no dynamic TS import, and drip

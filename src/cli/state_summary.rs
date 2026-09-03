@@ -1,5 +1,3 @@
-// port of src/cli/state-summary.ts
-//
 // Imports from state-summary.ts:
 //   countTaskStats, deriveVerificationSummary — ported in drip/src/cli/run_record.rs
 //   loadHarnessState — ported inline below from src/harness/state.ts:516-536
@@ -303,9 +301,9 @@ pub fn format_state_summary(state_path: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — state-summary.ts has no dedicated test file; behavior is covered
-// by the integration tests for the --state flag (not yet ported). Two smoke
-// tests verify the two functions work end-to-end without panicking.
+// Tests — no dedicated unit tests; behavior is covered by the integration
+// tests for the --state flag. Two smoke tests verify the two functions work
+// end-to-end without panicking.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

@@ -1,8 +1,4 @@
-// port of tools/check-tool.ts
-//
-// Deviation from the TS source: lci runs the TypeScript language service
-// in-process (createOrGetService + collectDiagnostics over the service host).
-// drip instead spawns `bunx tsc --noEmit --pretty false -p <tsconfig>` (with
+// drip spawns `bunx tsc --noEmit --pretty false -p <tsconfig>` (with
 // `npx tsc` as the fallback when bunx is missing) and parses the emitted
 // `file(line,col): error TSxxxx: message` lines into the same
 // DiagnosticEntry { file, line, message } shape. Everything the model sees —
@@ -54,9 +50,8 @@ pub struct CheckToolExecution {
     pub output_text: String,
 }
 
-/// The OpenAI function definition lci sends for this tool (the
-/// {type: "function", function: {...}} envelope built by
-/// buildTransportTools in src/chat/runtime.ts).
+/// The OpenAI function definition drip sends for this tool (the
+/// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
     json!({
         "type": "function",
@@ -415,7 +410,6 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
-// port of tools/test/check-tool.test.ts (scope filtering and the
 // diagnostic-line parser; the language-service invocation itself is not
 // exercised here).
 #[cfg(test)]

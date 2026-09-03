@@ -1,5 +1,3 @@
-// port of src/harness/roles.ts
-//
 // A role is a capability profile for a loop: which workspace tools that loop's
 // subagent may call, what extra system-prompt material (persona + skills) it
 // carries, which model route serves it, and how many cycles it gets. Roles are

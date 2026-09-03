@@ -1,11 +1,9 @@
-// port of src/tools/framework-tools.ts (built-in tool pack)
-//
 // In TS each built-in tool is a defineSyncTool/defineAsyncTool object with
 // prepare/execute/complete stages (src/tools/types.ts) — the per-tool
 // implementations live in tools/*.ts. The Rust port splits that in two: the
 // stage framework is ported separately in ../types.rs + ../execute.rs, and
 // each tool module here exposes the same behavior as plain functions:
-//   - definition() — the exact OpenAI function schema lci sends, i.e. the
+//   - definition() — the exact OpenAI function schema drip sends, i.e. the
 //     {type: "function", function: {name, description, parameters}} envelope
 //     built by buildTransportTools (src/chat/runtime.ts)
 //   - execute(args, ctx) — the whole prepare/execute/complete pipeline for

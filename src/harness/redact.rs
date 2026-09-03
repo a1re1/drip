@@ -1,5 +1,3 @@
-// port of src/harness/redact.ts
-//
 // Secret redaction at the tool-output choke point. Tool output flows into
 // four persistent/streamed places (model context, state telemetry, transcript
 // events, the NDJSON stream); one pass here keeps credentials out of all of

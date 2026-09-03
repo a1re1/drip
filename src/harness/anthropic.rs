@@ -1,5 +1,3 @@
-// port of src/chat/anthropic.ts
-//
 // Native Anthropic Messages API transport for the "claude" provider.
 //
 // Anthropic's OpenAI-compatible endpoint (the /chat/completions URL every

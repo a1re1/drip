@@ -1,5 +1,3 @@
-// port of src/harness/state.ts
-//
 // Harness state helpers: create/load/save, the task ledger, memory notes,
 // observations, goal history, and the shared derivations (verification
 // summary, task stats). Function names are the TS names in snake_case so the

@@ -1,5 +1,3 @@
-// port of src/harness — TODO
-//
 // anthropic/transport port src/chat/{anthropic,transport}.ts (the harness
 // model-call layer in TS lives in src/chat/).
 pub mod anthropic;

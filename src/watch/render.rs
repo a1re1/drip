@@ -1,5 +1,3 @@
-// port of src/cli/watch/render.ts
-//
 // Pure frame renderer for the dripw watch TUI: render_frame(vm, cols, rows)
 // returns exactly `rows` lines, each exactly `cols` visible columns. No I/O,
 // no clock — `vm.now` is the only time it may read.

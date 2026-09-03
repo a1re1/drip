@@ -1,5 +1,3 @@
-// port of src/harness/model-call.ts
-//
 // The model-transport layer of the harness (debt audit S2, stage 1): one
 // place owns the retry ladder — network rejections, 429s (with retry-after
 // and the non-retryable quota fast-fail), 5xx — plus context-overflow

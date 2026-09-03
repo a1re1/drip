@@ -1,7 +1,5 @@
-// port of src/cli/backfill.ts
-//
 // One-shot relocation of sessions written before home-keying moved from the
-// repo to the checkout (see resolveLciProject): a session whose cwd sits in a
+// repo to the checkout (see resolve_drip_project): a session whose cwd sits in a
 // linked worktree belongs under that worktree's slug, not the repo's. The
 // plan is pure inspection; applying it lands the target row, renames the
 // directory, and only then drops the source rows, so nothing is lost if any
@@ -40,7 +38,6 @@ pub struct BackfillMove {
 // run-collapsing slug (each RUN of non-alphanumerics must fold to ONE dash)
 // and has been deleted.
 
-// port of src/cli/home.ts resolve() — enough for tests: lexical absolute-ize
 // against the process cwd (tests only pass absolute paths, matching TS).
 fn resolve_path(path: &str) -> String {
     let p = Path::new(path);
@@ -51,7 +48,6 @@ fn resolve_path(path: &str) -> String {
     }
 }
 
-// port of src/cli/home.ts nearestGitAncestor (private copy, see module NOTE).
 fn nearest_git_ancestor(start: &str) -> Option<String> {
     let mut dir = resolve_path(start);
 

@@ -1,5 +1,3 @@
-// port of src/cli/ui/theme.ts
-//
 // Event colours and labels shared by the transcript surfaces (the TUI
 // timeline, dripw's transcript pane). The colour names are chalk/ink names;
 // watch::ansi maps them onto SGR codes.

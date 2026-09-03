@@ -1,5 +1,3 @@
-// port of src/cli/review.ts
-//
 // The --review command: enumerate <base>...HEAD, plan review units, fan the
 // units out to reviewer children (one in-process session each, bounded by a
 // pool), retry what the first pass did not deliver once, then synthesize one

@@ -1,5 +1,3 @@
-// port of src/cli
-//
 // Children mirror the module tree in drip/PLAN.md; each child names the TS
 // file it ports in its header comment.
 pub mod args;

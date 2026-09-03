@@ -1,5 +1,3 @@
-// port of src/chat/transport.ts
-//
 // Faithful port: the TS helper names are kept in snake_case so the two files
 // can be diffed side by side. TransportRequestMessage carries the same wire
 // fields (camelCase JSON) as the TS type; `anthropic_content` mirrors the

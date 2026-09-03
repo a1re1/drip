@@ -1,7 +1,7 @@
 // End-to-end smoke test for the loop driver: a scripted OpenAI-compatible
 // endpoint plays plan_tasks → finish_task → (text-only) run summary, and the
-// run must complete with the same state shape and event sequence lci
-// produces for that script.
+// run must complete with the expected state shape and event sequence for
+// that script.
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};

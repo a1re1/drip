@@ -1,5 +1,3 @@
-// port of src/chat/types.ts
-//
 // Only the types + serialization helpers that chat/transport.ts (and the
 // harness model-call layer) need are ported. The remaining types.ts surface
 // (pinned/deleted/reply/retry context helpers, ChatRuntime,

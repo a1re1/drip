@@ -1,5 +1,3 @@
-// port of src/cli/watch/app.ts
-//
 // The dripw application: a raw-mode, alt-screen, diff-painted watcher over
 // the session index. Node drives it from timers and stdin events on one
 // loop; here one thread owns the state and multiplexes a channel fed by a

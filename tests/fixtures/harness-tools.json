@@ -221,7 +221,7 @@
     "type": "function",
     "function": {
       "name": "remember",
-      "description": "Save a note to shared memory so future task loops can see it. Use for durable facts, decisions, and discovered constraints that matter for the rest of the run; for short-lived findings use observe.\n\nOptional scope parameter:\n- 'session' (default): saves to in-memory state for this run only.\n- 'repo': persists the note into the project's memory bank stored under ~/.lci/projects/<project>/memory (outside the repo tree) so future sessions see it. Requires topic (a short title/slug for the page) and note. Optionally provide hook (one-line summary for the index). Use repo scope for durable, repo-specific knowledge: gotchas, key commands, architecture facts, persistent ideas.",
+      "description": "Save a note to shared memory so future task loops can see it. Use for durable facts, decisions, and discovered constraints that matter for the rest of the run; for short-lived findings use observe.\n\nOptional scope parameter:\n- 'session' (default): saves to in-memory state for this run only.\n- 'repo': persists the note into the project's memory bank stored under ~/.drip/projects/<project>/memory (outside the repo tree) so future sessions see it. Requires topic (a short title/slug for the page) and note. Optionally provide hook (one-line summary for the index). Use repo scope for durable, repo-specific knowledge: gotchas, key commands, architecture facts, persistent ideas.",
       "parameters": {
         "properties": {
           "note": {
@@ -229,7 +229,7 @@
             "type": "string"
           },
           "scope": {
-            "description": "Where to save: 'session' (default, this run only) or 'repo' (persists to ~/.lci/projects/<project>/memory across sessions).",
+            "description": "Where to save: 'session' (default, this run only) or 'repo' (persists to ~/.drip/projects/<project>/memory across sessions).",
             "enum": [
               "session",
               "repo"
@@ -256,7 +256,7 @@
     "type": "function",
     "function": {
       "name": "forget",
-      "description": "Remove a shared memory note by id when it is stale or wrong.\n\nOptional scope parameter:\n- 'session' (default): removes a note from in-memory state by noteId.\n- 'repo': removes a topic page from the project's memory bank stored under ~/.lci/projects/<project>/memory (outside the repo tree) by slug. Use when repo-scoped knowledge is no longer accurate.",
+      "description": "Remove a shared memory note by id when it is stale or wrong.\n\nOptional scope parameter:\n- 'session' (default): removes a note from in-memory state by noteId.\n- 'repo': removes a topic page from the project's memory bank stored under ~/.drip/projects/<project>/memory (outside the repo tree) by slug. Use when repo-scoped knowledge is no longer accurate.",
       "parameters": {
         "properties": {
           "noteId": {

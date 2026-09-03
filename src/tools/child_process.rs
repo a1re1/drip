@@ -1,5 +1,3 @@
-// port of src/tools/child-process.ts
-//
 // The one process-capture implementation every command-running tool shares
 // (debt audit C1: bash-tool, verify-tool, and async-jobs each carried a copy,
 // and the copies had already drifted — VERIFY's missed the #56 stop fix).
@@ -32,8 +30,7 @@ use std::time::{Duration, Instant};
 use crate::tools::child_env::build_child_process_env;
 
 /// Tmux sessions the harness starts carry this prefix; drip gc reaps by it.
-/// (TS: LCI_TMUX_PREFIX = "lci-"; rename rule lci → drip.)
-pub const LCI_TMUX_PREFIX: &str = "drip-";
+pub const TMUX_PREFIX: &str = "drip-";
 
 #[derive(Debug)]
 pub struct CapturedProcessResult {
@@ -257,7 +254,7 @@ fn wait_with_pipes(
     // after the shell itself exits), or a settle deadline passes, or an
     // external stop fires. The timeout keeps running after the exit, so a
     // `sleep 30 &` left holding stdout is group-killed and reported as
-    // timedOut with the shell's own exit code — measured on lci.
+    // timedOut with the shell's own exit code (measured 2026-09-02).
     let mut exited: Option<(Option<i32>, Option<String>)> = None;
     let outcome = loop {
         if STOP_SIGNAL_FIRED.load(Ordering::SeqCst) {
@@ -516,7 +513,7 @@ mod tests {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` ignores TERM (and `sleep` inherits the ignore across exec), so
         // only the SIGKILL escalation 1s after the SIGTERM reaps it. Measured
-        // on lci (runCapturedProcess, 2026-09-02): {exitCode: null,
+        // (2026-09-02): {exitCode: null,
         // signal: "SIGKILL", timedOut: true} in ~1.3s — the signal reported
         // is the one that actually reaped the child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
@@ -539,7 +536,7 @@ mod tests {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `sh` exits at once but the backgrounded sleeps hold the stdio pipes,
         // so the result cannot settle until the timeout group-kills them.
-        // Measured on lci (2026-09-02): {exitCode: 0, signal: null,
+        // Measured (2026-09-02): {exitCode: 0, signal: null,
         // timedOut: true} in ~0.3s — the shell's own exit code survives, and
         // timedOut records that the kill is what freed the pipes.
         let process_args = owned(&["-c", "sleep 30 & sleep 30 & echo started"]);
@@ -630,9 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn lci_tmux_prefix_is_renamed_for_drip() {
-        // The TS constant is `lci-`; the rename rule makes it `drip-`.
-        assert_eq!(LCI_TMUX_PREFIX, "drip-");
+    fn tmux_prefix_is_drip_branded() {
+        assert_eq!(TMUX_PREFIX, "drip-");
     }
 
     #[test]

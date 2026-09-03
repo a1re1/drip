@@ -1,5 +1,3 @@
-// port of src/cli/watch/data.ts
-//
 // The pure data side of dripw: session classification and scoping, paging,
 // transcript windowing, and the incremental transcript tail.
 

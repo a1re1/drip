@@ -1,5 +1,3 @@
-// port of src/tools/child-env.ts
-//
 // DRIP_SCRUB_ENV is set by the CLI to the comma-separated names of credentials
 // the harness manages (the keys defined in ~/.drip/env.vars). Tool subprocesses
 // are model-driven, so those credentials are stripped from their environment:

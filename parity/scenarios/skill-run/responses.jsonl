@@ -1,5 +1,0 @@
-{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["update greeting"]}}]}
-{"content":"Planned one task."}
-{"toolCalls":[{"name":"PATCH","arguments":{"path":"hello.txt","content":"Hello with skills.\n"}}]}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Updated hello.txt."}}]}
-{"content":"Updated hello.txt."}

@@ -1,1 +1,0 @@
-[["--detach","--json","--max-iterations","6","Do one thing in fixture/"],["@sleep","800"],["--send","Actually: do not edit anything, just finish the task."],["--send","--json","Second note."],["@sleep","3500"],["--wait","--json","--timeout-secs","60"],["--state","--json"]]

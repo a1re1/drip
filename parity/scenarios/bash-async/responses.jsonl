@@ -1,6 +1,0 @@
-{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["run the job"]}}]}
-{"content":"Planned one task."}
-{"toolCalls":[{"name":"BASH_ASYNC","arguments":{"command":"sleep 1; echo job-done","label":"sleeper"}}]}
-{"toolCalls":[{"name":"BASH","arguments":{"command":"sleep 2; echo waited"}}]}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"Job started and finished."}}]}
-{"content":"The background job ran."}

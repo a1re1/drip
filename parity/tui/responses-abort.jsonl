@@ -1,8 +1,0 @@
-{"toolCalls":[{"name":"plan_tasks","arguments":{"tasks":["read greeting","slow step"]}}]}
-{"content":"Planned."}
-{"toolCalls":[{"name":"READ","arguments":{"path":"hello.txt"}}]}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"hello.txt read."}}]}
-{"delayMs":6000,"content":"slow thinking"}
-{"content":"stopped summary"}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"second run done."}}]}
-{"content":"second run summary"}

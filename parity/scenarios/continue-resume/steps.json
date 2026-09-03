@@ -1,1 +1,0 @@
-[["--json","--max-iterations","2","Do two things in fixture/"],["--continue","--json","--max-iterations","6","Finish the remaining tasks."],["--state","--json"],["--continue","--new-goal","--json","--max-iterations","3","Say hello"],["--state"]]

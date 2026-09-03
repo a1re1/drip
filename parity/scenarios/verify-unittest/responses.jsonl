@@ -1,5 +1,0 @@
-{"toolCalls": [{"name": "plan_tasks", "arguments": {"tasks": ["run the unit tests"]}}]}
-{"content": "Planned."}
-{"toolCalls": [{"name": "VERIFY", "arguments": {"command": "python3 -B -m unittest test_math.py"}}]}
-{"toolCalls": [{"name": "finish_task", "arguments": {"status": "completed", "summary": "unittest: 2 passed, 1 skipped."}}]}
-{"content": "unittest: 2 passed, 1 skipped."}

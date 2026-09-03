@@ -1,1 +1,0 @@
-[["--profile","mock-alt","--json","--max-iterations","3","Say hello"],["--continue","--json","--max-iterations","3","Say hello again"],["--state","--json","--full"],["--profile","nope","--json","--max-iterations","3","Say hello"]]

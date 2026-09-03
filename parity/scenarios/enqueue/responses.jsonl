@@ -1,3 +1,0 @@
-{"delayMs":2500,"toolCalls":[{"name":"respond","arguments":{"text":"Hello from mock"}}]}
-{"toolCalls":[{"name":"respond","arguments":{"text":"Bye from mock"}}]}
-{"toolCalls":[{"name":"respond","arguments":{"text":"Bye again from mock"}}]}

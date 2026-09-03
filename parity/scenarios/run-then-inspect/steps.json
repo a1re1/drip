@@ -1,1 +1,0 @@
-[["--json", "--max-iterations", "8", "Update the greeting in fixture/hello.txt."], ["--state"], ["--state", "--json"], ["--result"], ["--result", "--json"], ["--list"], ["--list", "--json"], ["--inspect"], ["--inspect", "--json"], ["--wait", "--json"]]

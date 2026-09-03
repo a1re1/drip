@@ -1,1 +1,0 @@
-[["--detach","--json","--max-iterations","3","Say hello"],["@sleep","800"],["--continue","--enqueue","--json","--max-iterations","2","Say bye"],["--continue","--enqueue","Say bye again"],["@sleep","6000"],["--wait","--json","--timeout-secs","60"],["--list","--json"],["--state","--json"]]

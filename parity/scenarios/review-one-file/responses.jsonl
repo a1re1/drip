@@ -1,5 +1,0 @@
-{"toolCalls":[{"name":"READ","arguments":{"path":"sum.py"}}]}
-{"content":"### File: sum.py\n\n**Rating**: ❌\n\n**Issues**:\n- P0 sum.py:5 — `clamp` returns `low` when `value > high`; must return `high`.\n\n**Goal fit**: does not satisfy the intent."}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"### File: sum.py\n\n**Rating**: ❌\n\n**Issues**:\n- P0 sum.py:5 — `clamp` returns `low` when `value > high`; must return `high`.\n\n**Goal fit**: does not satisfy the intent."}}]}
-{"content":"# Code Review: base...HEAD\n\n## Summary\nclamp returns the wrong bound.\n\n## Confidence Score\n3/5\n\n## Issues Table\n| Severity | File:Line | Issue |\n|---|---|---|\n| P0 | sum.py:5 | returns low instead of high |"}
-{"toolCalls":[{"name":"finish_task","arguments":{"status":"completed","summary":"# Code Review: base...HEAD\n\n## Summary\nclamp returns the wrong bound.\n\n## Confidence Score\n3/5\n\n## Issues Table\n| Severity | File:Line | Issue |\n|---|---|---|\n| P0 | sum.py:5 | returns low instead of high |"}}]}

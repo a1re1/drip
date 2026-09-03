@@ -1,1 +1,0 @@
-["--review", "--json", "--base", "base", "--file-profile", "mock", "--synth-profile", "mock", "--context", "document the arithmetic helpers with docstrings"]

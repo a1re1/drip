@@ -1,8 +1,8 @@
-// port of src/harness/loop.ts — chunk 1: pure helpers only.
+// drip harness — chunk 1: pure helpers only.
 //
 // Constants and the stateless helpers the loop driver leans on (transcript
 // folding, djb2 hashing, output spilling, footprint/verification extraction).
-// The loop driver itself is ported separately.
+// The loop driver itself lives later in this module.
 
 use std::collections::HashSet;
 use std::fs;
@@ -61,7 +61,7 @@ pub fn fold_cold_tool_results(
             Some(TransportContent::Text(text)) => text.clone(),
             _ => continue,
         };
-        // `/\s+/g → " "` plus trim, as in the TS preview.
+        // Collapse whitespace runs to single spaces, then trim the preview.
         let preview = truncate_text(&raw.split_whitespace().collect::<Vec<_>>().join(" "), MAX_FOLDED_PREVIEW_CHARS);
         let name = messages[index]
             .name
@@ -225,11 +225,11 @@ pub fn build_repeated_read_stub(tool_name: &str, prior_call_count: i64) -> Strin
 pub const READ_ONLY_NUDGE_EVERY: i64 = 8;
 
 // Shell commands that only inspect the workspace. Flash reads through BASH
-// as much as through READ (`cat a.ts b.ts`, `sed -n '1,140p' x.rs`, `for f in
+// as much as through READ (`cat a.rs b.rs`, `sed -n '1,140p' x.rs`, `for f in
 // …; do awk … $f; done`), so the read-only accounting has to see those too.
 // Conservative: a command is read-only only when every segment's program is
 // on this list and nothing is redirected to a file; anything unrecognized is
-// treated as a write (no nudge). Mirrors the TS READ_ONLY_SHELL_PROGRAMS.
+// treated as a write (no nudge).
 const READ_ONLY_SHELL_PROGRAMS: [&str; 33] = [
     "[", "awk", "basename", "cat", "command", "cut", "diff", "dirname", "du", "echo", "file", "find", "grep", "head", "jq", "ls", "nl", "printf", "pwd",
     "realpath", "rg", "sed", "sort", "stat", "tail", "test", "tr", "tree", "true", "type", "uniq", "wc", "which",
@@ -313,8 +313,7 @@ pub fn is_read_only_shell_command(command: &str) -> bool {
 // Shell commands that plainly write to the workspace: a file redirection or
 // heredoc, an in-place sed, or a program whose job is to create/move/remove
 // files. Flash writes whole files through `cat > f <<'EOF'`, and such a loop
-// has persisted something even though no PATCH ran. Mirrors the TS
-// WRITING_SHELL_PROGRAMS.
+// has persisted something even though no PATCH ran (see WRITING_SHELL_PROGRAMS).
 const WRITING_SHELL_PROGRAMS: [&str; 14] =
     ["chmod", "chown", "cp", "dd", "install", "ln", "mkdir", "mv", "patch", "rm", "rmdir", "tee", "touch", "truncate"];
 const WRITING_GIT_SUBCOMMANDS: [&str; 15] = [
@@ -364,10 +363,10 @@ pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: 
 }
 
 // Workspace-relative file paths a goal names explicitly ("NEW FILE
-// src/lib/widget.ts", "update `drip/src/cli/entry.rs`"). Requires a directory
-// separator so prose like "v1.2" or "README.md" never counts. Mirrors the TS
-// GOAL_PATH_PATTERN; its trailing lookahead is the manual boundary check in
-// `extract_goal_paths` (the regex crate has no lookaround).
+// src/lib/widget.rs", "update `drip/src/cli/entry.rs`"). Requires a directory
+// separator so prose like "v1.2" or "README.md" never counts. The boundary
+// check after each match lives in `extract_goal_paths` (the regex crate has
+// no lookaround).
 fn goal_path_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
@@ -464,8 +463,9 @@ pub fn build_unnamed_path_note(goal: &str, patch_output: &str) -> Option<String>
 
 // Commands whose outcome IS the verification story of the run: the harness
 // records the most recent one so summaries and results cite ground truth.
-// Hand-rolled scan of the TS VERIFICATION_COMMAND_PATTERN:
-// /\b(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:test|check|lint|typecheck|build)\b|\b(?:pytest|vitest|jest|tsc|cargo\s+(?:test|check)|go\s+(?:test|vet)|make\s+(?:test|check|lint))\b/
+// Hand-rolled scan recognizing package-manager runners (bun/npm/pnpm/yarn)
+// followed by test/check/lint/typecheck/build, direct tools like
+// pytest/vitest/jest/tsc, and cargo/go/make subcommands.
 fn is_word_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -575,7 +575,7 @@ pub const MAX_VERIFICATION_TIMELINE: usize = 20;
 pub const VERIFICATION_STUCK_THRESHOLD: u32 = 2;
 
 // djb2 — stable, dependency-free fingerprint for "did the failure change".
-// Iterates UTF-16 code units to match the TS charCodeAt() exactly.
+// Iterates UTF-16 code units so the hash is stable regardless of encoding.
 pub fn hash_text(text: &str) -> String {
     let mut hash: u32 = 5381;
 
@@ -634,7 +634,7 @@ pub fn extract_patched_paths(raw_input: &str) -> Vec<String> {
                 }
             }
         }
-        // A non-array `files` throws inside the TS for..of and is caught → [].
+        // A non-array `files` yields no paths.
         Some(_) => return Vec::new(),
         None => {}
     }
@@ -893,7 +893,7 @@ mod loop_helpers_tests {
         );
     }
 
-    // test/harness-feedback.test.ts "classifies the shell commands flash reads with as read-only"
+    // "classifies the shell commands flash reads with as read-only"
     #[test]
     fn read_only_shell_commands_are_classified_like_the_ts() {
         for command in [
@@ -942,7 +942,7 @@ mod loop_helpers_tests {
         assert_eq!(extract_bash_command("{"), None);
     }
 
-    // test/harness-verify-gate.test.ts "a command the goal names verbatim is its declared verification"
+    // "a command the goal names verbatim is its declared verification"
     #[test]
     fn goal_declared_commands_count_as_verification() {
         let goal = "NEW FILE docs/TOOLS.md … Verification: test -s docs/TOOLS.md && grep -c \"^## \" docs/TOOLS.md prints 8. Scope: docs only.";
@@ -960,7 +960,7 @@ mod loop_helpers_tests {
     }
 
 
-    // test/harness-feedback.test.ts "keeps whole exchanges within the hot-result and size caps, newest first"
+    // "keeps whole exchanges within the hot-result and size caps, newest first"
     #[test]
     fn loop_carryover_keeps_whole_exchanges_within_caps_newest_first() {
         fn exchange(id: &str, content: &str) -> Vec<TransportRequestMessage> {
@@ -1092,7 +1092,7 @@ mod loop_helpers_tests {
         assert!(!detect_empty_test_run("attest run", "no tests ran"));
     }
 
-    // test/harness-verify-gate.test.ts "a heredoc body that mentions a test runner is not a verification"
+    // "a heredoc body that mentions a test runner is not a verification"
     #[test]
     fn heredoc_bodies_do_not_make_a_write_a_verification() {
         let write = "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'\n# Tools\nit detects bun test, vitest, pytest, cargo test\nEOF";
@@ -1169,14 +1169,12 @@ mod loop_helpers_tests {
     }
 }
 // ---------------------------------------------------------------------------
-// Run driver (port of runSolidStateHarness, src/harness/loop.ts:336-1536).
+// Run driver: the solid-state harness run loop.
 //
-// The TS function is one 1200-line closure nest. The Rust port keeps the
-// same control flow but hoists the closure-captured state into `HarnessRun`
+// The run hoists closure-captured state into `HarnessRun`
 // (run-scoped: options, config, state, usage, model caller) and `LoopScope`
-// (loop-scoped locals: transcript, budgets, digest, progress flags). Each TS
-// closure becomes a method; the TS line ranges are noted on every method so
-// the port can be checked side by side.
+// (loop-scoped locals: transcript, budgets, digest, progress flags). Each
+// logical step of the loop becomes a method on those scopes.
 // ---------------------------------------------------------------------------
 
 use std::collections::HashMap;
@@ -1206,8 +1204,8 @@ use crate::harness::prompt::{
 };
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
-/// TS `RATE_LIMIT_BACKOFF_SECONDS` lives in model_call; the loop only reads
-/// the defaults below (loop.ts:35-56).
+/// Rate-limit backoff defaults live in model_call; the loop only reads
+/// the defaults below.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: i64 = 2;
 
 pub fn default_loop_config() -> HarnessLoopConfig {
@@ -1218,7 +1216,7 @@ pub fn default_telemetry_config() -> HarnessTelemetryConfig {
     crate::core::types::DEFAULT_TELEMETRY_CONFIG.clone()
 }
 
-/// TS `Partial<HarnessTelemetryConfig>` (options.telemetry).
+/// A partial telemetry override applied on top of `options.telemetry` defaults.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PartialHarnessTelemetryConfig {
     pub base_ttl: Option<i64>,
@@ -1241,13 +1239,12 @@ pub struct OperatorInboxEntry {
     pub text: String,
 }
 
-/// TS `clampLoopValue` (loop.ts:561-563) — clamp a role override between a
-/// floor and the run-level cap.
+/// Clamp a role override between a floor and the run-level cap.
 pub type NowFn = Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
 pub type EmitFn = Arc<dyn Fn(HarnessEvent) + Send + Sync>;
 
-/// Port of the TS `SolidStateHarnessOptions` (loop.ts:58-104). Every
-/// optional TS field is an `Option`; function-typed fields are trait objects.
+/// Options for constructing a `SolidStateHarness`. Every optional field is
+/// an `Option`; function-typed fields are trait objects.
 #[derive(Default)]
 pub struct SolidStateHarnessOptions {
     pub cwd: Option<String>,
@@ -1296,8 +1293,7 @@ pub struct SolidStateHarnessOptions {
 }
 
 /// Bridge for the model caller's `onUsage` / `onRetryWait` / `getIteration`
-/// hooks: the TS closures capture the run scope directly; the Rust caller
-/// holds `Arc<dyn Fn>`s that cannot borrow `HarnessRun`, so they post into
+/// hooks: `Arc<dyn Fn>`s cannot borrow `HarnessRun`, so they post into
 /// this inbox and the loop drains it right after every call_model.
 #[derive(Default)]
 pub struct UsageInbox {
@@ -1306,15 +1302,14 @@ pub struct UsageInbox {
     pub iteration: std::sync::atomic::AtomicI64,
 }
 
-/// Run-scoped state: everything the TS closures capture from the enclosing
-/// runSolidStateHarness scope (loop.ts:336-600).
+/// Run-scoped state: options, config, state, usage, and the model caller.
 pub struct HarnessRun {
     pub usage_inbox: Arc<UsageInbox>,
     pub options: SolidStateHarnessOptions,
     pub now: NowFn,
     pub emit_fn: EmitFn,
     pub run_started_at_ms: i64,
-    /// Stamped when a stop was requested (loop.ts:343-350).
+    /// Stamped when a stop was requested.
     pub abort_requested_at_ms: Option<i64>,
     pub run_usage: HarnessRunUsage,
     pub redact: Arc<dyn Fn(&str) -> String + Send + Sync>,
@@ -1341,7 +1336,7 @@ pub struct HarnessRun {
     pub start_iteration: i64,
     pub start_loop: i64,
     pub call_model: ModelCaller,
-    // Outer-loop locals (loop.ts:594-602).
+    // Outer-loop locals.
     pub idle_loops: i64,
     pub escalations_without_progress: i64,
     pub run_futile: bool,
@@ -1356,7 +1351,7 @@ pub struct HarnessRun {
     pub run_tool_usage: std::collections::BTreeMap<String, u64>,
 }
 
-/// Loop-scoped locals (loop.ts:660-745): one instance per task loop.
+/// Loop-scoped locals: one instance per task loop.
 pub struct LoopScope {
     pub loop_start_iteration: i64,
     pub current_task_id: Option<String>,
@@ -1394,19 +1389,18 @@ pub struct LoopScope {
     pub digest_actions: Vec<String>,
 }
 
-/// Outcome of one cycle's tool-round loop (the `break`/`continue` targets of
-/// the TS `for (round ...)` body).
+/// Outcome of one cycle's tool-round loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoundOutcome {
     /// Keep going with the next round.
     Continue,
-    /// The TS `break` out of the round loop (natural conclusion, task finished, overflow).
+    /// End the round loop early (natural conclusion, task finished, overflow).
     Break,
     /// `aborted = true; break`.
     Aborted,
 }
 
-/// A tool call after id de-duplication (loop.ts:1013-1027).
+/// A tool call after id de-duplication.
 pub struct NormalizedCall {
     pub call_id: String,
     pub normalized: crate::harness::transport::OpenAICompatibleToolCall,
@@ -1434,8 +1428,7 @@ pub fn model_route_from_role_route(route: &crate::harness::roles::ModelRoute) ->
     }
 }
 
-/// JS `Number.prototype.toLocaleString()` for a char count: digits with
-/// comma thousands separators (en-US, which is what lci's callers see).
+/// Digits with comma thousands separators (en-US locale formatting).
 pub fn format_thousands(value: usize) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -1448,13 +1441,13 @@ pub fn format_thousands(value: usize) -> String {
     out
 }
 
-/// Result of `executeWorkspaceTool` (loop.ts:547-578).
+/// Result of executing one workspace tool.
 pub struct WorkspaceToolExecution {
     pub failed: bool,
     pub tool_content: String,
 }
 
-/// loop.ts:311-322 — wrap the caller-supplied workspace tools as transport specs.
+/// Wrap the caller-supplied workspace tools as transport specs.
 fn build_transport_tools(tools: &[ChatToolDefinition]) -> Vec<OpenAICompatibleRequestTool> {
     tools
         .iter()
@@ -1468,10 +1461,9 @@ fn build_transport_tools(tools: &[ChatToolDefinition]) -> Vec<OpenAICompatibleRe
         .collect()
 }
 
-/// harness-tools.ts:148-190 — the harness (framework) tool specs. Starts from
-/// `harness_tool_definitions()` JSON converted with create_request_tool; when
-/// roles are configured, plan_tasks gains the `role` enum property exactly as
-/// the TS spread does (property order dependsOn, role, title).
+/// The harness (framework) tool specs. Starts from `harness_tool_definitions()`
+/// JSON converted with create_request_tool; when roles are configured,
+/// plan_tasks gains the `role` enum property (order dependsOn, role, title).
 fn build_harness_tool_specs(role_names: &[String]) -> Vec<OpenAICompatibleRequestTool> {
     let mut specs: Vec<OpenAICompatibleRequestTool> =
         crate::harness::harness_tools::harness_tool_definitions()
@@ -1519,8 +1511,8 @@ fn build_harness_tool_specs(role_names: &[String]) -> Vec<OpenAICompatibleReques
                     .get_mut("properties")
                     .and_then(|value| value.as_object_mut())
                 {
-                    // Re-insert title after role so key order matches the TS
-                    // object spread (dependsOn, role, title).
+                    // Re-insert title after role so the property order is
+                    // dependsOn, role, title.
                     let title = properties.remove("title");
                     properties.insert("role".to_string(), role_property.clone());
                     if let Some(title) = title {
@@ -1534,19 +1526,19 @@ fn build_harness_tool_specs(role_names: &[String]) -> Vec<OpenAICompatibleReques
     specs
 }
 
-/// loop.ts:370-372 — a zero/negative budget would spin the outer run loop
-/// without ever calling the model or advancing the iteration counter. i64 is
-/// always finite (the TS NaN fallback cannot occur), so only the floor
-/// applies; `fallback` is kept for signature parity with the TS helper.
+/// A zero/negative budget would spin the outer run loop without ever
+/// calling the model or advancing the iteration counter. i64 is always
+/// finite, so only the floor applies; `fallback` is unused and kept for
+/// call-site symmetry with the other clamps.
 fn clamp_loop_value(value: i64, minimum: i64, fallback: i64) -> i64 {
     let _ = fallback;
     value.max(minimum)
 }
 
 impl HarnessRun {
-    /// loop.ts:336-556 — resolve options into run-scoped config, load or
-    /// create the state, build the role map / harness tool specs / transport
-    /// tools, and create the model caller.
+    /// Resolve options into run-scoped config, load or create the state,
+    /// build the role map / harness tool specs / transport tools, and create
+    /// the model caller.
     pub async fn new(mut options: SolidStateHarnessOptions) -> Result<HarnessRun, String> {
         let now: NowFn = options.now.clone().unwrap_or_else(|| Arc::new(chrono::Utc::now));
         let emit_fn: EmitFn = options.on_event.clone().unwrap_or_else(|| Arc::new(|_event| {}));
@@ -1584,8 +1576,9 @@ impl HarnessRun {
         });
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
 
-        // { ...DEFAULT_LOOP_CONFIG, ...options.loop, maxToolRoundsPerCycle from
-        // maxToolRoundsPerIteration when the loop block does not set it }
+        // DEFAULT_LOOP_CONFIG overlaid with options.loop; maxToolRoundsPerCycle
+        // falls back to maxToolRoundsPerIteration when the loop block does not
+        // set it.
         let defaults = default_loop_config();
         let overrides = options.r#loop.unwrap_or_default();
         let mut loop_config = HarnessLoopConfig {
@@ -1692,7 +1685,7 @@ impl HarnessRun {
             headers.insert(0, ("content-type".to_string(), "application/json".to_string()));
         }
 
-        // loop.ts:476-485 — `options.toolServices ?? createChatToolRuntimeServices({ cwd })`:
+        // `options.toolServices ?? createChatToolRuntimeServices({ cwd })`:
         // the CLI runs without a web server, so the harness owns the async-job
         // runtime for the run.
         let tool_services = match options.tool_services.take() {
@@ -1720,9 +1713,8 @@ impl HarnessRun {
                 state.inbox_cursor = Some(cursor);
             }
         }
-        // options.initialState bypasses loadHarnessState's migrations: the TS
-        // repairs a missing loop clock here (state.loop = iteration when NaN);
-        // the Rust loop field is always numeric, so nothing to repair.
+        // options.initialState bypasses loadHarnessState's migrations; the Rust
+        // loop field is always numeric, so nothing needs repair.
         let start_iteration = state.iteration;
         let start_loop = state.r#loop;
 
@@ -1803,26 +1795,23 @@ impl HarnessRun {
         })
     }
 
-    /// loop.ts:348-350
     pub fn stop_latency_ms(&self) -> Option<i64> {
         self.abort_requested_at_ms
             .map(|requested| ((self.now)().timestamp_millis() - requested).max(0))
     }
 
-    /// loop.ts:368-371
     pub fn finalize_usage(&mut self) -> HarnessRunUsage {
         self.run_usage.wall_ms = ((self.now)().timestamp_millis() - self.run_started_at_ms).max(0);
         self.run_usage.clone()
     }
 
-    /// loop.ts:373-420 — accumulate usage and emit the `inference` event.
+    /// accumulate usage and emit the `inference` event.
     pub fn record_model_usage(
         &mut self,
         usage: Option<&crate::harness::model_call::OpenAICompatibleResponseUsage>,
         call: &ModelCallRecord,
     ) {
-        // TS truthiness guards: `if (taskId)` / `...(call.provider ? ... : {})`
-        // treat an empty string like undefined.
+        // Treat an empty string like an absent value.
         let task_id = call.task_id.clone().filter(|task_id| !task_id.is_empty());
         let provider = call.provider.clone().filter(|provider| !provider.is_empty());
 
@@ -1899,14 +1888,12 @@ impl HarnessRun {
         });
     }
 
-    /// loop.ts:422-425
     pub fn record_retry_wait(&mut self, wait_seconds: f64) {
         self.run_usage.retries += 1;
         self.run_usage.rate_limit_wait_seconds += wait_seconds;
     }
 
-    /// Drain the caller's usage/retry hooks posted during the last call_model
-    /// (the TS onUsage/onRetryWait callbacks run inside callModel itself).
+    /// Drain the caller's usage/retry hooks posted during the last call_model.
     pub fn drain_usage_inbox(&mut self) {
         let usages: Vec<_> = std::mem::take(&mut *self.usage_inbox.usages.lock().unwrap());
         for (usage, record) in usages {
@@ -1925,19 +1912,17 @@ impl HarnessRun {
             .store(self.state.iteration, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// loop.ts:499-501
     pub fn emit(&self, event: HarnessEvent) {
         (self.emit_fn)(event)
     }
 
-    /// loop.ts:503-507 — persist the state when a state path is configured.
+    /// persist the state when a state path is configured.
     pub fn persist(&self) {
         if let Some(state_path) = &self.options.state_path {
             let _ = crate::core::state::save_harness_state(state_path, &self.state);
         }
     }
 
-    /// loop.ts:509-522
     pub fn aborted_result(&mut self) -> HarnessRunResult {
         self.persist();
         HarnessRunResult {
@@ -1952,7 +1937,7 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:547-578 — run one workspace tool through the tool framework
+    /// run one workspace tool through the tool framework
     /// (`execute_tool_call`), redacting the model-facing text.
     pub fn execute_workspace_tool(
         &mut self,
@@ -1986,8 +1971,7 @@ impl HarnessRun {
             tags: None,
             transport_state: None,
         };
-        // TS `(args.registry ?? toolRegistry).get(args.toolName)`: resolve the
-        // tool by name, then treat it as absent when this loop's role
+        // Resolve the tool by name, then treat it as absent when this loop's role
         // restricts tools and the resolved index is not in the allowed list —
         // a disallowed call fails cleanly inside `execute_tool_call`.
         let tool = self
@@ -2004,7 +1988,7 @@ impl HarnessRun {
             raw_input,
             runtime_context: ChatRuntimeContext {
                 cwd: self.cwd.clone(),
-                // TS passes the run's runtimeContext; the no-file default state.
+                // No file is open: the default no-file state.
                 working_file: WorkingFileContext {
                     exists: false,
                     path: String::new(),
@@ -2028,7 +2012,7 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:580-592 — re-run dynamic warm-context entries at loop start.
+    /// re-run dynamic warm-context entries at loop start.
     pub fn refresh_dynamic_entries(&mut self) {
         // Collect first (the entries borrow `self.state`), then execute each
         // dynamic entry whose tool is registered, then write the refreshed
@@ -2076,7 +2060,7 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:604-1250 — the outer `while` loop: one task loop per iteration
+    /// the outer `while` loop: one task loop per iteration
     /// of this method's loop, delegating to `begin_loop` / `run_cycle` /
     /// `end_loop`. Returns Some(result) when the run ends inside the loop
     /// (abort/error paths); None when the outer loop exits normally.
@@ -2157,7 +2141,7 @@ impl HarnessRun {
                 }
             }
 
-            // The TS try/catch around the cycles: a thrown run error aborts the
+            // A thrown run error aborts the
             // run (with an aborted result when the stop was requested) and
             // otherwise surfaces as a run warning before the run ends.
             if let Some(message) = self.run_error.clone() {
@@ -2193,7 +2177,7 @@ impl HarnessRun {
         None
     }
 
-    /// The TS abort listener (loop.ts:345-347): the first time a stop is
+    /// Abort listener: the first time a stop is
     /// observed, stamp `abort_requested_at_ms`.
     fn signal_aborted(&mut self) -> bool {
         if self
@@ -2211,11 +2195,11 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:660-745 — pick up the current task, resolve the loop role,
+    /// pick up the current task, resolve the loop role,
     /// derive the loop budget, emit `loop-start`, refresh dynamic entries and
     /// build the loop scope.
     pub fn begin_loop(&mut self) -> LoopScope {
-        // loop.ts:661-667 — pending → in_progress; activations counts pickups.
+        // pending → in_progress; activations counts pickups.
         let current_task_id = core_state::get_current_task(&self.state)
             .map(|task| task.id.clone());
         if let Some(task_id) = current_task_id.as_deref() {
@@ -2227,7 +2211,7 @@ impl HarnessRun {
             }
         }
 
-        // loop.ts:669-677 — this loop's capability profile.
+        // this loop's capability profile.
         let current_task = current_task_id
             .as_deref()
             .and_then(|id| {
@@ -2238,7 +2222,7 @@ impl HarnessRun {
             current_task,
             self.options.role_bindings.as_ref(),
         );
-        // loop.ts:678 — filterToolsForRole.
+        // filterToolsForRole.
         let loop_tool_indexes: Vec<usize> = match role
             .as_ref()
             .and_then(|r| r.tool_names.as_ref())
@@ -2252,7 +2236,7 @@ impl HarnessRun {
                 .map(|(index, _)| index)
                 .collect(),
         };
-        // loop.ts:679-681 — transport tools.
+        // transport tools.
         let loop_transport_tools: Vec<OpenAICompatibleRequestTool> =
             if role.as_ref().and_then(|r| r.tool_names.as_ref()).is_some() {
                 let mut tools = self
@@ -2276,7 +2260,7 @@ impl HarnessRun {
             };
         let loop_system_prompt =
             crate::harness::roles::compose_role_system_prompt(&self.system_prompt, role.as_ref());
-        // loop.ts:682-692 — role loop budget clamps.
+        // role loop budget clamps.
         let loop_budget = match role.as_ref().and_then(|r| r.r#loop.as_ref()) {
             Some(role_loop) => HarnessLoopConfig {
                 hot_tool_results: clamp_loop_value(
@@ -2307,7 +2291,7 @@ impl HarnessRun {
             None => self.loop_config.clone(),
         };
 
-        // loop.ts:694-701 — the loop-start event.
+        // the loop-start event.
         let detail = format!(
             "loop {}{} — {}",
             self.state.r#loop,
@@ -2336,10 +2320,10 @@ impl HarnessRun {
             r#type: HarnessEventType::LoopStart,
         });
 
-        // loop.ts:703 — refresh dynamic warm-context entries.
+        // refresh dynamic warm-context entries.
         self.refresh_dynamic_entries();
 
-        // loop.ts:687-690 — cycles this loop can actually afford.
+        // cycles this loop can actually afford.
         let affordable_cycles = if self.max_iterations != i64::MAX {
             std::cmp::max(
                 1,
@@ -2382,13 +2366,13 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:704-737 — `recordLoopDigest(outcome)`.
+    /// `recordLoopDigest(outcome)`.
     pub fn record_loop_digest(&mut self, scope: &mut LoopScope, outcome: &str) {
         let current_task_id = scope.current_task_id.clone();
         let cycles_run = scope.cycles_run;
         let task_finished = scope.task_finished;
 
-        // loop.ts:706-715 — lastActivation with actions overflow handling.
+        // lastActivation with actions overflow handling.
         let overflow_count = scope
             .digest_actions
             .len()
@@ -2417,7 +2401,7 @@ impl HarnessRun {
             task_id: current_task_id.clone(),
         });
 
-        // loop.ts:718-737 — a task that keeps failing needs its earlier
+        // a task that keeps failing needs its earlier
         // attempts in view: append a compact attempt digest (newest three
         // attempts bounded).
         if let Some(task_id) = current_task_id.as_deref() {
@@ -2454,7 +2438,7 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:748-868 — cycle start: budget/abort checks, operator
+    /// cycle start: budget/abort checks, operator
     /// messages, `iteration-start`, transport messages for cycle 1 or the
     /// continuation message + fold for later cycles. Returns false when the
     /// cycle must not run (budget exhausted / aborted).
@@ -2793,7 +2777,7 @@ impl HarnessRun {
         true
     }
 
-    /// loop.ts:870-1010 — one tool round: fold on transcript size, call the
+    /// one tool round: fold on transcript size, call the
     /// model (with the context-overflow retry), then parse the reply: a
     /// text-only reply concludes (or is nudged once); tool calls are
     /// normalized and dispatched via `dispatch_tool_calls`.
@@ -3087,7 +3071,7 @@ impl HarnessRun {
 
         let normalized_calls = self.normalize_tool_calls(scope, round, &tool_calls);
 
-        // loop.ts:1029-1037 — replay the assistant turn. Native Anthropic
+        // replay the assistant turn. Native Anthropic
         // content blocks are only replayed when every tool-call id survived
         // de-duplication (a renamed id would not match its tool_use block).
         let native_ids_preserved = response_message
@@ -3118,7 +3102,7 @@ impl HarnessRun {
         RoundOutcome::Continue
     }
 
-    /// loop.ts:1013-1027 — de-duplicate tool call ids and normalize.
+    /// de-duplicate tool call ids and normalize.
     pub fn normalize_tool_calls(
         &self,
         scope: &mut LoopScope,
@@ -3180,7 +3164,7 @@ impl HarnessRun {
         normalized_calls
     }
 
-    /// loop.ts:1039-1212 — execute each normalized call: skipped-after-end,
+    /// execute each normalized call: skipped-after-end,
     /// harness ops, or workspace tools (verification tracking, spill,
     /// telemetry, footprint, tool-call/tool-result events), appending the
     /// tool-role messages to the transcript.
@@ -3601,7 +3585,7 @@ impl HarnessRun {
         }
     }
 
-    /// loop.ts:1225-1250 — the loop digest outcome text + abort/budget checks.
+    /// the loop digest outcome text + abort/budget checks.
     pub fn end_loop(&mut self, scope: &mut LoopScope) {
         let outcome: String = if self.aborted {
             "the run was stopped mid-loop".to_string()
@@ -3649,12 +3633,12 @@ impl HarnessRun {
         self.record_loop_digest(scope, &outcome);
     }
 
-    /// loop.ts:1250-1420 — stall accounting, auto-block, reopen/drop
+    /// stall accounting, auto-block, reopen/drop
     /// escalation, futile detection, telemetry maintenance, observation decay.
-    /// loop.ts:1250-1420 — stall accounting, auto-block, reopen/drop
+    /// stall accounting, auto-block, reopen/drop
     /// escalation, futile detection, telemetry maintenance, observation decay.
     pub fn after_loop(&mut self, scope: &LoopScope) {
-        // loop.ts:1310-1311 — a loop cut short by the run budget never got
+        // a loop cut short by the run budget never got
         // its full cycle allowance; penalizing the task for that would let
         // repeated short-budget resumes auto-block healthy work.
         let budget_truncated = !scope.concluded_naturally
@@ -3793,7 +3777,7 @@ impl HarnessRun {
                 r#type: crate::core::types::HarnessEventType::RunWarning,
             });
             self.persist();
-            // TS `break` — the outer loop ends before telemetry maintenance;
+            // The outer loop ends before telemetry maintenance;
             // run_loops reads self.run_futile and ends the run.
             return;
         }
@@ -3846,7 +3830,7 @@ impl HarnessRun {
         self.persist();
     }
 
-    /// loop.ts:1422-1536 — decide the run reason, generate the run summary,
+    /// decide the run reason, generate the run summary,
     /// report leaked tmux jobs, emit `run-complete`, persist, build the result.
     pub async fn finish(mut self) -> HarnessRunResult {
         if self.aborted {
@@ -3886,7 +3870,7 @@ impl HarnessRun {
         // Background jobs the run started and never tore down: report them so
         // the driver knows a dev server/watcher is still holding the port
         // (and how to kill it) instead of discovering it three runs later.
-        // Background tmux jobs that outlived the run (loop.ts:1494-1512).
+        // Background tmux jobs that outlived the run.
         let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = self
             .tool_services
             .tmux_sessions
@@ -3965,7 +3949,7 @@ impl HarnessRun {
 }
 
 impl HarnessRun {
-    /// Port of src/harness/run-summary.ts — one tool-free model call that
+    /// One tool-free model call that
     /// writes the user-facing recap, with three hard rules the loop used to
     /// hold inline: an error run never calls the endpoint that just failed, a
     /// respond answer is delivered verbatim rather than re-summarized, and a
@@ -4044,7 +4028,7 @@ impl HarnessRun {
         self.record_run_summary(reason, text);
     }
 
-    /// run-summary.ts `record(text)`: persist on state and emit `run-summary`.
+    /// Record a run summary: persist on state and emit `run-summary`.
     fn record_run_summary(&mut self, reason: HarnessRunReason, text: String) {
         self.state.run_summary = Some(crate::core::types::HarnessRunSummaryNote {
             created_at_iteration: self.state.iteration,
@@ -4060,7 +4044,7 @@ impl HarnessRun {
     }
 }
 
-/// loop.ts:336 — the public entry point.
+/// the public entry point.
 pub async fn run_solid_state_harness(options: SolidStateHarnessOptions) -> Result<HarnessRunResult, String> {
     let mut run = HarnessRun::new(options).await?;
     if let Some(result) = run.run_loops().await {

@@ -1,5 +1,3 @@
-// port of src/cli/transcript.ts
-//
 // The TS file pulls `readJsonlRecords` from src/lib/fs.ts; drip's module tree
 // (PLAN.md Layout) has no lib/ module, so that helper is ported inline here as
 // `read_jsonl_records`, with its provenance in its own comment.
@@ -60,7 +58,7 @@ pub struct TranscriptNoteEntry {
 // One role's inference route on a run that activated roles. `model` is absent
 // when the role declared no model of its own — it inherits the run's tool
 // route, then the base model — and `binding` is set for the role the harness
-// bound to a loop kind ("planning" or "task"), which is the only way lci runs
+// bound to a loop kind ("planning" or "task"), which is the only way drip runs
 // a distinct planning model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -234,8 +232,6 @@ pub struct JsonlRecord {
 	pub raw: String,
 }
 
-// port of src/lib/fs.ts readJsonlRecords
-//
 // Thin adapter over crate::lib_fs::read_jsonl_records (the single port of
 // src/lib/fs.ts readJsonlRecords): a missing file reads as empty, any other
 // IO error surfaces like the TS readFileSync would.
@@ -272,8 +268,8 @@ pub fn read_transcript(transcript_path: &Path) -> Vec<TranscriptEntry> {
 
 // The recorded inference routes as display lines, most general first: the base
 // (coding) model, the tool-calling route when it differs, then one line per
-// role. Shared by every surface that shows them (lci --follow, the TUI
-// timeline, the lciw header) so they never drift apart.
+// role. Shared by every surface that shows them (drip --follow, the TUI
+// timeline, the dripw header) so they never drift apart.
 pub fn format_model_route_lines(entry: &TranscriptModelEntry) -> Vec<String> {
 	// effort = (value) => value ? ` · effort ${value}` : ""
 	let effort = |value: Option<&str>| -> String {
@@ -328,11 +324,10 @@ mod tests {
 		tempfile::tempdir().expect("makeTempRoot")
 	}
 
-	// Byte-for-byte parity with lci's transcript lines: `type` is the last
-	// key (alphabetical order, as the TS object literals are written), and a
-	// line round-trips through the tagged deserializer.
+	// `type` is the last key in each transcript line (alphabetical key
+	// order), and a line round-trips through the tagged deserializer.
 	#[test]
-	fn serializes_with_lci_key_order() {
+	fn serializes_with_canonical_key_order() {
 		let entry = TranscriptEntry::RunEnd(TranscriptRunEndEntry {
 			at: "2026-07-01T00:00:02.000Z".into(),
 			goal_id: "goal-1".into(),

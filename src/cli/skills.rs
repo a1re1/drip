@@ -1,5 +1,3 @@
-// port of src/cli/skills.ts
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

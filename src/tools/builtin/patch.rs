@@ -1,5 +1,3 @@
-// port of tools/patch-tool.ts
-//
 // PATCH writes/edits files. Chunk 1 here holds the definition, the
 // input/result structs and the pure text functions; the prepare/execute
 // pipeline lives further down in this same file.
@@ -552,8 +550,7 @@ pub const SYNTAX_CHECKED_EXTENSIONS: &[&str] = &[
     ".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx",
 ];
 
-// DEVIATION vs the TS gate: lci validates .json targets with JSON.parse; drip
-// mirrors that with a small built-in JSON syntax scan below.
+// .json targets are validated with a small built-in JSON syntax scan below.
 // Returns the first syntax error in the text, or None when it parses (or when
 // the file type has no checker available). Uses the TypeScript transpiler's
 // syntactic diagnostics because it runs under both Bun and Node; if the

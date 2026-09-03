@@ -1,5 +1,3 @@
-// port of tools/verify-tool.ts
-//
 // VERIFY runs a shell command and parses its output into a structured test
 // verdict. The parsers (bun test, vitest, pytest, cargo test, go test, tsc)
 // are pure functions over the captured output text, so they are unit-tested
@@ -47,9 +45,8 @@ pub struct VerifyParsed {
 // ---------------------------------------------------------------------------
 
 
-/// The OpenAI function definition lci sends for this tool (the
-/// {type: "function", function: {...}} envelope built by
-/// buildTransportTools in src/chat/runtime.ts).
+/// The OpenAI function definition drip sends for this tool (the
+/// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
     json!({
         "type": "function",

@@ -1,5 +1,3 @@
-// port of src/cli/marketplaces.ts
-//
 // A marketplace is a repo (git URL or local directory) that ships plugins in
 // the Claude Code layout — `.claude-plugin/marketplace.json` listing plugins,
 // each with optional `.claude-plugin/plugin.json`, `skills/<name>/SKILL.md`,

@@ -1,4 +1,4 @@
-// port of src/lib/fs.ts
+// Filesystem helpers: atomic file writes and JSONL reading.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,8 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// always on the same filesystem (guaranteed atomic on POSIX).
 ///
 /// Temp-file naming: `.{millis}-{pid}.drip-tmp` — collision-safe across
-/// concurrent processes and time. (TS name was `.lci-tmp`; renamed per the
-/// port's rename rule.)
+/// concurrent processes and time.
 ///
 /// * `path`    — destination file path.
 /// * `content` — string content to write (caller controls trailing newline).
@@ -53,8 +52,8 @@ pub struct JsonlRecord<T> {
 pub fn read_jsonl_records<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<JsonlRecord<T>> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        // Only a missing file reads as empty (the TS short-circuits on
-        // !existsSync); any other IO error surfaces like readFileSync would.
+        // Only a missing file reads as empty; any other IO error surfaces as
+        // a panic.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => panic!("failed to read {}: {error}", path.display()),
     };

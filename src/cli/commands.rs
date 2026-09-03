@@ -82,12 +82,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         args: Some("[KEY=value]"),
         description:
-            "List token env vars the model profiles use, or save one to the lci env.vars file.",
+            "List token env vars the model profiles use, or save one to the drip env.vars file.",
         name: "env",
     },
     SlashCommandSpec {
         args: None,
-        description: "Exit lci.",
+        description: "Exit drip.",
         name: "quit",
     },
 ];

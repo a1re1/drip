@@ -1,5 +1,3 @@
-// port of src/cli/mentions.ts
-//
 // Resolves @path and @path#start:end mentions in a goal into a context block
 // the activation prompt can carry. Directory mentions become a bounded tree
 // listing.

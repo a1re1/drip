@@ -1,5 +1,3 @@
-// port of src/tools/async-jobs.ts
-//
 // The TS module provides two runtimes that BASH_ASYNC (tools/bash-tool.ts)
 // rides on:
 //
@@ -8,9 +6,8 @@
 //      and a 10s start grace period for sessions whose tmux server has not
 //      finished registering them.
 //   2. AsyncToolJobManager — create/track background jobs, each with a log
-//      file under <cwd>/.drip/async-tools/<id>.log (TS used `.lci`; drip is
-//      the only user-visible rename), a serialized append queue, and a
-//      settle-once finish path.
+//      file under <cwd>/.drip/async-tools/<id>.log, a serialized append
+//      queue, and a settle-once finish path.
 //
 // The BASH_ASYNC tool itself (schema + stages) lives in
 // drip/src/tools/builtin/bash.rs; this module holds the shared runtime.
@@ -127,8 +124,7 @@ pub fn compact_whitespace(value: &str) -> String {
 // ---------------------------------------------------------------------------
 // Job-dir / log-path helpers
 //
-// TS: jobsRoot = resolve(cwd, ".lci", "async-tools"); drip writes inside
-// `.drip` instead (the only user-visible rename on this path).
+// Jobs live under <cwd>/.drip/async-tools.
 // ---------------------------------------------------------------------------
 
 pub fn default_jobs_root(cwd: &Path) -> PathBuf {
@@ -840,8 +836,8 @@ pub struct CreateChatToolRuntimeServicesOptions {
 }
 
 
-/// Port of createChatToolRuntimeServices: the jobs root defaults to
-/// <cwd>/.drip/async-tools (TS: .lci/async-tools).
+/// Builds the runtime services for the chat tools; the jobs root defaults to
+/// <cwd>/.drip/async-tools.
 pub fn create_chat_tool_runtime_services(
     options: CreateChatToolRuntimeServicesOptions,
 ) -> ChatToolRuntimeServices {

@@ -1,5 +1,3 @@
-// port of src/cli/paste.ts
-//
 // Terminals wrap pastes in bracketed-paste markers when mode 2004 is on. The
 // markers may arrive with or without their ESC depending on how the terminal
 // chunks the paste, so both spellings are stripped.

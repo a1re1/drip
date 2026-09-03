@@ -1,4 +1,3 @@
-// port of test/cli-roles.test.ts (pure-function / file-system tests only)
 // Integration tests requiring runSolidStateHarness (test/harness-roles.test.ts)
 // are deferred until the harness loop is ported.
 

@@ -1,9 +1,5 @@
-// port of src/cli/args.ts — hand-written CLI parser (no clap, per drip/PLAN.md).
-//
-// Faithful port of parseCliArgs: every flag, the same validation rules and the
-// same usage-error strings (with the lci→drip rename only). Usage errors are
-// collected into `errors` — the caller prints them to stderr and exits 1
-// (src/cli/main.tsx:616-622).
+// Hand-written CLI parser (no clap). Usage errors are collected into
+// `errors` — the caller prints them to stderr and exits 1.
 
 /// --synthesis: run the holistic review pass always, never, or (default) only
 /// when a per-file unit reported something.
@@ -153,13 +149,6 @@ pub struct ParsedCliArgs {
     pub review_synthesis: Option<ReviewSynthesis>,
     /// Model profile for the per-file review children (default "glm-5-3-flash").
     pub review_file_profile: Option<String>,
-    /// --migrate-from-lci: copy an lci home into the drip home (drip-only
-    /// feature; no TS counterpart — see drip/PLAN.md and migrate.rs).
-    pub migrate_from_lci: bool,
-    /// Source lci home for --migrate-from-lci (default $LCI_HOME or ~/.lci).
-    pub migrate_from: Option<String>,
-    /// With --migrate-from-lci: also copy the current project's .lci → .drip.
-    pub migrate_project: bool,
 }
 
 impl Default for ParsedCliArgs {
@@ -232,9 +221,6 @@ impl Default for ParsedCliArgs {
             review_synth_profile: None,
             review_synthesis: None,
             review_file_profile: None,
-            migrate_from_lci: false,
-            migrate_from: None,
-            migrate_project: false,
         }
     }
 }
@@ -724,20 +710,6 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
-            // drip-only: lci → drip migration flags (drip/PLAN.md, migrate.rs).
-            // --dry-run is shared with plan mode and parsed above.
-            "--migrate-from-lci" => {
-                parsed.migrate_from_lci = true;
-            }
-            "--from" => {
-                if let Some(value) = take_required_value(argv, index, "--from", &mut parsed.errors) {
-                    parsed.migrate_from = Some(value);
-                    index += 1;
-                }
-            }
-            "--project" => {
-                parsed.migrate_project = true;
-            }
             other if other.starts_with('-') && other != "-" => {
                 parsed.errors.push(format!(
                     "Unknown flag \"{}\". Run drip --help for the full reference.",
@@ -908,7 +880,7 @@ mod tests {
     // --- exact usage-error text (usage errors exit 1; strings pinned here) ---
 
     #[test]
-    fn exact_error_strings_match_lci_verbatim_with_drip_rename() {
+    fn exact_error_strings_are_stable() {
         assert_eq!(
             parse(&["--profile"]).errors,
             vec!["--profile requires a value.".to_string()]
@@ -960,57 +932,6 @@ mod tests {
         // "020" round-trips through JS String(parsed) === raw.trim() as false.
         assert!(parse(&["--max-iterations", "020"]).errors.is_empty() == false);
         assert_eq!(parse(&["--max-iterations", "020"]).max_iterations, None);
-    }
-
-    // --- drip-only migration flags (no TS counterpart; see migrate.rs) ---
-
-    #[test]
-    fn parses_migration_flags_with_defaults() {
-        let parsed = parse(&["--migrate-from-lci"]);
-
-        assert!(parsed.migrate_from_lci);
-        assert_eq!(parsed.migrate_from, None);
-        assert!(!parsed.dry_run);
-        assert!(!parsed.migrate_project);
-        assert_eq!(parsed.errors, Vec::<String>::new());
-    }
-
-    #[test]
-    fn parses_the_full_migration_flag_combination() {
-        let parsed = parse(&[
-            "--migrate-from-lci",
-            "--from",
-            "/tmp/old-lci-home",
-            "--dry-run",
-            "--project",
-        ]);
-
-        assert!(parsed.migrate_from_lci);
-        assert_eq!(parsed.migrate_from.as_deref(), Some("/tmp/old-lci-home"));
-        assert!(parsed.dry_run);
-        assert!(parsed.migrate_project);
-        assert_eq!(parsed.goal, None);
-        assert_eq!(parsed.errors, Vec::<String>::new());
-    }
-
-    #[test]
-    fn migration_from_flag_requires_a_value() {
-        assert_eq!(
-            parse(&["--from"]).errors,
-            vec!["--from requires a value.".to_string()]
-        );
-        // A dash-leading next token is treated as a missing value, matching
-        // every other required-value flag.
-        assert_eq!(
-            parse(&["--from", "--dry-run"]).errors,
-            vec!["--from requires a value.".to_string()]
-        );
-        // The flags are independent: --from is not gated on --migrate-from-lci.
-        assert_eq!(
-            parse(&["--from", "/old/lci"]).migrate_from.as_deref(),
-            Some("/old/lci")
-        );
-        assert!(!parse(&["--project"]).migrate_from_lci);
     }
 
     // --- port of test/cli-help-drift.test.ts (adapted): parser ↔ help text ---

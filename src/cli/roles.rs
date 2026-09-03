@@ -1,12 +1,7 @@
-// port of src/cli/roles.ts
-//
 // The CLI-facing role loader: user-authored RoleDefinition objects (config
 // profiles, .drip/roles.json, or a marketplace plugin's agents/ directory)
 // resolved into the harness's runtime shape (HarnessRoleRuntime), the built-in
 // role presets ("reviewed", "research", "team", "planned"), and the --roles flag parser.
-//
-// Renames applied per the porting rules: .lci/roles.json -> .drip/roles.json,
-// lci -> drip in user-visible strings. JSON field names stay identical.
 //
 // NOTE on shared types: the minimal shapes roles.ts needs (role definitions,
 // presets, bindings) are defined here; model resolution goes through

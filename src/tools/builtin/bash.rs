@@ -1,5 +1,3 @@
-// port of tools/bash-tool.ts (the synchronous BASH tool)
-//
 // The async/tmux half of the TS file (BASH_ASYNC, session naming, tmux
 // probes) is ported in this file (below the sync half) and in
 // drip/src/tools/async_jobs.rs, which ports src/tools/async-jobs.ts.

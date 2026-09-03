@@ -1,5 +1,3 @@
-// port of tools/dir-tool.ts
-
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -35,10 +33,10 @@ pub struct DirToolExecution {
     pub output_text: String,
 }
 
-// .lci/.solid-state/.local-coding-app are the harness's own artifacts —
+// .drip/.solid-state/.local-coding-app are the harness's own artifacts —
 // showing them invites the model to read operator state instead of the code.
 // (The ignore list itself is shared: see helpers.rs DEFAULT_IGNORED_DIRS,
-// where the harness dir is already renamed to .drip.)
+// which lists the harness dir.)
 
 /// Port of clampDepth: undefined → 4, otherwise floored and clamped to [1, 8].
 pub fn clamp_depth(value: Option<f64>) -> i64 {
@@ -162,9 +160,8 @@ fn walk(
     Ok(())
 }
 
-/// The OpenAI function definition lci sends for this tool (the
-/// {type: "function", function: {...}} envelope built by
-/// buildTransportTools in src/chat/runtime.ts).
+/// The OpenAI function definition drip sends for this tool (the
+/// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
     json!({
         "type": "function",
@@ -282,7 +279,6 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
-// port of tools/test/dir-tool.test.ts
 #[cfg(test)]
 mod tests {
     use super::*;

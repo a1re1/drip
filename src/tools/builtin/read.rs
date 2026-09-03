@@ -1,5 +1,3 @@
-// port of tools/read-tool.ts
-
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -87,9 +85,8 @@ fn take_utf16(line: &str, units: usize) -> &str {
     line
 }
 
-/// The OpenAI function definition lci sends for this tool (the
-/// {type: "function", function: {...}} envelope built by
-/// buildTransportTools in src/chat/runtime.ts).
+/// The OpenAI function definition drip sends for this tool (the
+/// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
     json!({
         "type": "function",
@@ -341,7 +338,6 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     }
 }
 
-// port of tools/test/read-tool.test.ts
 #[cfg(test)]
 mod tests {
     use super::*;

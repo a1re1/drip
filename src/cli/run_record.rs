@@ -1,5 +1,3 @@
-// port of src/cli/run-record.ts
-//
 // The helpers run-record.ts pulls from sibling modules are inlined here
 // (this module is their only consumer):
 //   - writeFileAtomic (src/lib/fs.ts) -> `write_file_atomic`
@@ -48,7 +46,7 @@ pub struct RunRecord {
 	pub stop_latency_ms: Option<i64>,
 	pub summary: Option<String>,
 	/// Token/latency economics of the run; null on records from older versions.
-	/// (Declared before taskStats so serde emits lci's key order.)
+	/// (Declared before taskStats so serde emits the canonical key order.)
 	pub usage: Option<HarnessRunUsage>,
 	pub task_stats: TaskStats,
 }

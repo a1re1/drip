@@ -1,4 +1,4 @@
-// bin `dripw` — port of src/cli/watch/main.tsx (lciw): the read-only watch TUI.
+// bin `dripw` — the read-only watch TUI.
 
 use std::io::Write;
 
@@ -54,8 +54,8 @@ fn main() {
     let home_root = resolve_drip_home_root();
     // resolve_drip_project only, never open_drip_home/ensure_drip_project — a
     // watcher must not create the home tree, the project .drip, or anything else.
-    // No --project-dir / DRIP_PROJECT_DIR override: like lciw, the watcher
-    // always looks at the cwd's project.
+    // No --project-dir / DRIP_PROJECT_DIR override: the watcher always looks
+    // at the cwd's project.
     let project = match resolve_drip_project(&cwd, &home_root, None) {
         Ok(project) => project,
         Err(error) => {

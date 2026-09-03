@@ -1,5 +1,3 @@
-// port of src/cli/ui/markdown-ansi.ts
-//
 // Markdown → ANSI for line-oriented surfaces (the TUI timeline, dripw's
 // transcript pane). The TS renders through marked + marked-terminal; drip
 // carries a small renderer of its own covering what transcripts actually

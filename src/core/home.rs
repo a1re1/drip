@@ -1,5 +1,3 @@
-// port of src/cli/home.ts
-//
 // Storage is split in three:
 //   ~/.drip                          — shared across every project: config,
 //                                      credentials, user skills, marketplaces.
@@ -125,7 +123,7 @@ pub struct DripProject {
 }
 
 /// Resolves the global home root from $DRIP_HOME (or an injected override, for
-/// tests) or the user's home directory — port of resolveLciHomeRoot.
+/// tests) or the user's home directory.
 pub fn resolve_drip_home_root_from(home_override: Option<&str>) -> String {
     let override_ = home_override
         .map(str::trim)
@@ -148,8 +146,8 @@ pub fn resolve_drip_home_root() -> String {
 
 // Mirrors how other harnesses key per-project storage: the absolute cwd with
 // every non-alphanumeric run collapsed to a dash, so one home directory can
-// hold every project. Byte-identical to lci's projectSlug — migrated session
-// directories keep working.
+// hold every project. The slug shape is stable: existing session directories
+// keep working across versions.
 use std::borrow::Cow;
 
 pub fn project_slug(cwd: &str) -> String {
@@ -158,8 +156,8 @@ pub fn project_slug(cwd: &str) -> String {
         // non-alphanumeric characters to a single dash, exactly like the
         // TypeScript regex `/[^A-Za-z0-9]+/g`.
         Some(path) => collapse_non_alnum_runs(path).into_owned(),
-        // Non-UTF-8 paths cannot occur in lci (TS strings are UTF-16 with lossy
-        // resolve), so mirror resolve()'s lossy behavior before mapping.
+        // Non-UTF-8 paths are mapped through a lossy conversion before
+        // collapsing, so every cwd yields a slug.
         None => collapse_non_alnum_runs(&resolve(cwd).to_string_lossy()).into_owned(),
     };
 
@@ -552,7 +550,7 @@ mod tests {
 
     #[test]
     fn creates_the_global_home_layout() {
-        let (_guard, root) = temp_root("lci-test-");
+        let (_guard, root) = temp_root("drip-test-");
         let home = open_drip_home(&s(&join(&root, ".drip")));
 
         assert!(Path::new(&home.root).exists());
@@ -564,7 +562,7 @@ mod tests {
 
     #[test]
     fn keeps_sessions_and_the_index_under_the_global_home_repo_scoped_data_in_cwd_drip() {
-        let (_guard, cwd) = temp_root("lci-test-");
+        let (_guard, cwd) = temp_root("drip-test-");
         let home_root = s(&join(&cwd, "fake-home"));
         let project = resolve_drip_project(&s(&cwd), &home_root, None).unwrap();
         let project_home = join(&home_root, &format!("projects/{}", project_slug(&s(&cwd))));
@@ -608,7 +606,7 @@ mod tests {
 
     #[test]
     fn discovers_the_project_root_from_the_nearest_drip_then_git_then_cwd() {
-        let (_guard, root) = temp_root("lci-test-");
+        let (_guard, root) = temp_root("drip-test-");
         let home_root = s(&join(&root, "fake-home"));
         let nested = join(&root, "repo/src/deep");
 
@@ -626,7 +624,7 @@ mod tests {
 
     #[test]
     fn keys_sessions_to_the_checkout_and_memory_to_the_repo() {
-        let (_guard, root) = temp_root("lci-test-");
+        let (_guard, root) = temp_root("drip-test-");
         let home_root = s(&join(&root, "fake-home"));
         let main = join(&root, "repo");
         let linked = join(&main, ".worktrees/abc123");
@@ -715,7 +713,7 @@ mod tests {
 
     #[test]
     fn refuses_to_use_the_global_home_as_the_project_data_dir() {
-        let (_guard, root) = temp_root("lci-test-");
+        let (_guard, root) = temp_root("drip-test-");
         let home_root = s(&join(&root, ".drip"));
         fs::create_dir_all(&home_root).unwrap();
 
@@ -734,7 +732,7 @@ mod tests {
 
     #[test]
     fn a_project_dir_override_is_fully_self_contained() {
-        let (_guard, root) = temp_root("lci-test-");
+        let (_guard, root) = temp_root("drip-test-");
         let home_root = s(&join(&root, "fake-home"));
         let override_dir = s(&join(&root, "sandbox"));
 

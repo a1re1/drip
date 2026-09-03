@@ -1,5 +1,3 @@
-// port of src/harness/types.ts
-//
 // Serde port of every type in the harness state contract. Field names
 // serialize exactly as the TypeScript field names (they are already
 // camelCase there): Rust fields are snake_case + #[serde(rename_all =
@@ -21,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// JSON.stringify prints an integral number without a fraction (`0`, not
 /// `0.0`); serde_json prints every f64 with one. Seconds fields go through
-/// this so the wire text matches lci byte for byte.
+/// this so the wire text stays in the JavaScript form.
 pub fn serialize_js_number<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
 	if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
 		serializer.serialize_i64(*value as i64)
@@ -238,7 +236,7 @@ pub struct HarnessVerificationStreak {
 	pub output_tail_hash: String,
 }
 
-/// A steering message injected into a running session (lci --send).
+/// A steering message injected into a running session (drip --send).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessOperatorMessage {
@@ -650,7 +648,7 @@ mod tests {
 	#[test]
 	fn state_serializes_type_loop_and_version_one() {
 		let state = HarnessState {
-			goal: "port lci to drip".into(),
+			goal: "ship the feature".into(),
 			..Default::default()
 		};
 		let json = serde_json::to_value(&state).unwrap();

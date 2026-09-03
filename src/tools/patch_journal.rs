@@ -1,5 +1,3 @@
-// port of src/tools/patch-journal.ts
-//
 // PATCH used to write files in place: a crash or stop landing mid-write left
 // a truncated source file with no record of what was there. Writes now go
 // temp+rename (same-directory, so the rename is atomic), and every edit
@@ -38,7 +36,7 @@ pub fn sha256(text: &str) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-// Mirrors resolve_lci_project's git-style discovery (nearest .drip, then
+// Mirrors resolve_drip_project's git-style discovery (nearest .drip, then
 // nearest .git, then the start dir) so a run started in a subdirectory
 // journals to the same .drip its session lives in, not a stray nested one.
 pub fn find_journal_root(start_dir: &Path) -> PathBuf {
@@ -230,7 +228,6 @@ mod tests {
         assert!(temp_files.is_empty());
     }
 
-    // it("journals to the discovered .lci root, not a stray nested one")
     #[test]
     fn journals_to_the_discovered_root_not_a_stray_nested_one() {
         let root = make_root();

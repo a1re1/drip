@@ -1,10 +1,9 @@
-// port of src/cli/main.tsx — the `drip` binary's dispatch. The bin
-// (src/main.rs) only builds the runtime and calls `main(argv)`; keeping the
-// body in the library lets the parity harness and unit tests drive it.
+// The `drip` binary's dispatch. The bin (src/main.rs) only builds the runtime
+// and calls `main(argv)`; keeping the body in the library lets unit tests
+// drive it.
 //
-// `process.exit(n)` sites return the exit code up through `main`; `return`
-// sites return 0. Every stdout/stderr line keeps the TS text after the
-// lci→drip rename.
+// Exit sites return the exit code up through `main`; plain `return` sites
+// return 0.
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -102,12 +101,12 @@ fn to_fixed_2(value: f64) -> String {
 
 fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinition>, String> {
     if tools_path != "./tools" {
-        // A missing pack fails exactly as lci's resolveToolsEntryPath does; a
-        // pack that exists is TypeScript, which drip cannot load.
+        // A missing pack is an error; a pack that exists is a TypeScript
+        // module, which drip cannot load.
         crate::tools::loader::resolve_tools_entry_path(tools_path)?;
 
         return Err(format!(
-            "--tools: drip only ships the built-in tool pack; \"{tools_path}\" cannot be loaded (TypeScript tool packs are an lci-only feature)."
+            "--tools: drip only ships the built-in tool pack; \"{tools_path}\" cannot be loaded (only the built-in pack is supported)."
         ));
     }
 
@@ -1018,16 +1017,14 @@ pub async fn main(argv: Vec<String>) -> i32 {
     }
 
     if cli_args.help {
-        // lci: console.log(CLI_HELP_TEXT) — console.log appends one newline and
-        // the template itself ends with one, so stdout ends "\n\n"; println!
-        // over HELP reproduces that exactly.
+        // The template ends with one newline and println! appends another,
+        // so stdout ends "\n\n".
         println!("{HELP}");
         return 0;
     }
 
     if cli_args.version {
-        // lci reads package.json at runtime; drip embeds the Cargo package
-        // version at compile time (port brief: drip reports its own version).
+        // drip embeds the Cargo package version at compile time.
         let version = env!("CARGO_PKG_VERSION");
 
         if cli_args.json {
@@ -1037,30 +1034,6 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
         println!("drip {version}");
         return 0;
-    }
-
-    // drip-only: lci → drip migration (`--migrate-from-lci [--from <dir>]
-    // [--dry-run] [--project]`) — drip/PLAN.md; there is no TS dispatch to
-    // mirror, so it sits after help/version like the other leaf commands.
-    if cli_args.migrate_from_lci {
-        let options = crate::migrate::MigrateOptions {
-            from: cli_args.migrate_from.clone(),
-            dry_run: cli_args.dry_run,
-            project: cli_args.migrate_project,
-            to: None,
-            project_root: None,
-        };
-
-        return match crate::migrate::migrate_from_lci(&options) {
-            Ok(report) => {
-                print!("{}", report.summary());
-                0
-            }
-            Err(err) => {
-                eprintln!("{err:#}");
-                1
-            }
-        };
     }
 
     let cwd = std::env::current_dir()
@@ -1594,7 +1567,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             .output()
         {
             let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let looks_like_run = regex::Regex::new(r"(?i)bun|drip|lci|main\.tsx|node")
+            let looks_like_run = regex::Regex::new(r"(?i)drip")
                 .map(|pattern| pattern.is_match(&command))
                 .unwrap_or(true);
 
@@ -1670,8 +1643,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
             };
 
             let line = json!({ "at": now_iso(), "text": text }).to_string();
-            // A message that could not be queued is a failed --send (exit 1), as
-            // appendFileSync throwing is in lci — not a silent "Queued".
+            // A message that could not be queued is a failed --send (exit 1),
+            // not a silent "Queued".
             if let Err(error) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

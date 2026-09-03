@@ -312,7 +312,7 @@ fn sgr_re() -> &'static Regex {
 }
 
 // SGR wrappers. Each returns plain text untouched when color is disabled.
-// Accent is cyan (matching the existing lci watch TUI); selection uses onCyan.
+// Accent is cyan (matching the watch TUI); selection uses onCyan.
 fn sgr(open: &str, s: &str) -> String {
     if color_enabled() {
         format!("{ESC}[{open}m{s}{ESC}[0m")

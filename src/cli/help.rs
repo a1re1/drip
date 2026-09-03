@@ -1,10 +1,5 @@
-// port of src/cli/help.ts
-//
-// HELP is a byte-for-byte port of CLI_HELP_TEXT with only the user-visible
-// renames applied (lci→drip, lciw→dripw, LCI_→DRIP_; the bare lci→drip
-// substitution also rewrites ~/.lci / .lci/ paths to ~/.drip / .drip/).
-// Kept as a single raw string constant so byte comparison against the
-// TypeScript original (via `bun run src/cli/main.tsx --help`) stays trivial.
+// The --help text. Kept as a single raw string constant so it can be
+// compared byte for byte in tests.
 
 pub const HELP: &str = r#"	drip — local code inference, a headless-first coding agent harness
 
@@ -188,19 +183,6 @@ OPTIONS
 	--marketplace-update [name]   git pull registered marketplace clones (all, or one by name)
 	--plugin-enable <key>         Enable a plugin or single skill: marketplace/plugin[/skill]
 	--plugin-disable <key>        Disable a plugin or single skill
-	--migrate-from-lci [--from <dir>] [--dry-run] [--project]
-	                              Migrate a legacy lci installation into this
-	                              drip home (source default ~/.lci or $LCI_HOME,
-	                              destination ~/.drip or $DRIP_HOME): copies
-	                              config.json, env.vars (0600 kept), skills/,
-	                              marketplaces/ and projects/, rewriting session
-	                              paths and resume commands to drip's; existing
-	                              destination files are kept (reported:
-	                              skipped (exists)); nothing is moved or
-	                              deleted. --dry-run prints the plan without
-	                              writing; --project also copies <project>/.lci
-	                              → .drip (patches, async-tools, skills, roles,
-	                              plugins, policy)
 	--version                     Print the drip CLI version (with --json: {"version":"<version>"})
 	--help, -h                    Show this text
 
@@ -255,41 +237,13 @@ EXIT CODES
 	124 --wait gave up after --timeout-secs (the run keeps going)
 "#;
 
-/// Slices out the drip-only migration OPTIONS block — from the
-/// `--migrate-from-lci` synopsis line up to the `--version` line — returning
-/// the text byte-identical to the ported TypeScript template. The block is
-/// the ONE intentional drip-only help addition (`--migrate-from-lci` has no
-/// lci counterpart, so CLI_HELP_TEXT has no matching lines), which is why
-/// the parity test strips it before comparing against the renamed TS output.
-pub fn strip_migration_block(text: &str) -> String {
-    let start = text
-        .find("\n\t--migrate-from-lci")
-        .expect("help must contain the migration block start marker")
-        + 1;
-    let end = text
-        .find("\n\t--version")
-        .expect("help must contain the --version line")
-        + 1;
-    assert!(
-        start < end,
-        "the migration block must sit right before --version"
-    );
-    format!("{}{}", &text[..start], &text[end..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn help_text_carries_no_lci_branding() {
-        // The migration OPTIONS block is the one sanctioned place the legacy
-        // tool's name appears: the block copies FROM the lci home, so its
-        // flag, ~/.lci and $LCI_HOME cannot be renamed without lying about
-        // where the data comes from. Strip it before applying the invariant.
-        let ported = strip_migration_block(HELP);
-        assert!(!ported.contains("lci"));
-        assert!(!ported.contains("LCI_"));
+    fn help_text_carries_drip_branding_only() {
+        assert!(!HELP.contains("local-code-inference"));
         assert!(HELP.contains("drip — local code inference"));
     }
 
@@ -347,11 +301,7 @@ mod tests {
             "--synthesis",
             "--synth-profile",
             "--no-repo-memory",
-            // drip-only migration flags (no lci counterpart)
-            "--migrate-from-lci",
-            "--from",
             "--dry-run",
-            "--project",
         ];
 
         for flag in flags {
@@ -366,8 +316,8 @@ mod tests {
 
     #[test]
     fn help_text_is_printable_verbatim() {
-        // lci prints CLI_HELP_TEXT via console.log, which appends one newline;
-        // the template itself ends with a newline, so stdout ends in "\n\n".
+        // The template ends with exactly one newline; println! appends the
+        // second, so stdout ends in "\n\n".
         assert!(HELP.ends_with("the run keeps going)\n"));
         assert!(!HELP.ends_with("\n\n"));
         assert!(HELP.starts_with('\t'));

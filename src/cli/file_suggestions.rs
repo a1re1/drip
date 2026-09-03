@@ -1,4 +1,3 @@
-// port of src/chat/file-suggestions-server.ts (the workspace-file half; the
 // tmux-session suggestions belong to the web chat and are not ported).
 
 use std::path::{Path, PathBuf};

@@ -1,5 +1,3 @@
-// port of src/cli/ui/app.tsx — the interactive `drip --tui` session.
-//
 // Ink's model was: a <Static> timeline that scrolls into the terminal's
 // scrollback, and a live region (composer or picker, then the status bar)
 // re-painted in place at the bottom. This port keeps exactly that shape with

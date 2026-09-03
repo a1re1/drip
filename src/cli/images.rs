@@ -1,5 +1,3 @@
-// port of src/cli/images.ts
-//
 // Image attachment discovery/copying into the session images/ dir: data-URL
 // encoding, osascript clipboard hex parsing, and the size/type limits with
 // their exact error strings. The TS module is self-contained (node:fs,

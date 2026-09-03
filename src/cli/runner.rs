@@ -1,5 +1,3 @@
-// port of src/cli/runner.ts
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};

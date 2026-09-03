@@ -1,5 +1,3 @@
-// port of src/tools/types.ts
-//
 // Serde port of the tool-definition contract. TS field names are already
 // camelCase; Rust fields are snake_case with #[serde(rename_all = "camelCase")]
 // so the wire format matches the TS types byte for byte. The TS generics

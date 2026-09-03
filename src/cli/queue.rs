@@ -1,5 +1,3 @@
-// port of src/cli/queue.ts
-
 use std::fs;
 use std::path::{Path, PathBuf};
 

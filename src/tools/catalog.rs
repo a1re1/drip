@@ -1,5 +1,3 @@
-// port of src/tools/catalog.ts
-
 use super::types::{ChatToolDefinition, ChatToolMode};
 
 // function mergeToolDefinitions(...toolGroups: ChatToolDefinition[][])

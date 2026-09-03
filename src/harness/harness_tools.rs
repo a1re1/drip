@@ -1,38 +1,32 @@
-// port of src/harness/harness-tools.ts
+// Harness tool definitions and argument parsing.
 //
-// This module ports the *definitions + argument parsing* half of
-// harness-tools.ts: HARNESS_TOOL_SPECS (as harness_tool_definitions),
-// isHarnessTool, HarnessRoleGate, DEFAULT_MAX_REVIEW_ROUNDS, and the pure
-// argument extraction/validation of applyHarnessToolCall (parseToolInput +
-// parsePlannedTasks + the per-branch field coercion) as parse_harness_op.
-// The state-mutating op handlers (addTasks/dropTask/finishTask/... and their
-// resultText strings) are ported below as apply_harness_op.
+// This module holds HARNESS_TOOL_SPECS (as harness_tool_definitions),
+// is_harness_tool, HarnessRoleGate, DEFAULT_MAX_REVIEW_ROUNDS, and the pure
+// argument extraction/validation of a harness tool call
+// (parse_harness_op): JSON-decoding plus per-branch field coercion.
+// The state-mutating op handlers (add/drop/finish/... and their result_text
+// strings) live below as apply_harness_op.
 //
-// Rename rule applied to user-visible text: `~/.lci` -> `~/.drip` (three
-// description sites: remember, remember scope param, forget). Everything else
-// (names, field names, enum values, required arrays) is verbatim.
-//
-// The definitions are byte-identical to the TS oracle fixture
-// drip/tests/fixtures/harness-tools.json (dumped from
-// src/harness/harness-tools.ts via drip/parity/tools/dump-harness-tools.ts,
-// then renamed lci->drip) — see drip/tests/harness_tools_schema_parity.rs.
+// The definitions are byte-identical to the fixture
+// drip/tests/fixtures/harness-tools.json — see
+// drip/tests/harness_tools_schema_parity.rs.
 
 use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
-/// port of DEFAULT_MAX_REVIEW_ROUNDS
+/// Default cap on review rounds before a rejected task is blocked.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 2;
 
-/// port of HarnessRoleSpec (roles.ts): a named role, optionally owned by
-/// another role that must verify its completed work.
+/// A named role (see roles.rs), optionally one whose completed work must be
+/// verified by another role.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HarnessRoleSpec {
     /// verifiedBy: id of the role whose review must confirm this role's work.
     pub verified_by: Option<String>,
 }
 
-/// port of HarnessRoleGate
+/// The role configuration a run enforces.
 #[derive(Debug, Clone, Default)]
 pub struct HarnessRoleGate {
     pub roles: HashMap<String, HarnessRoleSpec>,
@@ -41,7 +35,7 @@ pub struct HarnessRoleGate {
     pub default_task_role: Option<String>,
 }
 
-/// port of HarnessTaskInput (the parsePlannedTasks entry shape)
+/// One planned-task entry as parsed from a plan_tasks call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessTaskInput {
     pub title: String,
@@ -49,7 +43,7 @@ pub struct HarnessTaskInput {
     pub depends_on: Vec<String>,
 }
 
-/// port of finish_task's `status` argument ("completed" | "blocked")
+/// The `status` argument of finish_task ("completed" | "blocked").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishTaskStatus {
     Completed,
@@ -65,7 +59,7 @@ impl FinishTaskStatus {
     }
 }
 
-/// port of remember/forget's `scope` argument ("session" | "repo")
+/// The `scope` argument of remember/forget ("session" | "repo").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryScope {
     Session,
@@ -74,9 +68,9 @@ pub enum MemoryScope {
 
 /// One parsed harness tool call: one variant per harness tool, carrying the
 /// arguments applyHarnessToolCall's matching branch would use. Field
-/// extraction follows the TS branch code exactly (`typeof input.x ===
-/// "string" ? input.x : <default>`); the state-dependent emptiness checks
-/// ("Provide the note text.", ...) stay in the op handlers.
+/// extraction is per-branch (`typeof input.x === "string" ? input.x :
+/// <default>`); the state-dependent emptiness checks ("Provide the note
+/// text.", ...) stay in the op handlers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HarnessOp {
     /// plan_tasks: entries from parsePlannedTasks, placement "next"|"end".
@@ -116,9 +110,9 @@ pub enum HarnessOp {
     Forget { scope: MemoryScope, note_id: String },
 }
 
-/// port of buildHarnessToolSpecs() with no roleNames: the 10 harness (framework)
-/// tool definitions as OpenAI function-call specs, in HARNESS_TOOL_SPECS order
-/// (alphabetical by function name — the same order the fixture dumps them in).
+/// The 10 harness (framework) tool definitions as OpenAI function-call
+/// specs, in HARNESS_TOOL_SPECS order (alphabetical by function name — the
+/// same order the fixture dumps them in).
 pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -366,7 +360,6 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
     ]
 }
 
-/// port of isHarnessTool
 // Leading verbs that make a task title read as "change the code". Judged on
 // the first word only, so "verify the added export" (verify) and "add a
 // check for X" (add) land on the right side; nouns like "check" or "test"
@@ -398,8 +391,8 @@ pub fn looks_like_build_task(title: &str) -> bool {
         return false;
     }
 
-    // Strip leading numbering/bullets the way the TS regex does, then take
-    // the first whitespace-delimited word and keep its letters only.
+    // Strip leading numbering/bullets, then take the first
+    // whitespace-delimited word and keep its letters only.
     let stripped = title
         .trim()
         .trim_start_matches(|c: char| c.is_whitespace() || c.is_ascii_digit() || matches!(c, '.' | ')' | ':' | '(' | '-' | '*' | '•'));
@@ -433,7 +426,7 @@ pub fn is_harness_tool(tool_name: &str) -> bool {
 
 // --- argument parsing (parseToolInput + the per-branch coercion) ---
 
-/// port of parseToolInput's wrapper text: a misleading missing-field error
+/// A misleading missing-field error
 /// sends weak models down the wrong repair path, so name the real problem.
 fn not_valid_json(parse_error: &str) -> String {
     format!(
@@ -441,9 +434,8 @@ fn not_valid_json(parse_error: &str) -> String {
     )
 }
 
-/// port of parseToolInput: JSON-parse the raw arguments and require an object.
-/// Note: the embedded parse-error detail comes from the JSON runtime; serde's
-/// messages differ from V8's, the wrapper text is identical.
+/// JSON-parse the raw arguments and require an object. Note: the embedded
+/// parse-error detail comes from the JSON runtime, the wrapper text is ours.
 fn parse_tool_input(raw_input: &str) -> Result<serde_json::Value, String> {
     match serde_json::from_str::<serde_json::Value>(raw_input) {
         Ok(parsed) if parsed.is_object() => Ok(parsed),
@@ -452,8 +444,7 @@ fn parse_tool_input(raw_input: &str) -> Result<serde_json::Value, String> {
     }
 }
 
-/// port of the per-branch `typeof input.x === "string" ? input.x : default`
-/// coercion.
+/// Per-branch `typeof input.x === "string" ? input.x : default` coercion.
 fn string_or_default(input: &serde_json::Value, key: &str, default: &str) -> String {
     match input.get(key) {
         Some(v) if v.is_string() => v.as_str().unwrap_or(default).to_string(),
@@ -461,7 +452,7 @@ fn string_or_default(input: &serde_json::Value, key: &str, default: &str) -> Str
     }
 }
 
-/// port of the optional-string coercion (`typeof input.x === "string" ? input.x : undefined`).
+/// Optional-string coercion (`typeof input.x === "string" ? input.x : undefined`).
 fn string_or_none(input: &serde_json::Value, key: &str) -> Option<String> {
     match input.get(key) {
         Some(v) if v.is_string() => Some(v.as_str().unwrap_or_default().to_string()),
@@ -469,7 +460,7 @@ fn string_or_none(input: &serde_json::Value, key: &str) -> Option<String> {
     }
 }
 
-/// port of parsePlannedTasks: accepts both plan_tasks entry shapes — bare
+/// Parses plan_tasks entries — accepts both shapes, bare
 /// titles, and {title, role, dependsOn} objects when roles are configured.
 /// Unknown role names are stripped (the task still lands, under the default
 /// role) and reported back to the model via `unknown_roles`.
@@ -537,7 +528,7 @@ fn parse_planned_tasks(
     (entries, unknown_roles)
 }
 
-/// port of HarnessToolResult (the applyHarnessToolCall return shape)
+/// The result of applying one harness tool call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessToolResult {
     pub result_text: String,
@@ -545,7 +536,7 @@ pub struct HarnessToolResult {
     pub task_finished: bool,
 }
 
-/// port of applyReviewVerdict: finishing a review task is a verdict on the
+/// apply_review_verdict: finishing a review task is a verdict on the
 /// reviewed work. Confirmation completes the review and annotates the
 /// original; rejection completes the review too (its unit of work — judging —
 /// is done) and sends the original back to the queue, or blocks it once its
@@ -638,8 +629,7 @@ pub fn apply_review_verdict(
 
     if original_review_round.unwrap_or(0) >= (max_review_rounds as i64) - 1 {
         let new_round = original_review_round.unwrap_or(0) + 1;
-        // TS mutates original.reviewRound via the same reference; the Rust
-        // state helper re-looks the task up by id.
+        // The state helper re-looks the task up by id to bump review_round.
         if let Some(task) = get_task_by_id_mut(state, &original_id) {
             task.review_round = Some(new_round);
         }
@@ -686,7 +676,7 @@ pub fn apply_review_verdict(
     }
 }
 
-/// port of the remember/forget scope coercion ("session" default).
+/// The remember/forget scope coercion ("session" default).
 fn parse_scope(input: &serde_json::Value) -> MemoryScope {
     if string_or_default(input, "scope", "session") == "repo" {
         MemoryScope::Repo
@@ -695,17 +685,16 @@ fn parse_scope(input: &serde_json::Value) -> MemoryScope {
     }
 }
 
-/// port of applyHarnessToolCall's argument handling: parse the raw JSON
-/// arguments into a typed HarnessOp. This is the no-role-gate entry point —
-/// plan_tasks role entries are stripped into `unknown_roles` exactly as the
-/// TS does when no gate is configured. Handlers with a gate should call
-/// [`parse_harness_op_with_gate`].
+/// Parse the raw JSON arguments of a harness tool call into a typed
+/// HarnessOp. This is the no-role-gate entry point — plan_tasks role entries
+/// are stripped into `unknown_roles` when no gate is configured. Handlers
+/// with a gate should call [`parse_harness_op_with_gate`].
 pub fn parse_harness_op(tool_name: &str, raw_input: &str) -> Result<HarnessOp, String> {
     parse_harness_op_with_gate(tool_name, raw_input, None)
 }
 
-/// parse_harness_op with the HarnessRoleGate the TS handler receives (it
-/// shapes plan_tasks' entry parsing).
+/// parse_harness_op with a HarnessRoleGate (it shapes plan_tasks' entry
+/// parsing).
 pub fn parse_harness_op_with_gate(
     tool_name: &str,
     raw_input: &str,
@@ -782,26 +771,25 @@ pub fn parse_harness_op_with_gate(
 }
 
 // ---------------------------------------------------------------------------
-// Repo memory bank helpers — port of src/harness/harness-tools.ts:26-132.
-// These file formats must stay byte-identical with the TS implementation: the
-// MEMORY.md index holds one line per page, `- [Title](slug.md) — hook`, and a
-// topic page starts with `# <topic>` when first created (later notes are
-// appended after a blank line).
+// Repo memory bank helpers.
+// File formats: the MEMORY.md index holds one line per page,
+// `- [Title](slug.md) — hook`, and a topic page starts with `# <topic>` when
+// first created (later notes are appended after a blank line).
 // ---------------------------------------------------------------------------
 
 use crate::core::state as core_state;
 
-/// port of MEMORY_INDEX (src/harness/harness-tools.ts:26)
+/// Filename of the memory bank index inside the memory dir.
 const MEMORY_INDEX: &str = "MEMORY.md";
 
-/// port of parseMemoryIndex's map value type `{ title: string; hook: string }`
+/// One index entry: `{ title, hook }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryIndexEntry {
     pub title: String,
     pub hook: String,
 }
 
-/// port of slugify (src/harness/harness-tools.ts:29-40)
+/// Slugify a topic into a filename stem.
 ///
 /// Lowercases, collapses every run of non-`[a-z0-9]` characters into a single
 /// dash, trims leading/trailing dashes and caps the result at 80 characters
@@ -838,11 +826,11 @@ pub fn slugify(topic: &str) -> String {
     }
 }
 
-/// port of parseMemoryIndex (src/harness/harness-tools.ts:46-56)
+/// Parse the MEMORY.md index.
 ///
 /// Parses MEMORY.md into an ordered map of filename → hook line. Lines are
 /// expected to be `- [Title](slug.md) — hook`. A `Vec<(String, _)>` keeps the
-/// TS `Map` insertion order (later duplicates update in place) so
+/// Insertion order is kept (later duplicates update in place) so
 /// re-serialisation is byte-identical.
 pub fn parse_memory_index(content: &str) -> Vec<(String, MemoryIndexEntry)> {
     let mut entries: Vec<(String, MemoryIndexEntry)> = Vec::new();
@@ -894,7 +882,7 @@ pub fn parse_memory_index(content: &str) -> Vec<(String, MemoryIndexEntry)> {
     entries
 }
 
-/// port of serializeMemoryIndex (src/harness/harness-tools.ts:59-64)
+/// Serialise the index map back to MEMORY.md content.
 ///
 /// Serialises the index map back to MEMORY.md content: one line per entry,
 /// `— hook` omitted when the hook is empty, newline-terminated when non-empty.
@@ -916,7 +904,7 @@ pub fn serialize_memory_index(entries: &[(String, MemoryIndexEntry)]) -> String 
     }
 }
 
-/// port of writeRepoMemoryNote (src/harness/harness-tools.ts:73-101)
+/// Upsert a topic page and keep MEMORY.md's index in sync.
 ///
 /// Upserts a topic page and keeps MEMORY.md's index in sync:
 /// - creates the memory dir if needed,
@@ -982,7 +970,7 @@ pub fn write_repo_memory_note(
     slug
 }
 
-/// port of removeRepoMemoryPage (src/harness/harness-tools.ts:107-132)
+/// Remove a topic page and its index entry from the memory bank.
 ///
 /// Removes a topic page and its index entry from the memory bank. Re-slugifies
 /// so a hostile or sloppy slug ("../notes", "MEMORY") can never resolve outside
@@ -1134,14 +1122,14 @@ mod memory_bank_tests {
     }
 }
 
-/// port of RepoMemoryConfig (subset the op dispatcher needs)
+/// Repo memory config the op dispatcher needs.
 #[derive(Debug, Clone, Default)]
 pub struct RepoMemoryConfig {
     pub memory_dir: String,
     pub disabled: bool,
 }
 
-/// port of HarnessToolResult: the model-visible outcome of one op.
+/// The model-visible outcome of one op.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessOpOutcome {
     pub text: String,
@@ -1151,10 +1139,9 @@ pub struct HarnessOpOutcome {
     pub direct_response: Option<String>,
 }
 
-/// port of the context the applyHarnessToolCall handlers read: the current
-/// loop's identity, the role gate in force and the repo memory config
-/// (mirrors the TS `gate?`/`repoMemory?` args plus the loop bookkeeping the
-/// per-op branches read).
+/// Context the op handlers read: the current loop's identity, the role gate
+/// in force and the repo memory config (the `gate`/`repo_memory` args plus
+/// the loop bookkeeping the per-op branches read).
 #[derive(Debug, Clone, Default)]
 pub struct HarnessOpContext {
     /// Current loop number (state.r#loop at call time).
@@ -1169,9 +1156,8 @@ pub struct HarnessOpContext {
     pub repo_memory: RepoMemoryConfig,
 }
 
-/// port of the status string interpolation in the applyHarnessToolCall
-/// branches: the TS reads the raw status field ("completed", "dropped") when
-/// text like "Task t-1 is already ${status}..." embeds it.
+/// The raw status field as text ("completed", "dropped"), for messages like
+/// "Task t-1 is already ${status}...".
 fn harness_task_status_label(status: &crate::core::types::HarnessTaskStatus) -> String {
     serde_json::to_value(status)
         .ok()
@@ -1179,9 +1165,8 @@ fn harness_task_status_label(status: &crate::core::types::HarnessTaskStatus) -> 
         .unwrap_or_else(|| format!("{status:?}"))
 }
 
-/// port of removeMemoryNote (harness-tools.ts session-scope forget): removes
-/// the memory note with the given id from `state.memory` and reports whether
-/// anything was removed.
+/// Session-scope forget: removes the memory note with the given id from
+/// `state.memory` and reports whether anything was removed.
 fn remove_memory_note(state: &mut crate::core::types::HarnessState, note_id: &str) -> bool {
     match state.memory.iter().position(|note| note.id == note_id) {
         Some(index) => {
@@ -1192,8 +1177,8 @@ fn remove_memory_note(state: &mut crate::core::types::HarnessState, note_id: &st
     }
 }
 
-/// port of the state-mutating branches of applyHarnessToolCall (every
-/// HarnessOp variant is handled here).
+/// The state-mutating half of a harness tool call (every HarnessOp variant
+/// is handled here).
 pub fn apply_harness_op(
     state: &mut crate::core::types::HarnessState,
     op: HarnessOp,
@@ -1428,8 +1413,7 @@ pub fn apply_harness_op(
                 };
             }
 
-            // An empty taskId is falsy in the TS: it falls back to the
-            // current task.
+            // An empty taskId falls back to the current task.
             let task_id = task_id.filter(|id| !id.is_empty());
             let target_id = match &task_id {
                 Some(id) => match core_state::get_task_by_id(state, id) {
@@ -2067,10 +2051,9 @@ mod apply_harness_op_tests {
     use super::*;
     use crate::core::state::create_harness_state;
 
-    /// port of the plan_tasks branch behavior: two planned tasks are appended
-    /// with ids task-1/task-2 and the exact model-visible result text the TS
-    /// returns (`Added N task(s): id: title; id: title.` — no "plan_tasks: "
-    /// prefix in the TS).
+    /// The plan_tasks branch: two planned tasks are appended with ids
+    /// task-1/task-2 and the exact model-visible result text
+    /// (`Added N task(s): id: title; id: title.`).
     #[test]
     fn plan_tasks_adds_two_tasks_with_ids_and_exact_result_text() {
         let mut state = create_harness_state("test goal: plan two tasks");
@@ -2094,7 +2077,7 @@ mod apply_harness_op_tests {
         assert_eq!(outcome.direct_response, None);
 
         // placement "next" inserts ahead of the pending queue and adds the
-        // TS's " ahead of the pending queue" phrase to the result text.
+        // " ahead of the pending queue" phrase to the result text.
         let raw_next = r#"{"tasks": [{"title": "Urgent task"}], "placement": "next"}"#;
         let op_next = parse_harness_op("plan_tasks", raw_next).expect("plan_tasks next parses");
         let outcome_next = apply_harness_op(&mut state, op_next, &ctx);
@@ -2105,8 +2088,8 @@ mod apply_harness_op_tests {
         );
     }
 
-    /// The empty-tasks array path returns the TS's refusal text and changes
-    /// no state.
+    /// The empty-tasks array path returns the refusal text and changes no
+    /// state.
     #[test]
     fn plan_tasks_with_empty_tasks_array_is_refused() {
         let mut state = create_harness_state("test goal: empty plan");
@@ -2122,7 +2105,7 @@ mod apply_harness_op_tests {
     }
 
 
-    /// port of the respond branch: empty text is refused verbatim; unfinished
+    /// The respond branch: empty text is refused verbatim; unfinished
     /// tasks block the answer; otherwise a synthetic completed
     /// "Answer the goal directly" task is added, the direct response is
     #[test]
@@ -2267,7 +2250,7 @@ mod apply_harness_op_tests {
         assert_eq!(answer_task.status, crate::core::types::HarnessTaskStatus::Completed);
     }
 
-    /// port of the recall branch: re-surfaces the most recent matching
+    /// The recall branch: re-surfaces the most recent matching
     /// telemetry record by toolName + query fragment, echoing the cached
     /// output verbatim (failed runs carry the FAILED note).
     #[test]
@@ -2306,7 +2289,7 @@ mod apply_harness_op_tests {
         assert!(!outcome.ended_loop);
     }
 
-    /// port of the recall branch: no telemetry record matching the query
+    /// The recall branch: no telemetry record matching the query
     /// yields the verbatim not-found text.
     #[test]
     fn recall_without_a_match_reports_it() {
@@ -2325,11 +2308,11 @@ mod apply_harness_op_tests {
         assert!(!outcome.task_finished);
     }
 
-    /// port of the drop_task branch: dropping a pending task reports its new
-    /// summary (core_state::drop_task sets the summary to the reason), marks
-    /// the task dropped, and does not finish the loop (the task was not the
-    /// loop's in-progress task). A second drop is refused with the TS's
-    /// terminal-status text.
+    /// The drop_task branch: dropping a pending task reports its new summary
+    /// (core_state::drop_task sets the summary to the reason), marks the task
+    /// dropped, and does not finish the loop (the task was not the loop's
+    /// in-progress task). A second drop is refused with the terminal-status
+    /// text.
     #[test]
     fn drop_task_drops_a_pending_task_and_reports_the_summary() {
         let mut state = create_harness_state("test goal: drop pending");
@@ -2355,7 +2338,7 @@ mod apply_harness_op_tests {
         );
         assert_eq!(state.tasks[0].summary, Some("no longer needed".to_string()));
 
-        // the TS refuses to drop a task that is already dropped
+        // dropping a task that is already dropped is refused
         let again = parse_harness_op(
             "drop_task",
             r#"{"taskId": "task-1", "reason": "again"}"#,
@@ -2370,8 +2353,8 @@ mod apply_harness_op_tests {
         assert!(!outcome.task_finished);
     }
 
-    /// port of the drop_task branch refusals: an unknown id and an empty
-    /// taskId return the TS refusal texts verbatim and change no state.
+    /// The drop_task branch refusals: an unknown id and an empty taskId
+    /// return the refusal texts verbatim and change no state.
     #[test]
     fn drop_task_unknown_id_returns_the_ts_refusal_text() {
         let mut state = create_harness_state("test goal: drop unknown");
@@ -2391,7 +2374,7 @@ mod apply_harness_op_tests {
         assert!(!outcome.task_finished);
     }
 
-    /// port of the revise_task branch: a successful retitle reports the new
+    /// The revise_task branch: a successful retitle reports the new
     /// title, updates the task, and (via core_state::revise_task) appends the
     /// "Retitled from" note.
     #[test]
@@ -2416,9 +2399,9 @@ mod apply_harness_op_tests {
         assert_eq!(state.tasks[0].notes, ["Retitled from \"First task\"."]);
     }
 
-    /// port of the note_task branch: with no explicit taskId the note is
-    /// appended to the current task and the loop continues; an unknown id and
-    /// a state with no current task return the TS refusal texts verbatim.
+    /// The note_task branch: with no explicit taskId the note is appended to
+    /// the current task and the loop continues; an unknown id and a state
+    /// with no current task return the refusal texts verbatim.
     #[test]
     fn note_task_appends_the_note_and_reports_the_target() {
         let mut state = create_harness_state("test goal: note task");
@@ -2462,7 +2445,7 @@ mod apply_harness_op_tests {
         assert!(!outcome.task_finished);
     }
 
-    /// port of the observe branch: a new note is saved with the base ttl and
+    /// The observe branch: a new note is saved with the base ttl and
     /// the verbatim saved text; re-observing the same text refreshes the
     /// existing observation instead of duplicating it; a non-string/empty
     /// note is refused verbatim.

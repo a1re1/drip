@@ -19,28 +19,17 @@ and `package.json` are kept in lockstep by `drip/tests/version_lockstep.rs`).
 
 ## How parity is checked
 
-`lci` is the oracle. `drip/parity/run.ts` runs every scenario under
-`drip/parity/scenarios/<name>/` against **both** binaries with a scripted
-mock model server (`drip/parity/mock-model.ts`) and diffs the normalized
-artifacts: stdout, stderr, exit code, `state.json`, `transcript.jsonl`,
-`result.json`, the sqlite session index rows, every request the mock
-received, and the fixture's `git status`/`git diff`.
+`lci` is the oracle. The differential harness (`drip/parity/` in
+[local-code-inference](https://github.com/a1re1/local-code-inference)) runs
+every scenario against **both** binaries with a scripted mock model server
+and diffs the normalized artifacts: stdout, stderr, exit code, `state.json`,
+`transcript.jsonl`, `result.json`, the sqlite session index rows, every
+request the mock received, and the fixture's `git status`/`git diff`. That
+harness is not part of this crate; here:
 
 ```
-bun run drip/parity/run.ts --drip-bin drip/target/debug/drip [--only <name>] [--keep]
-bun run drip/parity/run.ts --self-check         # lci vs lci (runner sanity)
-cd drip && cargo test                            # unit + fixture tests (tool schemas, prompt snapshots, help)
+cargo test    # unit + fixture tests (tool schemas, prompt snapshots, help)
 ```
-
-A scenario is `args.json` (one invocation) or `steps.json` (several, in the
-same project/home; `["@sleep", "<ms>"]` pauses between them), plus
-`responses.jsonl` for the mock and an optional `fixture/` (committed as the
-project; `fixture-base/` is committed first and tagged `base` for `--review`).
-Timestamps, ids, pids, durations, and paths are masked by
-`drip/parity/normalize.ts`; everything else must match byte for byte.
-
-Byte-exact fixtures dumped from the TS (`drip/tests/fixtures/*.json`) pin the
-tool schemas, harness tool schemas, and prompt text in declaration order.
 
 ## Known deviations
 

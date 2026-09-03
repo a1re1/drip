@@ -43,7 +43,6 @@ drip/
     watch/                   data, ps, shelllog, render, transcript_view, app
     tui/                     port of src/cli/ui (phase 5)
     migrate.rs               lci → drip migration
-  parity/                    differential test harness (see below)
   PLAN.md                    this file
 ```
 
@@ -51,6 +50,9 @@ Each Rust module names the TS file it ports in a header comment. Port
 comments and constants verbatim where they explain behavior.
 
 ## Parity strategy — lci is the oracle
+
+> The `drip/parity/` harness described below lives in the local-code-inference
+> monorepo next to the lci source; it was dropped from this standalone crate.
 
 There are no golden files. `drip/parity/run.ts` (Bun) runs every scenario
 under `drip/parity/scenarios/<name>/` twice — once with `lci`, once with

@@ -124,20 +124,39 @@ struct StatusLineJob {
     generation: u64,
 }
 
+/// Coordination state shared by the runner (TUI thread) and the worker
+/// thread, guarded by a single mutex so the in-flight claim and the pending
+/// request change atomically. A refresh that lands while a job is claimed
+/// can never be stranded: the finish path releases the claim and drains the
+/// pending request inside one lock (F-6e).
+///
+/// `running_generation` is the generation token of the claimed job; only the
+/// finish path holding that exact token may release it, so a newer claim is
+/// never overwritten by an older job completing.
+#[derive(Default)]
+struct RunnerState {
+    running_generation: Option<u64>,
+    pending: Option<StatusLineRequest>,
+    last_started: Option<Instant>,
+}
+
 /// Shared handle the TUI owns for the lifetime of the feature.
 ///
-/// At most one job runs at any time (`in_flight` guards overlap); a refresh
-/// requested while a job runs is coalesced into `pending` and picked up by the
-/// worker when it finishes, so rapid state changes never queue a storm.
+/// At most one job is claimed at any time: a refresh requested while a job
+/// runs is coalesced into `pending` and picked up by the worker when it
+/// finishes, so rapid state changes never queue a storm. A failed channel
+/// send or a dead worker releases the claim instead of leaving it wedged
+/// forever (F-6d).
 pub struct StatusLineRunner {
     setting: StatusLineSetting,
     job_tx: Option<Sender<StatusLineJob>>,
     output_rx: Receiver<StatusLineOutput>,
-    last_started: Arc<Mutex<Option<Instant>>>,
-    in_flight: Arc<AtomicBool>,
-    pending: Arc<Mutex<Option<StatusLineRequest>>>,
+    state: Arc<Mutex<RunnerState>>,
     generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    /// False once the worker thread has exited; lets `request_refresh`
+    /// release a claim the worker can no longer finish.
+    worker_alive: Arc<AtomicBool>,
 }
 
 impl StatusLineRunner {
@@ -146,21 +165,20 @@ impl StatusLineRunner {
     pub fn new(setting: StatusLineSetting) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<StatusLineJob>();
         let (out_tx, out_rx) = mpsc::channel::<StatusLineOutput>();
-        let in_flight = Arc::new(AtomicBool::new(false));
-        let pending: Arc<Mutex<Option<StatusLineRequest>>> = Arc::new(Mutex::new(None));
+        let state = Arc::new(Mutex::new(RunnerState::default()));
         let generation = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
-        let last_started: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let worker_alive = Arc::new(AtomicBool::new(true));
 
         let worker = StatusLineWorker {
             setting: setting.clone(),
             job_rx,
             job_tx: job_tx.clone(),
             out_tx,
-            in_flight: Arc::clone(&in_flight),
-            pending: Arc::clone(&pending),
+            state: Arc::clone(&state),
             generation: Arc::clone(&generation),
             stop: Arc::clone(&stop),
+            alive: Arc::clone(&worker_alive),
         };
         std::thread::Builder::new()
             .name("status-line".to_string())
@@ -171,11 +189,10 @@ impl StatusLineRunner {
             setting,
             job_tx: Some(job_tx),
             output_rx: out_rx,
-            last_started,
-            in_flight,
-            pending,
+            state,
             generation,
             stop,
+            worker_alive,
         }
     }
 
@@ -183,46 +200,64 @@ impl StatusLineRunner {
         &self.setting
     }
 
-    /// True while a job is running (never blocks).
+    /// True while a job is claimed (running or queued to run); never blocks.
     pub fn job_running(&self) -> bool {
-        self.in_flight.load(Ordering::SeqCst)
+        self.state
+            .lock()
+            .ok()
+            .map_or(false, |state| state.running_generation.is_some())
     }
 
     /// Asks for a refresh. Returns true when a job was started now; returns
-    /// false (and coalesces the request) when one is already running or the
+    /// false (and coalesces the request) when one is already claimed or the
     /// minimum spacing between starts has not elapsed. Never blocks.
     pub fn request_refresh(&mut self, request: StatusLineRequest) -> bool {
         if self.stop.load(Ordering::SeqCst) {
             return false;
         }
-        if self.job_running() {
-            if let Ok(mut pending) = self.pending.lock() {
-                *pending = Some(request);
+        let generation = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(_) => return false,
+            };
+            // A worker that already exited can neither finish the claimed
+            // job nor drain `pending`; release both instead of wedging the
+            // feature forever (F-6d).
+            if !self.worker_alive.load(Ordering::SeqCst) {
+                state.running_generation = None;
+                state.pending = None;
+                return false;
             }
-            return false;
-        }
-        if let Ok(last) = self.last_started.lock() {
-            if let Some(started) = *last {
+            if state.running_generation.is_some() {
+                state.pending = Some(request);
+                return false;
+            }
+            if let Some(started) = state.last_started {
                 if started.elapsed() < Duration::from_millis(MIN_REFRESH_SPACING_MS) {
-                    if let Ok(mut pending) = self.pending.lock() {
-                        *pending = Some(request);
-                    }
+                    state.pending = Some(request);
                     return false;
                 }
             }
-        }
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Ok(mut last) = self.last_started.lock() {
-            *last = Some(Instant::now());
-        }
-        self.in_flight.store(true, Ordering::SeqCst);
-        match &self.job_tx {
+            state.last_started = Some(Instant::now());
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            state.running_generation = Some(generation);
+            generation
+        };
+        let sent = match &self.job_tx {
             Some(tx) => tx.send(StatusLineJob { request, generation }).is_ok(),
-            None => {
-                self.in_flight.store(false, Ordering::SeqCst);
-                false
+            None => false,
+        };
+        if !sent {
+            // The send failed (shutdown or a dead channel): release the
+            // claim immediately instead of leaving it stuck until the next
+            // job finishes.
+            if let Ok(mut state) = self.state.lock() {
+                if state.running_generation == Some(generation) {
+                    state.running_generation = None;
+                }
             }
         }
+        sent
     }
 
     /// Drains the newest finished job, if any (non-blocking). Older results
@@ -240,6 +275,12 @@ impl StatusLineRunner {
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.job_tx = None;
+        // Release any claim at once: a claimed-but-unsent job would
+        // otherwise linger until the (now stopping) worker finished.
+        if let Ok(mut state) = self.state.lock() {
+            state.running_generation = None;
+            state.pending = None;
+        }
     }
 }
 
@@ -258,25 +299,31 @@ struct StatusLineWorker {
     job_rx: Receiver<StatusLineJob>,
     job_tx: Sender<StatusLineJob>,
     out_tx: Sender<StatusLineOutput>,
-    in_flight: Arc<AtomicBool>,
-    pending: Arc<Mutex<Option<StatusLineRequest>>>,
+    state: Arc<Mutex<RunnerState>>,
     generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
 }
 
 impl StatusLineWorker {
-    fn run(mut self) {
+    fn run(self) {
         loop {
             if self.stop.load(Ordering::SeqCst) {
-                return;
+                break;
             }
             let job = match self.job_rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(job) => job,
                 Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => break,
             };
 
-            let result = run_status_line_job(&self.setting, &job.request);
+            // A panicking job must not kill the worker: a dead worker would
+            // leave the runner's claim stuck forever (F-6d). A panicked job
+            // is reported like any other failure instead.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_status_line_job(&self.setting, &job.request)
+            }))
+            .unwrap_or(None);
 
             // Only the newest generation may publish; a superseded job's
             // output is stale by definition.
@@ -299,22 +346,41 @@ impl StatusLineWorker {
             // TUI replaces the custom row with the built-in bar whenever the
             // newest result failed, timed out, or was blank (the documented
             // fallback), so a stale success is never kept visible.
-            self.finish_job(output);
+            self.finish_job(job.generation, output);
         }
+        self.alive.store(false, Ordering::SeqCst);
     }
 
-    fn finish_job(&self, output: StatusLineOutput) {
+    fn finish_job(&self, job_generation: u64, output: StatusLineOutput) {
         let _ = self.out_tx.send(output);
-        // Pick up a request that arrived while this job ran; it becomes the
-        // next job without another wakeup from the TUI.
-        let next = self.pending.lock().ok().and_then(|mut guard| guard.take());
-        self.in_flight.store(false, Ordering::SeqCst);
-        if let Some(request) = next {
-            if !self.stop.load(Ordering::SeqCst) {
-                let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                let _ = self.job_tx.send(StatusLineJob { request, generation });
-                self.in_flight.store(true, Ordering::SeqCst);
+        // Atomically release this job's claim and pick up a request that was
+        // coalesced while it ran: the pending request becomes the next job
+        // without another wakeup from the TUI (F-6e). Releasing the claim and
+        // taking the pending request under one lock means a refresh landing
+        // in this window is either drained now or starts a fresh job later,
+        // never stranded.
+        let next = match self.state.lock() {
+            Ok(mut state) => {
+                // Only the finish holding this exact claim may release it; a
+                // newer claim is left untouched.
+                if state.running_generation == Some(job_generation) {
+                    state.running_generation = None;
+                }
+                if self.stop.load(Ordering::SeqCst) {
+                    None
+                } else {
+                    state.pending.take().map(|request| {
+                        let generation =
+                            self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        state.running_generation = Some(generation);
+                        StatusLineJob { request, generation }
+                    })
+                }
             }
+            Err(_) => None,
+        };
+        if let Some(job) = next {
+            let _ = self.job_tx.send(job);
         }
     }
 }
@@ -879,5 +945,104 @@ mod tests {
         let mut runner = worker_runner("~/definitely/not/a/real/binary-xyz", 5_000);
         let out = drive_until(&mut runner, 80, |out| !out.ok);
         assert_eq!(out.line, "");
+    }
+
+    // --- F-6d/e runner state-transition regressions: a failed send or a
+    // dead worker releases the in-flight claim instead of wedging the
+    // feature, and a coalesced request is handed off at completion.
+
+    #[test]
+    fn failed_channel_send_releases_the_claim() {
+        let mut runner = worker_runner("printf drip-row", 5_000);
+        // Simulate a dead job channel without setting `stop`, so the send
+        // path is exercised rather than the early stop return.
+        runner.job_tx = None;
+        assert!(!runner.request_refresh(request(80)));
+        assert!(!runner.job_running(), "failed send must release the claim");
+        // Later refreshes must not stay wedged either.
+        assert!(!runner.request_refresh(request(80)));
+        assert!(!runner.job_running());
+    }
+
+    #[test]
+    fn dead_worker_releases_a_stuck_claim() {
+        let mut runner = worker_runner("printf drip-row", 5_000);
+        // Simulate a worker that died while a job was claimed: the alive
+        // flag is cleared and the claim is stuck.
+        runner.worker_alive.store(false, Ordering::SeqCst);
+        runner.state.lock().unwrap().running_generation = Some(999);
+        assert!(runner.job_running());
+        assert!(!runner.request_refresh(request(80)));
+        assert!(!runner.job_running(), "dead worker must release the claim");
+    }
+
+    #[test]
+    fn in_flight_refresh_coalesces_latest_request_and_hands_off() {
+        let payload_path = std::env::temp_dir().join(format!(
+            "drip-statusline-payload-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&payload_path);
+        let path = payload_path.to_string_lossy().into_owned();
+        // The command records the stdin payload it received, so the test can
+        // observe which request actually ran. The sleep keeps the first job
+        // in flight while the test coalesces into `pending`.
+        let mut runner = worker_runner(&format!("sleep 0.3; cat > '{path}'"), 5_000);
+        let mut first = request(80);
+        first.model_display_name = Some("first".into());
+        assert!(runner.request_refresh(first), "first refresh starts a job");
+        assert!(runner.job_running());
+
+        // Refreshes while the job runs are coalesced, never starting a
+        // second concurrent job; only the LATEST request is kept.
+        let mut second = request(80);
+        second.model_display_name = Some("second".into());
+        assert!(!runner.request_refresh(second));
+        let mut third = request(80);
+        third.model_display_name = Some("third".into());
+        assert!(!runner.request_refresh(third));
+
+        // The first job's output arrives...
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let first_output = wait_for_output(&mut runner, deadline);
+        assert!(first_output.ok);
+        // ...and the coalesced job starts automatically at completion,
+        // without any further refresh call from the TUI (F-6e handoff).
+        let handoff_deadline = Instant::now() + Duration::from_secs(2);
+        while !runner.job_running() {
+            assert!(
+                Instant::now() < handoff_deadline,
+                "pending job must be picked up when the worker finishes"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let second_output = wait_for_output(&mut runner, deadline);
+        assert!(second_output.ok);
+        assert!(
+            second_output.fresh,
+            "handed-off job runs as the newest generation"
+        );
+        let payload = std::fs::read_to_string(&payload_path).expect("payload file");
+        assert!(
+            payload.contains("third") && !payload.contains("first") && !payload.contains("second"),
+            "the latest coalesced request must run, got: {payload}"
+        );
+        let _ = std::fs::remove_file(&payload_path);
+    }
+
+    fn wait_for_output(
+        runner: &mut StatusLineRunner,
+        deadline: Instant,
+    ) -> StatusLineOutput {
+        loop {
+            if let Some(out) = runner.poll_output() {
+                return out;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "status-line runner never produced output"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

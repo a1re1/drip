@@ -35,9 +35,7 @@ use crate::watch::ansi::{char_width};
 
 /// Upper bound on captured stdout, so a chatty command cannot balloon the TUI.
 pub const STATUS_LINE_MAX_OUTPUT_CHARS: usize = 8_192;
-/// Slack added after `timeout_ms` before a still-running job is abandoned
-/// (the worker always terminates the child first; this bounds the join).
-const ABANDON_SLACK_MS: u64 = 3_000;
+
 /// Minimum spacing between two spawned jobs, independent of the configured
 /// interval, so a fast interval plus a slow command can never overlap.
 const MIN_REFRESH_SPACING_MS: u64 = 50;
@@ -69,15 +67,7 @@ pub struct StatusLineOutput {
 }
 
 impl StatusLineOutput {
-    fn fallback(reason: &str, _request: &StatusLineRequest, finished_at: Instant) -> Self {
-        let _ = reason;
-        Self {
-            line: String::new(),
-            ok: false,
-            fresh: true,
-            finished_at,
-        }
-    }
+
 }
 
 /// Serialized stdin payload (kept public for the payload tests and README).
@@ -261,6 +251,15 @@ impl StatusLineRunner {
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.job_tx = None;
+    }
+}
+
+impl Drop for StatusLineRunner {
+    fn drop(&mut self) {
+        // Stop the worker on exit: the worker holds its own job-channel
+        // sender, so dropping the runner alone would not close the channel.
+        // An in-flight job still finishes, bounded by its own timeout.
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 

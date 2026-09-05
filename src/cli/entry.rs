@@ -1812,6 +1812,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
     // index handle per goal run, so the bootstrap one is released first.
     index.close();
     let allow_net = cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
+    let status_line_setting = config.status_line.clone();
     tokio::task::block_in_place(|| {
         crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
             allow_net,
@@ -1823,6 +1824,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             no_repo_memory: cli_args.no_repo_memory,
             project: project.clone(),
             session,
+            status_line: status_line_setting,
         })
     })
 }

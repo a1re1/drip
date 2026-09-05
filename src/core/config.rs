@@ -899,10 +899,82 @@ pub fn parse_status_line_setting(
     if !value.get("command").map(Value::is_string).unwrap_or(false) {
         bail!("statusLine.command must be a non-empty shell command string.");
     }
-    let setting: StatusLineSetting = serde_json::from_value(value.clone())
+    // Numeric fields accept any JSON number and clamp to the documented
+    // range here, so a negative or out-of-representable-range value degrades
+    // with a warning (the documented policy for every numeric setting)
+    // instead of a serde parse error silently disabling the whole opt-in
+    // feature. Non-numeric values are left for the typed parse to reject:
+    // padding is a number (0-4) per the documented contract, not Claude
+    // Code's boolean.
+    let mut value = value.clone();
+    let mut warnings = Vec::new();
+    if let Some(object) = value.as_object_mut() {
+        coerce_status_line_number(
+            object,
+            "padding",
+            0.0,
+            STATUS_LINE_MAX_PADDING as f64,
+            |clamped| {
+                format!(
+                    "statusLine.padding clamped to {clamped} (supported range {STATUS_LINE_MIN_PADDING}-{STATUS_LINE_MAX_PADDING})."
+                )
+            },
+            &mut warnings,
+        );
+        coerce_status_line_number(
+            object,
+            "updateIntervalMs",
+            STATUS_LINE_MIN_UPDATE_INTERVAL_MS as f64,
+            STATUS_LINE_MAX_UPDATE_INTERVAL_MS as f64,
+            |clamped| {
+                format!(
+                    "statusLine.updateIntervalMs clamped to {clamped} ms (supported range {STATUS_LINE_MIN_UPDATE_INTERVAL_MS}-{STATUS_LINE_MAX_UPDATE_INTERVAL_MS} ms)."
+                )
+            },
+            &mut warnings,
+        );
+        coerce_status_line_number(
+            object,
+            "timeoutMs",
+            STATUS_LINE_MIN_TIMEOUT_MS as f64,
+            STATUS_LINE_MAX_TIMEOUT_MS as f64,
+            |clamped| {
+                format!(
+                    "statusLine.timeoutMs clamped to {clamped} ms (supported range {STATUS_LINE_MIN_TIMEOUT_MS}-{STATUS_LINE_MAX_TIMEOUT_MS} ms)."
+                )
+            },
+            &mut warnings,
+        );
+    }
+    let setting: StatusLineSetting = serde_json::from_value(value)
         .map_err(|error| anyhow!("statusLine is not a valid status-line configuration: {error}"))?;
-    let (setting, warnings) = validate_status_line(&setting)?;
+    let (setting, clamped) = validate_status_line(&setting)?;
+    warnings.extend(clamped);
     Ok((Some(setting), warnings))
+}
+
+// coerce_status_line_number(): clamp any JSON number stored at `key` into
+// `min..=max` (rounded to the nearest integer), rewriting the raw JSON and
+// recording a warning when the value changes. Numbers beyond f64/u64
+// precision clamp deterministically to the bound. Values that are not JSON
+// numbers are left untouched so the typed parse rejects them.
+fn coerce_status_line_number(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    min: f64,
+    max: f64,
+    warning: impl Fn(f64) -> String,
+    warnings: &mut Vec<String>,
+) {
+    let Some(raw) = object.get(key).and_then(Value::as_f64) else {
+        return;
+    };
+    let coerced = raw.round().clamp(min, max);
+    if raw == coerced {
+        return;
+    }
+    warnings.push(warning(coerced));
+    object.insert(key.to_string(), serde_json::json!(coerced as u64));
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,6 +1602,119 @@ mod tests {
     }
 
     #[test]
+    fn status_line_numeric_fields_clamp_any_number_representation() {
+        // Negative and beyond-representable numbers clamp to the documented
+        // bounds with one warning each instead of disabling the feature.
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"echo hi","padding":-1,"updateIntervalMs":-5,"timeoutMs":99999999999999999999}"#,
+        )))
+        .unwrap();
+        let setting = setting.unwrap();
+        assert_eq!(setting.padding, 0);
+        assert_eq!(
+            setting.update_interval_ms,
+            STATUS_LINE_MIN_UPDATE_INTERVAL_MS
+        );
+        assert_eq!(setting.timeout_ms, STATUS_LINE_MAX_TIMEOUT_MS);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(
+            warnings.iter().all(|w| w.contains("clamped")),
+            "{warnings:?}"
+        );
+
+        // Fractional padding rounds to the nearest integer with a warning.
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"echo hi","padding":2.5}"#,
+        )))
+        .unwrap();
+        assert_eq!(setting.unwrap().padding, 3);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+        // An over-representable padding (past u16) still clamps and warns.
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"echo hi","padding":70000}"#,
+        )))
+        .unwrap();
+        assert_eq!(setting.unwrap().padding, STATUS_LINE_MAX_PADDING);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    #[test]
+    fn status_line_non_numeric_padding_is_rejected_per_documented_contract() {
+        // README: drip's padding is a number (0-4), not Claude Code's
+        // boolean. A boolean (or string) padding is therefore a deterministic
+        // disable: parse fails with a diagnostic naming the field and the
+        // caller degrades to the built-in bar; nothing executes.
+        for json in [
+            r#"{"type":"command","command":"echo hi","padding":true}"#,
+            r#"{"type":"command","command":"echo hi","padding":false}"#,
+            r#"{"type":"command","command":"echo hi","padding":"2"}"#,
+        ] {
+            let error = parse_status_line_setting(Some(&status_line_value(json)))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("not a valid status-line configuration"),
+                "{json} -> {error}"
+            );
+            // serde names the offending type, not the key; the deterministic
+            // contract is the parse failure + caller-side disable, which the
+            // load-path test below pins end to end.
+        }
+    }
+
+    #[test]
+    fn status_line_command_length_boundary_pins_chars_not_bytes() {
+        let base = "echo ";
+        // Exactly 4096 characters is accepted.
+        let ok_command =
+            format!("{base}{}", "a".repeat(STATUS_LINE_MAX_COMMAND_CHARS - base.len()));
+        assert_eq!(ok_command.chars().count(), STATUS_LINE_MAX_COMMAND_CHARS);
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            &serde_json::json!({"type":"command","command":ok_command}).to_string(),
+        )))
+        .unwrap();
+        assert_eq!(
+            setting.unwrap().command.chars().count(),
+            STATUS_LINE_MAX_COMMAND_CHARS
+        );
+        assert!(warnings.is_empty());
+
+        // One more character is rejected.
+        let too_long = format!("{ok_command}a");
+        let error = parse_status_line_setting(Some(&status_line_value(
+            &serde_json::json!({"type":"command","command":too_long}).to_string(),
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("4096"), "{error}");
+
+        // Unicode pins chars, not bytes: 4096 three-byte glyphs (~12 KiB of
+        // UTF-8) are accepted because they are 4096 characters.
+        let unicode_ok: String =
+            std::iter::repeat('\u{65e5}').take(STATUS_LINE_MAX_COMMAND_CHARS).collect();
+        let (setting, _) = parse_status_line_setting(Some(&status_line_value(
+            &serde_json::json!({"type":"command","command":unicode_ok}).to_string(),
+        )))
+        .unwrap();
+        assert_eq!(
+            setting.unwrap().command.chars().count(),
+            STATUS_LINE_MAX_COMMAND_CHARS
+        );
+
+        // ...and 4097 of them is rejected.
+        let unicode_long: String = std::iter::repeat('\u{3042}')
+            .take(STATUS_LINE_MAX_COMMAND_CHARS + 1)
+            .collect();
+        let error = parse_status_line_setting(Some(&status_line_value(
+            &serde_json::json!({"type":"command","command":unicode_long}).to_string(),
+        )))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("4096"), "{error}");
+    }
+
+    #[test]
     fn cli_config_round_trips_status_line_and_omits_it_when_absent() {
         let mut config = create_default_cli_config();
         assert_eq!(config.status_line, None);
@@ -1587,6 +1772,16 @@ mod tests {
         std::fs::write(
             &path,
             r#"{ "settings": {}, "version": 1, "statusLine": "echo hi" }"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(config.status_line, None);
+
+        // A non-numeric padding (Claude-style boolean) also disables the
+        // feature with a warning while the rest of the config still loads.
+        std::fs::write(
+            &path,
+            r#"{ "settings": {}, "version": 1, "statusLine": {"type":"command","command":"echo hi","padding":true} }"#,
         )
         .unwrap();
         let config = load_cli_config(&path).unwrap();

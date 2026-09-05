@@ -33,6 +33,10 @@ pub const TMUX_PREFIX: &str = "drip-";
 
 #[derive(Debug)]
 pub struct CapturedProcessResult {
+    /// Set when delivering the stdin payload failed (e.g. the child exited
+    /// before consuming stdin, so the write hit EPIPE). `None` for no-payload
+    /// runs and for fully delivered payloads.
+    pub stdin_error: Option<String>,
     pub exit_code: Option<i32>,
     pub signal: Option<String>,
     pub stderr: String,
@@ -142,16 +146,6 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
 
     let pid = child.id();
 
-    // Write the stdin payload (if any) and close stdin so the child observes
-    // EOF instead of blocking on read. Done before the wait loop so a child
-    // that fills its stdout pipe cannot deadlock us mid-write.
-    if let Some(payload) = args.stdin_payload {
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(payload.as_bytes());
-        }
-    }
-
     // The terminator registered for this child: on an external stop the poll
     // loop SIGTERMs the group, SIGKILLs after 1s, and settles after 1.5s
     // with whatever was captured. The flag keeps the closure safe to call
@@ -173,6 +167,7 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
         terminate_now_id,
         &terminate_now,
         pid,
+        args.stdin_payload,
     );
 
     // Both the `close` and `error` paths delete the terminator before
@@ -248,6 +243,7 @@ fn wait_with_pipes(
     terminate_now_id: u64,
     terminate_now: &AtomicBool,
     _pid: u32,
+    stdin_payload: Option<&str>,
 ) -> CapturedProcessResult {
     let _ = terminate_now_id;
 
@@ -257,6 +253,39 @@ fn wait_with_pipes(
     // when a surviving grandchild holds a pipe open.
     let stdout_handle = spawn_pipe_reader(child.stdout.take());
     let stderr_handle = spawn_pipe_reader(child.stderr.take());
+
+    // Deliver the stdin payload on its own thread now that the readers are
+    // draining: a child that emits more than the pipe buffer before reading
+    // stdin cannot deadlock the write. Write failures (e.g. EPIPE when the
+    // child exits without consuming stdin) are recorded for the caller
+    // instead of being discarded. The thread signals completion over a
+    // channel so the result can collect it with a bound instead of joining
+    // indefinitely; a timeout or external-stop group kill closes the pipe
+    // and fails the write promptly, so the bound is never actually waited
+    // out in practice.
+    let stdin_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut stdin_done_rx: Option<std::sync::mpsc::Receiver<()>> = None;
+    if let Some(payload) = stdin_payload {
+        if let Some(stdin) = child.stdin.take() {
+            let payload: Arc<str> = Arc::from(payload);
+            let error_slot = Arc::clone(&stdin_error);
+            let (stdin_done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            stdin_done_rx = Some(done_rx);
+            thread::spawn(move || {
+                use std::io::Write;
+                let mut stdin = stdin;
+                let write = stdin.write_all(payload.as_bytes()).and_then(|_| stdin.flush());
+                if let Err(error) = write {
+                    if let Ok(mut slot) = error_slot.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                }
+                // Dropping `stdin` here closes the pipe: the child observes
+                // EOF. Dropping `stdin_done_tx` marks the writer finished.
+                let _ = stdin_done_tx.send(());
+            });
+        }
+    }
 
     let mut timed_out = false;
     let mut terminate_signal_sent: Option<Instant> = None;
@@ -346,12 +375,31 @@ fn wait_with_pipes(
     let stdout = join_pipe(stdout_handle, extra_wait);
     let stderr = join_pipe(stderr_handle, extra_wait);
 
+    // Collect the stdin writer with a bound; see the spawn comment above.
+    // A disconnected channel means the writer finished (dropped tx on
+    // completion); no channel at all means no writer was needed. Both leave
+    // the error slot untouched.
+    if let Some(stdin_done_rx) = stdin_done_rx {
+        // Ok = writer signalled done; Disconnected = writer exited and
+        // dropped the sender. Only a Timeout (still blocked after the bound)
+        // reports, and only when no real write error was already recorded.
+        let done = stdin_done_rx.recv_timeout(Duration::from_millis(250));
+        if done == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            if let Ok(mut slot) = stdin_error.lock() {
+                if slot.is_none() {
+                    *slot = Some("stdin writer did not finish".to_string());
+                }
+            }
+        }
+    }
+
     CapturedProcessResult {
         exit_code,
         signal,
         stderr,
         stdout,
         timed_out,
+        stdin_error: stdin_error.lock().ok().and_then(|mut slot| slot.take()),
     }
 }
 
@@ -698,5 +746,119 @@ mod tests {
         let result = run_captured_process(&args).expect("cat should run");
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, "payload-through-stdin");
+    }
+
+    #[test]
+    fn large_stdin_payload_is_delivered_while_the_child_floods_stdout() {
+        // Regression for the pre-fix deadlock window: the payload exceeds the
+        // ~64 KiB pipe capacity AND the child floods stdout before reading
+        // stdin, so a write issued before the pipe readers existed would block
+        // forever outside the timeout. The write now runs on its own thread
+        // with the readers draining, so this completes well within the
+        // timeout instead of hanging.
+        let payload = "x".repeat(200_000);
+        let process_args = owned(&["-c", "head -c 200000 /dev/zero; cat"]);
+        let args = CapturedProcessArgs {
+            command: "/bin/sh",
+            cwd: None,
+            env: None,
+            process_args: &process_args,
+            timeout_ms: Some(10_000),
+            stdin_payload: Some(&payload),
+        };
+        let started = Instant::now();
+        let result = run_captured_process(&args).expect("spawn failed");
+
+        assert_eq!(result.exit_code, Some(0));
+        // The child floods stdout with NULs first, then echoes stdin.
+        let expected_suffix = format!("\0\0{}", payload);
+        assert!(
+            result.stdout.ends_with(&expected_suffix)
+                || result.stdout.ends_with(&payload),
+            "payload not delivered intact after the stdout flood"
+        );
+        assert_eq!(result.stdin_error, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(9),
+            "deadlock-shaped run settled in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn child_that_never_reads_stdin_times_out_instead_of_hanging_the_write() {
+        let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The payload is larger than the pipe buffer and `sleep` never reads
+        // stdin, so the writer thread blocks mid-write; the timeout must reap
+        // the group and the result must settle on time (pre-fix, the write
+        // happened before the poll loop, so the timeout never applied).
+        let payload = "y".repeat(200_000);
+        let process_args = owned(&["-c", "sleep 30"]);
+        let args = CapturedProcessArgs {
+            command: "/bin/sh",
+            cwd: None,
+            env: None,
+            process_args: &process_args,
+            timeout_ms: Some(300),
+            stdin_payload: Some(&payload),
+        };
+        let started = Instant::now();
+        let result = run_captured_process(&args).expect("spawn failed");
+
+        assert!(result.timed_out);
+        assert!(
+            result.stdin_error.is_some(),
+            "blocked write should fail once the group is killed"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(9),
+            "timed-out stdin write settled in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn child_exiting_before_reading_stdin_surfaces_the_write_error() {
+        // The child exits without consuming stdin; the payload is larger than
+        // the pipe buffer, so the writer blocks and then hits EPIPE when the
+        // pipe closes. The failure must reach the caller instead of being
+        // discarded (the old `let _ = stdin.write_all(...)`).
+        let payload = "z".repeat(200_000);
+        let process_args = owned(&["-c", "exit 0"]);
+        let args = CapturedProcessArgs {
+            command: "/bin/sh",
+            cwd: None,
+            env: None,
+            process_args: &process_args,
+            timeout_ms: Some(5_000),
+            stdin_payload: Some(&payload),
+        };
+        let result = run_captured_process(&args).expect("spawn failed");
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            result.stdin_error.is_some(),
+            "expected the stdin write failure to be reported"
+        );
+    }
+
+    #[test]
+    fn stdin_payload_none_gives_the_child_immediate_eof() {
+        // Pins the `None` half of the contract: stdin is Stdio::null(), so
+        // `cat` sees EOF at once and exits 0 with empty output.
+        let process_args = owned(&["-c", "cat"]);
+        let args = CapturedProcessArgs {
+            command: "/bin/sh",
+            cwd: None,
+            env: None,
+            process_args: &process_args,
+            timeout_ms: Some(2_000),
+            stdin_payload: None,
+        };
+        let result = run_captured_process(&args).expect("cat should run");
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stdin_error, None);
     }
 }

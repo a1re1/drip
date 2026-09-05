@@ -276,7 +276,6 @@ impl StatusLineWorker {
                 Err(RecvTimeoutError::Disconnected) => return,
             };
 
-            let started = Instant::now();
             let result = run_status_line_job(&self.setting, &job.request);
 
             // Only the newest generation may publish; a superseded job's
@@ -286,14 +285,13 @@ impl StatusLineWorker {
             let output = match result {
                 Some(mut output) => {
                     output.fresh = fresh;
-                    output.finished_at = started;
                     output
                 }
                 None => StatusLineOutput {
                     line: String::new(),
                     ok: false,
                     fresh,
-                    finished_at: started,
+                    finished_at: Instant::now(),
                 },
             };
 
@@ -322,13 +320,26 @@ impl StatusLineWorker {
 }
 
 /// Expands a leading `~/` (or bare `~`) to the user's home directory.
+///
+/// The home value comes from the environment — `USERPROFILE` on Windows with
+/// `HOME` as fallback, `HOME` elsewhere — and tests never mutate it; the pure
+/// logic lives in [`expand_home_with`].
 pub fn expand_home(command: &str) -> String {
+    let primary = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(primary)
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| home.to_string_lossy().into_owned());
+    expand_home_with(command, home.as_deref())
+}
+
+/// Pure core of [`expand_home`]: the looked-up `home` value (or `None` when
+/// unset) is injected, so tests never touch the process environment.
+fn expand_home_with(command: &str, home: Option<&str>) -> String {
     let trimmed = command.trim_start();
     if trimmed == "~" || trimmed.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy().into_owned();
+        if let Some(home) = home {
             if trimmed == "~" {
-                return home;
+                return home.to_string();
             }
             return format!("{}/{}", home.trim_end_matches('/'), &trimmed[2..]);
         }
@@ -351,7 +362,6 @@ pub fn run_status_line_job(
     setting: &StatusLineSetting,
     request: &StatusLineRequest,
 ) -> Option<StatusLineOutput> {
-    let finished_at = Instant::now();
     let command = expand_home(&setting.command);
     if command.trim().is_empty() {
         return None;
@@ -374,6 +384,9 @@ pub fn run_status_line_job(
     };
 
     let result = run_captured_process(&args).ok()?;
+    // Completion instant: when the command actually finished (success,
+    // failure or timeout), not when the job started.
+    let finished_at = Instant::now();
     let timed_out = result.timed_out;
     // Exit 127 means the shell could not find the configured command at all;
     // there is nothing to display, so report "no output" instead of a
@@ -413,10 +426,16 @@ const SGR_RESET: &str = "\x1b[0m";
 ///   row cannot bleed into the rest of the TUI.
 /// - Visible width is measured Unicode-aware (combining marks are zero-width,
 ///   East-Asian wide characters are two cells) and truncated to `width`.
-/// - `padding` (the configured 0-4) is applied on both sides inside `width`.
+/// - `padding` (the configured 0-4) is applied on both sides inside `width`;
+///   when `width` < 2*padding+1 the padding is clamped so the row never
+///   exceeds `width`.
 pub fn sanitize_status_line(raw: &str, width: usize, padding: u16) -> String {
     let first_line = raw.lines().next().unwrap_or("");
-    let pad = padding.min(4) as usize;
+    let pad_requested = padding.min(4) as usize;
+    // Clamp the padding so a nonzero `width` smaller than 2*padding+1 still
+    // fits: the padded row is exactly `width` visible cells, never more.
+    // `width == 0` keeps the content-only mode (no padding, no truncation).
+    let pad = pad_requested.min(width.saturating_sub(1) / 2);
     let inner = if width == 0 {
         usize::MAX
     } else {
@@ -569,18 +588,104 @@ mod tests {
     }
 
     #[test]
-    fn expand_home_uses_home_env() {
-        // SAFETY of the test env: single-threaded mutation guarded by the
-        // color_test_lock-style pattern is overkill here; HOME is restored.
-        let previous = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/Users/tester");
-        assert_eq!(expand_home("~/bin/status.sh"), "/Users/tester/bin/status.sh");
-        assert_eq!(expand_home("~"), "/Users/tester");
-        assert_eq!(expand_home("/bin/echo ok"), "/bin/echo ok");
-        assert_eq!(expand_home("a~b"), "a~b");
-        if let Some(previous) = previous {
-            std::env::set_var("HOME", previous);
+    fn expand_home_uses_injected_home_value() {
+        let home = Some("/Users/tester");
+        assert_eq!(
+            expand_home_with("~/bin/status.sh", home),
+            "/Users/tester/bin/status.sh"
+        );
+        assert_eq!(expand_home_with("~", home), "/Users/tester");
+        assert_eq!(expand_home_with(" /bin/echo ok", home), " /bin/echo ok");
+        assert_eq!(expand_home_with("a~b", home), "a~b");
+        assert_eq!(expand_home_with("echo ~", home), "echo ~");
+        assert_eq!(expand_home_with("~x/rel", home), "~x/rel");
+    }
+
+    #[test]
+    fn expand_home_with_unset_home_leaves_command_alone() {
+        assert_eq!(expand_home_with("~/bin/status.sh", None), "~/bin/status.sh");
+        assert_eq!(expand_home_with("~", None), "~");
+        assert_eq!(expand_home_with("/bin/echo ok", None), "/bin/echo ok");
+    }
+
+    #[test]
+    fn expand_home_public_fn_reads_environment_without_mutating_it() {
+        // Pure pass-through: whatever the process env holds (or not), the
+        // public wrapper must not mutate it and must fall back gracefully.
+        // `unset` / `USERPROFILE`-only shapes are covered by the pure core
+        // tests above; here we only pin that the wrapper is env-read-only.
+        let before = std::env::var_os("HOME");
+        let _ = expand_home("~/bin/status.sh");
+        assert_eq!(std::env::var_os("HOME"), before);
+    }
+
+    #[test]
+    fn sanitize_clamps_padding_on_narrow_widths() {
+        // Nonzero widths smaller than 2*padding+1 must not overflow: the row
+        // is exactly `width` visible cells (padding clamped, content >= 1).
+        for width in 1..=5usize {
+            for pad in 0..=4u16 {
+                let out = sanitize_status_line("abcdef", width, pad);
+                let visible: usize = out.chars().map(|c| char_width(c as u32)).sum();
+                assert_eq!(visible, width, "width={width} pad={pad} out={out:?}");
+                assert!(!out.contains('\u{1b}'), "no SGR expected: {out:?}");
+            }
         }
+        // width 1: all padding clamped to 0, first char kept.
+        assert_eq!(sanitize_status_line("abcdef", 1, 2), "a");
+        // width == 2*pad + 1: full padding fits with one content cell.
+        assert_eq!(sanitize_status_line("abcdef", 5, 2), "  a  ");
+    }
+
+    #[test]
+    fn sanitize_unicode_width_and_padding() {
+        // East-Asian wide chars are two cells; the row fits exactly.
+        let out = sanitize_status_line("日本", 6, 0);
+        assert_eq!(out, "日本  "); // 4 cells content + 2 trailing spaces
+        // Combining mark adds zero width.
+        let out = sanitize_status_line("e\u{301}x", 4, 0);
+        let visible: usize = out.chars().map(|c| char_width(c as u32)).sum();
+        assert_eq!(visible, 4);
+        // Padding counts inside width for wide content.
+        let out = sanitize_status_line("日本", 10, 2);
+        let visible: usize = out.chars().map(|c| char_width(c as u32)).sum();
+        assert_eq!(visible, 10);
+    }
+
+    #[test]
+    fn finished_at_is_the_completion_instant() {
+        let s = setting("sleep 0.3; printf ok");
+        let before = Instant::now();
+        let out = run_status_line_job(&s, &request(80)).expect("job ran");
+        let after = Instant::now();
+        // The stamp must land in [after-spawn, completion], not at the start:
+        // the command slept 300ms, so started+300ms <= finished_at must hold.
+        assert!(out.finished_at >= before, "stamp before spawn");
+        assert!(out.finished_at <= after, "stamp after completion");
+        assert!(
+            out.finished_at - before >= Duration::from_millis(250),
+            "finished_at reflects command duration, not the start instant"
+        );
+        assert!(out.ok);
+        assert_eq!(out.line, "ok");
+    }
+
+    #[test]
+    fn finished_at_set_on_timeout_and_failure() {
+        let s = setting("sleep 5");
+        let s = StatusLineSetting { timeout_ms: 300, ..s };
+        let started = Instant::now();
+        let out = run_status_line_job(&s, &request(80)).expect("job ran");
+        assert!(!out.ok);
+        // Timeout fires at ~300ms; a start-instant stamp would be ~0ms after.
+        assert!(
+            out.finished_at.duration_since(started) >= Duration::from_millis(250),
+            "timeout stamp should be near the timeout, not the start"
+        );
+        let s = setting("exit 3");
+        let out = run_status_line_job(&s, &request(80)).expect("job ran");
+        assert!(!out.ok);
+        assert!(out.finished_at >= started);
     }
 
     #[test]

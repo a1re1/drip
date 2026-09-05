@@ -92,8 +92,8 @@ fn empty_payload_falls_back_to_literal_drip() {
 }
 
 /// The script's model-only branch: a styled model name with no separator
-/// and no cwd basename. Real production shape — `from_request` drops the
-/// workspace object entirely when cwd is unavailable.
+/// and no cwd basename. Real production shape — `from_request` emits the
+/// workspace object with no fields when cwd is unavailable.
 #[test]
 fn model_only_payload_renders_styled_model_without_cwd() {
     let request = StatusLineRequest {

@@ -314,9 +314,10 @@ Behavior:
   `session_id`, `workspace.current_dir`, `model.display_name` and
   `render_width_chars` (terminal width) carry real values. Everything drip
   does not genuinely know is `null` or omitted rather than invented:
-  `workspace` and `model` are dropped entirely when unavailable, and
-  `version`, `model.id` and `context_usage` are reserved fields that are
-  currently always `null`/omitted.
+  the `workspace` and `model` objects are always present but their
+  fields are omitted when unavailable, and `version`, `model.id` and
+  `context_usage` are reserved fields that are currently always
+  `null`/omitted.
 - The command runs under `/bin/sh -c` (POSIX) or `cmd /C` (Windows). Only its
   stdout becomes the status row: output is capped at 8,192 characters, only
   the first line is shown, SGR color escapes are kept (a reset is appended so

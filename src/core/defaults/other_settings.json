@@ -4,5 +4,8 @@
   "runtime.active_system_prompt_id": "default-coding-agent",
   "runtime.cerebras_api_key": "",
   "runtime.role_profiles": "[]",
-  "runtime.role_bindings": "{}"
+  "runtime.role_bindings": "{}",
+  "runtime.terminal_title_enabled": "true",
+  "runtime.terminal_title_profile_id": "glm-5-3-flash",
+  "runtime.terminal_title_timeout_ms": "8000"
 }

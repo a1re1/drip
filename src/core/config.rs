@@ -33,6 +33,11 @@ pub const SYSTEM_PROMPT_PROFILES_DEFAULT_JSON: &str =
 pub const STORED_API_KEYS_DEFAULT_JSON: &str = include_str!("defaults/stored_api_keys.json");
 pub const OTHER_SETTINGS_DEFAULT_JSON: &str = include_str!("defaults/other_settings.json");
 
+/// Terminal pane title generation (best-effort, one-shot per chat).
+pub const TERMINAL_TITLE_ENABLED_SETTING_ID: &str = "runtime.terminal_title_enabled";
+pub const TERMINAL_TITLE_PROFILE_SETTING_ID: &str = "runtime.terminal_title_profile_id";
+pub const TERMINAL_TITLE_TIMEOUT_MS_SETTING_ID: &str = "runtime.terminal_title_timeout_ms";
+
 // ---------------------------------------------------------------------------
 // InferenceProviderId
 // ---------------------------------------------------------------------------

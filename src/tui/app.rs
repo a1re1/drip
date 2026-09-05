@@ -611,12 +611,6 @@ impl TuiApp {
         }
     }
 
-    /// Cancels in-flight status-line work on exit; the worker finishes its
-    /// bounded current job and its thread exits. Drop never blocks the TUI.
-    ///
-    /// One generation per session means results from a finished run can never
-    /// leak into a new frame.
-
     fn model_label(&self) -> String {
         let settings = &self.config.settings;
         let active_id = get_active_cli_profile_id(settings);

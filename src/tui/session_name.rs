@@ -58,11 +58,15 @@ pub fn extract_session_name(response: &OpenAICompatibleResponse) -> Option<Strin
     Some(name)
 }
 
-/// A session name is 5-7 words after stripping quotes/punctuation edges, and
-/// is not the terminal-title fallback.
+/// A session name is 5-7 whitespace-separated words with non-empty,
+/// non-fallback text (quotes/punctuation are stripped upstream by
+/// `extract_session_name`'s sanitizer); callers passing raw model output
+/// should go through `extract_session_name`.
 pub fn is_valid_session_name(name: &str) -> bool {
     let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("drip") {
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case(crate::tui::pane_title::FALLBACK_LABEL)
+    {
         return false;
     }
     let words = trimmed.split_whitespace().count();
@@ -196,7 +200,34 @@ pub fn persist_session_name(meta_path: &Path, name: &str) -> bool {
     let body = serde_json::to_string_pretty(&value)
         .map(|s| format!("{s}\n"))
         .unwrap_or_default();
-    fs::write(meta_path, body).is_ok()
+    // Stage to a unique sibling file, then rename: a crash, SIGKILL, or full
+    // disk mid-write must never truncate/corrupt session.json, which carries
+    // session identity ("id", "createdAt").
+    let file_name = meta_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if file_name.is_empty() {
+        return false;
+    }
+    let staged = meta_path.with_file_name(format!(
+        "{file_name}.rename-{}.tmp",
+        std::process::id()
+    ));
+    let write_ok = fs::write(&staged, body).is_ok();
+    if !write_ok {
+        let _ = fs::remove_file(&staged);
+        return false;
+    }
+    // On the same filesystem rename is atomic: readers see either the old
+    // file intact or the new one complete, never a partial write.
+    match fs::rename(&staged, meta_path) {
+        Ok(()) => true,
+        Err(_) => {
+            let _ = fs::remove_file(&staged);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

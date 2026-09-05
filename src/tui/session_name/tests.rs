@@ -28,7 +28,7 @@ fn accepts_five_to_seven_word_names() {
     let seven = extract_session_name(&response_with_content(
         "Add Rename Command Wiring And Tests Today",
     ));
-    assert!(is_valid_session_name(seven.as_deref().unwrap_or_default()));
+    assert_eq!(seven.as_deref().unwrap_or_default().split_whitespace().count(), 7);
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn rejects_names_outside_the_word_contract() {
     );
     assert!(!is_valid_session_name(""));
     assert!(!is_valid_session_name("one two three"));
-    assert!(!is_valid_session_name("drip"));
+    assert!(!is_valid_session_name(crate::tui::pane_title::FALLBACK_LABEL));
     assert!(is_valid_session_name("five whole words right here now"));
 }
 

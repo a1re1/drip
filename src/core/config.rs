@@ -735,6 +735,177 @@ pub fn merge_missing_default_system_prompt_profiles(raw_value: Option<&str>) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Custom status line (opt-in)
+// ---------------------------------------------------------------------------
+
+// The optional `statusLine` object in ~/.drip/config.json — shaped after
+// Claude Code's status line so an existing script's shape carries over, but
+// drip only ever reads its own config file: ~/.claude settings are never
+// imported or executed. Absent or null keeps the built-in status bar, and a
+// bad statusLine produces a nonfatal diagnostic — nothing here executes.
+pub const STATUS_LINE_DEFAULT_UPDATE_INTERVAL_MS: u64 = 300;
+pub const STATUS_LINE_MIN_UPDATE_INTERVAL_MS: u64 = 100;
+pub const STATUS_LINE_MAX_UPDATE_INTERVAL_MS: u64 = 60_000;
+pub const STATUS_LINE_DEFAULT_TIMEOUT_MS: u64 = 5_000;
+pub const STATUS_LINE_MIN_TIMEOUT_MS: u64 = 100;
+pub const STATUS_LINE_MAX_TIMEOUT_MS: u64 = 30_000;
+pub const STATUS_LINE_MIN_PADDING: u16 = 0;
+pub const STATUS_LINE_MAX_PADDING: u16 = 4;
+pub const STATUS_LINE_MAX_COMMAND_CHARS: usize = 4096;
+
+fn default_status_line_type() -> String {
+    "command".to_string()
+}
+
+fn default_status_line_padding() -> u16 {
+    0
+}
+
+fn default_status_line_update_interval_ms() -> u64 {
+    STATUS_LINE_DEFAULT_UPDATE_INTERVAL_MS
+}
+
+fn default_status_line_timeout_ms() -> u64 {
+    STATUS_LINE_DEFAULT_TIMEOUT_MS
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusLineSetting {
+    #[serde(rename = "type", default = "default_status_line_type")]
+    pub kind: String,
+    pub command: String,
+    #[serde(default = "default_status_line_padding")]
+    pub padding: u16,
+    #[serde(
+        rename = "updateIntervalMs",
+        default = "default_status_line_update_interval_ms"
+    )]
+    pub update_interval_ms: u64,
+    #[serde(rename = "timeoutMs", default = "default_status_line_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for StatusLineSetting {
+    fn default() -> Self {
+        StatusLineSetting {
+            kind: default_status_line_type(),
+            command: String::new(),
+            padding: default_status_line_padding(),
+            update_interval_ms: default_status_line_update_interval_ms(),
+            timeout_ms: default_status_line_timeout_ms(),
+        }
+    }
+}
+
+// validate_status_line(): the shared checks over a deserialized statusLine.
+// Returns the cleaned setting (trimmed command, numeric bounds clamped to the
+// documented ranges) plus human-readable warnings for every clamped value.
+// Errors name the offending key so the caller can surface a useful,
+// nonfatal diagnostic without executing anything.
+pub fn validate_status_line(
+    setting: &StatusLineSetting,
+) -> Result<(StatusLineSetting, Vec<String>)> {
+    let mut warnings = Vec::new();
+
+    if setting.kind.trim() != "command" {
+        bail!(
+            "statusLine.type must be \"command\" (the only supported kind); got {:?}.",
+            setting.kind
+        );
+    }
+
+    let command = setting.command.trim();
+    if command.is_empty() {
+        bail!("statusLine.command must be a non-empty shell command.");
+    }
+    if command.chars().count() > STATUS_LINE_MAX_COMMAND_CHARS {
+        bail!(
+            "statusLine.command is longer than the supported {STATUS_LINE_MAX_COMMAND_CHARS} characters."
+        );
+    }
+
+    let update_interval_ms = setting.update_interval_ms.clamp(
+        STATUS_LINE_MIN_UPDATE_INTERVAL_MS,
+        STATUS_LINE_MAX_UPDATE_INTERVAL_MS,
+    );
+    if update_interval_ms != setting.update_interval_ms {
+        warnings.push(format!(
+            "statusLine.updateIntervalMs clamped to {update_interval_ms} ms (supported range {}-{} ms).",
+            STATUS_LINE_MIN_UPDATE_INTERVAL_MS, STATUS_LINE_MAX_UPDATE_INTERVAL_MS
+        ));
+    }
+
+    let timeout_ms = setting
+        .timeout_ms
+        .clamp(STATUS_LINE_MIN_TIMEOUT_MS, STATUS_LINE_MAX_TIMEOUT_MS);
+    if timeout_ms != setting.timeout_ms {
+        warnings.push(format!(
+            "statusLine.timeoutMs clamped to {timeout_ms} ms (supported range {}-{} ms).",
+            STATUS_LINE_MIN_TIMEOUT_MS, STATUS_LINE_MAX_TIMEOUT_MS
+        ));
+    }
+
+    let padding = setting.padding.clamp(STATUS_LINE_MIN_PADDING, STATUS_LINE_MAX_PADDING);
+    if padding != setting.padding {
+        warnings.push(format!(
+            "statusLine.padding clamped to {padding} (supported range {}-{}).",
+            STATUS_LINE_MIN_PADDING, STATUS_LINE_MAX_PADDING
+        ));
+    }
+
+    Ok((
+        StatusLineSetting {
+            kind: "command".to_string(),
+            command: command.to_string(),
+            padding,
+            update_interval_ms,
+            timeout_ms,
+        },
+        warnings,
+    ))
+}
+
+fn describe_status_line_value(value: &Value) -> &'static str {
+    if value.is_string() {
+        "a string"
+    } else if value.is_array() {
+        "an array"
+    } else if value.is_number() || value.is_boolean() {
+        "a scalar"
+    } else {
+        "an unexpected value"
+    }
+}
+
+// parse_status_line_setting(raw): Ok(None) when statusLine is absent or null
+// — the built-in status bar stays exactly as it is. Err carries a
+// human-readable diagnostic; callers show it nonfatally and continue without
+// a custom status line. Nothing here spawns a process.
+pub fn parse_status_line_setting(
+    raw: Option<&Value>,
+) -> Result<(Option<StatusLineSetting>, Vec<String>)> {
+    let Some(value) = raw else {
+        return Ok((None, Vec::new()));
+    };
+    if value.is_null() {
+        return Ok((None, Vec::new()));
+    }
+    if !value.is_object() {
+        bail!(
+            "statusLine must be an object like {{\"type\":\"command\",\"command\":\"...\"}}; found {}.",
+            describe_status_line_value(value)
+        );
+    }
+    if !value.get("command").map(Value::is_string).unwrap_or(false) {
+        bail!("statusLine.command must be a non-empty shell command string.");
+    }
+    let setting: StatusLineSetting = serde_json::from_value(value.clone())
+        .map_err(|error| anyhow!("statusLine is not a valid status-line configuration: {error}"))?;
+    let (setting, warnings) = validate_status_line(&setting)?;
+    Ok((Some(setting), warnings))
+}
+
+// ---------------------------------------------------------------------------
 // CLI layer
 // ---------------------------------------------------------------------------
 
@@ -743,6 +914,8 @@ pub struct CliConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     pub settings: IndexMap<String, String>,
+    #[serde(rename = "statusLine", default, skip_serializing_if = "Option::is_none")]
+    pub status_line: Option<StatusLineSetting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
 }
@@ -751,6 +924,7 @@ pub fn create_default_cli_config() -> CliConfig {
     CliConfig {
         path: None,
         settings: default_setting_values(),
+        status_line: None,
         version: Some(1),
     }
 }
@@ -919,9 +1093,23 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     upgrade_cerebras_profiles(&mut settings);
     upgrade_retired_vendor_profiles(&mut settings);
 
+    // statusLine is opt-in and never fatal: a malformed entry warns and the
+    // rest of the config still loads. No process is spawned here.
+    let (status_line, warnings) = match parse_status_line_setting(parsed_value.get("statusLine")) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("warning: {}: ignoring \"statusLine\": {error}", path.display());
+            (None, Vec::new())
+        }
+    };
+    for warning in &warnings {
+        eprintln!("warning: {}: {warning}", path.display());
+    }
+
     Ok(CliConfig {
         path: None,
         settings,
+        status_line,
         version: Some(1),
     })
 }
@@ -1268,5 +1456,142 @@ mod tests {
             unsupported,
             "Inference profile \"o3\" has an unsupported provider \"nope\"."
         );
+    }
+
+    // ---- statusLine configuration ----
+
+    fn status_line_value(json: &str) -> Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn status_line_absent_or_null_is_none() {
+        assert_eq!(parse_status_line_setting(None).unwrap().0, None);
+        assert_eq!(
+            parse_status_line_setting(Some(&Value::Null)).unwrap().0,
+            None
+        );
+    }
+
+    #[test]
+    fn status_line_parses_with_defaults_and_bounded_values() {
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"echo hi"}"#,
+        )))
+        .unwrap();
+        let setting = setting.unwrap();
+        assert_eq!(setting.kind, "command");
+        assert_eq!(setting.padding, 0);
+        assert_eq!(
+            setting.update_interval_ms,
+            STATUS_LINE_DEFAULT_UPDATE_INTERVAL_MS
+        );
+        assert_eq!(setting.timeout_ms, STATUS_LINE_DEFAULT_TIMEOUT_MS);
+        assert!(warnings.is_empty());
+
+        // Out-of-range numbers clamp to the documented bounds with a warning.
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"echo hi","padding":9,"updateIntervalMs":5,"timeoutMs":999999}"#,
+        )))
+        .unwrap();
+        let setting = setting.unwrap();
+        assert_eq!(setting.padding, STATUS_LINE_MAX_PADDING);
+        assert_eq!(
+            setting.update_interval_ms,
+            STATUS_LINE_MIN_UPDATE_INTERVAL_MS
+        );
+        assert_eq!(setting.timeout_ms, STATUS_LINE_MAX_TIMEOUT_MS);
+        assert_eq!(warnings.len(), 3, "one warning per clamped field: {warnings:?}");
+
+        // Command is trimmed.
+        let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
+            r#"{"type":"command","command":"  echo hi  "}"#,
+        )))
+        .unwrap();
+        assert_eq!(setting.unwrap().command, "echo hi");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn status_line_rejects_bad_configurations_without_executing_anything() {
+        for (json, fragment) in [
+            (r#""echo hi""#, "must be an object"),
+            (r#"42"#, "must be an object"),
+            (r#"{"type":"tty","command":"x"}"#, "statusLine.type"),
+            (r#"{"type":"command"}"#, "statusLine.command"),
+            (r#"{"type":"command","command":"   "}"#, "statusLine.command"),
+            (r#"{}"#, "statusLine.command"),
+        ] {
+            let error = parse_status_line_setting(Some(&status_line_value(json)))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(fragment), "{json} -> {error}");
+        }
+    }
+
+    #[test]
+    fn cli_config_round_trips_status_line_and_omits_it_when_absent() {
+        let mut config = create_default_cli_config();
+        assert_eq!(config.status_line, None);
+
+        // Missing configuration must preserve existing behavior: no statusLine
+        // key ever appears in the saved file.
+        let saved = serde_json::to_string(&config).unwrap();
+        assert!(!saved.contains("statusLine"), "{saved}");
+
+        config.status_line = Some(StatusLineSetting {
+            kind: "command".to_string(),
+            command: "echo hi".to_string(),
+            padding: 1,
+            update_interval_ms: 500,
+            timeout_ms: 2000,
+        });
+        let saved = serde_json::to_string(&config).unwrap();
+        assert!(saved.contains("\"statusLine\""), "{saved}");
+        let parsed: CliConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(parsed.status_line, config.status_line);
+    }
+
+    #[test]
+    fn load_cli_config_keeps_status_line_and_degrades_gracefully() {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-status-line-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // No statusLine -> None, existing behavior preserved.
+        std::fs::write(&path, "{\n  \"settings\": {},\n  \"version\": 1\n}\n").unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(config.status_line, None);
+
+        // A valid statusLine survives the load.
+        std::fs::write(
+            &path,
+            r#"{ "settings": {}, "version": 1, "statusLine": {"type":"command","command":"echo hi"} }"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(
+            config.status_line.map(|s| s.command),
+            Some("echo hi".to_string())
+        );
+
+        // A malformed statusLine is nonfatal: config still loads, None result,
+        // and nothing was executed.
+        std::fs::write(
+            &path,
+            r#"{ "settings": {}, "version": 1, "statusLine": "echo hi" }"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(config.status_line, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1039,12 +1039,11 @@ impl TuiApp {
             let escape = title.set_label(FALLBACK_LABEL, Instant::now());
             crate::tui::pane_title::emit(escape.as_deref());
         }
-        // Restore this session's explicit /rename name, if it has one.
+        // Restore this session's explicit /rename name, if it has one —
+        // materializing the pane title when no goal has created it yet, so
+        // a resumed session shows its persisted name immediately.
         if let Some(name) = read_session_name(Path::new(&self.paths.meta_path)) {
-            if let Some(title) = self.pane_title.as_mut() {
-                let escape = title.set_label(&name, Instant::now());
-                crate::tui::pane_title::emit(escape.as_deref());
-            }
+            apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
         }
         // Replay the new transcript from the top, like remounting <Static>:
         // the previous session's rows stay in scrollback (ink cannot take
@@ -1682,7 +1681,16 @@ impl TuiApp {
     /// JSON, and redirected runs never emit escapes or make a model call.
     fn begin_title(&mut self, goal_text: &str, env: &HashMap<String, String>) {
         let settings = self.config.settings.clone();
-        if !should_request_title(stdout_is_tty(), &settings, self.title_requested) {
+        // An explicit /rename name wins over a generated title: when
+        // session.json already carries one, the one-shot auto-title never
+        // runs, so the next goal cannot overwrite the user's choice.
+        let persisted_name = read_session_name(Path::new(&self.paths.meta_path));
+        if !should_request_auto_title(
+            stdout_is_tty(),
+            &settings,
+            self.title_requested,
+            persisted_name.as_deref(),
+        ) {
             return;
         }
         self.title_requested = true;
@@ -1718,6 +1726,10 @@ impl TuiApp {
             self.push_error("A goal is running; /rename is disabled until it finishes.");
             return;
         }
+        // A rename takes over the shared pane title: drop any in-flight
+        // auto-title reply now so a late Msg::Title cannot clobber the
+        // freshly applied name (apply_title_result rejects epoch mismatches).
+        self.title_epoch = self.title_epoch.wrapping_add(1);
         let goal = self.session.last_goal.clone().unwrap_or_default();
         let digest = read_session_name_context(&goal, &self.cells);
         let env = self.merged_env();
@@ -1753,10 +1765,7 @@ impl TuiApp {
             self.push_error("Could not generate a session name; keeping the current one.");
             return;
         };
-        if let Some(title) = self.pane_title.as_mut() {
-            let escape = title.set_label(&name, Instant::now());
-            crate::tui::pane_title::emit(escape.as_deref());
-        }
+        apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
         self.push_info(format!("Session renamed to \"{name}\"."));
     }
 
@@ -2030,6 +2039,33 @@ fn should_request_title(
     requested: bool,
 ) -> bool {
     is_tty && terminal_title_enabled(settings) && !requested
+}
+
+/// Whether the next goal may request the one-shot auto-title: the usual
+/// TTY/enabled/one-shot gate, and never when an explicit /rename name is
+/// persisted — the user's chosen name wins over a generated one.
+fn should_request_auto_title(
+    is_tty: bool,
+    settings: &indexmap::IndexMap<String, String>,
+    requested: bool,
+    persisted_name: Option<&str>,
+) -> bool {
+    persisted_name.is_none() && should_request_title(is_tty, settings, requested)
+}
+
+/// Applies a /rename (or a restored session name) to the visible pane title:
+/// updates the existing title, or materializes one on a real terminal when
+/// no goal has created it yet. Headless runs never emit title escapes.
+fn apply_rename_label(pane_title: &mut Option<PaneTitle>, name: &str, is_tty: bool) {
+    if let Some(title) = pane_title.as_mut() {
+        let escape = title.set_label(name, Instant::now());
+        crate::tui::pane_title::emit(escape.as_deref());
+    } else if is_tty {
+        let mut title = PaneTitle::new(name);
+        let escape = title.set_label(name, Instant::now());
+        crate::tui::pane_title::emit(escape.as_deref());
+        *pane_title = Some(title);
+    }
 }
 
 /// Whether a consumed title tick re-arms the spinner deadline: only while a
@@ -2503,6 +2539,61 @@ mod rename_tests {
             .expect("pane title exists")
             .label()
             .to_string()
+    }
+
+    #[test]
+    fn auto_title_yields_to_a_persisted_rename_name() {
+        let settings = crate::core::config::default_setting_values();
+        // An explicit /rename name wins: no auto-title even on a fresh,
+        // TTY-visible, enabled session.
+        assert!(!should_request_auto_title(true, &settings, false, Some("User Chosen Name")));
+        // Without one, the usual gate applies unchanged.
+        assert!(should_request_auto_title(true, &settings, false, None));
+        assert!(!should_request_auto_title(false, &settings, false, None));
+        assert!(!should_request_auto_title(true, &settings, true, None));
+    }
+
+    #[test]
+    fn rename_attempt_drops_in_flight_auto_title_replies() {
+        let dir = temp_dir("stale-title");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        let before = app.title_epoch;
+        // No profile is configured, so begin_rename refuses after the epoch
+        // bump — the bump guards every attempt, not just scheduled ones.
+        app.begin_rename();
+        assert_eq!(app.title_epoch, before.wrapping_add(1));
+        assert_eq!(app.rename_epoch, 0);
+        // The late auto-title reply for the old epoch is rejected and the
+        // current label survives.
+        assert!(apply_title_result(
+            app.pane_title.as_mut(),
+            before,
+            app.title_epoch,
+            Some("Late Auto Title".to_string()),
+            Instant::now(),
+        )
+        .is_none());
+        assert_eq!(
+            label(&app),
+            crate::tui::pane_title::fallback_title("ship the release")
+        );
+    }
+
+    #[test]
+    fn rename_label_materializes_a_title_only_on_a_tty() {
+        // Before any goal there is no pane title: on a real terminal the
+        // chosen name materializes one...
+        let mut pane_title: Option<PaneTitle> = None;
+        apply_rename_label(&mut pane_title, "Alpha Beta Gamma", true);
+        let title = pane_title.expect("materialized on a tty");
+        assert_eq!(title.label(), "Alpha Beta Gamma");
+        // ...headless runs never materialize one (no escapes on piped
+        // stdout).
+        let mut pane_title: Option<PaneTitle> = None;
+        apply_rename_label(&mut pane_title, "Alpha Beta Gamma", false);
+        assert!(pane_title.is_none());
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::cli::marketplaces::{
 };
 use crate::cli::mentions::resolve_goal_mentions;
 use crate::cli::queue::{append_queued_goal, drain_queued_goals, pending_queued_goals, DrainError, QueuedGoal};
-use crate::cli::roles::{resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs};
+use crate::cli::roles::{resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs, RoleSetupSource};
 use crate::cli::run_record::{load_run_record, RunRecord};
 use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
 use crate::cli::skills::{
@@ -593,6 +593,7 @@ struct HeadlessArgs<'a> {
     home: &'a DripHome,
     index: &'a SessionIndex,
     project: &'a DripProject,
+    roles_flag: Option<RoleSetupSource>,
     session: &'a SessionRecord,
 }
 
@@ -737,26 +738,10 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         },
     );
 
-    // Resolve --roles <preset-or-path> into extra role definitions that take
-    // highest precedence over config/project/marketplace roles (name-keyed
-    // override merge inside resolveRoleSetup).
-    let mut extra_roles = None;
-    let mut extra_bindings = None;
-
-    if let Some(preset_or_path) = &args.cli_args.roles_preset_or_path {
-        // A preset and a roles.json file carry the same shape (roles plus optional
-        // loop-kind bindings), so both --roles sources thread through identically.
-        match resolve_roles_flag(preset_or_path) {
-            Ok(resolved) => {
-                extra_roles = Some(resolved.roles);
-                extra_bindings = resolved.bindings;
-            }
-            Err(error) => {
-                eprintln!("--roles: could not load \"{preset_or_path}\": {error}");
-                return 1;
-            }
-        }
-    }
+    // --roles resolved once at startup; the flag's own contents are pinned for
+    // the whole run.
+    let extra_roles = args.roles_flag.as_ref().map(|resolved| resolved.roles.clone());
+    let extra_bindings = args.roles_flag.as_ref().and_then(|resolved| resolved.bindings.clone());
 
     let skills_pool = discover_all_skills(Path::new(args.cwd), args.home).unwrap_or_default();
     let marketplace_roles = list_enabled_marketplace_roles(Path::new(args.cwd), args.home).unwrap_or_default();
@@ -1701,6 +1686,22 @@ pub async fn main(argv: Vec<String>) -> i32 {
         return 1;
     };
 
+    // Resolve --roles <preset-or-path> into extra role definitions that take
+    // highest precedence over config/project/marketplace roles (name-keyed
+    // override merge inside resolveRoleSetup). Resolved once here so the
+    // headless runner and the TUI share the same source, and so a bad value
+    // fails before the TUI takes over the terminal.
+    let roles_flag = match &cli_args.roles_preset_or_path {
+        Some(preset_or_path) => match resolve_roles_flag(preset_or_path) {
+            Ok(resolved) => Some(resolved),
+            Err(error) => {
+                eprintln!("--roles: could not load \"{preset_or_path}\": {error}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+
     if !cli_args.tui {
         let Some(goal_text) = goal_text.filter(|text| !text.is_empty()) else {
             // Bare drip: initialize (or select, with --continue/--resume) a session and
@@ -1800,6 +1801,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             home: &home,
             index: &index,
             project: &project,
+            roles_flag,
             session: &session,
         })
         .await;
@@ -1822,6 +1824,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             max_iterations: cli_args.max_iterations,
             no_repo_memory: cli_args.no_repo_memory,
             project: project.clone(),
+            roles_flag,
             session,
         })
     })

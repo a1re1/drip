@@ -546,3 +546,83 @@ fn roles_preset_or_path_is_none_when_not_passed() {
     let parsed = parse_cli_args(&["goal text".to_string()]);
     assert!(parsed.roles_preset_or_path.is_none());
 }
+#[test]
+fn resolve_role_setup_extra_roles_override_config_roles() {
+    let root = make_temp_root("drip-roles-extra-roles-");
+    let mut config = default_config();
+    config.settings.insert(
+        ROLE_PROFILES_SETTING_ID.to_string(),
+        r#"[{"name":"reviewer","prompt":"Config reviewer."},{"name":"planner","prompt":"Config planner."}]"#.to_string(),
+    );
+
+    use drip::cli::roles::RoleDefinition;
+    let extra_roles = vec![RoleDefinition {
+        description: None,
+        r#loop: None,
+        model: None,
+        name: "reviewer".to_string(),
+        prompt: Some("Flag reviewer.".to_string()),
+        skills: None,
+        tools: Some(vec!["READ".to_string()]),
+        verified_by: None,
+    }];
+
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: Some(extra_roles),
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec!["READ".to_string(), "DIR".to_string()],
+    });
+
+    // Flag roles replace same-named config roles wholesale
+    let reviewer = setup.roles.iter().find(|r| r.name == "reviewer").unwrap();
+    assert_eq!(
+        reviewer.system_prompt_suffix.as_deref(),
+        Some("Flag reviewer.")
+    );
+    assert_eq!(reviewer.tool_names.as_deref(), Some(&["READ".to_string()][..]));
+    // Config roles the flag does not mention still resolve
+    let planner = setup.roles.iter().find(|r| r.name == "planner").unwrap();
+    assert_eq!(
+        planner.system_prompt_suffix.as_deref(),
+        Some("Config planner.")
+    );
+}
+
+#[test]
+fn resolve_role_setup_extra_bindings_override_config_bindings() {
+    let root = make_temp_root("drip-roles-extra-bindings-");
+    let mut config = default_config();
+    config.settings.insert(
+        ROLE_PROFILES_SETTING_ID.to_string(),
+        r#"[{"name":"architect"},{"name":"author"},{"name":"planner"}]"#.to_string(),
+    );
+    config.settings.insert(
+        ROLE_BINDINGS_SETTING_ID.to_string(),
+        r#"{"planning":"planner","task":"author"}"#.to_string(),
+    );
+
+    use drip::harness::roles::HarnessRoleBindings;
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: Some(HarnessRoleBindings {
+            planning: Some("architect".to_string()),
+            task: None,
+        }),
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+    });
+
+    // Extra bindings win per key; keys they leave unset fall back to config
+    let bindings = setup.bindings.as_ref().unwrap();
+    assert_eq!(bindings.planning.as_deref(), Some("architect"));
+    assert_eq!(bindings.task.as_deref(), Some("author"));
+}

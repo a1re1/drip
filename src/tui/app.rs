@@ -31,7 +31,7 @@ use crate::cli::marketplaces::{
 };
 use crate::cli::mentions::{get_active_chat_file_mention, replace_active_chat_file_mention, resolve_goal_mentions};
 use crate::cli::paste::{sanitize_pasted_input, DISABLE_BRACKETED_PASTE, ENABLE_BRACKETED_PASTE};
-use crate::cli::roles::{load_skill_content, resolve_role_setup, ResolveRoleSetupArgs};
+use crate::cli::roles::{load_skill_content, resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource};
 use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
 use crate::cli::skills::LoadedCliSkill;
 use crate::cli::state_summary::format_state_summary;
@@ -68,6 +68,7 @@ pub struct TuiBootstrap {
     pub max_iterations: Option<i64>,
     pub no_repo_memory: bool,
     pub project: DripProject,
+    pub roles_flag: Option<RoleSetupSource>,
     pub session: SessionRecord,
 }
 
@@ -1242,8 +1243,8 @@ impl TuiApp {
             config: &self.config,
             cwd: self.bootstrap.cwd.clone(),
             env: Some(&env),
-            extra_bindings: None,
-            extra_roles: None,
+            extra_bindings: self.bootstrap.roles_flag.as_ref().and_then(|flag| flag.bindings.clone()),
+            extra_roles: self.bootstrap.roles_flag.as_ref().map(|flag| flag.roles.clone()),
             marketplace_roles: Some(list_enabled_marketplace_roles(cwd, home).unwrap_or_default()),
             skills: discover_all_skills(cwd, home).unwrap_or_default(),
             tool_names: self.tool_names(),
@@ -1408,8 +1409,8 @@ impl TuiApp {
             config: &self.config,
             cwd: self.bootstrap.cwd.clone(),
             env: Some(&env),
-            extra_bindings: None,
-            extra_roles: None,
+            extra_bindings: self.bootstrap.roles_flag.as_ref().and_then(|flag| flag.bindings.clone()),
+            extra_roles: self.bootstrap.roles_flag.as_ref().map(|flag| flag.roles.clone()),
             marketplace_roles: Some(list_enabled_marketplace_roles(cwd, &self.bootstrap.home).unwrap_or_default()),
             skills: discover_all_skills(cwd, &self.bootstrap.home).unwrap_or_default(),
             tool_names: self.tool_names(),

@@ -545,6 +545,7 @@ pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyV
         env: None,
         process_args: &["-lc".to_string(), input.command.clone()],
         timeout_ms: Some(input.timeout_ms),
+        stdin_payload: None,
     })
     .map_err(|e| anyhow::anyhow!(e))?;
 

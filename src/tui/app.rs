@@ -70,6 +70,9 @@ pub struct TuiBootstrap {
     pub project: DripProject,
     pub roles_flag: Option<RoleSetupSource>,
     pub session: SessionRecord,
+    /// Opt-in custom status-line command from the persisted drip config; None
+    /// keeps the built-in status bar. Never imported from ~/.claude.
+    pub status_line: Option<crate::core::config::StatusLineSetting>,
 }
 
 // Harness events can arrive far faster than the terminal can usefully paint;
@@ -309,8 +312,31 @@ struct TuiApp {
     running_detail: Option<String>,
     selected_suggestion_index: usize,
     session: SessionRecord,
+    status_line_next_refresh: Option<Instant>,
+    status_line_output: Option<crate::tui::status_line::StatusLineOutput>,
+    status_line_request_width: Option<usize>,
+    status_line_runner: Option<crate::tui::status_line::StatusLineRunner>,
     text: String,
     tx: Sender<Msg>,
+}
+
+/// Pure render decision: the painted custom status row for a finished job.
+/// `None` keeps the default bar (no output, failure, or blank line); a painted
+/// row is sanitized and width-fitted at draw time only — no side effects.
+fn custom_status_row_from(
+    output: Option<&crate::tui::status_line::StatusLineOutput>,
+    cols: usize,
+    padding: usize,
+) -> Option<String> {
+    let output = output?;
+    if !output.ok || output.line.is_empty() {
+        return None;
+    }
+    Some(crate::tui::status_line::sanitize_status_line(
+        &output.line,
+        cols,
+        padding as u16,
+    ))
 }
 
 impl TuiApp {
@@ -320,6 +346,10 @@ impl TuiApp {
         let (cols, rows) = terminal_size();
         let config = bootstrap.config.clone();
         let session = bootstrap.session.clone();
+        let status_line_runner = bootstrap
+            .status_line
+            .clone()
+            .map(crate::tui::status_line::StatusLineRunner::new);
 
         Self {
             abort: None,
@@ -348,6 +378,10 @@ impl TuiApp {
             running_detail: None,
             selected_suggestion_index: 0,
             session,
+            status_line_next_refresh: None,
+            status_line_output: None,
+            status_line_request_width: None,
+            status_line_runner,
             text: String::new(),
             tx,
         }
@@ -429,19 +463,38 @@ impl TuiApp {
         }
 
         let skill_names: Vec<String> = self.active_skills.iter().map(|skill| skill.name.clone()).collect();
+        // Custom statusLine: when configured, its output replaces only the
+        // presentation status row (essential controls and the composer stay).
+        // Disabled, failed, timed-out, or blank output falls back to the
+        // default bar; failures never retry or log from the paint path.
+        let mut custom_status_rows: Option<usize> = None;
+        if self.status_line_runner.is_some() {
+            if let Some(row) = self.custom_status_row() {
+                if !row.is_empty() {
+                    let before = rows.len();
+                    rows.push(row);
+                    custom_status_rows = Some(rows.len() - before);
+                }
+            }
+        }
         let before_status = rows.len();
-        rows.extend(render_status_bar(
-            &StatusBarProps {
-                active_skill_names: &skill_names,
-                cwd: &self.bootstrap.cwd,
-                model_label: &self.model_label(),
-                running: self.running,
-                running_detail: self.running_detail.as_deref(),
-                session_id: &self.session.id,
-            },
-            self.cols,
-        ));
-        let status_rows = rows.len() - before_status;
+        if custom_status_rows.is_none() {
+            rows.extend(render_status_bar(
+                &StatusBarProps {
+                    active_skill_names: &skill_names,
+                    cwd: &self.bootstrap.cwd,
+                    model_label: &self.model_label(),
+                    running: self.running,
+                    running_detail: self.running_detail.as_deref(),
+                    session_id: &self.session.id,
+                },
+                self.cols,
+            ));
+        }
+        let status_rows = match custom_status_rows {
+            Some(count) => count,
+            None => rows.len() - before_status,
+        };
 
         // Live rows must never wrap: the cursor-up arithmetic that erases the
         // previous frame counts logical rows. Clipping keeps SGR codes (the
@@ -495,6 +548,68 @@ impl TuiApp {
         }
         self.live_rows = 0;
         self.paint(&out);
+    }
+
+    // ----- custom status line ---------------------------------------------
+
+    /// Builds the runner request from real session state. Telemetry drip does
+    /// not genuinely know (model id, token/context usage, version) stays None
+    /// and serializes as null/absent rather than being invented.
+    fn status_line_request(&self) -> crate::tui::status_line::StatusLineRequest {
+        crate::tui::status_line::StatusLineRequest {
+            session_id: Some(self.session.id.clone()),
+            cwd: Some(self.bootstrap.cwd.clone()),
+            model_id: None,
+            model_display_name: Some(self.model_label()),
+            version: None,
+            render_width_chars: self.cols,
+            context_usage: None,
+        }
+    }
+
+    /// Paints the custom row from cached output only: no job is started and
+    /// nothing is executed here, so drawing stays side-effect-free.
+    fn custom_status_row(&self) -> Option<String> {
+        let padding = self
+            .status_line_runner
+            .as_ref()
+            .map(|runner| usize::try_from(runner.setting().padding).unwrap_or(0))
+            .unwrap_or(0);
+        custom_status_row_from(self.status_line_output.as_ref(), self.cols, padding)
+    }
+
+    /// Non-blocking: adopts any finished status-line job and re-arms the
+    /// interval refresh. Width changes (resize) refresh immediately; both are
+    /// rate limited by the configured interval plus the runner's own spacing.
+    /// Input and streaming are never blocked.
+    fn poll_status_line(&mut self) {
+        if self.status_line_runner.is_none() {
+            return;
+        }
+        if let Some(runner) = self.status_line_runner.as_ref() {
+            if let Some(output) = runner.poll_output() {
+                self.status_line_output = Some(output);
+            }
+        }
+        let due = self
+            .status_line_next_refresh
+            .map_or(true, |at| Instant::now() >= at)
+            || self.status_line_request_width != Some(self.cols);
+        if !due {
+            return;
+        }
+        let interval_ms = self
+            .status_line_runner
+            .as_ref()
+            .map(|runner| runner.setting().update_interval_ms)
+            .unwrap_or(300);
+        self.status_line_next_refresh =
+            Some(Instant::now() + Duration::from_millis(interval_ms));
+        self.status_line_request_width = Some(self.cols);
+        let request = self.status_line_request();
+        if let Some(runner) = self.status_line_runner.as_mut() {
+            runner.request_refresh(request);
+        }
     }
 
     fn model_label(&self) -> String {
@@ -1566,8 +1681,20 @@ impl TuiApp {
                 }
             }
 
+            // Custom status line: adopt finished jobs and re-arm the
+            // interval refresh here, never in the paint path (drawing stays
+            // side-effect-free). Non-blocking; failures never retry or log.
+            self.poll_status_line();
+
             let mut wait = Duration::from_millis(300);
-            for deadline in [self.flush_deadline, self.resize_at].into_iter().flatten() {
+            for deadline in [
+                self.flush_deadline,
+                self.resize_at,
+                self.status_line_next_refresh,
+            ]
+            .into_iter()
+            .flatten()
+            {
                 wait = wait.min(deadline.saturating_duration_since(now));
             }
 
@@ -1816,5 +1943,92 @@ mod tests {
             assert!(text.contains(&format!("/{}", command.name)), "{}", command.name);
         }
         assert!(text.contains("ctrl+c — exit"));
+    }
+}
+
+#[cfg(test)]
+mod status_line_tui_tests {
+    use super::*;
+
+    fn output(line: &str, ok: bool) -> crate::tui::status_line::StatusLineOutput {
+        crate::tui::status_line::StatusLineOutput {
+            line: line.to_string(),
+            ok,
+            fresh: true,
+            finished_at: Instant::now(),
+        }
+    }
+
+    fn bare_request() -> crate::tui::status_line::StatusLineRequest {
+        crate::tui::status_line::StatusLineRequest {
+            session_id: None,
+            cwd: None,
+            model_id: None,
+            model_display_name: None,
+            version: None,
+            render_width_chars: 80,
+            context_usage: None,
+        }
+    }
+
+    fn command_setting(command: &str) -> crate::core::config::StatusLineSetting {
+        crate::core::config::StatusLineSetting {
+            kind: "command".to_string(),
+            command: command.to_string(),
+            padding: 0,
+            update_interval_ms: 300,
+            timeout_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn no_custom_output_keeps_default_bar() {
+        // Not configured, or configured but nothing finished yet: default bar.
+        assert!(custom_status_row_from(None, 80, 0).is_none());
+        assert!(custom_status_row_from(Some(&output("", true)), 80, 0).is_none());
+    }
+
+    #[test]
+    fn failed_or_timed_out_output_falls_back_to_default_bar() {
+        assert!(custom_status_row_from(Some(&output("ignored", false)), 80, 0).is_none());
+    }
+
+    #[test]
+    fn stale_success_row_is_dropped_on_any_later_failure_or_blank() {
+        // The runner delivers every finished job; the renderer keeps only the
+        // newest: a success paints, but any later failure, timeout, blank, or
+        // missing output renders the built-in bar, never a stale custom row.
+        assert!(custom_status_row_from(Some(&output("current", true)), 40, 0).is_some());
+        assert!(custom_status_row_from(Some(&output("stale", false)), 40, 0).is_none());
+        assert!(custom_status_row_from(Some(&output("", true)), 40, 0).is_none());
+        assert!(custom_status_row_from(None, 40, 0).is_none());
+    }
+
+    #[test]
+    fn custom_ansi_output_is_exact_width_with_reset() {
+        let row =
+            custom_status_row_from(Some(&output("\x1b[32mok\x1b[0m", true)), 10, 0).unwrap();
+        assert!(row.starts_with("\x1b[32mok\x1b[0m"), "{row:?}");
+        assert_eq!(string_width(&row), 10);
+        assert!(row.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn custom_row_survives_narrow_unicode_and_padding() {
+        let wide = custom_status_row_from(Some(&output("コード drip", true)), 4, 0).unwrap();
+        assert_eq!(string_width(&wide), 4);
+        // Width>0 pads to exactly the requested cells; padding 2 shows as two
+        // leading spaces before the content.
+        let row = custom_status_row_from(Some(&output("ab", true)), 80, 2).unwrap();
+        assert_eq!(string_width(&row), 80);
+        assert!(row.starts_with("  ab"), "{row:?}");
+    }
+
+    #[test]
+    fn shutdown_runner_ignores_refresh_requests() {
+        let mut runner =
+            crate::tui::status_line::StatusLineRunner::new(command_setting("true"));
+        runner.shutdown();
+        assert!(!runner.request_refresh(bare_request()));
     }
 }

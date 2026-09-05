@@ -262,6 +262,97 @@ stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 
 ---
 
+## Custom status line
+
+In the interactive TUI you can replace the built-in bottom status bar with the
+output of a shell command — the same idea as Claude Code's status line. The
+setting lives in drip's own persisted config file, `~/.drip/config.json`
+(`DRIP_HOME` relocates the home directory), as a top-level `statusLine` object
+next to `settings`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.drip/statusline.sh",
+    "padding": 0,
+    "updateIntervalMs": 300,
+    "timeoutMs": 5000
+  }
+}
+```
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `type` | `"command"` | `"command"` is the only supported kind. |
+| `command` | (required) | Shell command, at most 4096 characters; `~` is expanded. |
+| `padding` | `0` | Blank cells added on both sides of the row; clamped to 0-4. |
+| `updateIntervalMs` | `300` | Minimum milliseconds between runs; clamped to 100-60000. |
+| `timeoutMs` | `5000` | Kill a run after this many milliseconds; clamped to 100-30000. |
+
+Behavior:
+
+- No `statusLine` key (or `null`) keeps the built-in status bar unchanged. An
+  invalid `statusLine` (wrong `type`, empty command, values out of range,
+  wrong JSON shape) prints one nonfatal warning naming the config file and the
+  offending key, and drip starts with the built-in bar — an invalid command is
+  never executed.
+- Each run gets the session's working directory as its cwd and one JSON
+  document on stdin (stdin is closed immediately, so readers observe EOF):
+
+```json
+{
+  "session_id": "…",
+  "workspace": { "current_dir": "/path/to/repo" },
+  "model": { "id": "…", "display_name": "…" },
+  "version": "…",
+  "render_width_chars": 120,
+  "context_usage": 0.35
+}
+```
+
+  `session_id`, `workspace.current_dir`, `model.display_name` and
+  `render_width_chars` (terminal width) carry real values. Everything drip
+  does not genuinely know is `null` or omitted rather than invented:
+  the `workspace` and `model` objects are always present but their
+  fields are omitted when unavailable, and `version`, `model.id` and
+  `context_usage` are reserved fields that are currently always
+  `null`/omitted.
+- The command runs under `/bin/sh -c` (POSIX) or `cmd /C` (Windows). Only its
+  stdout becomes the status row: output is capped at 8,192 characters, only
+  the first line is shown, SGR color escapes are kept (a reset is appended so
+  colors cannot bleed into the TUI), and OSC sequences, cursor movement and
+  other control characters are stripped. The row is truncated to the terminal
+  width (Unicode-aware: East-Asian wide characters count as two cells) with
+  `padding` applied inside that width, and re-fits on resize without
+  re-running the command.
+- While the TUI is open the command re-runs no more often than
+  `updateIntervalMs` (plus immediately on resize), with at most one run in
+  flight. Runs that exceed `timeoutMs` are killed, together with their
+  descendants where the platform supports process-group kills.
+- Fallbacks: a nonzero exit or a timeout shows the built-in bar for that
+  refresh; empty output and exit 127 (command not found) count as "nothing to
+  show" and also fall back to the built-in bar, with no error spam.
+- **Trust boundary:** `statusLine.command` is arbitrary local code that drip
+  executes repeatedly while the TUI runs. Only put commands there that you
+  control. drip never reads `~/.claude/settings.json`; to reuse an existing
+  Claude status-line script, point drip's command at it explicitly without
+  touching your Claude settings:
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" } }
+```
+
+  Claude Code payload fields drip does not provide: `transcript_path`,
+  `workspace.project_dir`, `output_style`, `cost` and `exceeds_200k_tokens`
+  (scripts receive `null`/omitted values instead). drip additionally offers
+  `updateIntervalMs`/`timeoutMs`, and its `padding` is a number (0-4), not
+  Claude Code's boolean. A working POSIX example lives in
+  `examples/statusline/statusline.sh`, and `tests/statusline_example.rs`
+  validates it against a payload produced by the real implementation.
+
+---
+
 ## Contributing
 
 PRs welcome. Please run `cargo build --release && cargo test` before submitting.

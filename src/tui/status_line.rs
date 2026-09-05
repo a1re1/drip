@@ -133,7 +133,6 @@ pub struct StatusLineRunner {
     setting: StatusLineSetting,
     job_tx: Option<Sender<StatusLineJob>>,
     output_rx: Receiver<StatusLineOutput>,
-    output: Arc<Mutex<Option<StatusLineOutput>>>,
     last_started: Arc<Mutex<Option<Instant>>>,
     in_flight: Arc<AtomicBool>,
     pending: Arc<Mutex<Option<StatusLineRequest>>>,
@@ -147,7 +146,6 @@ impl StatusLineRunner {
     pub fn new(setting: StatusLineSetting) -> Self {
         let (job_tx, job_rx) = mpsc::channel::<StatusLineJob>();
         let (out_tx, out_rx) = mpsc::channel::<StatusLineOutput>();
-        let output: Arc<Mutex<Option<StatusLineOutput>>> = Arc::new(Mutex::new(None));
         let in_flight = Arc::new(AtomicBool::new(false));
         let pending: Arc<Mutex<Option<StatusLineRequest>>> = Arc::new(Mutex::new(None));
         let generation = Arc::new(AtomicU64::new(0));
@@ -159,12 +157,10 @@ impl StatusLineRunner {
             job_rx,
             job_tx: job_tx.clone(),
             out_tx,
-            output: Arc::clone(&output),
             in_flight: Arc::clone(&in_flight),
             pending: Arc::clone(&pending),
             generation: Arc::clone(&generation),
             stop: Arc::clone(&stop),
-            last_cached: None,
         };
         std::thread::Builder::new()
             .name("status-line".to_string())
@@ -175,7 +171,6 @@ impl StatusLineRunner {
             setting,
             job_tx: Some(job_tx),
             output_rx: out_rx,
-            output,
             last_started,
             in_flight,
             pending,
@@ -186,12 +181,6 @@ impl StatusLineRunner {
 
     pub fn setting(&self) -> &StatusLineSetting {
         &self.setting
-    }
-
-    /// Last stored output (success or, before any success, the previous
-    /// successful row that a failure did not evict).
-    pub fn cached_output(&self) -> Option<StatusLineOutput> {
-        self.output.lock().ok().and_then(|guard| guard.clone())
     }
 
     /// True while a job is running (never blocks).
@@ -269,12 +258,10 @@ struct StatusLineWorker {
     job_rx: Receiver<StatusLineJob>,
     job_tx: Sender<StatusLineJob>,
     out_tx: Sender<StatusLineOutput>,
-    output: Arc<Mutex<Option<StatusLineOutput>>>,
     in_flight: Arc<AtomicBool>,
     pending: Arc<Mutex<Option<StatusLineRequest>>>,
     generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    last_cached: Option<String>,
 }
 
 impl StatusLineWorker {
@@ -310,31 +297,16 @@ impl StatusLineWorker {
                 },
             };
 
-            // Cache successful rows; failures and timeouts keep the last
-            // good row visible instead of blanking the status area.
-            if output.ok {
-                self.last_cached = Some(output.line.clone());
-            } else if let Some(cached) = self.last_cached.clone() {
-                let mut stored = output.clone();
-                stored.line = cached;
-                self.store(stored.clone());
-                self.finish_job(&output, stored);
-                continue;
-            }
-            self.store(output.clone());
-            self.finish_job(&output, output.clone());
+            // Deliver every finished job, successes and failures alike: the
+            // TUI replaces the custom row with the built-in bar whenever the
+            // newest result failed, timed out, or was blank (the documented
+            // fallback), so a stale success is never kept visible.
+            self.finish_job(output);
         }
     }
 
-    fn store(&self, output: StatusLineOutput) {
-        if let Ok(mut guard) = self.output.lock() {
-            *guard = Some(output);
-        }
-    }
-
-    fn finish_job(&self, published: &StatusLineOutput, delivered: StatusLineOutput) {
-        let _ = self.out_tx.send(delivered);
-        let _ = published;
+    fn finish_job(&self, output: StatusLineOutput) {
+        let _ = self.out_tx.send(output);
         // Pick up a request that arrived while this job ran; it becomes the
         // next job without another wakeup from the TUI.
         let next = self.pending.lock().ok().and_then(|mut guard| guard.take());
@@ -715,5 +687,92 @@ mod tests {
         let out = sanitize_status_line("hi", 10, 2);
         assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 10);
         assert!(out.starts_with("  hi  "));
+    }
+
+    // --- StatusLineRunner delivery regressions (F-2): every finished job,
+    // successes and failures alike, is published on the output channel, so
+    // the TUI can fall back to the built-in bar on the newest result.
+
+    fn worker_runner(command: &str, timeout_ms: u64) -> StatusLineRunner {
+        StatusLineRunner::new(StatusLineSetting {
+            timeout_ms,
+            ..setting(command)
+        })
+    }
+
+    fn drive_until(
+        runner: &mut StatusLineRunner,
+        width: usize,
+        want: impl Fn(&StatusLineOutput) -> bool,
+    ) -> StatusLineOutput {
+        let started = Instant::now();
+        loop {
+            // Re-requesting is idempotent: it starts the job, coalesces into
+            // `pending` while throttled or in flight, and the worker picks it
+            // up regardless of which path the call took.
+            runner.request_refresh(request(width));
+            if let Some(out) = runner.poll_output() {
+                if want(&out) {
+                    return out;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "status-line runner never produced the expected output"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn runner_delivers_failure_after_an_earlier_success() {
+        // The command succeeds on the first run and exits nonzero on the
+        // second (marker file), so the same runner sees success then failure.
+        let marker = std::env::temp_dir().join(format!(
+            "drip-statusline-fail-{}.flag",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let path = marker.to_string_lossy().into_owned();
+        let mut runner =
+            worker_runner(&format!("if [ -f {path} ]; then exit 3; fi; touch {path}; printf drip-row"), 5_000);
+        let first = drive_until(&mut runner, 80, |out| out.ok);
+        assert_eq!(first.line, "drip-row");
+        let second = drive_until(&mut runner, 80, |out| !out.ok);
+        assert_eq!(second.line, "");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn runner_delivers_timeout_after_an_earlier_success() {
+        // Second run sleeps past the timeout: the timed-out failure must be
+        // delivered promptly so the TUI replaces the row with the built-in
+        // bar instead of leaving a stale success visible.
+        let marker = std::env::temp_dir().join(format!(
+            "drip-statusline-timeout-{}.flag",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let path = marker.to_string_lossy().into_owned();
+        let mut runner = worker_runner(
+            &format!("if [ -f {path} ]; then sleep 5; fi; touch {path}; printf drip-row"),
+            300,
+        );
+        let first = drive_until(&mut runner, 80, |out| out.ok);
+        assert_eq!(first.line, "drip-row");
+        let started = Instant::now();
+        let second = drive_until(&mut runner, 80, |out| !out.ok);
+        assert_eq!(second.line, "");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn runner_delivers_failure_output_for_unspawnable_command() {
+        // Spawn failure (None from run_status_line_job) also becomes a
+        // delivered failure output, never a silently dropped job.
+        let mut runner = worker_runner("~/definitely/not/a/real/binary-xyz", 5_000);
+        let out = drive_until(&mut runner, 80, |out| !out.ok);
+        assert_eq!(out.line, "");
     }
 }

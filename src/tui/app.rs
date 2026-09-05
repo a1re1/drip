@@ -1999,6 +1999,17 @@ mod status_line_tui_tests {
     }
 
     #[test]
+    fn stale_success_row_is_dropped_on_any_later_failure_or_blank() {
+        // The runner delivers every finished job; the renderer keeps only the
+        // newest: a success paints, but any later failure, timeout, blank, or
+        // missing output renders the built-in bar, never a stale custom row.
+        assert!(custom_status_row_from(Some(&output("current", true)), 40, 0).is_some());
+        assert!(custom_status_row_from(Some(&output("stale", false)), 40, 0).is_none());
+        assert!(custom_status_row_from(Some(&output("", true)), 40, 0).is_none());
+        assert!(custom_status_row_from(None, 40, 0).is_none());
+    }
+
+    #[test]
     fn custom_ansi_output_is_exact_width_with_reset() {
         let row =
             custom_status_row_from(Some(&output("\x1b[32mok\x1b[0m", true)), 10, 0).unwrap();

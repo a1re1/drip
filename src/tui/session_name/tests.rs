@@ -197,3 +197,25 @@ fn async_error_paths_resolve_to_none() {
     let empty_digest = runtime.block_on(generate_session_name(route, "goal only", "", 1));
     assert_eq!(empty_digest, None);
 }
+
+#[test]
+fn empty_goal_and_transcript_yields_none_without_a_model_call() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let route = ModelRoute {
+        fallback_route: None,
+        headers: None,
+        model: "test-model".into(),
+        provider: Some("openai".into()),
+        reasoning_effort: None,
+        refresh_headers: None,
+        // Would refuse if a call were attempted; the guard must
+        // short-circuit before any network activity.
+        url: "http://127.0.0.1:9/unreachable".into(),
+    };
+    let both_empty = runtime.block_on(generate_session_name(route.clone(), "", "", 1));
+    assert_eq!(both_empty, None, "empty goal + digest must not fabricate a name");
+    let whitespace_only = runtime.block_on(generate_session_name(route, "   \n\t ", "  ", 1));
+    assert_eq!(whitespace_only, None, "whitespace-only context must not fabricate a name");
+}

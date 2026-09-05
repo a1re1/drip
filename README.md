@@ -262,7 +262,7 @@ stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 
 **Renaming a session.** Type `/rename` in the TUI composer and the configured model distills the
 session transcript into a short 5-7 word name. The name replaces the window title and is persisted
-to the session's `session.json` metadata, so `/sessions` and resume keep it; on any failure the
+to the session's `session.json` metadata, so resume keeps it; on any failure the
 current name is kept.
 
 ---

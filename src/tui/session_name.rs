@@ -92,6 +92,12 @@ pub async fn generate_session_name(
     timeout_ms: u64,
 ) -> Option<String> {
     let timeout_ms = timeout_ms.max(1);
+    // Contract: with no goal and no transcript there is nothing to name.
+    // Resolve to None so the caller keeps the current name instead of
+    // letting the model fabricate one from an empty prompt.
+    if sanitize(goal).trim().is_empty() && sanitize(transcript_digest).trim().is_empty() {
+        return None;
+    }
     let caller = create_model_caller(ModelCallerDeps {
         cwd: None,
         default_transport_tools: Vec::new(),

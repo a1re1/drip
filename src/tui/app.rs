@@ -53,6 +53,10 @@ use crate::core::sessions::{
 use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::builtin_tool_pack;
+use crate::tui::pane_title::{FALLBACK_LABEL, PaneTitle, SPINNER_INTERVAL_MS};
+use crate::tui::terminal_title::{
+    generate_chat_title, resolve_title_route, terminal_title_enabled, terminal_title_timeout_ms,
+};
 use crate::tui::term::{terminal_size, write_out, RawMode};
 use crate::tui::timeline::{render_timeline_cell, select_repaint_tail_start};
 use crate::tui::widgets::{render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps};
@@ -161,6 +165,9 @@ enum Msg {
     Input(Vec<u8>),
     Mentions { paths: Vec<String>, seq: u64 },
     RunDone(Result<SessionGoalOutcome, SessionGoalError>),
+    /// One-shot title generation finished on the background thread. `label`
+    /// is None on any failure; stale epochs are dropped by the handler.
+    Title { epoch: u64, label: Option<String> },
 }
 
 /// One decoded terminal input.
@@ -317,6 +324,15 @@ struct TuiApp {
     status_line_request_width: Option<usize>,
     status_line_runner: Option<crate::tui::status_line::StatusLineRunner>,
     text: String,
+    /// OSC 2 title state while an interactive TTY owns stdout; None keeps
+    /// headless/redirected runs silent. Pure state lives in pane_title.rs.
+    pane_title: Option<PaneTitle>,
+    /// One-shot guard: title generation is requested at most once per session.
+    title_requested: bool,
+    /// Bumped on session switch; in-flight generations from older epochs are
+    /// stale and dropped without touching the title.
+    title_epoch: u64,
+    title_next_tick: Option<Instant>,
     tx: Sender<Msg>,
 }
 
@@ -379,6 +395,10 @@ impl TuiApp {
             selected_suggestion_index: 0,
             session,
             status_line_next_refresh: None,
+            pane_title: None,
+            title_requested: false,
+            title_epoch: 0,
+            title_next_tick: None,
             status_line_output: None,
             status_line_request_width: None,
             status_line_runner,
@@ -997,6 +1017,16 @@ impl TuiApp {
         self.flush_pending_cells();
         self.paths = session_paths_for(&self.bootstrap.project, &record);
         self.session = record;
+        // New session: invalidate any in-flight title generation for the old
+        // session (epoch mismatch drops it) and reset to the neutral fallback
+        // label; the new session's first goal may request a fresh title.
+        self.title_epoch = self.title_epoch.wrapping_add(1);
+        self.title_requested = false;
+        self.title_next_tick = None;
+        if let Some(title) = self.pane_title.as_mut() {
+            let escape = title.set_label(FALLBACK_LABEL, Instant::now());
+            crate::tui::pane_title::emit(escape.as_deref());
+        }
         // Replay the new transcript from the top, like remounting <Static>:
         // the previous session's rows stay in scrollback (ink cannot take
         // static output back) and the new transcript is printed below them.
@@ -1508,6 +1538,7 @@ impl TuiApp {
         );
 
         let env = self.merged_env();
+        self.begin_title(&goal_text, &env);
         let inference = match resolve_cli_inference(&self.config, Some(&env)) {
             Ok(inference) => inference,
             Err(error) => {
@@ -1621,12 +1652,54 @@ impl TuiApp {
         self.finish_run();
     }
 
+    // ----- terminal pane title --------------------------------------------
+
+    /// Captures the first goal of the session exactly once (the initial CLI
+    /// goal or the first submitted chat goal): shows a readable fallback
+    /// immediately with the spinner running, and on an interactive TTY with
+    /// the feature enabled spawns ONE background request for a model label.
+    /// Later goals and spinner ticks never re-request. TTY-gated: headless,
+    /// JSON, and redirected runs never emit escapes or make a model call.
+    fn begin_title(&mut self, goal_text: &str, env: &HashMap<String, String>) {
+        let settings = self.config.settings.clone();
+        if !should_request_title(stdout_is_tty(), &settings, self.title_requested) {
+            return;
+        }
+        self.title_requested = true;
+        let mut title = PaneTitle::new(goal_text);
+        if let Some(escape) = title.set_busy(true, Instant::now()) {
+            crate::tui::pane_title::emit(Some(&escape));
+            self.title_next_tick =
+                Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
+        }
+        self.pane_title = Some(title);
+
+        // Background, nonblocking, one-shot: the thread only sends a message
+        // and never writes title escapes itself.
+        let tx = self.tx.clone();
+        let epoch = self.title_epoch;
+        let goal = goal_text.to_string();
+        let env = env.clone();
+        let timeout_ms = terminal_title_timeout_ms(&settings);
+        std::thread::spawn(move || {
+            let label = generate_title_label(settings, env, goal, timeout_ms);
+            let _ = tx.send(Msg::Title { epoch, label });
+        });
+    }
+
     fn finish_run(&mut self) {
         self.abort = None;
         self.pending_detail = None;
         self.flush_pending_cells();
         self.running = false;
         self.running_detail = None;
+        // Idle title (bare label, no spinner) whatever ended the run:
+        // completion, cancel, or error.
+        self.title_next_tick = None;
+        if let Some(title) = self.pane_title.as_mut() {
+            let escape = title.set_busy(false, Instant::now());
+            crate::tui::pane_title::emit(escape.as_deref());
+        }
     }
 
     // ----- main loop ------------------------------------------------------
@@ -1681,6 +1754,23 @@ impl TuiApp {
                 }
             }
 
+            // Pane-title spinner: consume a due tick here, never in the paint
+            // path. The deadline is taken before ticking so a throttled frame
+            // cannot leave a past deadline behind, and it is re-armed only
+            // while the title is busy - idle ticks never re-arm, so the loop
+            // falls back to its plain wait instead of busy-polling.
+            if let Some(at) = self.title_next_tick {
+                if now >= at {
+                    self.title_next_tick = None;
+                    let escape = self.pane_title.as_mut().and_then(|title| title.tick(now));
+                    crate::tui::pane_title::emit(escape.as_deref());
+                    if should_rearm_title_tick(self.pane_title.as_ref()) {
+                        self.title_next_tick =
+                            Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
+                    }
+                }
+            }
+
             // Custom status line: adopt finished jobs and re-arm the
             // interval refresh here, never in the paint path (drawing stays
             // side-effect-free). Non-blocking; failures never retry or log.
@@ -1691,6 +1781,7 @@ impl TuiApp {
                 self.flush_deadline,
                 self.resize_at,
                 self.status_line_next_refresh,
+                self.title_next_tick,
             ]
             .into_iter()
             .flatten()
@@ -1735,6 +1826,16 @@ impl TuiApp {
                         self.repaint();
                     }
                 }
+                Ok(Msg::Title { epoch, label }) => {
+                    let escape = apply_title_result(
+                        self.pane_title.as_mut(),
+                        self.title_epoch,
+                        epoch,
+                        label,
+                        Instant::now(),
+                    );
+                    crate::tui::pane_title::emit(escape.as_deref());
+                }
                 Ok(Msg::Info(text)) => self.push_info(text),
                 Ok(Msg::Error(text)) => self.push_error(text),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1755,6 +1856,12 @@ impl TuiApp {
                     break;
                 }
             }
+        }
+        // Leave an idle title on exit (quit, ctrl-c, or halt): bare label,
+        // no spinner left behind.
+        if let Some(title) = self.pane_title.as_mut() {
+            let escape = title.set_busy(false, Instant::now());
+            crate::tui::pane_title::emit(escape.as_deref());
         }
         self.flush_pending_cells();
         write_out(&format!("\n{SHOW_CURSOR}"));
@@ -1832,6 +1939,66 @@ fn spawn_mention_indexer(cwd: String, requests: Receiver<(u64, String)>, tx: Sen
 }
 
 /// Runs the interactive session on the current terminal; returns the exit code.
+fn stdout_is_tty() -> bool {
+    // SAFETY: isatty on a fixed descriptor.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+/// Gate for the one-shot background title request: interactive TTY only,
+/// config-enabled, and not already requested this session. Pure so lifecycle
+/// tests can cover the decision without a terminal.
+fn should_request_title(
+    is_tty: bool,
+    settings: &indexmap::IndexMap<String, String>,
+    requested: bool,
+) -> bool {
+    is_tty && terminal_title_enabled(settings) && !requested
+}
+
+/// Whether a consumed title tick re-arms the spinner deadline: only while a
+/// title exists and is busy. Idle and headless states never re-arm, so the
+/// event loop falls back to its plain wait instead of busy-polling.
+fn should_rearm_title_tick(title: Option<&PaneTitle>) -> bool {
+    title.map_or(false, PaneTitle::is_busy)
+}
+
+/// The single bounded, non-tool inference request for a short chat title.
+/// Missing credentials, offline restrictions, timeouts, and malformed output
+/// all return None so the sanitized fallback stays; this never fails the
+/// chat and stays outside conversation/history state.
+fn generate_title_label(
+    settings: indexmap::IndexMap<String, String>,
+    env: HashMap<String, String>,
+    goal: String,
+    timeout_ms: u64,
+) -> Option<String> {
+    let route = resolve_title_route(&settings, Some(&env))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(generate_chat_title(route, &goal, timeout_ms))
+}
+
+/// Applies a background title result: only the current session's epoch is
+/// accepted, and a label identical to the current title dedupes to nothing.
+fn apply_title_result(
+    title: Option<&mut PaneTitle>,
+    current_epoch: u64,
+    msg_epoch: u64,
+    label: Option<String>,
+    now: Instant,
+) -> Option<String> {
+    if msg_epoch != current_epoch {
+        return None;
+    }
+    let title = title?;
+    match label {
+        Some(raw) => title.set_label(&raw, now),
+        None => None,
+    }
+}
+
 pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let (tx, rx) = mpsc::channel::<Msg>();
     let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
@@ -2030,5 +2197,153 @@ mod status_line_tui_tests {
             crate::tui::status_line::StatusLineRunner::new(command_setting("true"));
         runner.shutdown();
         assert!(!runner.request_refresh(bare_request()));
+    }
+}
+
+#[cfg(test)]
+mod pane_title_lifecycle_tests {
+    use super::*;
+    use crate::tui::pane_title::fallback_title;
+
+    fn enabled_settings() -> indexmap::IndexMap<String, String> {
+        crate::core::config::default_setting_values()
+    }
+
+    #[test]
+    fn title_request_gate_is_tty_enabled_and_one_shot() {
+        let settings = enabled_settings();
+        assert!(should_request_title(true, &settings, false));
+        // Headless, redirected, or worker children: never request.
+        assert!(!should_request_title(false, &settings, false));
+        // Explicit opt-out disables the request entirely.
+        let mut off = settings.clone();
+        off.insert(
+            crate::core::config::TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
+        assert!(!should_request_title(true, &off, false));
+        // Exactly one request per session.
+        assert!(!should_request_title(true, &settings, true));
+    }
+
+    #[test]
+    fn generated_label_replaces_fallback_with_sanitized_bounded_escape() {
+        let mut title = PaneTitle::new("fix the login bug");
+        let escape = apply_title_result(
+            Some(&mut title),
+            0,
+            0,
+            Some("\x1b]2;pwn\x07fix the login bug and the signup flow too".to_string()),
+            Instant::now(),
+        )
+        .expect("escape expected");
+        assert!(escape.starts_with("\x1b]2;") && escape.ends_with('\x07'));
+        assert!(!escape.contains("pwn"));
+        assert!(title.label().split_whitespace().count() <= 5);
+    }
+
+    #[test]
+    fn stale_generation_result_from_previous_session_is_rejected() {
+        // switch_session bumps the epoch before the old session's result lands.
+        let mut title = PaneTitle::new("old goal");
+        assert!(apply_title_result(
+            Some(&mut title),
+            1,
+            0,
+            Some("stale title".to_string()),
+            Instant::now(),
+        )
+        .is_none());
+        assert_eq!(title.label(), fallback_title("old goal"));
+    }
+
+    #[test]
+    fn failed_generation_keeps_fallback_and_headless_title_is_none() {
+        // Generation failure (None label): the fallback label survives.
+        let mut title = PaneTitle::new("my goal");
+        assert!(apply_title_result(Some(&mut title), 0, 0, None, Instant::now()).is_none());
+        assert_eq!(title.label(), fallback_title("my goal"));
+        // No pane title at all (headless/no-TTY): results are dropped safely.
+        assert!(apply_title_result(None, 0, 0, Some("unused".to_string()), Instant::now()).is_none());
+    }
+
+    #[test]
+    fn busy_ticks_produce_distinct_spinner_frames() {
+        // The main loop's tick consumption must actually animate the busy
+        // title: two due ticks, one spinner interval apart, emit different
+        // frames around the same stable label.
+        let mut title = PaneTitle::new("fix the login bug");
+        let start = Instant::now();
+        assert!(title.set_busy(true, start).is_some());
+        let step = Duration::from_millis(SPINNER_INTERVAL_MS);
+        let first = title.tick(start + step).expect("first due tick emits");
+        let second = title.tick(start + 2 * step).expect("second due tick emits");
+        assert_ne!(first, second, "spinner frames must advance between ticks");
+        assert!(first.starts_with("\x1b]2;") && first.ends_with('\x07'));
+        assert!(second.ends_with("fix the login bug\x07"));
+    }
+
+    #[test]
+    fn idle_ticks_never_rearm_the_spinner_deadline() {
+        // A fired tick while idle must not re-arm the deadline: the re-arm
+        // gate is busy-only, so title ticks can never drive the event loop
+        // into a zero-wait busy poll.
+        let at = Instant::now();
+        let step = Duration::from_millis(SPINNER_INTERVAL_MS);
+        // Headless (no pane title): nothing to re-arm.
+        assert!(!should_rearm_title_tick(None));
+        // A title that never went busy: its ticks are inert.
+        let mut idle = PaneTitle::new("another goal");
+        assert!(idle.tick(at).is_none());
+        assert!(!should_rearm_title_tick(Some(&idle)));
+        // The finish_run path: busy then idled — later ticks stay inert and
+        // the gate stays closed.
+        let mut done = PaneTitle::new("finish the run");
+        assert!(done.set_busy(true, at).is_some());
+        assert!(done.set_busy(false, at + step).is_some());
+        assert!(done.tick(at + 2 * step).is_none());
+        assert!(!should_rearm_title_tick(Some(&done)));
+        // The only live re-arm case: a title that is busy.
+        let mut busy = PaneTitle::new("run the goal");
+        assert!(busy.set_busy(true, at).is_some());
+        assert!(should_rearm_title_tick(Some(&busy)));
+    }
+
+    #[test]
+    fn offline_or_missing_profile_title_generation_silently_returns_none() {
+        // Disabled: route resolution refuses before any network work.
+        let mut off = enabled_settings();
+        off.insert(
+            crate::core::config::TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
+        assert!(generate_title_label(off, HashMap::new(), "goal".into(), 1000).is_none());
+        // Enabled but pointing at a profile that does not exist: silent None,
+        // deterministic offline, no request is ever attempted.
+        let mut nop = enabled_settings();
+        nop.insert(
+            crate::core::config::TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "no-such-profile".to_string(),
+        );
+        assert!(generate_title_label(nop, HashMap::new(), "goal".into(), 1000).is_none());
+    }
+
+    #[test]
+    fn title_escapes_and_custom_status_line_coexist_sanitized() {
+        // The OSC 2 pane-title stream and the custom status line sanitize
+        // independently: neither leaks control sequences into the other.
+        // The label is sanitized BEFORE wrapping, so the escape carries a
+        // clean payload; the status-line sanitizer runs on the plain label
+        // text and strips any residual control sequences.
+        let raw = "\x1b]2;pwn\x07 \u{24b8}fix\tlogin\nbug\x1b[2J";
+        let label = crate::tui::pane_title::sanitize(raw);
+        assert!(!label.contains('\x1b') && !label.contains('\x07'), "{label:?}");
+        let title = crate::tui::pane_title::osc2(&label);
+        assert!(title.starts_with("\x1b]2;") && title.ends_with('\x07'), "{title:?}");
+        assert!(!title.contains("pwn") && !title.contains("\x1b[2J"), "{title:?}");
+        let row = crate::tui::status_line::sanitize_status_line(&label, 20, 0);
+        assert!(row.contains("fix login bug"), "{row:?}");
+        assert!(!row.contains('\x1b') && !row.contains('\x07'), "{row:?}");
+        assert!(row.chars().count() <= 20);
     }
 }

@@ -353,6 +353,48 @@ Behavior:
 
 ---
 
+
+## Terminal pane title
+
+While a goal runs, drip sets the terminal window title (OSC 2) so activity is
+visible at a glance in the terminal tab or tmux pane, similar to Claude Code
+or Codex. The title is a short stable label plus a time-driven braille
+spinner while the harness runs — no fabricated percentage. On completion,
+cancel, or exit the spinner is removed and the bare label remains.
+
+- The label starts as a deterministic 3–5-word summary of your goal (its
+  first usable words, or `drip` when nothing usable remains).
+- If the lightweight title profile is reachable, drip replaces the label
+  with a 3–5-word title generated from the initial goal of the session
+  (default profile: `glm-5-3-flash` via OpenRouter). This is one short
+  background request per session, run after the goal starts so it never
+  blocks the chat. Only the initial goal is sent — never repository, tool,
+  or transcript content — and the result is sanitized and capped at 5
+  words before it reaches the terminal.
+- Missing credentials or profile, offline restrictions, timeouts, and
+  malformed or empty model output are all silent: the deterministic
+  fallback label stays and the chat is never affected. The title request
+  happens once per session — later turns and spinner ticks never repeat it.
+
+Settings (in drip's `settings.json`, under the `runtime` keys):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `runtime.terminal_title_enabled` | `true` | Set to `false` to disable all pane-title updates |
+| `runtime.terminal_title_profile_id` | `glm-5-3-flash` | Model profile used for the one-shot title generation |
+| `runtime.terminal_title_timeout_ms` | `8000` | Timeout bound (ms) for the single title request |
+
+Limitations: title escapes are written only when stdout is an interactive
+terminal. Headless runs, `--json`, and redirected/piped output never receive
+title escapes, and background or worker threads never write the title (the
+generation thread only sends a message to the event loop). OSC 2 window
+titles are supported by most terminals (iTerm2, Terminal.app, Windows
+Terminal, kitty, WezTerm, Alacritty); terminals that ignore OSC 2 simply
+show nothing. Under tmux the escape updates the pane title; mirror it onto
+the outer terminal window with `set -g set-titles on` (plus
+`allow-passthrough on` on tmux 3.3+ if needed). drip emits only OSC 2
+window-title escapes — no progress-bar protocols such as OSC 9;4.
+
 ## Contributing
 
 PRs welcome. Please run `cargo build --release && cargo test` before submitting.

@@ -123,6 +123,9 @@ pub struct CapturedProcessArgs<'a> {
     pub env: Option<&'a BTreeMap<String, String>>,
     pub process_args: &'a [String],
     pub timeout_ms: Option<u64>,
+    /// Optional bytes written to the child's stdin; stdin is then closed so
+    /// the child observes EOF. `None` keeps stdin disconnected (as before).
+    pub stdin_payload: Option<&'a str>,
 }
 
 pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProcessResult, String> {
@@ -133,10 +136,21 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
         args.process_args,
         args.cwd,
         args.env,
+        args.stdin_payload,
     )
     .map_err(|error| error.to_string())?;
 
     let pid = child.id();
+
+    // Write the stdin payload (if any) and close stdin so the child observes
+    // EOF instead of blocking on read. Done before the wait loop so a child
+    // that fills its stdout pipe cannot deadlock us mid-write.
+    if let Some(payload) = args.stdin_payload {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(payload.as_bytes());
+        }
+    }
 
     // The terminator registered for this child: on an external stop the poll
     // loop SIGTERMs the group, SIGKILLs after 1s, and settles after 1.5s
@@ -176,6 +190,7 @@ fn spawn_detached(
     process_args: &[String],
     cwd: Option<&str>,
     env: Option<&BTreeMap<String, String>>,
+    stdin_payload: Option<&str>,
 ) -> std::io::Result<Child> {
     let child_env = build_child_process_env(env);
 
@@ -186,7 +201,11 @@ fn spawn_detached(
         .process_group(0)
         .env_clear()
         .envs(child_env.iter().map(|(key, value)| (key, value)))
-        .stdin(Stdio::null())
+        .stdin(if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -475,7 +494,7 @@ mod tests {
     #[test]
     fn captured_process_result_captures_stdout_stderr_and_exit_code() {
         let process_args = owned(&["-c", "echo out; echo err 1>&2; exit 3"]);
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -493,7 +512,7 @@ mod tests {
 
     #[test]
     fn captured_process_honors_cwd_and_empty_process_args() {
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/pwd",
             cwd: Some("/"),
             env: None,
@@ -515,7 +534,7 @@ mod tests {
         // timed_out: true } in ~1.3s — the signal reported is the one that
         // actually reaped the child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -538,7 +557,7 @@ mod tests {
         // timed_out: true } in ~0.3s — the shell's own exit code survives, and
         // timed_out records that the kill is what freed the pipes.
         let process_args = owned(&["-c", "sleep 30 & sleep 30 & echo started"]);
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -560,7 +579,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("DRIP_TEST_VALUE".to_string(), "42".to_string());
         let process_args = owned(&["-c", "echo $DRIP_TEST_VALUE"]);
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: Some(&env),
@@ -575,7 +594,7 @@ mod tests {
 
     #[test]
     fn missing_command_rejects_with_an_error() {
-        let args = CapturedProcessArgs {
+        let args = CapturedProcessArgs { stdin_payload: None,
             command: "/definitely/not/a/real/binary",
             cwd: None,
             env: None,
@@ -663,5 +682,21 @@ mod tests {
             build_combined_output("\nout", "\nerr"),
             "\nout\n\n[stderr]\n\nerr"
         );
+    }
+
+    #[test]
+    fn captured_process_writes_stdin_then_closes_it() {
+        let process_args = vec!["-c".to_string(), "cat".to_string()];
+        let args = CapturedProcessArgs {
+            command: "/bin/sh",
+            cwd: None,
+            env: None,
+            process_args: &process_args,
+            timeout_ms: Some(2_000),
+            stdin_payload: Some("payload-through-stdin"),
+        };
+        let result = run_captured_process(&args).expect("cat should run");
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "payload-through-stdin");
     }
 }

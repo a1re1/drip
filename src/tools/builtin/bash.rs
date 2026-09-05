@@ -234,7 +234,7 @@ pub struct BashToolExecution {
 /// build_combined_output.
 pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution> {
     let absolute_cwd = prepared.absolute_cwd.to_string_lossy().to_string();
-    let result = run_captured_process(&CapturedProcessArgs {
+    let result = run_captured_process(&CapturedProcessArgs { stdin_payload: None,
         command: "bash",
         cwd: Some(absolute_cwd.as_str()),
         // No env overrides here; run_captured_process builds the scrubbed

@@ -27,6 +27,7 @@ fn make_temp_root(prefix: &str) -> PathBuf {
 
 fn default_config() -> CliConfig {
     CliConfig {
+        status_line: None,
         path: None,
         settings: indexmap::IndexMap::new(),
         version: Some(1),

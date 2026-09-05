@@ -180,7 +180,7 @@ pub fn run_process(command: &str, args: &[&str]) -> Result<ProcessResult> {
     let owned_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
     let captured = crate::tools::child_process::run_captured_process(
-        &crate::tools::child_process::CapturedProcessArgs {
+        &crate::tools::child_process::CapturedProcessArgs { stdin_payload: None,
             command,
             cwd: None,
             env: None,

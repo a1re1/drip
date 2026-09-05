@@ -89,6 +89,44 @@ the same id, and `fallbackProfileId` still chains user-authored profiles.
 `https://openrouter.ai/api/v1`, OpenAI-compatible on the wire), so adding
 another OpenRouter model is one profile entry with its `vendor/model` slug.
 
+### Codex (ChatGPT subscription, no API key)
+
+The built-in profile `gpt-5.6-luna-high` runs model `gpt-5.6-luna` with
+`reasoningEffort: "high"` through the `codex` provider. There is no HTTP
+endpoint and no Node SDK: drip is Rust and speaks the Codex CLI app-server
+protocol directly (JSON-RPC over stdio, the experimental `dynamicTools` API,
+developed against Codex CLI 0.153.2), resolving the route to the sentinel
+`codex://local`. No API key, base URL, or headers are configured, and a codex
+profile that sets any of `apiKey`/`apiKeyRef`/`baseUrl`/`headers` is rejected
+at config load; the bridge also scrubs `OPENAI_API_KEY` from the subprocess
+environment and refuses an API-key-billed Codex account, so this lane never
+silently spends OpenAI API credits.
+
+```sh
+npm install -g @openai/codex   # official Codex CLI
+codex login                    # authenticate with your ChatGPT account
+drip --profile gpt-5.6-luna-high "goal"
+```
+
+Codex manages your ChatGPT subscription limits and additional ChatGPT credits;
+these are separate from OpenAI API billing. Drip session resumes replay the
+saved conversation into a fresh Codex thread. Codex profiles are ordinary
+entries in `~/.drip/config.json`; author your
+own with any model slug and `reasoningEffort`, and chain `fallbackProfileId`
+like any other provider:
+
+```jsonc
+{
+  "id": "my-codex",
+  "model": "gpt-5.6-luna",
+  "provider": "codex",
+  "reasoningEffort": "high"
+}
+```
+
+References: [ChatGPT login/auth for the Codex CLI](https://learn.chatgpt.com/docs/auth)
+and the [app-server protocol](https://learn.chatgpt.com/docs/app-server).
+
 ---
 
 ## --json result contract
@@ -227,6 +265,7 @@ stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 ## Contributing
 
 PRs welcome. Please run `cargo build --release && cargo test` before submitting.
+The Codex protocol tests also require Python 3 for their local mock server.
 
 ---
 

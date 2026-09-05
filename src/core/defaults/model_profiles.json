@@ -182,5 +182,12 @@
     "maxContextTokens": 64000,
     "model": "llama3.2",
     "provider": "ollama"
+  },
+  {
+    "id": "gpt-5.6-luna-high",
+    "label": "GPT-5.6 Luna high (Codex)",
+    "model": "gpt-5.6-luna",
+    "provider": "codex",
+    "reasoningEffort": "high"
   }
 ]

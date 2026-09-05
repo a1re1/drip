@@ -3,6 +3,7 @@
 pub mod app;
 pub mod markdown_ansi;
 pub mod pane_title;
+pub mod session_name;
 pub mod terminal_title;
 pub mod status_line;
 pub mod term;

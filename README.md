@@ -260,9 +260,15 @@ data (`patches.jsonl`, `async-tools/`, `skills/`, `roles.json`, `plugins.json`)
 stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 `DRIP_PROJECT_DIR` / `--project-dir` pins the project root.
 
+**Renaming a session.** Type `/rename` in the TUI composer and the configured model distills the
+session transcript into a short 5-7 word name. The name replaces the window title and is persisted
+to the session's `session.json` metadata, so `/sessions` and resume keep it; on any failure the
+current name is kept.
+
 ---
 
 ## Custom status line
+
 
 In the interactive TUI you can replace the built-in bottom status bar with the
 output of a shell command — the same idea as Claude Code's status line. The

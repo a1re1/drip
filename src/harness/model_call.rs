@@ -22,6 +22,7 @@ use crate::harness::anthropic::{
     build_anthropic_headers, build_anthropic_messages_url, build_anthropic_request_payload,
     is_anthropic_native_provider, translate_anthropic_response, BuildAnthropicRequestPayloadArgs,
 };
+use crate::harness::codex::{BridgeConfig, CodexBridge};
 use crate::harness::transport::{
     build_transport_request_payload, BuildTransportRequestPayloadArgs, OpenAICompatibleRequestTool,
     OpenAICompatibleToolCall, TransportRequestMessage,
@@ -381,6 +382,9 @@ pub struct ModelCallOptions {
 }
 
 pub struct ModelCallerDeps {
+    /// Harness working directory handed to the codex bridge so spawned
+    /// `codex app-server` processes run where the harness runs.
+    pub cwd: Option<String>,
     pub default_transport_tools: Vec<OpenAICompatibleRequestTool>,
     pub emit: Arc<dyn Fn(HarnessEvent) + Send + Sync>,
     /// Fallback gateway for calls that use the base model/url (text-only calls such as run summaries), where there is no route object to hang one off.
@@ -417,6 +421,11 @@ pub struct ModelCaller {
     http_client: reqwest::Client,
     request_timeout_ms: u64,
     sleep: SleepFn,
+    /// Codex lane for tool-bearing calls (the run's main conversation).
+    codex_tool_lane: tokio::sync::Mutex<Option<CodexBridge>>,
+    /// Codex lane for include_tools=false calls (run summaries), so they never
+    /// interleave with the tool lane's pending tool request.
+    codex_summary_lane: tokio::sync::Mutex<Option<CodexBridge>>,
 }
 
 pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
@@ -438,6 +447,8 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         http_client,
         request_timeout_ms,
         sleep,
+        codex_tool_lane: tokio::sync::Mutex::new(None),
+        codex_summary_lane: tokio::sync::Mutex::new(None),
     }
 }
 
@@ -488,6 +499,35 @@ async fn run_bounded_request(
         Ok(Err(error)) => RequestOutcome::Failed(error),
         Err(_) => RequestOutcome::TimedOut,
     }
+}
+
+/// Bounds a codex-side wait (the lane mutex, the bridge spawn) with the
+/// per-attempt request deadline and the run's abort signal, mirroring
+/// run_bounded_request's outcome handling: an aborted run surfaces as the
+/// canonical stop error and a deadline overrun as an error, instead of the
+/// wait blocking the caller uninterruptibly.
+async fn bounded_codex_wait<T>(
+    wait_fut: impl Future<Output = T>,
+    timeout_ms: u64,
+    signal: Option<&AbortSignal>,
+) -> Result<T, ModelCallError> {
+    let bounded = tokio::time::timeout(Duration::from_millis(timeout_ms), wait_fut);
+
+    let result = match signal {
+        Some(signal) => tokio::select! {
+            () = wait_for_abort(signal) => {
+                return Err(ModelCallError::Message("The run was stopped.".to_string()));
+            }
+            result = bounded => result,
+        },
+        None => bounded.await,
+    };
+
+    result.map_err(|_| {
+        ModelCallError::Message(format!(
+            "codex bridge wait timed out after {timeout_ms}ms"
+        ))
+    })
 }
 
 fn build_header_map(headers: &[(String, String)]) -> Result<reqwest::header::HeaderMap, String> {
@@ -665,6 +705,148 @@ impl ModelCaller {
     /// request shape depends on (Anthropic-native vs OpenAI-compatible, url,
     /// headers, model) is re-derived from the route handed in, so a failover to
     /// a different gateway never inherits the primary's surface decisions.
+    /// Bridge configuration for a codex call: spawn `codex app-server` in the
+    /// harness cwd with the call's model and the run's per-attempt timeout.
+    /// Per-call knobs (tools, reasoning effort) ride the call, not the config.
+    fn codex_bridge_config(&self, model: &str) -> BridgeConfig {
+        BridgeConfig {
+            cwd: self.deps.cwd.as_deref().map(std::path::PathBuf::from),
+            model: Some(model.to_string()),
+            request_timeout_ms: self.request_timeout_ms,
+            ..BridgeConfig::default()
+        }
+    }
+
+    /// One codex attempt = a single bridge call. The bridge owns its own
+    /// network retries and the caller's configured fallback ladder owns
+    /// failover, so auth/config/protocol failures surface immediately instead
+    /// of burning a rate-limit backoff ladder. Tool calls and text-only
+    /// summaries ride separate lanes so a summary can never interleave with
+    /// the run's pending tool request, and a model change replaces the lane's
+    /// bridge.
+    #[allow(clippy::too_many_arguments)]
+    async fn attempt_codex_route(
+        &self,
+        model: String,
+        messages: &[TransportRequestMessage],
+        include_tools: bool,
+        request_tools: &[OpenAICompatibleRequestTool],
+        call_options: &ModelCallOptions,
+        reasoning_effort: Option<String>,
+        call_started_at: Instant,
+    ) -> Result<OpenAICompatibleResponse, ModelCallError> {
+        let lane = if include_tools {
+            &self.codex_tool_lane
+        } else {
+            &self.codex_summary_lane
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(self.request_timeout_ms);
+        let remaining_ms = || deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64;
+        // Summary calls carry no tools; tool calls get the call's filtered
+        // dynamic tool set.
+        let tools_for_lane: &[OpenAICompatibleRequestTool] = if include_tools {
+            request_tools
+        } else {
+            &[]
+        };
+
+        if self
+            .deps
+            .signal
+            .as_ref()
+            .is_some_and(|signal| signal.is_aborted())
+        {
+            return Err(ModelCallError::Message("The run was stopped.".to_string()));
+        }
+
+        // Serializing on the lane keeps one pending request per bridge; the
+        // guard is held across the call because a codex bridge serves a single
+        // turn at a time. The lock wait and the spawn are both bounded by the
+        // request deadline and the abort signal — an uninterruptible wait here
+        // would wedge the caller past a stop or a stalled handshake.
+        let mut lane_guard = bounded_codex_wait(
+            lane.lock(),
+            remaining_ms(),
+            self.deps.signal.as_ref(),
+        )
+        .await?;
+
+        let reuse = lane_guard
+            .as_ref()
+            .is_some_and(|bridge| bridge.config.model.as_deref() == Some(model.as_str()));
+
+        if !reuse {
+            // Replacing the bridge (model/profile change) drops the old one,
+            // killing its child process, before the new one spawns. A spawn
+            // that loses the race against the deadline/abort leaves no owner
+            // holding the child, so kill_on_drop reaps it.
+            *lane_guard = None;
+            let bridge = match bounded_codex_wait(
+                CodexBridge::spawn(self.codex_bridge_config(&model)),
+                remaining_ms(),
+                self.deps.signal.as_ref(),
+            )
+            .await
+            {
+                Ok(Ok(bridge)) => bridge,
+                Ok(Err(error)) | Err(error) => return Err(error),
+            };
+            *lane_guard = Some(bridge);
+        }
+
+        let bridge = lane_guard
+            .as_mut()
+            .expect("codex bridge is spawned above");
+        let outcome = bounded_codex_wait(
+            bridge.call(
+                messages,
+                tools_for_lane,
+                self.deps.signal.as_ref(),
+                reasoning_effort.as_deref(),
+            ),
+            remaining_ms(),
+            self.deps.signal.as_ref(),
+        ).await.and_then(|outcome| outcome);
+
+        match outcome {
+            Ok(response) => {
+                (self.deps.on_usage)(
+                    &response,
+                    ModelCallRecord {
+                        latency_ms: call_started_at.elapsed().as_millis() as i64,
+                        model,
+                        provider: Some("codex".to_string()),
+                        task_id: call_options.usage_task_id.clone(),
+                    },
+                );
+
+                Ok(response)
+            }
+            Err(error) => {
+                // A failed call leaves the bridge in an unknown state (the
+                // child may be mid-turn or already killed) — discard it so the
+                // next call spawns a fresh process. The error itself goes
+                // straight out: the bridge owns its network retries and the
+                // caller's fallback ladder owns failover.
+                *lane_guard = None;
+
+                if self
+                    .deps
+                    .signal
+                    .as_ref()
+                    .is_some_and(|signal| signal.is_aborted())
+                    || is_run_stopped_error(&error)
+                {
+                    // Stopped runs are never retried.
+                    return Err(ModelCallError::Message("The run was stopped.".to_string()));
+                }
+
+                Err(error)
+            }
+        }
+    }
+
+
     #[allow(clippy::too_many_arguments)]
     async fn attempt_route(
         &self,
@@ -676,22 +858,6 @@ impl ModelCaller {
         call_options: &ModelCallOptions,
         call_started_at: Instant,
     ) -> Result<OpenAICompatibleResponse, ModelCallError> {
-        // A route with refreshHeaders re-mints its auth headers on every call so a
-        // "cmd:" token that expires mid-run is transparently renewed; the command
-        // result is TTL-cached, so calling this per request stays cheap.
-        let route_headers: Option<Vec<(String, String)>> = match route {
-            Some(route) => {
-                let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-                let route_headers = match &route.refresh_headers {
-                    Some(refresh_headers) => refresh_headers().map_err(ModelCallError::Message)?,
-                    None => route.headers.clone().unwrap_or_default(),
-                };
-
-                headers.extend(route_headers);
-                Some(headers)
-            }
-            None => None,
-        };
         // Text-only calls carry no route, so they resolve to the run's base
         // provider; a routed call uses that route's own provider.
         let provider = match route {
@@ -699,6 +865,43 @@ impl ModelCaller {
             None => self.deps.provider.clone(),
         };
         let anthropic_native = is_anthropic_native_provider(provider.as_deref());
+        // The codex provider speaks the `codex app-server` JSON-RPC protocol
+        // over stdio, not HTTPS — dispatch before any HTTP header or reqwest
+        // work happens for the attempt.
+        if provider.as_deref() == Some("codex") {
+            let model = route
+                .map(|route| route.model.clone())
+                .unwrap_or_else(|| self.deps.model.clone());
+            let reasoning_effort = match route {
+                Some(route) => route.reasoning_effort.clone(),
+                None => self.deps.reasoning_effort.clone(),
+            };
+
+            return self
+                .attempt_codex_route(
+                    model,
+                    messages,
+                    include_tools,
+                    request_tools,
+                    call_options,
+                    reasoning_effort,
+                    call_started_at,
+                )
+                .await;
+        }
+        // HTTP credentials are resolved only after local-provider dispatch.
+        let route_headers: Option<Vec<(String, String)>> = match route {
+            Some(route) => {
+                let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+                let route_headers = match &route.refresh_headers {
+                    Some(refresh_headers) => refresh_headers().map_err(ModelCallError::Message)?,
+                    None => route.headers.clone().unwrap_or_default(),
+                };
+                headers.extend(route_headers);
+                Some(headers)
+            }
+            None => None,
+        };
         let request_url = route
             .map(|route| route.url.clone())
             .unwrap_or_else(|| self.deps.url.clone());
@@ -1272,6 +1475,7 @@ mod tests {
 
     fn test_deps(url: String) -> ModelCallerDeps {
         ModelCallerDeps {
+            cwd: None,
             default_transport_tools: Vec::new(),
             emit: Arc::new(|_| {}),
             fallback_route: None,

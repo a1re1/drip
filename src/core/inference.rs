@@ -106,6 +106,9 @@ fn trim_trailing_slash(value: &str) -> String {
 pub fn get_default_base_url(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1",
+        // Codex rides the local codex app-server over stdio; the "URL" is a
+        // sentinel, never an HTTP endpoint.
+        "codex" => "codex://local",
         "claude" => "https://api.anthropic.com/v1",
         "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
         "ollama" => "http://localhost:11434/v1",
@@ -136,6 +139,9 @@ pub fn supports_openai_reasoning_effort(provider: &str, model: &str) -> bool {
     // gate is the model family, on either the direct or the aggregated route.
     (provider == "openai" && model.starts_with("gpt-5.4"))
         || (provider == "openrouter" && model.starts_with("openai/gpt-5.4"))
+        // Codex carries reasoning effort natively on turn/start, so any
+        // configured effort is preserved for its models (gpt-5.6-luna).
+        || provider == "codex"
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -425,7 +431,13 @@ fn resolve_profile_route_visited(
         } else {
             None
         },
-        url: build_chat_completions_url(&base_url),
+        // The codex sentinel stays verbatim — no /chat/completions suffix,
+        // because the bridge speaks app-server stdio, not HTTP.
+        url: if profile.provider == "codex" {
+            base_url
+        } else {
+            build_chat_completions_url(&base_url)
+        },
     })
 }
 
@@ -680,5 +692,82 @@ mod tests {
         assert!(supports_openai_reasoning_effort("openrouter", "openai/gpt-5.4"));
         assert!(!supports_openai_reasoning_effort("openai", "gpt-4o"));
         assert!(!supports_openai_reasoning_effort("claude", "gpt-5.4"));
+    }
+
+    #[test]
+    fn codex_builtin_profile_resolves_without_credentials() {
+        // The shipped default catalog carries gpt-5.6-luna-high; with no user
+        // override it resolves to the local codex sentinel, effort high.
+        let settings = settings_with(&[
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "gpt-5.6-luna-high"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let resolved = resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
+        assert_eq!(resolved.route.profile_id, "gpt-5.6-luna-high");
+        assert_eq!(resolved.route.provider, "codex");
+        assert_eq!(resolved.route.model, "gpt-5.6-luna");
+        assert_eq!(resolved.route.url, "codex://local");
+        assert_eq!(resolved.route.reasoning_effort.as_deref(), Some("high"));
+        assert!(resolved.route.headers.is_empty(), "codex never sends API headers");
+        assert!(resolved.route.refresh_headers.is_none());
+        assert!(resolved.route.fallback_route.is_none());
+    }
+
+    #[test]
+    fn codex_route_preserves_reasoning_effort_without_http_config() {
+        let profiles = r#"[{"id":"codex-hi","label":"Codex","model":"gpt-5.6-luna","provider":"codex","reasoningEffort":"high"}]"#;
+        let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, profiles),
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "codex-hi"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let resolved = resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
+        assert_eq!(get_default_base_url("codex"), "codex://local");
+        assert_eq!(resolved.route.url, "codex://local");
+        assert_eq!(resolved.route.model, "gpt-5.6-luna");
+        assert_eq!(resolved.route.reasoning_effort.as_deref(), Some("high"));
+        assert!(resolved.route.headers.is_empty());
+        assert!(resolved.route.refresh_headers.is_none());
+        assert!(supports_openai_reasoning_effort("codex", "gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn openai_route_unchanged_by_codex_support() {
+        let profiles = r#"[{"id":"oai","label":"O","model":"gpt-5.4-mini","provider":"openai","apiKeyRef":"env:OAI_KEY","reasoningEffort":"low"}]"#;
+        let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, profiles),
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "oai"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let mut env = std::collections::HashMap::new();
+        env.insert("OAI_KEY".to_string(), "k".to_string());
+        let resolved = resolve_inference_config(&settings, Some(&env)).unwrap();
+        assert_eq!(resolved.route.url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(resolved.route.reasoning_effort.as_deref(), Some("low"));
+        assert!(!resolved.route.headers.is_empty(), "openai still sends Authorization");
+        assert!(!supports_openai_reasoning_effort("openai", "gpt-4o"));
+    }
+
+    #[test]
+    fn fallback_chain_resolves_codex_hop_without_credentials() {
+        let profiles = r#"[
+          {"id":"oai","label":"O","model":"gpt-5.4-mini","provider":"openai","apiKeyRef":"env:OAI_KEY","fallbackProfileId":"cx"},
+          {"id":"cx","label":"C","model":"gpt-5.6-luna","provider":"codex","reasoningEffort":"high"}
+        ]"#;
+        let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, profiles),
+            (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "oai"),
+            (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
+        ]);
+        let mut env = std::collections::HashMap::new();
+        env.insert("OAI_KEY".to_string(), "k".to_string());
+        let resolved = resolve_inference_config(&settings, Some(&env)).unwrap();
+        let fallback = resolved.route.fallback_route.as_ref().expect("codex fallback resolves");
+        assert_eq!(fallback.profile_id, "cx");
+        assert_eq!(fallback.url, "codex://local");
+        assert_eq!(fallback.model, "gpt-5.6-luna");
+        assert_eq!(fallback.reasoning_effort.as_deref(), Some("high"));
+        assert!(fallback.headers.is_empty());
+        assert!(fallback.fallback_route.is_none());
     }
 }

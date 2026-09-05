@@ -2,6 +2,7 @@
 // harness model-call layer.
 pub mod anthropic;
 pub mod chat_types;
+pub mod codex;
 pub mod harness_tools;
 // `loop` is a Rust keyword: the module name needs the raw identifier.
 #[allow(non_snake_case)]

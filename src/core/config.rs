@@ -43,6 +43,8 @@ pub enum InferenceProviderId {
     Cerebras,
     #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "codex")]
+    Codex,
     #[serde(rename = "gemini")]
     Gemini,
     #[serde(rename = "ollama")]
@@ -62,6 +64,7 @@ impl InferenceProviderId {
         match self {
             InferenceProviderId::Cerebras => "cerebras",
             InferenceProviderId::Claude => "claude",
+            InferenceProviderId::Codex => "codex",
             InferenceProviderId::Gemini => "gemini",
             InferenceProviderId::Ollama => "ollama",
             InferenceProviderId::OpenAi => "openai",
@@ -75,6 +78,7 @@ impl InferenceProviderId {
         Some(match raw {
             "cerebras" => InferenceProviderId::Cerebras,
             "claude" => InferenceProviderId::Claude,
+            "codex" => InferenceProviderId::Codex,
             "gemini" => InferenceProviderId::Gemini,
             "ollama" => InferenceProviderId::Ollama,
             "openai" => InferenceProviderId::OpenAi,
@@ -266,27 +270,55 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
         }
         Some(_) => bail!("Inference profile \"{id}\" must use an object for headers."),
     };
+    let base_url = str_field(obj, "baseUrl")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let api_key = str_field(obj, "apiKey")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let api_key_ref = str_field(obj, "apiKeyRef")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    if provider == "codex" {
+        // Codex never talks HTTP: the profile routes through the local
+        // `codex app-server` bridge and the ChatGPT login is the credential.
+        // HTTP billing inputs are rejected loudly instead of being silently
+        // charged to the OpenAI API.
+        let conflicts: Vec<&str> = [
+            ("apiKey", api_key.is_some()),
+            ("apiKeyRef", api_key_ref.is_some()),
+            ("baseUrl", base_url.is_some()),
+            ("headers", headers.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(field, _)| field)
+        .collect();
+        if !conflicts.is_empty() {
+            return Err(anyhow!(
+                "Inference profile \"{}\" uses provider \"codex\", which runs the local codex \
+                 app-server (ChatGPT login); remove {} — HTTP credentials and endpoints would \
+                 bill the OpenAI API instead.",
+                id,
+                conflicts.join(", ")
+            ));
+        }
+    }
     Ok(InferenceModelProfile {
         id: id.to_string(),
         model: model.to_string(),
         provider: provider.to_string(),
-        base_url: str_field(obj, "baseUrl")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string()),
+        base_url,
         label: str_field(obj, "label")
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(|v| v.to_string()),
         max_context_tokens,
-        api_key: str_field(obj, "apiKey")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string()),
-        api_key_ref: str_field(obj, "apiKeyRef")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(|v| v.to_string()),
+        api_key,
+        api_key_ref,
         reasoning_effort,
         fallback_profile_id: str_field(obj, "fallbackProfileId")
             .map(str::trim)
@@ -1138,5 +1170,103 @@ mod tests {
             upgrade(&mut settings);
             assert_eq!(settings[MODEL_PROFILES_SETTING_ID], "not json at all");
         }
+    }
+
+    // (codex-1) provider id: "codex" parses, is case-sensitive, and round-trips.
+    #[test]
+    fn test_codex_provider_id_parses() {
+        assert_eq!(InferenceProviderId::parse("codex"), Some(InferenceProviderId::Codex));
+        assert_eq!(InferenceProviderId::parse("Codex"), None);
+        assert_eq!(InferenceProviderId::parse("openai"), Some(InferenceProviderId::OpenAi));
+        assert_eq!(InferenceProviderId::Codex.as_str(), "codex");
+        let profile = normalize_model_profile(
+            &serde_json::from_str::<Value>(
+                r#"{"id":"c1","model":"gpt-5.6-luna","provider":"codex","reasoningEffort":"high"}"#,
+            )
+            .unwrap(),
+            0,
+        )
+        .expect("codex profile parses");
+        assert_eq!(profile.provider, "codex");
+        assert_eq!(profile.base_url, None);
+        assert_eq!(profile.api_key, None);
+        assert_eq!(profile.api_key_ref, None);
+        assert_eq!(profile.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    // (codex-2) nonempty HTTP credential/endpoint fields are rejected for codex.
+    #[test]
+    fn test_codex_rejects_http_credentials_and_endpoints() {
+        let cases = [
+            r#"{"id":"c2","model":"gpt-5.6-luna","provider":"codex","apiKey":"sk-x"}"#,
+            r#"{"id":"c2","model":"gpt-5.6-luna","provider":"codex","apiKeyRef":"env:OPENAI_API_KEY"}"#,
+            r#"{"id":"c2","model":"gpt-5.6-luna","provider":"codex","baseUrl":"https://api.openai.com/v1"}"#,
+            r#"{"id":"c2","model":"gpt-5.6-luna","provider":"codex","headers":{"X-A":"b"}}"#,
+        ];
+        for json in cases {
+            let error = normalize_model_profile(&serde_json::from_str(json).unwrap(), 0)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("codex") && error.contains("remove "),
+                "diagnostic should name codex and the fix: {error}"
+            );
+        }
+        // Empty/blank HTTP fields are treated as absent, not conflicts.
+        let blank = normalize_model_profile(
+            &serde_json::from_str::<Value>(
+                r#"{"id":"c3","model":"gpt-5.6-luna","provider":"codex","apiKey":"","baseUrl":"  "}"#,
+            )
+            .unwrap(),
+            0,
+        )
+        .expect("blank credential fields are ignored");
+        assert_eq!(blank.api_key, None);
+        assert_eq!(blank.base_url, None);
+
+        // parse_inference_model_profiles surfaces the conflict loudly.
+        let mut settings = IndexMap::new();
+        settings.insert(
+            MODEL_PROFILES_SETTING_ID.to_string(),
+            r#"[{"id":"c4","model":"gpt-5.6-luna","provider":"codex","apiKey":"sk-x"}]"#.to_string(),
+        );
+        let error = parse_inference_model_profiles(&settings).unwrap_err().to_string();
+        assert!(error.contains("codex"), "parse-level diagnostic: {error}");
+    }
+
+    // (codex-3) existing openai route behavior is unchanged: inline key,
+    // env ref, and credential-less profiles all normalize as before.
+    #[test]
+    fn test_openai_profile_normalization_unchanged() {
+        let inline = normalize_model_profile(
+            &serde_json::from_str::<Value>(
+                r#"{"id":"o1","model":"m","provider":"openai","apiKey":"sk-y","baseUrl":"https://api.openai.com/v1","headers":{"X-A":"a"}}"#,
+            )
+            .unwrap(),
+            0,
+        )
+        .expect("openai keeps credentials");
+        assert_eq!(inline.api_key.as_deref(), Some("sk-y"));
+        assert_eq!(inline.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert!(inline.headers.is_some());
+
+        let bare = normalize_model_profile(
+            &serde_json::from_str::<Value>(r#"{"id":"o2","model":"m","provider":"openai"}"#).unwrap(),
+            0,
+        )
+        .expect("openai without credentials still parses");
+        assert_eq!(bare.api_key, None);
+        assert_eq!(bare.base_url, None);
+
+        let unsupported = normalize_model_profile(
+            &serde_json::from_str::<Value>(r#"{"id":"o3","model":"m","provider":"nope"}"#).unwrap(),
+            0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            unsupported,
+            "Inference profile \"o3\" has an unsupported provider \"nope\"."
+        );
     }
 }

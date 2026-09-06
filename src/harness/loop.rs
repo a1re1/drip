@@ -1986,10 +1986,29 @@ impl HarnessRun {
         // Privacy: hook payloads go to user-configured commands over stdin,
         // so redact the tool input before it leaves the process.
         let redacted_input = (self.redact)(raw_input);
-        self.fire_hook(
+        // Claude Code semantics: a pre_tool_use hook that exits 2 vetoes the
+        // tool call — the tool never runs and the hook's stderr goes back to
+        // the model as the tool result so it can adapt.
+        let pre_tool_use_outcomes = self.fire_hook_checked(
             crate::harness::hooks::HookEvent::PreToolUse,
             Some((tool_name, redacted_input.as_str())),
         );
+        if let Some(veto) = pre_tool_use_outcomes
+            .iter()
+            .find(|outcome| outcome.exit_code == Some(2))
+        {
+            let stderr_excerpt = if veto.stderr_excerpt.is_empty() {
+                "(no stderr output)".to_string()
+            } else {
+                veto.stderr_excerpt.clone()
+            };
+            return WorkspaceToolExecution {
+                failed: true,
+                tool_content: format!(
+                    "tool call blocked by pre_tool_use hook: {stderr_excerpt}"
+                ),
+            };
+        }
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
             history: &[],
@@ -2084,8 +2103,9 @@ impl HarnessRun {
     /// Fire user-configured hooks for `event`. A hook failure or timeout
     /// never blocks the run: it is only surfaced as a RunWarning event.
     /// Deliberately blocking (bounded by the configured timeout) so the sync
-    /// tool-dispatch sites can call it; callers that need each hook's outcome
-    /// (the PreToolUse exit-2 veto) use [`Self::fire_hook_checked`].
+    /// tool-dispatch sites can call it. The one exception is the PreToolUse
+    /// exit-2 veto in [`Self::execute_workspace_tool`], which consumes the
+    /// outcomes returned by [`Self::fire_hook_checked`].
     fn fire_hook(&self, event: crate::harness::hooks::HookEvent, tool: Option<(&str, &str)>) {
         self.fire_hook_checked(event, tool);
     }

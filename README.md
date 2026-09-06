@@ -400,27 +400,41 @@ next to `settings` and `statusLine`:
 {
   "hooks": {
     "timeout_seconds": 10,
-    "pre_tool_use":  { "matcher": "Bash|rm *", "command": "~/.drip/hooks/guard.sh" },
-    "post_tool_use": { "matcher": "Edit|Write", "command": "~/.drip/hooks/fmt-changed.sh" },
-    "task_start":    "date '+task start %H:%M:%S' >> ~/.drip/hooks.log",
-    "stop":          "~/.drip/hooks/notify-done.sh"
+    "pre_tool_use": [
+      { "matcher": "Bash|rm *", "command": "~/.drip/hooks/guard.sh" }
+    ],
+    "post_tool_use": [
+      { "matcher": "Edit|Write", "command": "~/.drip/hooks/fmt-changed.sh" }
+    ],
+    "task_start":   ["date '+task start %H:%M:%S' >> ~/.drip/hooks.log"],
+    "memory_write": ["~/.drip/hooks/memory-changed.sh"],
+    "pr_ready":     ["~/.drip/hooks/announce-pr.sh"],
+    "stop":         ["~/.drip/hooks/notify-done.sh"]
   }
 }
 ```
 
 | Key | Fires when | Value |
 | --- | --- | --- |
-| `session_start` | the run loop starts for a session | command string |
-| `loop_start` / `loop_finish` | a harness loop begins / ends | command string |
-| `task_start` / `task_finish` | a task inside a loop begins / ends | command string |
-| `pre_tool_use` | just before a workspace tool executes | `{ "matcher", "command" }` |
-| `post_tool_use` | just after a workspace tool executed | `{ "matcher", "command" }` |
-| `stop` | the run finishes | command string |
+| `session_start` | the run loop starts for a session | array of commands |
+| `loop_start` / `loop_finish` | a harness loop begins / ends | array of commands |
+| `task_start` / `task_finish` | a task inside a loop begins / ends | array of commands |
+| `pre_tool_use` | just before a workspace tool executes | array of `{ "matcher", "command" }` |
+| `post_tool_use` | just after a workspace tool executed | array of `{ "matcher", "command" }` |
+| `relay_start` / `relay_finish` | a subagent relay round begins / ends (drip-specific) | array of commands |
+| `memory_write` | `remember` or `forget` wrote the memory bank (drip-specific) | array of commands |
+| `pr_ready` | the run publishes — `git commit`/`git push` or `gh pr create` (drip-specific) | array of commands |
+| `stop` | the run finishes | array of commands |
 | `timeout_seconds` | — (not an event) | per-hook deadline in seconds, default `10` |
 
 The `matcher` of the two tool events is a `|`-separated list of tool names
 with an optional trailing `*` wildcard (`Edit|Write`, `Bash*`); an empty or
 missing matcher matches every tool. Lifecycle hooks always fire.
+
+Every event value is an array: when several commands match an event they
+all run, in array order, each with its own JSON payload on stdin. A bare
+string instead of an array makes the whole `hooks` block malformed (see
+the warning behavior below).
 
 Behavior:
 
@@ -438,15 +452,18 @@ Behavior:
 }
 ```
 
-  `tool_name` and `tool_input` are present only for `pre_tool_use` and
-  `post_tool_use`; for `post_tool_use` the tool's output text arrives in
-  `tool_input`. Long inputs are truncated at 24,000 characters, and hook
-  output is capped (first 4 KiB) — it is only surfaced in warnings.
+  `tool_name` and `tool_input` are present for `pre_tool_use`,
+  `post_tool_use`, and `memory_write`; for `post_tool_use` the tool's
+  output text arrives in `tool_input`, and for `memory_write` it is the
+  redacted note plus the `remember`/`forget` tool name. Long inputs are
+  truncated at 24,000 characters, and hook output is capped (first 4 KiB)
+  — it is only surfaced in warnings.
 - Hooks never block a run: a missing binary, a non-zero exit, or a
   timeout (the process is killed at the deadline) becomes a `RunWarning`
-  naming the event and the hook, and the session continues. A
-  `pre_tool_use` hook exiting `2` to veto a tool call is planned but not
-  yet honored.
+  naming the event and the hook, and the session continues. The one
+  exception is Claude Code's veto: a `pre_tool_use` hook that exits `2`
+  blocks the tool call — the tool never executes and the hook's stderr
+  is returned to the model as the tool result.
 - Payload strings pass through drip's secret redactor before they reach
   a hook's stdin.
 - Hooks are commands from your own config, so they run with your user's

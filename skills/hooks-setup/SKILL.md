@@ -11,10 +11,14 @@ notify on session/tool activity:
    existing key — edit only the `hooks` block.
 2. Pick events from the README "Hooks" table: `session_start`,
    `loop_start` / `loop_finish`, `task_start` / `task_finish`,
-   `pre_tool_use`, `post_tool_use`, `stop`. The two tool events take
-   `{ "matcher", "command" }` objects (matcher is a `|`-separated tool
-   list with optional trailing `*`); lifecycle events take plain command
-   strings. `timeout_seconds` caps every hook (default 10).
+   `pre_tool_use`, `post_tool_use`, `stop`, plus the drip-specific
+   `relay_start` / `relay_finish` (relay rounds), `memory_write`
+   (`remember`/`forget`), and `pr_ready` (the run publishes). The two
+   tool events take arrays of `{ "matcher", "command" }` objects
+   (matcher is a `|`-separated tool list with optional trailing `*`);
+   every other event takes an array of command strings — a bare string
+   instead of an array is a malformed block. `timeout_seconds` caps
+   every hook (default 10).
 3. Write hook commands defensively: each gets one JSON payload on stdin
    (`event`/`cwd`/`tool_name`/`tool_input`/`timestamp`), runs under
    `$SHELL -c` with the session's cwd, and is killed at the deadline.

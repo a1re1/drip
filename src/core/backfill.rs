@@ -288,9 +288,7 @@ struct IndexSessionRow {
     created_at: String,
     cwd: String,
     goal_count: i64,
-    id: String,
     last_goal: Option<String>,
-    project_slug: String,
     status: String,
     updated_at: String,
 }
@@ -300,20 +298,18 @@ struct IndexSessionRow {
 fn load_session_row(db: &Connection, id: &str) -> Option<IndexSessionRow> {
     let mut stmt = db
         .prepare(
-            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal FROM sessions WHERE id = ?1",
+            "SELECT cwd, created_at, updated_at, status, goal_count, last_goal FROM sessions WHERE id = ?1",
         )
         .expect("prepare source session row query");
     let mut rows = stmt.query([id]).expect("query source session row");
     if let Some(row) = rows.next().expect("step source session row") {
         Some(IndexSessionRow {
-            id: row.get(0).expect("id"),
-            project_slug: row.get(1).expect("project_slug"),
-            cwd: row.get(2).expect("cwd"),
-            created_at: row.get(3).expect("created_at"),
-            updated_at: row.get(4).expect("updated_at"),
-            status: row.get(5).expect("status"),
-            goal_count: row.get(6).expect("goal_count"),
-            last_goal: row.get(7).expect("last_goal"),
+            cwd: row.get(0).expect("cwd"),
+            created_at: row.get(1).expect("created_at"),
+            updated_at: row.get(2).expect("updated_at"),
+            status: row.get(3).expect("status"),
+            goal_count: row.get(4).expect("goal_count"),
+            last_goal: row.get(5).expect("last_goal"),
         })
     } else {
         None

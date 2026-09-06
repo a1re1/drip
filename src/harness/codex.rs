@@ -106,7 +106,7 @@ pub(crate) enum ServerEvent {
     /// A server->client notification (turn/completed, token usage, noise).
     Notification { method: String, params: Value },
     /// A line that was not valid JSON or not a JSON-RPC frame.
-    Malformed { reason: String, line: String },
+    Malformed { reason: String },
 }
 
 /// A server->client item/tool/call request captured while its turn is open.
@@ -514,10 +514,7 @@ fn classify_frame(line: &str) -> ServerEvent {
         Ok(parsed) => parsed,
         Err(error) => {
             let reason = format!("malformed codex stdout JSON: {}", error);
-            return ServerEvent::Malformed {
-                reason,
-                line: line.to_string(),
-            };
+            return ServerEvent::Malformed { reason };
         }
     };
     let id: Option<JsonRpcId> = parsed
@@ -551,7 +548,6 @@ fn classify_frame(line: &str) -> ServerEvent {
         },
         (None, None) => ServerEvent::Malformed {
             reason: "JSON-RPC frame carried neither id nor method".to_string(),
-            line: line.to_string(),
         },
     }
 }
@@ -615,7 +611,6 @@ async fn read_server_events(
     let _ = event_tx
         .send(ServerEvent::Malformed {
             reason: "codex app-server closed stdout (process exited)".to_string(),
-            line: String::new(),
         })
         .await;
 }

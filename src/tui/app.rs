@@ -122,7 +122,7 @@ fn help_text() -> String {
             "",
             "composer:",
             "  /<skill-name> — enable a discovered skill for this session (idempotent; /skill <name> toggles)",
-            "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc dismisses",
+            "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  esc — clear the composer, or stop the running goal",
@@ -395,7 +395,10 @@ fn filter_skill_catalog(
     let mut exact: Vec<(String, String)> = Vec::new();
     let mut qualified: Vec<(String, String)> = Vec::new();
     for (name, description) in catalog {
-        if builtins.iter().any(|builtin| *builtin == name.as_str()) {
+        if builtins
+            .iter()
+            .any(|builtin| builtin.eq_ignore_ascii_case(name.as_str()))
+        {
             continue;
         }
         let last = name.rsplit(':').next().unwrap_or(name);
@@ -1516,7 +1519,11 @@ impl TuiApp {
             // names always win because their arms match first, and "/skill"
             // keeps its toggle behavior unchanged.
             _ => {
-                if !self.enable_skill_if_discovered(name) {
+                // A discovered skill name enables for the session — but only
+                // as a lone token. With arguments this is not a skill command,
+                // so keep the unknown-command error instead of silently
+                // dropping the arguments.
+                if !args.trim().is_empty() || !self.enable_skill_if_discovered(name) {
                     self.push_error(format!("Unknown command /{name}. Try /help."));
                 }
             }

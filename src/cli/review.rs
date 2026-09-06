@@ -598,6 +598,7 @@ impl ReviewContext<'_> {
             goal,
             goal_context: None,
             goal_images: None,
+            hooks: Default::default(),
             index: &index,
             inference,
             max_iterations: Some(max_iterations),

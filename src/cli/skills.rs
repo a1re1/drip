@@ -11,6 +11,8 @@ const BUILTIN_COMMIT_DISCIPLINE: &str =
     include_str!("../../skills/commit-discipline/SKILL.md");
 const BUILTIN_DEBUG_ROOT_CAUSE: &str =
     include_str!("../../skills/debug-root-cause/SKILL.md");
+const BUILTIN_HOOKS_SETUP: &str =
+    include_str!("../../skills/hooks-setup/SKILL.md");
 const BUILTIN_MIGRATION_DISCIPLINE: &str =
     include_str!("../../skills/migration-discipline/SKILL.md");
 const BUILTIN_REFACTOR_SAFELY: &str =
@@ -26,6 +28,7 @@ fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("commit-discipline", BUILTIN_COMMIT_DISCIPLINE),
         ("debug-root-cause", BUILTIN_DEBUG_ROOT_CAUSE),
+        ("hooks-setup", BUILTIN_HOOKS_SETUP),
         ("migration-discipline", BUILTIN_MIGRATION_DISCIPLINE),
         ("refactor-safely", BUILTIN_REFACTOR_SAFELY),
         ("review-independently", BUILTIN_REVIEW_INDEPENDENTLY),
@@ -1877,12 +1880,13 @@ mod tests {
     // --- Built-in skills embedded ---
 
     #[test]
-    fn builtin_skills_all_seven_present() {
+    fn builtin_skills_all_eight_present() {
         let skills = collect_builtin_skills(None);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         for expected in &[
             "commit-discipline",
             "debug-root-cause",
+            "hooks-setup",
             "migration-discipline",
             "refactor-safely",
             "review-independently",

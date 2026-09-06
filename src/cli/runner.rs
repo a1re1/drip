@@ -3,7 +3,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use regex::Regex;
 
 use crate::cli::follow::{read_inbox_entries, read_inbox_messages};
 use crate::cli::skills::{compose_skill_system_prompt, LoadedCliSkill};
@@ -18,6 +17,7 @@ use crate::harness::harness_tools::RepoMemoryConfig;
 use crate::harness::model_call::AbortSignal;
 use crate::harness::prompt::compose_harness_system_prompt;
 use crate::harness::r#loop::{run_solid_state_harness, EmitFn, OperatorInboxEntry, SolidStateHarnessOptions};
+use crate::harness::hooks::git_publish_pattern;
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
@@ -28,6 +28,7 @@ pub struct CliGoalRunArgs {
     pub goal: String,
     pub goal_context: Option<String>,
     pub goal_images: Option<Vec<String>>,
+    pub hooks: crate::harness::hooks::HooksConfig,
     pub inference: ResolvedInferenceConfig,
     /// Session inbox file (drip --send); polled at cycle boundaries when set.
     pub inbox_path: Option<PathBuf>,
@@ -128,11 +129,6 @@ pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> 
 /// printed something shorter (a slice would panic on it).
 fn short_sha(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
-}
-
-fn git_publish_pattern() -> &'static Regex {
-    static PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(|| Regex::new(r"\bgit\s+(commit|push)\b|\bgh\s+pr\s+create\b").unwrap())
 }
 
 // The PR #19 incident shape: a run pushes a branch, then keeps editing the
@@ -330,8 +326,15 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
 
     let on_event = args.on_event.clone();
     let published_flag = published_from_workspace.clone();
+    // PRReady hooks are NOT fired here: the emit closure is event transport,
+    // and spawning hook subprocesses here blocked every subsequent event and
+    // surfaced failures only via eprintln. The harness fires PRReady after a
+    // successful publish-matching tool execution (loop.rs dispatch_tool_calls),
+    // reusing fire_hook so failures surface as RunWarning.
     let emit: EmitFn = Arc::new(move |event: HarnessEvent| {
-        if event.r#type == HarnessEventType::ToolCall && git_publish_pattern().is_match(&event.detail) {
+        let published = event.r#type == HarnessEventType::ToolCall
+            && git_publish_pattern().is_match(&event.detail);
+        if published {
             published_flag.store(true, Ordering::Relaxed);
         }
 
@@ -393,6 +396,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         tools: args.tools,
         tool_services: args.tool_services.clone(),
         url: Some(args.inference.url.clone()),
+        hooks: args.hooks.clone(),
         ..SolidStateHarnessOptions::default()
     };
 

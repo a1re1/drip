@@ -1253,6 +1253,7 @@ pub struct SolidStateHarnessOptions {
     pub goal_context: Option<String>,
     pub goal_images: Option<Vec<String>>,
     pub headers: Vec<(String, String)>,
+    pub hooks: crate::harness::hooks::HooksConfig,
     pub initial_state: Option<HarnessState>,
     pub r#loop: Option<crate::harness::roles::PartialHarnessLoopConfig>,
     pub max_iterations: Option<i64>,
@@ -1982,6 +1983,32 @@ impl HarnessRun {
             .filter(|index| registry.map_or(true, |allowed| allowed.contains(index)))
             .and_then(|index| self.tools.get(index));
 
+        // Privacy: hook payloads go to user-configured commands over stdin,
+        // so redact the tool input before it leaves the process.
+        let redacted_input = (self.redact)(raw_input);
+        // Claude Code semantics: a pre_tool_use hook that exits 2 vetoes the
+        // tool call — the tool never runs and the hook's stderr goes back to
+        // the model as the tool result so it can adapt.
+        let pre_tool_use_outcomes = self.fire_hook_checked(
+            crate::harness::hooks::HookEvent::PreToolUse,
+            Some((tool_name, redacted_input.as_str())),
+        );
+        if let Some(veto) = pre_tool_use_outcomes
+            .iter()
+            .find(|outcome| outcome.exit_code == Some(2))
+        {
+            let stderr_excerpt = if veto.stderr_excerpt.is_empty() {
+                "(no stderr output)".to_string()
+            } else {
+                veto.stderr_excerpt.clone()
+            };
+            return WorkspaceToolExecution {
+                failed: true,
+                tool_content: format!(
+                    "tool call blocked by pre_tool_use hook: {stderr_excerpt}"
+                ),
+            };
+        }
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
             history: &[],
@@ -2002,14 +2029,22 @@ impl HarnessRun {
             tool_name,
         });
 
+        let failed = executed
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed));
+        // The one choke point every consumer shares: context injection,
+        // telemetry, transcript events, and the NDJSON stream all read this.
+        let tool_content = (self.redact)(&executed.tool_content);
+        self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
+        // drip-specific: memory-bank writes (remember/forget) get their own
+        // event, but harness ops dispatch in dispatch_tool_calls and never
+        // reach execute_workspace_tool, so MemoryWrite fires there — gated
+        // on apply_harness_op's state_changed so failures and no-ops stay
+        // silent.
         WorkspaceToolExecution {
-            failed: executed
-                .blocks
-                .iter()
-                .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed)),
-            // The one choke point every consumer shares: context injection,
-            // telemetry, transcript events, and the NDJSON stream all read this.
-            tool_content: (self.redact)(&executed.tool_content),
+            failed,
+            tool_content,
         }
     }
 
@@ -2061,11 +2096,56 @@ impl HarnessRun {
         }
     }
 
+    /// Fire user-configured hooks for `event`. A hook failure or timeout
+    /// never blocks the run: it is only surfaced as a RunWarning event.
+    /// Deliberately blocking (bounded by the configured timeout) so the sync
+    /// tool-dispatch sites can call it. The one exception is the PreToolUse
+    /// exit-2 veto in [`Self::execute_workspace_tool`], which consumes the
+    /// outcomes returned by [`Self::fire_hook_checked`].
+    fn fire_hook(&self, event: crate::harness::hooks::HookEvent, tool: Option<(&str, &str)>) {
+        self.fire_hook_checked(event, tool);
+    }
+
+    /// Like [`Self::fire_hook`], but returns every hook's outcome so the
+    /// caller can act on it. Failures still surface as RunWarning events
+    /// here; the caller only needs to look for the veto exit code (2).
+    fn fire_hook_checked(
+        &self,
+        event: crate::harness::hooks::HookEvent,
+        tool: Option<(&str, &str)>,
+    ) -> Vec<crate::harness::hooks::HookOutcome> {
+        let commands = self.options.hooks.commands_for(event, tool.map(|(name, _)| name));
+        if commands.is_empty() {
+            return Vec::new();
+        }
+        let timeout = self.options.hooks.timeout();
+        let timestamp = (self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        commands
+            .iter()
+            .map(|command| {
+                let payload =
+                    crate::harness::hooks::build_hook_payload(event, &self.cwd, tool, &timestamp);
+                let outcome =
+                    crate::harness::hooks::run_hook_command(command, &self.cwd, &payload, timeout);
+                if !outcome.succeeded() {
+                    self.emit(HarnessEvent {
+                        data: None,
+                        detail: format!("hook {}: {}", event.as_str(), outcome.describe()),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+                outcome
+            })
+            .collect()
+    }
+
     /// the outer `while` loop: one task loop per iteration
     /// of this method's loop, delegating to `begin_loop` / `run_cycle` /
     /// `end_loop`. Returns Some(result) when the run ends inside the loop
     /// (abort/error paths); None when the outer loop exits normally.
     pub async fn run_loops(&mut self) -> Option<HarnessRunResult> {
+        self.fire_hook(crate::harness::hooks::HookEvent::SessionStart, None);
         while self.state.iteration - self.start_iteration < self.max_iterations {
             if self.signal_aborted() {
                 self.aborted = true;
@@ -2094,6 +2174,8 @@ impl HarnessRun {
             }
 
             let mut scope = self.begin_loop();
+            self.fire_hook(crate::harness::hooks::HookEvent::LoopStart, None);
+            self.fire_hook(crate::harness::hooks::HookEvent::TaskStart, None);
 
             for cycle in 1..=scope.loop_budget.max_cycles {
                 if scope.task_finished || scope.concluded_naturally || self.aborted {
@@ -2163,6 +2245,8 @@ impl HarnessRun {
             }
 
             self.end_loop(&mut scope);
+            self.fire_hook(crate::harness::hooks::HookEvent::LoopFinish, None);
+            self.fire_hook(crate::harness::hooks::HookEvent::TaskFinish, None);
 
             if self.aborted {
                 return Some(self.aborted_result());
@@ -2782,7 +2866,15 @@ impl HarnessRun {
     /// model (with the context-overflow retry), then parse the reply: a
     /// text-only reply concludes (or is nudged once); tool calls are
     /// normalized and dispatched via `dispatch_tool_calls`.
+    /// Fires `RelayStart` on entry and `RelayFinish` on every exit path.
     pub async fn run_round(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
+        self.fire_hook(crate::harness::hooks::HookEvent::RelayStart, None);
+        let outcome = self.run_round_inner(scope, cycle, round).await;
+        self.fire_hook(crate::harness::hooks::HookEvent::RelayFinish, None);
+        outcome
+    }
+
+    async fn run_round_inner(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
         use crate::harness::model_call::ModelCallOptions;
 
         if self.options.signal.as_ref().map(AbortSignal::is_aborted) == Some(true) {
@@ -3276,6 +3368,18 @@ impl HarnessRun {
                 scope.task_finished = scope.task_finished || outcome.task_finished;
                 scope.made_progress = scope.made_progress || outcome.state_changed;
                 scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
+                // drip-specific: memory-bank writes (remember/forget) get their
+                // own event, gated on apply_harness_op's state_changed so a
+                // failed, denied, or no-op op never announces a state change.
+                // Fires at this choke point (not execute_workspace_tool) because
+                // harness ops never reach it. Payload = redacted input (the note).
+                if (tool_name == "remember" || tool_name == "forget") && outcome.state_changed {
+                    let redacted_input = (self.redact)(&raw_input);
+                    self.fire_hook(
+                        crate::harness::hooks::HookEvent::MemoryWrite,
+                        Some((tool_name.as_str(), redacted_input.as_str())),
+                    );
+                }
                 scope
                     .transport_messages
                     .push(crate::harness::transport::TransportRequestMessage {
@@ -3573,6 +3677,17 @@ impl HarnessRun {
                 r#type: HarnessEventType::ToolResult,
             });
 
+            // drip-specific: PRReady fires only after a publish-matching tool
+            // call actually succeeded (git commit/push, `gh pr create`). The
+            // veto and failure paths return failed:true above, so they stay
+            // silent. Lifecycle payload (no tool fields); reuses fire_hook so
+            // hook failures surface as RunWarning in the transcript.
+            if !execution.failed
+                && crate::harness::hooks::git_publish_pattern().is_match(&raw_input)
+            {
+                self.fire_hook(crate::harness::hooks::HookEvent::PRReady, None);
+            }
+
             scope
                 .transport_messages
                 .push(crate::harness::transport::TransportRequestMessage {
@@ -3834,6 +3949,7 @@ impl HarnessRun {
     /// decide the run reason, generate the run summary,
     /// report leaked tmux jobs, emit `run-complete`, persist, build the result.
     pub async fn finish(mut self) -> HarnessRunResult {
+        self.fire_hook(crate::harness::hooks::HookEvent::Stop, None);
         if self.aborted {
             return self.aborted_result();
         }

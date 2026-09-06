@@ -4,6 +4,7 @@ pub mod anthropic;
 pub mod chat_types;
 pub mod codex;
 pub mod harness_tools;
+pub mod hooks;
 // `loop` is a Rust keyword: the module name needs the raw identifier.
 #[allow(non_snake_case)]
 pub mod r#loop;

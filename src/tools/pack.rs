@@ -45,8 +45,32 @@ pub const BUILTIN_TOOL_NAMES: [&str; 9] = [
     "CHECK",
 ];
 
-/// The tools readable while plan mode is active.
-pub const PLAN_MODE_TOOLS: [&str; 3] = ["READ", "GREP", "DIR"];
+/// The name of the corpus-gated REFERENCE tool. It is not in
+/// BUILTIN_TOOL_NAMES: the pack only carries it when a corpus root is
+/// configured (see builtin_tool_pack).
+pub const REFERENCE_TOOL_NAME: &str = "REFERENCE";
+
+/// The tools readable while plan mode is active. REFERENCE is read-only
+/// research, so planning may consult the corpus.
+pub const PLAN_MODE_TOOLS: [&str; 4] = ["READ", "GREP", "DIR", "REFERENCE"];
+
+/// The per-run knobs the built-in pack bakes into every tool closure:
+/// `allow_net` is the DRIP_ALLOW_NET=1 gate FETCH honors, and
+/// `reference_roots` are the oasis corpus roots REFERENCE searches (empty =
+/// no corpus configured, so REFERENCE is left out of the pack entirely).
+#[derive(Clone, Debug, Default)]
+pub struct BuiltinToolOptions {
+    pub allow_net: bool,
+    pub reference_roots: Vec<PathBuf>,
+}
+
+impl BuiltinToolOptions {
+    /// The options for a run with network access but no corpus — the shape
+    /// most callers and tests want.
+    pub fn with_allow_net(allow_net: bool) -> Self {
+        Self { allow_net, ..Self::default() }
+    }
+}
 
 /// Splits a builtin `definition()` envelope
 /// ({type: "function", function: {name, description, parameters}}) into the
@@ -61,10 +85,11 @@ fn split_definition(definition: &Value) -> (String, String, ChatToolParameters) 
     (name, description, parameters)
 }
 
-fn tool_ctx(cwd: &str, allow_net: bool) -> ToolCtx {
+fn tool_ctx(cwd: &str, options: &BuiltinToolOptions) -> ToolCtx {
     ToolCtx {
         cwd: PathBuf::from(cwd),
-        allow_net,
+        allow_net: options.allow_net,
+        reference_roots: options.reference_roots.clone(),
     }
 }
 
@@ -102,11 +127,13 @@ type DisplayInput = fn(&str, &ToolCtx) -> Option<String>;
 fn sync_tool(
     definition: Value,
     mutates_workspace: bool,
-    allow_net: bool,
+    options: &BuiltinToolOptions,
     display: DisplayInput,
     run: Arc<dyn Fn(&str, &ToolCtx) -> ToolOutcome>,
 ) -> ChatToolDefinition {
     let (name, description, parameters) = split_definition(&definition);
+    let prepare_options = options.clone();
+    let execute_options = options.clone();
 
     define_sync_tool(ChatToolDefinition {
         name,
@@ -115,7 +142,7 @@ fn sync_tool(
         mutates_workspace,
         mode: ChatToolMode::Sync,
         prepare: Box::new(move |request: ChatToolPrepareRequest<'_>| {
-            let ctx = tool_ctx(&request.runtime_context.cwd, allow_net);
+            let ctx = tool_ctx(&request.runtime_context.cwd, &prepare_options);
 
             Ok(ChatToolPreparedInput {
                 display_input: display(request.raw_input, &ctx).unwrap_or_else(|| request.raw_input.to_string()),
@@ -125,7 +152,7 @@ fn sync_tool(
         }),
         execute: Box::new(move |request: ChatToolExecuteRequest<'_>| {
             let raw_input = request.prepared.input.as_str().unwrap_or_default().to_string();
-            let ctx = tool_ctx(&request.runtime_context.cwd, allow_net);
+            let ctx = tool_ctx(&request.runtime_context.cwd, &execute_options);
 
             outcome_to_result(run(&raw_input, &ctx))
         }),
@@ -615,28 +642,45 @@ pub fn get_framework_tool_definitions() -> Vec<ChatToolDefinition> {
 // ---------------------------------------------------------------------------
 
 /// The built-in pack, in declaration order: READ, PATCH, DIR, BASH, BASH_ASYNC,
-/// GREP, VERIFY, FETCH, CHECK. `allow_net` is the DRIP_ALLOW_NET=1 gate FETCH
-/// honors (set from --allow-net).
-pub fn builtin_tool_pack(allow_net: bool) -> Vec<ChatToolDefinition> {
-    vec![
-        sync_tool(builtin::read::definition(), false, allow_net, value_display!(read), value_runner(builtin::read::execute)),
-        sync_tool(builtin::patch::definition(), true, allow_net, value_display!(patch), value_runner(builtin::patch::execute)),
-        sync_tool(builtin::dir::definition(), false, allow_net, value_display!(dir), value_runner(builtin::dir::execute)),
+/// GREP, VERIFY, FETCH, CHECK, and — only when a corpus root is configured —
+/// REFERENCE last. `options.allow_net` is the DRIP_ALLOW_NET=1 gate FETCH
+/// honors (set from --allow-net); `options.reference_roots` are the oasis
+/// corpus roots (set from --reference-root / DRIP_REFERENCE_ROOTS).
+pub fn builtin_tool_pack(options: BuiltinToolOptions) -> Vec<ChatToolDefinition> {
+    let options = &options;
+    let mut pack = vec![
+        sync_tool(builtin::read::definition(), false, options, value_display!(read), value_runner(builtin::read::execute)),
+        sync_tool(builtin::patch::definition(), true, options, value_display!(patch), value_runner(builtin::patch::execute)),
+        sync_tool(builtin::dir::definition(), false, options, value_display!(dir), value_runner(builtin::dir::execute)),
         // Only PATCH declares mutates_workspace; a BASH
         // call is not progress for the stall accounting.
         sync_tool(
             builtin::bash::definition(),
             false,
-            allow_net,
+            options,
             builtin::bash::display_input,
             Arc::new(|raw_input: &str, ctx: &ToolCtx| builtin::bash::execute(raw_input, ctx)),
         ),
         async_bash_tool(),
-        sync_tool(builtin::grep::definition(), false, allow_net, value_display!(grep), value_runner(builtin::grep::execute)),
-        sync_tool(builtin::verify::definition(), false, allow_net, value_display!(verify), value_runner(builtin::verify::execute)),
-        sync_tool(builtin::fetch::definition(), false, allow_net, value_display!(fetch), value_runner(builtin::fetch::execute)),
-        sync_tool(builtin::check::definition(), false, allow_net, value_display!(check), value_runner(builtin::check::execute)),
-    ]
+        sync_tool(builtin::grep::definition(), false, options, value_display!(grep), value_runner(builtin::grep::execute)),
+        sync_tool(builtin::verify::definition(), false, options, value_display!(verify), value_runner(builtin::verify::execute)),
+        sync_tool(builtin::fetch::definition(), false, options, value_display!(fetch), value_runner(builtin::fetch::execute)),
+        sync_tool(builtin::check::definition(), false, options, value_display!(check), value_runner(builtin::check::execute)),
+    ];
+
+    // REFERENCE is corpus-gated: without a root every call would fail, so the
+    // model never sees the tool at all.
+    if !options.reference_roots.is_empty() {
+        pack.push(sync_tool(
+            builtin::reference::definition(),
+            false,
+            options,
+            value_display!(reference),
+            value_runner(builtin::reference::execute),
+        ));
+    }
+
+    pack
 }
 
 #[cfg(test)]
@@ -696,7 +740,7 @@ mod tests {
 
     /// The tool-call block's `input` for one call, as derived by `display`.
     fn display_of(name: &str, raw_input: &str, cwd: &std::path::Path) -> String {
-        let tools = builtin_tool_pack(false);
+        let tools = builtin_tool_pack(BuiltinToolOptions::default());
         let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions { cwd: Some(cwd.to_path_buf()), jobs_root: None });
         let message = message();
         let executed = execute_tool_call(ToolExecutionContext {
@@ -739,13 +783,13 @@ mod tests {
         // the raw input there; with net the "GET url (max N bytes)" formula shows.
         assert_eq!(display_of("FETCH", r#"{"url":"https://example.com/x"}"#, cwd), r#"{"url":"https://example.com/x"}"#);
         assert_eq!(
-            builtin::fetch::display_input(&Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()), &tool_ctx(&cwd.to_string_lossy(), true)),
+            builtin::fetch::display_input(&Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()), &tool_ctx(&cwd.to_string_lossy(), &BuiltinToolOptions::with_allow_net(true))),
             Some("GET https://example.com/x (max 100 bytes)".to_string())
         );
         // A failed execution (no tsconfig here) shows the raw input.
         assert_eq!(display_of("CHECK", r#"{"path":"hello.txt"}"#, cwd), r#"{"path":"hello.txt"}"#);
         assert_eq!(
-            builtin::check::display_input(&Value::String(r#"{"path":" hello.txt "}"#.into()), &tool_ctx(&cwd.to_string_lossy(), false)),
+            builtin::check::display_input(&Value::String(r#"{"path":" hello.txt "}"#.into()), &tool_ctx(&cwd.to_string_lossy(), &BuiltinToolOptions::default())),
             Some(r#"{ path: "hello.txt" }"#.to_string())
         );
         // Unparseable arguments fall back to the raw input; execute reports the error.
@@ -754,11 +798,52 @@ mod tests {
 
     #[test]
     fn pack_names_match_tools_index_order() {
-        let names: Vec<String> = builtin_tool_pack(false).into_iter().map(|tool| tool.name).collect();
+        let names: Vec<String> = builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.name).collect();
         assert_eq!(names, BUILTIN_TOOL_NAMES.iter().map(|name| name.to_string()).collect::<Vec<_>>());
-        let modes: Vec<ChatToolMode> = builtin_tool_pack(false).into_iter().map(|tool| tool.mode).collect();
+        let modes: Vec<ChatToolMode> = builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.mode).collect();
         assert_eq!(modes[4], ChatToolMode::Async);
         assert!(modes.iter().enumerate().all(|(index, mode)| index == 4 || *mode == ChatToolMode::Sync));
+    }
+
+    // REFERENCE is corpus-gated: absent with no roots, appended last with them.
+    #[test]
+    fn reference_is_registered_only_when_a_corpus_root_is_configured() {
+        let without: Vec<String> =
+            builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.name).collect();
+        assert!(!without.contains(&REFERENCE_TOOL_NAME.to_string()), "{without:?}");
+
+        let with: Vec<String> = builtin_tool_pack(BuiltinToolOptions {
+            allow_net: false,
+            reference_roots: vec![PathBuf::from("/corpus/wiki")],
+        })
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+        assert_eq!(with.len(), without.len() + 1);
+        assert_eq!(with.last().map(String::as_str), Some(REFERENCE_TOOL_NAME));
+        assert_eq!(with[..without.len()], without[..]);
+    }
+
+    // The roots reach the tool's ctx, so a configured REFERENCE call gets past
+    // the "no reference corpus configured" refusal.
+    #[test]
+    fn configured_roots_reach_the_reference_tool_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = tool_ctx(
+            &dir.path().to_string_lossy(),
+            &BuiltinToolOptions {
+                allow_net: false,
+                reference_roots: vec![PathBuf::from("/corpus/wiki")],
+            },
+        );
+        assert_eq!(ctx.reference_roots, vec![PathBuf::from("/corpus/wiki")]);
+
+        let refusal = builtin::reference::execute(
+            &Value::String(r#"{"action":"search","query":"bm25"}"#.into()),
+            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
+        );
+        assert!(refusal.failed);
+        assert!(refusal.text.contains("no reference corpus configured"), "{}", refusal.text);
     }
 
     #[test]
@@ -775,7 +860,25 @@ mod tests {
             builtin::check::definition(),
         ];
 
-        for (tool, definition) in builtin_tool_pack(false).iter().zip(definitions.iter()) {
+        // The corpus-gated tool goes through the same adapter, so its schema is
+        // round-tripped too rather than only the unconditional nine.
+        let configured = builtin_tool_pack(BuiltinToolOptions {
+            allow_net: false,
+            reference_roots: vec![PathBuf::from("/corpus/wiki")],
+        });
+        let reference = configured.last().expect("pack is not empty");
+        assert_eq!(reference.name, REFERENCE_TOOL_NAME);
+        assert_eq!(
+            serde_json::to_value(&crate::harness::transport::create_request_tool(
+                &reference.name,
+                &reference.description,
+                serde_json::to_value(&reference.parameters).unwrap(),
+            ))
+            .unwrap(),
+            builtin::reference::definition()
+        );
+
+        for (tool, definition) in builtin_tool_pack(BuiltinToolOptions::default()).iter().zip(definitions.iter()) {
             let rebuilt = crate::harness::transport::create_request_tool(
                 &tool.name,
                 &tool.description,
@@ -789,13 +892,13 @@ mod tests {
     fn sync_adapter_preserves_success_and_failure_text() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "hi\n").unwrap();
-        let tools = builtin_tool_pack(false);
+        let tools = builtin_tool_pack(BuiltinToolOptions::default());
 
         let (content, failed) = run(&tools, "READ", r#"{"path":"hello.txt"}"#, dir.path());
         assert!(!failed);
         let direct = builtin::read::execute(
             &json!({ "path": "hello.txt" }),
-            &tool_ctx(&dir.path().to_string_lossy(), false),
+            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
         );
         assert_eq!(content, direct.text);
 
@@ -803,7 +906,7 @@ mod tests {
         assert!(failed);
         let direct = builtin::read::execute(
             &json!({ "path": "missing.txt" }),
-            &tool_ctx(&dir.path().to_string_lossy(), false),
+            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
         );
         assert_eq!(content, direct.text);
         assert!(content.starts_with("ERROR: "));
@@ -812,7 +915,7 @@ mod tests {
     #[test]
     fn unknown_tool_reports_the_loader_message() {
         let dir = tempfile::tempdir().unwrap();
-        let tools = builtin_tool_pack(false);
+        let tools = builtin_tool_pack(BuiltinToolOptions::default());
         let (content, failed) = run(&tools, "NOPE", "{}", dir.path());
         assert!(failed);
         assert_eq!(content, "ERROR: Tool \"NOPE\" is not available in the loaded tools folder.");

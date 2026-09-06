@@ -53,7 +53,7 @@ use crate::core::sessions::{
 use crate::core::state::load_harness_state;
 use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
-use crate::tools::pack::{builtin_tool_pack, PLAN_MODE_TOOLS};
+use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions, PLAN_MODE_TOOLS};
 use crate::tools::patch_journal::{undo_last_patches, UndoOutcome};
 use crate::tools::types::ChatToolDefinition;
 
@@ -99,7 +99,40 @@ fn to_fixed_2(value: f64) -> String {
     }
 }
 
-fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinition>, String> {
+/// The oasis corpus roots REFERENCE searches this run: --reference-root
+/// values first, else the colon-separated DRIP_REFERENCE_ROOTS, else oasis'
+/// own OASIS_ROOTS. Empty means no corpus, and REFERENCE stays out of the
+/// pack entirely.
+fn resolve_reference_roots(cli_args: &ParsedCliArgs) -> Vec<PathBuf> {
+    if !cli_args.reference_roots.is_empty() {
+        return cli_args.reference_roots.iter().map(PathBuf::from).collect();
+    }
+
+    for variable in ["DRIP_REFERENCE_ROOTS", "OASIS_ROOTS"] {
+        let Ok(raw) = std::env::var(variable) else { continue };
+        let roots: Vec<PathBuf> = raw
+            .split(':')
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !roots.is_empty() {
+            return roots;
+        }
+    }
+
+    Vec::new()
+}
+
+/// The built-in pack knobs for this run: the network gate and the corpus roots.
+fn builtin_tool_options(cli_args: &ParsedCliArgs) -> BuiltinToolOptions {
+    BuiltinToolOptions {
+        allow_net: cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1"),
+        reference_roots: resolve_reference_roots(cli_args),
+    }
+}
+
+fn load_tools(tools_path: &str, options: BuiltinToolOptions) -> Result<Vec<ChatToolDefinition>, String> {
     if tools_path != "./tools" {
         // A missing pack is an error; a pack that exists is still refused,
         // since drip only loads the built-in tool pack.
@@ -110,7 +143,7 @@ fn load_tools(tools_path: &str, allow_net: bool) -> Result<Vec<ChatToolDefinitio
         ));
     }
 
-    Ok(builtin_tool_pack(allow_net))
+    Ok(builtin_tool_pack(options))
 }
 
 struct ResolvedSessionRef {
@@ -439,9 +472,9 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     let project = ensure_drip_project(project);
     let base_ref = cli_args.review_base.clone().unwrap_or_else(|| resolve_default_base_ref(cwd));
     let tools_path = resolve_tools_path(&cli_args.tools_path);
-    let allow_net = cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
+    let tool_options = builtin_tool_options(cli_args);
 
-    if let Err(error) = load_tools(&tools_path, allow_net) {
+    if let Err(error) = load_tools(&tools_path, tool_options.clone()) {
         eprintln!("Review failed: {error}");
         return 1;
     }
@@ -524,7 +557,7 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
                 ReviewSynthesis::Always => ReviewSynthesisMode::Always,
                 ReviewSynthesis::Never => ReviewSynthesisMode::Never,
             }),
-            tools: Arc::new(move || builtin_tool_pack(allow_net)),
+            tools: Arc::new(move || builtin_tool_pack(tool_options.clone())),
         })
     });
 
@@ -608,10 +641,11 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     }
 
     // The env var counts as much as the flag (which entry sets into the
-    // env for children), so an operator export enables networking too.
-    let allow_net = args.cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
+    // env for children), so an operator export enables networking too; the
+    // corpus roots resolve the same way for REFERENCE.
+    let tool_options = builtin_tool_options(args.cli_args);
     let tools_path = resolve_tools_path(&args.cli_args.tools_path);
-    let loaded_tools = match load_tools(&tools_path, allow_net) {
+    let loaded_tools = match load_tools(&tools_path, tool_options.clone()) {
         Ok(tools) => tools,
         Err(message) => {
             eprintln!("{message}");
@@ -621,7 +655,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     // --plan explores but never mutates: the tool surface shrinks to readers.
     let plan = args.cli_args.plan;
     let base_tools_factory: Arc<dyn Fn() -> Vec<ChatToolDefinition>> = Arc::new(move || {
-        let pack = builtin_tool_pack(allow_net);
+        let pack = builtin_tool_pack(tool_options.clone());
         if plan {
             pack.into_iter().filter(|tool| PLAN_MODE_TOOLS.contains(&tool.name.as_str())).collect()
         } else {
@@ -1815,11 +1849,14 @@ pub async fn main(argv: Vec<String>) -> i32 {
     // The interactive session owns the terminal from here; it opens its own
     // index handle per goal run, so the bootstrap one is released first.
     index.close();
-    let allow_net = cli_args.allow_net || std::env::var("DRIP_ALLOW_NET").as_deref() == Ok("1");
+    let tool_options = builtin_tool_options(&cli_args);
+    let allow_net = tool_options.allow_net;
+    let reference_roots = tool_options.reference_roots.clone();
     let status_line_setting = config.status_line.clone();
     tokio::task::block_in_place(|| {
         crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
             allow_net,
+            reference_roots,
             config,
             cwd: cwd.clone(),
             home: home.clone(),

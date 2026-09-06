@@ -386,6 +386,7 @@ mod tests {
         ToolCtx {
             cwd: std::env::temp_dir(),
             allow_net,
+            reference_roots: Vec::new(),
         }
     }
 

@@ -177,6 +177,27 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 | VERIFY | Run a shell command and parse structured test verdicts (bun, vitest, pytest, unittest, cargo, go, tsc) |
 | FETCH | HTTP GET a URL and return text content (requires `DRIP_ALLOW_NET=1`) |
 | CHECK | Run incremental TypeScript diagnostics (semantic + syntactic) |
+| REFERENCE | Hybrid (BM25 + dense) search over an oasis-indexed markdown corpus — only in the pack when a corpus root is configured |
+
+### Pointing REFERENCE at a corpus
+
+REFERENCE searches a markdown knowledge base through the
+[`oasis`](https://github.com/a1re1/o-cs) search engine, so a run can answer from a
+reference corpus (for example the o-cs computer-science wiki) with citable page paths
+instead of from the model's memory. It needs the `oasis` binary on PATH and at least one
+corpus root:
+
+```sh
+drip --reference-root ~/src/o-cs/wiki "explain why our queue needs backpressure"
+export DRIP_REFERENCE_ROOTS=~/src/o-cs/wiki   # same thing, colon-separated for several
+```
+
+`--reference-root` is repeatable, `DRIP_REFERENCE_ROOTS` and oasis' own `OASIS_ROOTS`
+are read as fallbacks, and with no root configured the tool is left out of the pack
+entirely — the model never sees a tool that cannot work. Pair it with
+`--skill cs-reference` to prime the search → read → cite loop. The wiring's retrieval
+quality and its effect on answers are measured by the benchmark in
+[`evals/reference/`](evals/reference/README.md).
 
 ---
 
@@ -561,7 +582,7 @@ The `matcher` of the two tool events is a `|`-separated list of tool names
 with an optional trailing `*` wildcard (`PATCH|READ`, `BASH*`); an empty or
 missing matcher matches every tool. Matching is case-sensitive against
 drip's uppercase canonical tool names (`BASH`, `BASH_ASYNC`, `PATCH`,
-`READ`, `GREP`, `DIR`, `VERIFY`, `FETCH`, `CHECK`) and never sees the
+`READ`, `GREP`, `DIR`, `VERIFY`, `FETCH`, `CHECK`, `REFERENCE`) and never sees the
 command text — `"Bash"` or `"rm *"` will never match anything. Lifecycle
 hooks always fire.
 

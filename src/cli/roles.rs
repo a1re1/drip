@@ -94,9 +94,15 @@ pub struct ResolvedRoleSetup {
 // Harness ops (plan_tasks, finish_task, remember, ...) are deliberately absent:
 // the loop appends them to every role unconditionally, so naming them here only
 // produces a spurious "unknown tool(s)" issue on every preset run.
-pub const ALL_STANDARD_TOOL_NAMES: [&str; 9] = [
-	"READ", "PATCH", "DIR", "BASH", "BASH_ASYNC", "GREP", "VERIFY", "FETCH", "CHECK",
+pub const ALL_STANDARD_TOOL_NAMES: [&str; 10] = [
+	"READ", "PATCH", "DIR", "BASH", "BASH_ASYNC", "GREP", "VERIFY", "FETCH", "CHECK", "REFERENCE",
 ];
+
+// Tools the pack carries only under a runtime condition (REFERENCE needs a
+// configured corpus root). A role may name one, and a run without that
+// condition simply drops it from the role's effective tools — naming it is
+// not the typo the "unknown tool(s)" issue is meant to catch.
+pub const OPTIONAL_TOOL_NAMES: [&str; 1] = ["REFERENCE"];
 
 // Shared by every no-PATCH role so there is exactly one place that decides which
 // tool the gate roles are denied. PATCH is the only journaled, --undo-last-able
@@ -684,6 +690,7 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 				.iter()
 				.map(String::as_str)
 				.filter(|tool_name| !known_tool_names.contains(tool_name))
+				.filter(|tool_name| !OPTIONAL_TOOL_NAMES.contains(tool_name))
 				.collect();
 
 			if !unknown_tools.is_empty() {

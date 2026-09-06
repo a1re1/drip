@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 // Built-in skill pack — embedded at compile time
 // ---------------------------------------------------------------------------
 
+const BUILTIN_CS_REFERENCE: &str =
+    include_str!("../../skills/cs-reference/SKILL.md");
 const BUILTIN_COMMIT_DISCIPLINE: &str =
     include_str!("../../skills/commit-discipline/SKILL.md");
 const BUILTIN_DEBUG_ROOT_CAUSE: &str =
@@ -27,6 +29,7 @@ const BUILTIN_VERIFY_BEFORE_DONE: &str =
 fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("commit-discipline", BUILTIN_COMMIT_DISCIPLINE),
+        ("cs-reference", BUILTIN_CS_REFERENCE),
         ("debug-root-cause", BUILTIN_DEBUG_ROOT_CAUSE),
         ("hooks-setup", BUILTIN_HOOKS_SETUP),
         ("migration-discipline", BUILTIN_MIGRATION_DISCIPLINE),
@@ -1880,11 +1883,12 @@ mod tests {
     // --- Built-in skills embedded ---
 
     #[test]
-    fn builtin_skills_all_eight_present() {
+    fn builtin_skills_all_present() {
         let skills = collect_builtin_skills(None);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         for expected in &[
             "commit-discipline",
+            "cs-reference",
             "debug-root-cause",
             "hooks-setup",
             "migration-discipline",
@@ -1895,6 +1899,26 @@ mod tests {
         ] {
             assert!(names.contains(expected), "missing builtin: {}", expected);
         }
+    }
+
+    // Every skills/<name>/SKILL.md must be embedded: a directory added without
+    // a registry entry silently fails `--skill <name>` at runtime.
+    #[test]
+    fn every_shipped_skill_directory_is_registered() {
+        let registered: Vec<&str> = builtin_skill_entries().into_iter().map(|(name, _)| name).collect();
+        let mut shipped: Vec<String> = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"))
+            .expect("skills/ exists")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().join("SKILL.md").exists())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        shipped.sort();
+
+        assert_eq!(
+            shipped,
+            registered.iter().map(|name| name.to_string()).collect::<Vec<_>>(),
+            "skills/ and builtin_skill_entries() disagree"
+        );
     }
 
     #[test]

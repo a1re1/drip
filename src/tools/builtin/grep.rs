@@ -624,7 +624,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_ctx(cwd: &str) -> ToolCtx {
-        ToolCtx { cwd: cwd.to_string().into(), allow_net: false }
+        ToolCtx { cwd: cwd.to_string().into(), allow_net: false, reference_roots: Vec::new() }
     }
 
     fn run_grep(cwd: &str, json: serde_json::Value) -> (String, String) {

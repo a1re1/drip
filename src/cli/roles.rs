@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::marketplaces::MarketplaceRoleEntry;
-use crate::cli::skills::{CliSkill, LoadedCliSkill};
+use crate::cli::skills::{CliSkill, LoadedCliSkill, SkillRoleHints};
 use crate::core::config::CliConfig;
 use crate::core::inference::EnvSource;
 use crate::harness::roles::{
@@ -660,8 +660,12 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 
 				match load_skill_content(skill, None) {
 					Ok(loaded) => {
-						prompt_sections
-							.push(format!("# Skill: {}\n\n{}", loaded.name, loaded.content));
+						// Compose through the shared composer so role-embedded
+						// skills get the same "# Skill role hints (advisory)"
+						// section as CLI/slash-activated skills (README contract).
+						prompt_sections.push(crate::cli::skills::compose_skill_system_prompt(
+							"", std::slice::from_ref(&loaded),
+						));
 					}
 					Err(error) => {
 						issues.push(format!(
@@ -824,6 +828,7 @@ pub fn load_skill_content(
 		return Ok(LoadedCliSkill {
 			content: raw.trim().to_string(),
 			name: skill.name.clone(),
+			role_hints: parse_skill_roles_hints(&raw),
 		});
 	};
 
@@ -894,6 +899,7 @@ pub fn load_skill_content(
 	Ok(LoadedCliSkill {
 		content,
 		name: skill.name.clone(),
+		role_hints: parse_skill_roles_hints(&raw),
 	})
 }
 
@@ -947,6 +953,14 @@ fn parse_skill_frontmatter_args(markdown: &str) -> Option<Vec<SkillArgDef>> {
 	}
 
 	Some(defs)
+}
+
+/// Parse the advisory `roles:` block from a skill's frontmatter via the one
+/// shared parser (`parse_skill_frontmatter`), so CLI, slash, and role-loaded
+/// skills all agree on block syntax (two-space indent, blank line ends the
+/// block, first `default:`/first occurrence of each stage wins).
+fn parse_skill_roles_hints(markdown: &str) -> Option<SkillRoleHints> {
+	crate::cli::skills::parse_skill_frontmatter(markdown).roles
 }
 
 fn extract_frontmatter(markdown: &str) -> Option<String> {

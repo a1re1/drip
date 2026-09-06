@@ -2018,6 +2018,15 @@ impl HarnessRun {
         // telemetry, transcript events, and the NDJSON stream all read this.
         let tool_content = (self.redact)(&executed.tool_content);
         self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
+        // drip-specific: memory-bank writes (remember/forget) get their own
+        // event so hooks can react to state changes without parsing tool
+        // names; the payload carries the redacted input (the note itself).
+        if tool_name == "remember" || tool_name == "forget" {
+            self.fire_hook(
+                crate::harness::hooks::HookEvent::MemoryWrite,
+                Some((tool_name, redacted_input.as_str())),
+            );
+        }
         WorkspaceToolExecution {
             failed,
             tool_content,
@@ -2075,27 +2084,44 @@ impl HarnessRun {
     /// Fire user-configured hooks for `event`. A hook failure or timeout
     /// never blocks the run: it is only surfaced as a RunWarning event.
     /// Deliberately blocking (bounded by the configured timeout) so the sync
-    /// tool-dispatch sites can call it; PreToolUse exit-2 blocking semantics
-    /// land with the drip-specific events task.
+    /// tool-dispatch sites can call it; callers that need each hook's outcome
+    /// (the PreToolUse exit-2 veto) use [`Self::fire_hook_checked`].
     fn fire_hook(&self, event: crate::harness::hooks::HookEvent, tool: Option<(&str, &str)>) {
+        self.fire_hook_checked(event, tool);
+    }
+
+    /// Like [`Self::fire_hook`], but returns every hook's outcome so the
+    /// caller can act on it. Failures still surface as RunWarning events
+    /// here; the caller only needs to look for the veto exit code (2).
+    fn fire_hook_checked(
+        &self,
+        event: crate::harness::hooks::HookEvent,
+        tool: Option<(&str, &str)>,
+    ) -> Vec<crate::harness::hooks::HookOutcome> {
         let commands = self.options.hooks.commands_for(event, tool.map(|(name, _)| name));
         if commands.is_empty() {
-            return;
+            return Vec::new();
         }
         let timeout = self.options.hooks.timeout();
         let timestamp = (self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        for command in commands {
-            let payload = crate::harness::hooks::build_hook_payload(event, &self.cwd, tool, &timestamp);
-            let outcome = crate::harness::hooks::run_hook_command(&command, &self.cwd, &payload, timeout);
-            if !outcome.succeeded() {
-                self.emit(HarnessEvent {
-                    data: None,
-                    detail: format!("hook {}: {}", event.as_str(), outcome.describe()),
-                    iteration: self.state.iteration,
-                    r#type: HarnessEventType::RunWarning,
-                });
-            }
-        }
+        commands
+            .iter()
+            .map(|command| {
+                let payload =
+                    crate::harness::hooks::build_hook_payload(event, &self.cwd, tool, &timestamp);
+                let outcome =
+                    crate::harness::hooks::run_hook_command(command, &self.cwd, &payload, timeout);
+                if !outcome.succeeded() {
+                    self.emit(HarnessEvent {
+                        data: None,
+                        detail: format!("hook {}: {}", event.as_str(), outcome.describe()),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+                outcome
+            })
+            .collect()
     }
 
     /// the outer `while` loop: one task loop per iteration
@@ -2824,7 +2850,15 @@ impl HarnessRun {
     /// model (with the context-overflow retry), then parse the reply: a
     /// text-only reply concludes (or is nudged once); tool calls are
     /// normalized and dispatched via `dispatch_tool_calls`.
+    /// Fires `RelayStart` on entry and `RelayFinish` on every exit path.
     pub async fn run_round(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
+        self.fire_hook(crate::harness::hooks::HookEvent::RelayStart, None);
+        let outcome = self.run_round_inner(scope, cycle, round).await;
+        self.fire_hook(crate::harness::hooks::HookEvent::RelayFinish, None);
+        outcome
+    }
+
+    async fn run_round_inner(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
         use crate::harness::model_call::ModelCallOptions;
 
         if self.options.signal.as_ref().map(AbortSignal::is_aborted) == Some(true) {

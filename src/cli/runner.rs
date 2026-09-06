@@ -331,9 +331,34 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
 
     let on_event = args.on_event.clone();
     let published_flag = published_from_workspace.clone();
+    let hooks_for_emit = args.hooks.clone();
+    let cwd_for_emit = args.cwd.clone();
     let emit: EmitFn = Arc::new(move |event: HarnessEvent| {
-        if event.r#type == HarnessEventType::ToolCall && git_publish_pattern().is_match(&event.detail) {
+        let published = event.r#type == HarnessEventType::ToolCall
+            && git_publish_pattern().is_match(&event.detail);
+        if published {
             published_flag.store(true, Ordering::Relaxed);
+            // drip-specific: PRReady fires when the run publishes (git
+            // commit/push, `gh pr create`). Best-effort like every hook: a
+            // failing or timed-out command is reported to stderr, never blocks.
+            let payload = crate::harness::hooks::build_hook_payload(
+                crate::harness::hooks::HookEvent::PRReady,
+                &cwd_for_emit,
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+            );
+            let commands = hooks_for_emit.commands_for(crate::harness::hooks::HookEvent::PRReady, None);
+            for command in &commands {
+                let outcome = crate::harness::hooks::run_hook_command(
+                    command,
+                    &cwd_for_emit,
+                    &payload,
+                    hooks_for_emit.timeout(),
+                );
+                if !outcome.succeeded() {
+                    eprintln!("drip: pr_ready hook failed: {}", outcome.describe());
+                }
+            }
         }
 
         on_event(event);

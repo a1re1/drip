@@ -18,7 +18,9 @@ notify on session/tool activity:
 3. Write hook commands defensively: each gets one JSON payload on stdin
    (`event`/`cwd`/`tool_name`/`tool_input`/`timestamp`), runs under
    `$SHELL -c` with the session's cwd, and is killed at the deadline.
-   Failures only surface as warnings — a hook must never stall a run.
+   Failures only surface as warnings — a hook must never stall a run;
+   the one exception is `pre_tool_use` exiting `2`, which vetoes the tool
+   call and returns the hook's stderr to the model.
 4. Never put untrusted commands in a hooks block: hooks run with the
    user's privileges and are not sandboxed. Prefer small scripts under
    `~/.drip/hooks/` over long inline one-liners.

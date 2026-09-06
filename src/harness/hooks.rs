@@ -13,8 +13,9 @@
 //!   only present for `PreToolUse` / `PostToolUse`, and `tool_input` is the
 //!   (already-redacted) raw input, truncated.
 //! - A hook that exits non-zero, times out, or fails to spawn is logged to
-//!   stderr and never blocks the run. (`PreToolUse` exit-code-2 blocking is a
-//!   follow-up: it needs an awaitable check at dispatch time.)
+//!   stderr and never blocks the run — except `PreToolUse` exit code 2, which
+//!   blocks the tool call (Claude Code's veto semantics) and feeds the hook's
+//!   stderr back to the model.
 //! - Every hook is bounded by `timeout_seconds` (default 10): on expiry the
 //!   child is killed and the run continues.
 
@@ -44,6 +45,14 @@ pub enum HookEvent {
     PreToolUse,
     PostToolUse,
     Stop,
+    /// drip-specific: a relay round (one model call + tool dispatch) started.
+    RelayStart,
+    /// drip-specific: a relay round finished (any outcome, including abort).
+    RelayFinish,
+    /// drip-specific: the harness memory bank was written (remember/forget).
+    MemoryWrite,
+    /// drip-specific: the run published a PR (git commit/push, `gh pr create`).
+    PRReady,
 }
 
 impl HookEvent {
@@ -57,6 +66,10 @@ impl HookEvent {
             HookEvent::PreToolUse => "PreToolUse",
             HookEvent::PostToolUse => "PostToolUse",
             HookEvent::Stop => "Stop",
+            HookEvent::RelayStart => "RelayStart",
+            HookEvent::RelayFinish => "RelayFinish",
+            HookEvent::MemoryWrite => "MemoryWrite",
+            HookEvent::PRReady => "PRReady",
         }
     }
 }
@@ -117,6 +130,18 @@ pub struct HooksConfig {
     pub session_start: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop: Vec<String>,
+    /// drip-specific: fires at the start of each relay round.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_start: Vec<String>,
+    /// drip-specific: fires when a relay round ends (any outcome).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_finish: Vec<String>,
+    /// drip-specific: fires when the memory bank is written (remember/forget).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_write: Vec<String>,
+    /// drip-specific: fires when the run publishes a PR.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_ready: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
 }
@@ -131,6 +156,10 @@ impl HooksConfig {
             && self.loop_finish.is_empty()
             && self.session_start.is_empty()
             && self.stop.is_empty()
+            && self.relay_start.is_empty()
+            && self.relay_finish.is_empty()
+            && self.memory_write.is_empty()
+            && self.pr_ready.is_empty()
             && self.timeout_seconds.is_none()
     }
 
@@ -160,6 +189,10 @@ impl HooksConfig {
             HookEvent::LoopFinish => self.loop_finish.clone(),
             HookEvent::SessionStart => self.session_start.clone(),
             HookEvent::Stop => self.stop.clone(),
+            HookEvent::RelayStart => self.relay_start.clone(),
+            HookEvent::RelayFinish => self.relay_finish.clone(),
+            HookEvent::MemoryWrite => self.memory_write.clone(),
+            HookEvent::PRReady => self.pr_ready.clone(),
         }
     }
 }
@@ -380,5 +413,95 @@ mod tests {
         assert!(hook(Some("Bash*")).matches(Some("Bash")));
         assert!(!hook(Some("Bash*")).matches(Some("Write")));
         assert!(hook(Some(" ")).matches(Some("Bash")));
+    }
+
+    #[test]
+    fn run_hook_command_success_and_failure_exit_codes() {
+        let payload = "{}";
+        let ok = run_hook_command("cat > /dev/null; exit 0", ".", payload, Duration::from_secs(5));
+        assert_eq!(ok.exit_code, Some(0));
+        assert!(ok.succeeded());
+
+        let failed =
+            run_hook_command("cat > /dev/null; exit 3", ".", payload, Duration::from_secs(5));
+        assert_eq!(failed.exit_code, Some(3));
+        assert!(!failed.succeeded());
+
+        // 2 is the PreToolUse veto code: it must be observable on the
+        // outcome so execute_workspace_tool can block the call.
+        let veto = run_hook_command("exit 2", ".", payload, Duration::from_secs(5));
+        assert_eq!(veto.exit_code, Some(2));
+        assert!(!veto.succeeded());
+    }
+
+    #[test]
+    fn run_hook_command_reports_spawn_failure() {
+        let outcome = run_hook_command(
+            "definitely-not-a-real-command-xyz",
+            ".",
+            "{}",
+            Duration::from_secs(5),
+        );
+        // The user shell reports command-not-found as a nonzero exit (or the
+        // spawn itself fails); either way the hook must not look successful.
+        assert!(!outcome.succeeded());
+    }
+
+    #[test]
+    fn run_hook_command_times_out_and_kills() {
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("sleep 5", ".", "{}", Duration::from_millis(150));
+        assert!(outcome.timed_out);
+        assert!(!outcome.succeeded());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn payload_shape_for_drip_specific_events() {
+        let memory = build_hook_payload(
+            HookEvent::MemoryWrite,
+            "/tmp/proj",
+            Some(("remember", r#"{"note":"hi"}"#)),
+            "t",
+        );
+        let value: serde_json::Value = serde_json::from_str(&memory).expect("payload is JSON");
+        assert_eq!(value["event"], "MemoryWrite");
+        assert_eq!(value["tool_name"], "remember");
+        assert_eq!(value["tool_input"], r#"{"note":"hi"}"#);
+
+        for event in [HookEvent::RelayStart, HookEvent::RelayFinish, HookEvent::PRReady] {
+            let payload = build_hook_payload(event, "/tmp/proj", None, "t");
+            let value: serde_json::Value = serde_json::from_str(&payload).expect("payload is JSON");
+            assert!(value["tool_name"].is_null());
+            assert!(value["tool_input"].is_null());
+        }
+    }
+
+    #[test]
+    fn commands_for_drip_specific_events() {
+        let config = HooksConfig {
+            relay_start: vec!["echo relay-start".into()],
+            relay_finish: vec!["echo relay-finish".into()],
+            memory_write: vec!["echo memory".into()],
+            pr_ready: vec!["echo pr".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            config.commands_for(HookEvent::RelayStart, None),
+            vec!["echo relay-start".to_string()]
+        );
+        assert_eq!(
+            config.commands_for(HookEvent::RelayFinish, None),
+            vec!["echo relay-finish".to_string()]
+        );
+        assert_eq!(
+            config.commands_for(HookEvent::MemoryWrite, None),
+            vec!["echo memory".to_string()]
+        );
+        assert_eq!(
+            config.commands_for(HookEvent::PRReady, None),
+            vec!["echo pr".to_string()]
+        );
+        assert!(!config.is_empty());
     }
 }

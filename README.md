@@ -457,10 +457,9 @@ Behavior:
 - A malformed `hooks` block prints one nonfatal warning (naming the
   config file) and is ignored; the rest of the config still loads.
 
-Planned next on this branch (parity with drip's own machinery):
-drip-specific `relay_start` / `relay_finish` (subagent relay loops),
-`memory_write` (the remember/forget memory tools), and `pr_ready` (when
-`/navis` publishes a PR).
+`relay_*`, `memory_write`, and `pr_ready` are drip-specific — they exist
+because drip has machinery other harnesses don't: subagent relay rounds,
+the persistent memory bank, and the /navis publish flow.
 
 This mirrors Claude Code's hooks
 ([code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks)):

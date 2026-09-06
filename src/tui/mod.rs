@@ -1,6 +1,7 @@
 // Ink app itself (drip --tui) is the last phase of the port.
 
 pub mod app;
+pub mod compact;
 pub mod markdown_ansi;
 pub mod pane_title;
 pub mod terminal_title;

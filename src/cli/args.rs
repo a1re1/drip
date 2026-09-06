@@ -68,6 +68,8 @@ pub struct ParsedCliArgs {
     pub allow_destructive: bool,
     /// Opt this run into network access (enables the FETCH tool).
     pub allow_net: bool,
+    /// oasis corpus roots for the REFERENCE tool (repeatable --reference-root).
+    pub reference_roots: Vec<String>,
     /// Queue the goal behind a live run instead of refusing (LiveRunError).
     pub enqueue: bool,
     /// Dry-run: plan tasks with read-only tools, stop before executing.
@@ -180,6 +182,7 @@ impl Default for ParsedCliArgs {
             roles_preset_or_path: None,
             allow_destructive: false,
             allow_net: false,
+            reference_roots: Vec::new(),
             enqueue: false,
             plan: false,
             new_goal: false,
@@ -540,6 +543,12 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--allow-net" => {
                 parsed.allow_net = true;
             }
+            "--reference-root" => {
+                if let Some(value) = take_required_value(argv, index, "--reference-root", &mut parsed.errors) {
+                    parsed.reference_roots.push(value);
+                    index += 1;
+                }
+            }
             "--enqueue" => {
                 parsed.enqueue = true;
             }
@@ -773,6 +782,24 @@ mod tests {
         assert!(!parse(&["-x"]).errors.is_empty());
         assert!(parse(&["do the work"]).errors.is_empty());
         assert_eq!(parse(&["do the work"]).goal.as_deref(), Some("do the work"));
+    }
+
+    // --reference-root is repeatable and ordered: oasis searches the roots in
+    // the order they are given, so the parse must not reorder or dedupe them.
+    #[test]
+    fn collects_reference_roots_in_order_and_requires_a_value() {
+        assert!(parse(&["goal"]).reference_roots.is_empty());
+        assert_eq!(
+            parse(&["--reference-root", "b/wiki", "--reference-root", "a/wiki", "goal"]).reference_roots,
+            vec!["b/wiki".to_string(), "a/wiki".to_string()]
+        );
+
+        let missing_value = parse(&["--reference-root"]);
+        assert!(
+            missing_value.errors.iter().any(|problem| problem.contains("--reference-root")),
+            "{:?}",
+            missing_value.errors
+        );
     }
 
     #[test]

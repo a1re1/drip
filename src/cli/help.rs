@@ -159,13 +159,17 @@ OPTIONS
 	                              --wait/--result to collect the outcome
 	--allow-net                   Opt the run into network access: enables the FETCH
 	                              tool (bounded readable-text web fetch, off by default)
+	--reference-root <dir>        Point the REFERENCE tool at an oasis-indexed markdown
+	                              corpus (repeatable; also DRIP_REFERENCE_ROOTS or
+	                              OASIS_ROOTS, colon-separated). Without a root the tool
+	                              is left out of the pack; requires the `oasis` binary
 	--allow-destructive           Downgrade destructive-command policy blocks (rm -rf
 	                              outside the workspace, git push --force / reset --hard /
 	                              clean -f, sudo, curl|sh, device writes) to warnings for
 	                              this run; a repo can allowlist specific commands in
 	                              .drip/policy.json {"allowCommands": ["<substring>"]}
 	--skills                      List discovered skills with source and description;
-	                              a built-in pack of seven ships with drip
+	                              a built-in pack ships with drip
 	                              (verify-before-done, tdd, commit-discipline,
 	                              debug-root-cause, refactor-safely,
 	                              review-independently, migration-discipline),
@@ -270,6 +274,7 @@ mod tests {
             "--no-skills",
             "--allow-destructive",
             "--allow-net",
+            "--reference-root",
             "--enqueue",
             "--plan",
             "--detach",

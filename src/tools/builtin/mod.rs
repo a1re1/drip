@@ -13,6 +13,7 @@ pub mod fetch;
 pub mod grep;
 pub mod patch;
 pub mod read;
+pub mod reference;
 pub mod verify;
 
 use anyhow::{anyhow, Result};
@@ -27,6 +28,8 @@ use crate::tools::helpers::parse_tool_arguments;
 pub struct ToolCtx {
     pub cwd: PathBuf,
     pub allow_net: bool,
+    /// Optional oasis corpus roots for the REFERENCE tool; empty = unregistered.
+    pub reference_roots: Vec<PathBuf>,
 }
 
 impl Default for ToolCtx {
@@ -34,6 +37,7 @@ impl Default for ToolCtx {
         Self {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             allow_net: false,
+            reference_roots: Vec::new(),
         }
     }
 }

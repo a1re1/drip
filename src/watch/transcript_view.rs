@@ -207,6 +207,14 @@ pub fn summarize_tool_call(tool_name: &str, raw_args: &str) -> String {
             let (paths, write) = patch_targets(&args);
             (!paths.is_empty()).then(|| format!("{tool_name} {}{}", paths.join(", "), if write { " (write)" } else { "" }))
         }
+        "REFERENCE" => match str_arg(&args, "action").as_deref() {
+            Some("show") => Some(match (str_arg(&args, "path"), args.get("chunk").and_then(|value| value.as_i64())) {
+                (Some(path), _) => format!("REFERENCE show {path}"),
+                (None, Some(chunk)) => format!("REFERENCE show chunk {chunk}"),
+                (None, None) => "REFERENCE show".to_string(),
+            }),
+            _ => str_arg(&args, "query").map(|query| format!("REFERENCE search {}", collapse(query))),
+        },
         "DIR" => str_arg(&args, "path").filter(|p| !p.is_empty()).map(|path| format!("DIR {path}")),
         _ => None,
     };

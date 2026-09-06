@@ -1169,6 +1169,7 @@ mod execute_tests {
         ToolCtx {
             cwd: dir.to_path_buf(),
             allow_net: false,
+            reference_roots: Vec::new(),
         }
     }
 
@@ -1295,6 +1296,7 @@ mod prepare_tests {
         ToolCtx {
             cwd: std::env::temp_dir(),
             allow_net: false,
+            reference_roots: Vec::new(),
         }
     }
 

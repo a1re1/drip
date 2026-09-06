@@ -300,6 +300,7 @@ mod tests {
         ToolCtx {
             cwd: cwd.to_path_buf(),
             allow_net: false,
+            reference_roots: Vec::new(),
         }
     }
 

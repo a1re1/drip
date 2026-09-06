@@ -52,7 +52,7 @@ use crate::core::sessions::{
 };
 use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
-use crate::tools::pack::builtin_tool_pack;
+use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
 use crate::tui::pane_title::{FALLBACK_LABEL, PaneTitle, SPINNER_INTERVAL_MS};
 use crate::tui::session_name::{persist_session_name, read_session_name, read_session_name_context};
 use crate::tui::terminal_title::{
@@ -70,6 +70,8 @@ use crate::watch::ansi::{string_width, wrap_ansi};
 /// What `drip --tui` needs from entry.rs to start.
 pub struct TuiBootstrap {
     pub allow_net: bool,
+    /// oasis corpus roots for the REFERENCE tool (empty = no corpus).
+    pub reference_roots: Vec<std::path::PathBuf>,
     pub config: CliConfig,
     pub cwd: String,
     pub home: DripHome,
@@ -1958,8 +1960,17 @@ impl TuiApp {
         }
     }
 
+    /// The built-in pack knobs this session runs with: the network gate and
+    /// the oasis corpus roots REFERENCE searches.
+    fn tool_options(&self) -> BuiltinToolOptions {
+        BuiltinToolOptions {
+            allow_net: self.bootstrap.allow_net,
+            reference_roots: self.bootstrap.reference_roots.clone(),
+        }
+    }
+
     fn tool_names(&self) -> Vec<String> {
-        builtin_tool_pack(self.bootstrap.allow_net).iter().map(|tool| tool.name.clone()).collect()
+        builtin_tool_pack(self.tool_options()).iter().map(|tool| tool.name.clone()).collect()
     }
 
     // ----- goals ----------------------------------------------------------
@@ -2029,7 +2040,7 @@ impl TuiApp {
         let cwd = self.bootstrap.cwd.clone();
         let max_iterations = self.bootstrap.max_iterations;
         let no_repo_memory = self.bootstrap.no_repo_memory;
-        let allow_net = self.bootstrap.allow_net;
+        let tool_options = self.tool_options();
         let skills = self.active_skills.clone();
         let redact_secrets = load_env_vars(Path::new(&self.bootstrap.home.env_vars_path)).unwrap_or_default();
         let goal_context = resolved.context_block.clone();
@@ -2077,7 +2088,7 @@ impl TuiApp {
                 signal: Some(signal),
                 skills,
                 summarize_run: None,
-                tools: builtin_tool_pack(allow_net),
+                tools: builtin_tool_pack(tool_options.clone()),
                 tool_services: None,
             }));
             index.close();
@@ -3137,6 +3148,7 @@ mod rename_tests {
         index.close();
         let bootstrap = TuiBootstrap {
             allow_net: false,
+            reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),
             cwd: "/tmp".to_string(),
             home,
@@ -3529,6 +3541,7 @@ mod skill_activation_tests {
         };
         let bootstrap = TuiBootstrap {
             allow_net: false,
+            reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),
             cwd: cwd_str,
             home: drip_home,
@@ -3953,6 +3966,7 @@ mod prompt_history_wiring_tests {
         };
         let bootstrap = TuiBootstrap {
             allow_net: false,
+            reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),
             cwd: cwd_str,
             home: drip_home,

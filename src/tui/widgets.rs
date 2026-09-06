@@ -525,4 +525,27 @@ mod tests {
             "{rows:?}"
         );
     }
+
+    #[test]
+    fn skill_menu_hidden_while_composer_disabled() {
+        let skills = vec![("navis".to_string(), "one".to_string())];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 6,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/navis",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        // A disabled composer must not paint skill rows even when the filter
+        // has matches.
+        assert!(
+            rows.iter().all(|row| !row.contains("/navis \u{2014} one")),
+            "skill menu rendered while composer disabled: {rows:?}"
+        );
+    }
 }

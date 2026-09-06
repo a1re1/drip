@@ -425,8 +425,10 @@ impl TuiApp {
             .clone()
             .map(crate::tui::status_line::StatusLineRunner::new);
 
-        // Skill catalog is discovered ONCE at construction; the edit and draw
-        // paths only ever filter this cached copy.
+        // Skill catalog is discovered at construction; the edit and draw
+        // paths only ever filter this cached copy. Command dispatch refreshes
+        // it (refresh_skill_catalog) so skills installed after startup become
+        // visible without any per-draw filesystem scan.
         let skill_catalog: Vec<(String, String)> =
             discover_all_skills(Path::new(&bootstrap.cwd), &bootstrap.home)
                 .unwrap_or_default()
@@ -1255,6 +1257,21 @@ impl TuiApp {
 
     // ----- skills ---------------------------------------------------------
 
+    /// Reload the cached skill catalog from disk.
+    ///
+    /// Only command dispatch calls this: the edit and draw paths must stay
+    /// free of filesystem scans (they only filter the cached copy). Refreshing
+    /// on /skills and /marketplace keeps the suggestion menu and direct
+    /// `/name` activation in sync with skills installed after the TUI started.
+    fn refresh_skill_catalog(&mut self) {
+        self.skill_catalog =
+            discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|skill| (skill.name, skill.description))
+                .collect();
+    }
+
     fn toggle_skill(&mut self, skill_name: &str) {
         if self.active_skills.iter().any(|skill| skill.name == skill_name) {
             self.active_skills.retain(|skill| skill.name != skill_name);
@@ -1405,6 +1422,7 @@ impl TuiApp {
                 }
             }
             "skills" => {
+                self.refresh_skill_catalog();
                 let discovered = discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home).unwrap_or_default();
                 let active_names: HashSet<String> = self.active_skills.iter().map(|skill| skill.name.clone()).collect();
                 let text = if discovered.is_empty() {
@@ -1441,7 +1459,10 @@ impl TuiApp {
                     self.toggle_skill(&name);
                 }
             }
-            "marketplace" => self.marketplace_command(args),
+            "marketplace" => {
+                self.marketplace_command(args);
+                self.refresh_skill_catalog();
+            }
             "plugin" => {
                 let parts: Vec<&str> = args.split_whitespace().collect();
                 let action = parts.first().copied().unwrap_or("");
@@ -3360,6 +3381,33 @@ mod skill_activation_tests {
                 .iter()
                 .any(|entry| matches!(entry, TranscriptEntry::Error(_))),
             "run_goal reports the unresolvable inference profile as an error"
+        );
+    }
+
+    #[test]
+    fn dispatching_a_skill_with_arguments_errors_instead_of_activating() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.dispatch_command("navis", "extra");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "a skill dispatched with arguments must not activate"
+        );
+        assert!(!fixture.app.running);
+        assert!(
+            fixture
+                .app
+                .cells
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Error(_))),
+            "the dispatch must report an unknown-command error, not drop the args silently"
+        );
+        assert!(
+            fixture
+                .app
+                .cells
+                .iter()
+                .all(|entry| !matches!(entry, TranscriptEntry::Skill(_))),
+            "no skill activation may be recorded"
         );
     }
 }

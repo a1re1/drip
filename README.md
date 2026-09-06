@@ -1,4 +1,4 @@
-# drip — Local Code Inference, in Rust
+# drip — Goal based coding harness
 
 A headless-first coding-agent harness driven from the terminal.  
 `drip "goal"` spawns an agent loop, persists its session under `~/.drip/projects/<slug>/sessions/<id>/`,

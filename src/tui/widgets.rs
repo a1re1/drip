@@ -51,7 +51,9 @@ pub struct ComposerProps<'a> {
     pub cursor: usize,
     pub disabled: bool,
     pub mention_suggestions: &'a [String],
+    pub selected_skill_index: usize,
     pub selected_suggestion_index: usize,
+    pub skill_suggestions: &'a [(String, String)],
     pub slash_suggestions: &'a [&'a SlashCommandSpec],
     pub text: &'a str,
 }
@@ -71,6 +73,26 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
             })
             .collect::<String>();
         rows.push(line);
+    }
+
+    // The skill menu is painted before the box, so these rows float ABOVE
+    // the input line (Claude-style floating suggestions). Long names and
+    // descriptions are clipped to the terminal width.
+    let show_skill_menu = !props.disabled
+        && props.slash_suggestions.is_empty()
+        && !props.skill_suggestions.is_empty();
+    if show_skill_menu {
+        let accent = paint(ACCENT_COLOR);
+        let dim = paint(DIM_COLOR);
+        let line_width = width.max(6).saturating_sub(4).max(1);
+        for (index, (name, description)) in props.skill_suggestions.iter().enumerate() {
+            let line = fit(&format!("/{name} — {description}"), line_width, true);
+            if index == props.selected_skill_index {
+                rows.push(format!("  {}{}", accent("▸ "), accent(&line)));
+            } else {
+                rows.push(format!("  {}{}", dim("  "), dim(&line)));
+            }
+        }
     }
 
     let border_color = if props.disabled { DIM_COLOR } else { ACCENT_COLOR };
@@ -261,7 +283,9 @@ mod tests {
             cursor: 1,
             disabled: false,
             mention_suggestions: &[],
+            selected_skill_index: 0,
             selected_suggestion_index: 0,
+            skill_suggestions: &[],
             slash_suggestions: &[],
             text: "abc",
         };
@@ -276,7 +300,9 @@ mod tests {
             cursor: 8,
             disabled: false,
             mention_suggestions: &[],
+            selected_skill_index: 0,
             selected_suggestion_index: 0,
+            skill_suggestions: &[],
             slash_suggestions: &[],
             text: "line one\nline two",
         };
@@ -297,7 +323,9 @@ mod tests {
             cursor: 4,
             disabled: false,
             mention_suggestions: &mentions,
+            selected_skill_index: 0,
             selected_suggestion_index: 0,
+            skill_suggestions: &[],
             slash_suggestions: &[],
             text: "@hel",
         };
@@ -307,13 +335,72 @@ mod tests {
     }
 
     #[test]
+    fn skill_menu_rows_render_above_the_composer_box() {
+        let skills = vec![
+            ("navis".to_string(), "test skill navis".to_string()),
+            ("nada".to_string(), "test skill nada".to_string()),
+        ];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 3,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/na",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        assert!(
+            rows[0].trim_end().ends_with("▸ /navis — test skill navis"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[1].trim_end(), "    /nada — test skill nada");
+        assert!(rows[2].starts_with("╭"), "{rows:?}");
+        let box_index = rows.iter().position(|row| row.starts_with("╭")).unwrap();
+        assert!(
+            rows.iter()
+                .take(box_index)
+                .any(|row| row.contains("/navis")),
+            "menu rows must come before the box"
+        );
+        assert!(!rows.iter().skip(box_index).any(|row| row.contains("navis")));
+    }
+
+    #[test]
+    fn skill_menu_clips_long_descriptions_on_narrow_widths() {
+        let skills = vec![(
+            "navis".to_string(),
+            "an extremely long description that cannot possibly fit inside twenty columns"
+                .to_string(),
+        )];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 5,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/navi",
+        };
+        let rows = plain(&render_composer(&props, 20));
+        assert!(rows[0].contains("…"), "{rows:?}");
+        assert!(rows[0].chars().count() <= 20, "{rows:?}");
+    }
+
+    #[test]
     fn composer_disabled_placeholder() {
         let props = ComposerProps {
             attachments: &[],
             cursor: 0,
             disabled: true,
             mention_suggestions: &[],
+            selected_skill_index: 0,
             selected_suggestion_index: 0,
+            skill_suggestions: &[],
             slash_suggestions: &[],
             text: "",
         };
@@ -359,5 +446,106 @@ mod tests {
         let rows = plain(&render_status_bar(&props, 30));
         assert_eq!(rows.len(), 1);
         assert!(rows[0].chars().count() <= 30);
+    }
+
+    #[test]
+    fn skill_menu_clips_long_names_on_narrow_widths() {
+        let skills = vec![(
+            "an-absurdly-long-skill-name-that-cannot-fit".to_string(),
+            "d".to_string(),
+        )];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 3,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/an",
+        };
+        let rows = plain(&render_composer(&props, 20));
+        assert!(rows[0].contains("…"), "{rows:?}");
+        assert!(rows[0].chars().count() <= 20, "{rows:?}");
+        assert!(rows[0].contains("/an-absurd"), "{rows:?}");
+    }
+
+    #[test]
+    fn skill_menu_marks_the_selected_row_among_several() {
+        let skills = vec![
+            ("navis".to_string(), "one".to_string()),
+            ("nada".to_string(), "two".to_string()),
+            ("nab".to_string(), "three".to_string()),
+        ];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 3,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 2,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/na",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        assert!(rows[0].contains("    /navis — one"), "{rows:?}");
+        assert!(rows[1].contains("    /nada — two"), "{rows:?}");
+        assert!(rows[2].contains("▸ /nab — three"), "{rows:?}");
+        assert!(rows[3].starts_with("╭"), "{rows:?}");
+    }
+
+    #[test]
+    fn skill_menu_yields_to_the_builtin_slash_menu() {
+        let skills = vec![("navis".to_string(), "one".to_string())];
+        let first_builtin = crate::cli::commands::SLASH_COMMANDS[0].name;
+        let builtins: Vec<&crate::cli::commands::SlashCommandSpec> =
+            crate::cli::commands::SLASH_COMMANDS.iter().collect();
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 1,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &builtins,
+            text: "/",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        // Both suggestion sources are non-empty: the builtin slash menu wins
+        // and no skill rows may render.
+        assert!(
+            rows.iter().all(|row| !row.contains("/navis — one")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains(first_builtin)),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn skill_menu_hidden_while_composer_disabled() {
+        let skills = vec![("navis".to_string(), "one".to_string())];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 6,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &[],
+            text: "/navis",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        // A disabled composer must not paint skill rows even when the filter
+        // has matches.
+        assert!(
+            rows.iter().all(|row| !row.contains("/navis \u{2014} one")),
+            "skill menu rendered while composer disabled: {rows:?}"
+        );
     }
 }

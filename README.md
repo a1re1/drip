@@ -30,6 +30,11 @@ drip "refactor auth module" \
   --max-iterations 12 \
   --skill verify-before-done
 
+# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
+# skills appear above the input line; up/down selects, tab completes, and
+# enter enables the skill for that session. Typing a full skill name as a
+# command (e.g. `/navis`) also enables it without starting a run.
+
 # Machine-readable output (NDJSON; final line is the result)
 drip "goal" --json
 # → ... {"type":"result","reason":"...","summary":"...","exitCode":0,"taskStats":{...},"lastVerification":"...","continueCommand":"drip --resume <id> \"goal\""}

@@ -19,7 +19,7 @@ const MIN_PANE: usize = 3; // border+border + 1 content row
 
 // ── View model ───────────────────────────────────────────────────────────────
 
-/// 1 | 2 | 3
+/// 1 | 2 | 3 | 4
 pub type FocusPane = u8;
 
 /// Which session list owns the transcript/shells: Running or Recent. Unlike
@@ -60,6 +60,12 @@ pub struct WatchViewModel {
     /// Files discovered behind the selected shell's fd 1/2 — tells the empty
     /// states "no tailable fds" and "tailing, nothing yet" apart.
     pub shell_log_files: Vec<String>,
+    /// Selection index into state_rows (used when focus == 4). Neutral
+    /// until a state pane shows rows; render clamps it to the visible rows.
+    pub sel_state: usize,
+    /// Rows for the State pane, rebuilt on each list tick when the selected
+    /// session's state.json changes (None while the file is absent or unreadable).
+    pub state_rows: Option<Vec<RowCell>>,
     /// Whether Recent is scoped to the current worktree or shows every
     /// worktree of the repo. Defaults to worktree when the cwd sits in one.
     pub scope: Scope,
@@ -518,6 +524,38 @@ fn shells_title(vm: &WatchViewModel) -> String {
     format!("[3] Shells ({})", vm.shells.len())
 }
 
+fn state_title(vm: &WatchViewModel) -> String {
+    let (list, sel) = if vm.session_focus == 1 {
+        (&vm.running, vm.sel_running)
+    } else {
+        (&vm.recent, vm.sel_recent)
+    };
+    let short = list
+        .get(sel)
+        .map(|rec| short_id(&rec.id))
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    format!("[4] State \u{b7} {short}")
+}
+
+/// The state pane footer note: the recorded state is stale when the selected
+/// session is not running (same lease-status check transcript_title uses).
+fn state_stale_note(vm: &WatchViewModel) -> Option<&'static str> {
+    let (list, sel) = if vm.session_focus == 1 {
+        (&vm.running, vm.sel_running)
+    } else {
+        (&vm.recent, vm.sel_recent)
+    };
+    let Some(rec) = list.get(sel) else {
+        return Some("stale");
+    };
+    let running = vm.session_focus == 1 && vm.started_at_ms.contains_key(&rec.id);
+    if running {
+        None
+    } else {
+        Some("stale")
+    }
+}
+
 fn shell_detail_title(vm: &WatchViewModel) -> String {
     format!("[0] Shell · {}", vm.shells.get(vm.sel_shell).map(|p| p.pid.to_string()).unwrap_or_else(|| "—".to_string()))
 }
@@ -542,7 +580,8 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · j/k move · [/] h/l scroll log · w scope · q quit";
+const FOOTER_HINT: &str =
+    "1/2/3/4 focus · tab cycle · j/k move · [/] h/l scroll log · w scope · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -561,6 +600,7 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 
     let run_focused = vm.focus == 1;
     let recent_focused = vm.focus == 2;
+    let state_focused = vm.focus == 4;
 
     let mk_running = |w: usize, h: usize, height: usize| -> Vec<String> {
         render_pane(
@@ -587,6 +627,27 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     let mk_shells = |w: usize, height: usize| -> Vec<String> {
         let note = if vm.focus == 3 { pos_note(vm.sel_shell, vm.shells.len()) } else { None };
         render_pane(w, height, &shells_title(vm), vm.focus == 3, &shell_rows(vm, w.saturating_sub(2), height.saturating_sub(2)), note.as_deref())
+    };
+
+    // The [4] State pane: harness state of the selected session (goal, shared
+    // memory, warm context, last activation, telemetry watchlist). Always a
+    // plain-list box (single focus pane, no drill-in like the [0] column).
+    let mk_state = |w: usize, height: usize| -> Vec<String> {
+        let mut cells = match vm.state_rows.as_ref() {
+            Some(rows) => rows.clone(),
+            None => vec![plain("(no state recorded for this session)", c::gray)],
+        };
+        let sel = vm.sel_state.min(cells.len().saturating_sub(1));
+        cells[sel].selected = true;
+
+        render_pane(
+            w,
+            height,
+            &state_title(vm),
+            state_focused,
+            &cells,
+            state_stale_note(vm),
+        )
     };
 
     // The [0] column: the transcript normally; a shell-detail box over a raw
@@ -622,35 +683,51 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     };
 
     let body: Vec<String> = if cols < PORTRAIT_MAX_COLS {
-        // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
-        // transcript absorbs the reclaimed rows.
-        let heights = portrait_heights(body_h, &[vm.running.len(), vm.recent.len(), vm.shells.len(), 0]);
-        let (h1, h2, h3, h0) = (heights[0], heights[1], heights[2], heights[3]);
+        // Portrait: [1] / [2] / Shells / [4] / [0] stacked full-width; lists
+        // and state hug, transcript absorbs the reclaimed rows.
+        let state_count = vm.state_rows.as_ref().map_or(0, Vec::len);
+        let heights = portrait_heights(
+            body_h,
+            &[
+                vm.running.len(),
+                vm.recent.len(),
+                vm.shells.len(),
+                state_count,
+                0,
+            ],
+        );
+        let (h1, h2, h3, h4, h0) = (heights[0], heights[1], heights[2], heights[3], heights[4]);
         let mut body = mk_running(cols, h1.saturating_sub(2), h1);
         body.extend(mk_recent(cols, h2.saturating_sub(2), h2));
         body.extend(mk_shells(cols, h3));
+        body.extend(mk_state(cols, h4));
         body.extend(mk_zero(cols, h0));
         body
     } else {
-        // Landscape: left [1]/[2]/Shells (~40% width), right full-height [0].
+        // Landscape: left [1]/[2]/Shells/[4] (~40% width), right full-height [0].
         let left_w = (cols * 2 / 5).max(30).min(cols - 20);
         let right_w = cols - left_w;
-        // Content-hug running and shells; recent takes the rest of the left column.
+        // Content-hug running, shells and state; recent takes the rest of the left column.
         let run_desired = vm.running.len().max(1) + 2;
         let shells_desired = vm.shells.len().max(1) + 2;
-        let mut h1 = run_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
-        let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + MIN_PANE)));
-        let mut h2 = body_h as i64 - h1 as i64 - h3 as i64;
+        let state_c = vm.state_rows.as_ref().map_or(0, Vec::len);
+        let state_desired = state_c.max(1) + 2;
+        let mut h1 = run_desired.min(MIN_PANE.max(body_h.saturating_sub(3 * MIN_PANE)));
+        let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + 2 * MIN_PANE)));
+        let mut h4 = state_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + MIN_PANE)));
+        let mut h2 = body_h as i64 - h1 as i64 - h3 as i64 - h4 as i64;
         if h2 < MIN_PANE as i64 {
-            let capped = split_heights(body_h, &[4, 4, 3]);
+            let capped = split_heights(body_h, &[4, 4, 3, 3]);
             h1 = capped[0];
             h2 = capped[1] as i64;
             h3 = capped[2];
+            h4 = capped[3];
         }
         let h2 = h2.max(0) as usize;
         let mut left = mk_running(left_w, h1.saturating_sub(2), h1);
         left.extend(mk_recent(left_w, h2.saturating_sub(2), h2));
         left.extend(mk_shells(left_w, h3));
+        left.extend(mk_state(left_w, h4));
         let right = mk_zero(right_w, body_h);
         hconcat(&left, &right)
     };
@@ -686,6 +763,8 @@ mod tests {
             sel_shell: 0,
             shell_log_lines: vec![],
             shell_log_files: vec![],
+            state_rows: None,
+            sel_state: 0,
             scope: Scope::Repo,
             scope_label: "all worktrees".into(),
         }
@@ -778,5 +857,149 @@ mod tests {
         assert!(frame.contains("[0] Shell · 12"));
         assert!(frame.contains("Log · 12"));
         assert!(widths(&frame).iter().all(|&x| x == 100));
+    }
+
+    // ── State pane (task-3 / P0-1 fix) ───────────────────────────────────────
+
+    use crate::core::types::{
+        HarnessActivationDigest, HarnessMemoryNote, HarnessState, PromotedContextEntry,
+        ToolTelemetryRecord,
+    };
+    use crate::watch::state_view::build_state_rows;
+    use indexmap::IndexMap;
+
+    /// Crafted harness state that fills all four lci sidebar sections, so the
+    /// rendered frame must show every section header.
+    fn crafted_state() -> HarnessState {
+        let mut telemetry = IndexMap::new();
+        telemetry.insert(
+            "t-1".to_string(),
+            ToolTelemetryRecord {
+                call_count: 5,
+                input_preview: "src/x.rs".to_string(),
+                iterations_used: vec![1, 2],
+                key: "t-1".to_string(),
+                last_failed: None,
+                last_output: "ok".to_string(),
+                last_used_iteration: 2,
+                raw_input: "{}".to_string(),
+                reinforcements: 0,
+                tool_name: "bash".to_string(),
+            },
+        );
+        HarnessState {
+            goal: "state pane test goal".to_string(),
+            iteration: 3,
+            memory: vec![HarnessMemoryNote {
+                created_at_iteration: 2,
+                id: "m-1".to_string(),
+                text: "remembered note text".to_string(),
+            }],
+            promoted_context: vec![PromotedContextEntry {
+                dynamic: true,
+                input_preview: "READ src/main.rs".to_string(),
+                key: "k-1".to_string(),
+                last_failed: None,
+                output: "1..10".to_string(),
+                promoted_at_iteration: 2,
+                raw_input: "{}".to_string(),
+                reinforcements: 1,
+                tool_name: "read_file".to_string(),
+                ttl: 4,
+            }],
+            last_activation: Some(HarnessActivationDigest {
+                actions: vec![
+                    "edited src/main.rs".to_string(),
+                    "ran cargo test".to_string(),
+                ],
+                cycles: Some(2),
+                iteration: 3,
+                r#loop: Some(5),
+                outcome: "completed".to_string(),
+                task_id: Some("task-3".to_string()),
+            }),
+            telemetry,
+            ..HarnessState::default()
+        }
+    }
+
+    /// P0-1 acceptance: a session with state.json renders all four lci
+    /// sections in the [4] pane at a portrait AND a landscape size, and the
+    /// frame invariant (exactly `rows` lines of `cols` columns) still holds.
+    #[test]
+    fn state_pane_renders_all_four_sections_in_both_layouts() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.running.push(record("aaaaaaaa-1", "goal needing state"));
+        vm.session_focus = 1;
+        vm.started_at_ms.insert("aaaaaaaa-1".to_string(), 1000);
+        vm.state_rows = Some(build_state_rows(&crafted_state()));
+        for (cols, lines) in [(80, 36), (120, 36)] {
+            let frame = render_frame(&vm, cols, lines);
+            let w = widths(&frame);
+            assert_eq!(w.len(), lines, "{cols}x{lines}");
+            assert!(
+                w.iter().all(|&x| x == cols),
+                "{cols}x{lines} width mismatch"
+            );
+            assert!(
+                frame.contains("[4] State"),
+                "{cols}x{lines}: pane title missing"
+            );
+            assert!(
+                frame.contains("SHARED MEMORY"),
+                "{cols}x{lines}: Shared memory section missing"
+            );
+            assert!(
+                frame.contains("WARM CONTEXT"),
+                "{cols}x{lines}: Warm context section missing"
+            );
+            assert!(
+                frame.contains("LAST ACTIVATION"),
+                "{cols}x{lines}: Last activation section missing"
+            );
+            assert!(
+                frame.contains("TELEMETRY WATCHLIST"),
+                "{cols}x{lines}: Telemetry section missing"
+            );
+            assert!(
+                frame.contains("m-1"),
+                "{cols}x{lines}: memory note id missing"
+            );
+            assert!(
+                frame.contains("read_file"),
+                "{cols}x{lines}: promoted tool missing"
+            );
+            assert!(
+                frame.contains("bash"),
+                "{cols}x{lines}: telemetry tool missing"
+            );
+        }
+    }
+
+    /// Empty + stale paths: no state.json → dim placeholder row + "stale"
+    /// footer; the frame invariant still holds in both layouts.
+    #[test]
+    fn state_pane_dim_placeholder_and_stale_footer_when_no_state() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.running.push(record("aaaaaaaa-1", "goal without state"));
+        // running list but no lease entry → status not running → stale note.
+        vm.session_focus = 1;
+        vm.state_rows = None;
+        for (cols, lines) in [(80, 36), (120, 36)] {
+            let frame = render_frame(&vm, cols, lines);
+            let w = widths(&frame);
+            assert_eq!(w.len(), lines, "{cols}x{lines}");
+            assert!(
+                w.iter().all(|&x| x == cols),
+                "{cols}x{lines} width mismatch"
+            );
+            assert!(frame.contains("[4] State"), "{cols}x{lines}");
+            assert!(frame.contains("no state recorded"), "{cols}x{lines}");
+            assert!(frame.contains("stale"), "{cols}x{lines}");
+        }
     }
 }

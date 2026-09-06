@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
 use crate::core::home::{list_linked_worktree_roots, DripProject};
@@ -18,11 +19,13 @@ use crate::core::sessions::{
     has_any_worktree_session_index, list_all_sessions, open_session_index, session_paths_for, SessionIndex,
     SessionRecord,
 };
+use crate::core::state::load_harness_state;
 use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, scope_sessions, trim_transcript, ScopeOptions, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
 use crate::watch::render::{diff_lines, render_frame, Scope, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
+use crate::watch::state_view::build_state_rows;
 
 const LIST_MS: u64 = 2000; // session-list refresh
 const TAIL_MS: u64 = 300; // transcript tail poll
@@ -65,6 +68,9 @@ fn empty_vm(now: i64) -> WatchViewModel {
         sel_shell: 0,
         shell_log_lines: Vec::new(),
         shell_log_files: Vec::new(),
+        state_rows: None,
+        // Neutral until a state pane shows rows; render clamps it to the visible rows.
+        sel_state: 0,
         // Repo scope is the neutral default; the constructor narrows it to the
         // current worktree when the cwd sits inside one.
         scope: Scope::Repo,
@@ -123,6 +129,10 @@ pub struct WatchApp {
     stopping: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    /// Last state.json path + mtime nanos we loaded — lets refresh_state skip
+    /// the parse when the file hasn't moved.
+    state_file: Option<String>,
+    state_mtime_ns: i64,
 }
 
 impl WatchApp {
@@ -153,6 +163,8 @@ impl WatchApp {
             stopping: false,
             tx,
             rx,
+            state_file: None,
+            state_mtime_ns: i64::MIN,
         }
     }
 
@@ -253,7 +265,53 @@ impl WatchApp {
         self.refresh_sessions();
         self.refresh_shells();
         self.sync_shell_log();
+        self.refresh_state();
         self.draw();
+    }
+
+    // ── state pane ───────────────────────────────────────────────────────────
+
+    /// Rebuild the state pane rows for the selected session when its
+    /// state.json changed since the last load: one mtime stat per list tick,
+    /// and the parse only when the file's path or mtime moved. A missing,
+    /// unreadable, or invalid file yields `None` (the pane's empty hint) —
+    /// never a surfaced error, so opening with a session that has no
+    /// state.json is safe.
+    ///
+    /// Note: the `i64::MIN` sentinel below stands in for BOTH "file absent"
+    /// and "metadata/clock lookup failed". The two cases behave the same in
+    /// practice — an unreadable or stat-failing file simply won't have its
+    /// mtime move, so the guard re-loads once more and, on a file that later
+    /// becomes readable, the mtime change self-heals it.
+    fn refresh_state(&mut self) {
+        let paths = match self
+            .selected_record()
+            .map(|r| session_paths_for(&self.project, &r))
+        {
+            Some(p) => p,
+            None => {
+                self.state_file = None;
+                self.vm.state_rows = None;
+                return;
+            }
+        };
+        let mtime_ns = std::fs::metadata(&paths.state_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_nanos()).ok())
+            .unwrap_or(i64::MIN);
+        if self.state_file.as_deref() == Some(paths.state_path.as_str())
+            && self.state_mtime_ns == mtime_ns
+        {
+            return;
+        }
+        self.vm.state_rows = load_harness_state(std::path::Path::new(&paths.state_path))
+            .ok()
+            .flatten()
+            .map(|s| build_state_rows(&s));
+        self.state_file = Some(paths.state_path);
+        self.state_mtime_ns = mtime_ns;
     }
 
     // Keep the drilled-in shell view pointed at the selected process: rediscover
@@ -446,6 +504,10 @@ impl WatchApp {
         self.vm.sel_running = clamp_sel(self.vm.sel_running as i64, self.vm.running.len());
         self.vm.sel_recent = clamp_sel(self.vm.sel_recent as i64, self.vm.recent.len());
         self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64, self.vm.shells.len());
+        self.vm.sel_state = clamp_sel(
+            self.vm.sel_state as i64,
+            self.vm.state_rows.as_ref().map_or(0, Vec::len),
+        );
     }
 
     fn selected_record(&self) -> Option<SessionRecord> {
@@ -553,16 +615,27 @@ impl WatchApp {
             return;
         }
 
-        // Tab cycles Running → Recent → Shells
+        // Focus the State pane — the selected session's harness state (the lci
+        // sidebar surfaces). Like Shells, it is a [0]-side view: the session
+        // focus is left untouched for the way back.
+        if key == "4" {
+            self.vm.focus = 4;
+            self.draw();
+            return;
+        }
+
+        // Tab cycles Running → Recent → Shells → State
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
                 2 => 3,
+                3 => 4,
                 _ => 1,
             };
+            // Shells and State are [0]-side drills: keep the session focus.
             if self.vm.focus == 3 {
                 self.sync_shell_log();
-            } else {
+            } else if self.vm.focus == 1 || self.vm.focus == 2 {
                 self.vm.session_focus = self.vm.focus;
                 self.sync_focused();
             }
@@ -614,6 +687,13 @@ impl WatchApp {
             self.vm.sel_running = clamp_sel(self.vm.sel_running as i64 + delta, self.vm.running.len());
         } else if self.vm.focus == 2 {
             self.vm.sel_recent = clamp_sel(self.vm.sel_recent as i64 + delta, self.vm.recent.len());
+        } else if self.vm.focus == 4 {
+            // State pane: scroll the state rows; no session sync.
+            self.vm.sel_state = clamp_sel(
+                self.vm.sel_state as i64 + delta,
+                self.vm.state_rows.as_ref().map_or(0, Vec::len),
+            );
+            return;
         } else {
             self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64 + delta, self.vm.shells.len());
             self.sync_shell_log();
@@ -688,4 +768,156 @@ impl WatchApp {
 pub fn run_watch_app(project: DripProject) {
     let mut app = WatchApp::new(project);
     app.start();
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+
+    use crate::core::types::HarnessState;
+    use crate::watch::transcript_view::RowCell;
+
+    // Per-test unique dirs under the OS temp dir (parallel test threads share
+    // the process id, so a counter keeps names unique within this binary).
+    static TMP_IDX: AtomicUsize = AtomicUsize::new(0);
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let n = TMP_IDX.fetch_add(1, AOrdering::SeqCst);
+        let p =
+            std::env::temp_dir().join(format!("dripw-state-{n}-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(p.join("sessions")).unwrap();
+        p
+    }
+
+    fn test_project(dir: &std::path::Path) -> DripProject {
+        DripProject {
+            legacy_index_db_path: None,
+            legacy_sessions_dir: None,
+            home_root: dir.join("home").to_string_lossy().into_owned(),
+            index_db_path: dir
+                .join("home")
+                .join("index.sqlite")
+                .to_string_lossy()
+                .into_owned(),
+            memory_dir: dir.join("memory").to_string_lossy().into_owned(),
+            project_root: Some(dir.to_string_lossy().into_owned()),
+            repo_root: Some(dir.to_string_lossy().into_owned()),
+            repo_slug: "test".into(),
+            root: dir.join(".drip").to_string_lossy().into_owned(),
+            sessions_dir: dir.join("sessions").to_string_lossy().into_owned(),
+            slug: "test".into(),
+            worktree_root: Some(dir.to_string_lossy().into_owned()),
+        }
+    }
+
+    fn recent_session(dir: &std::path::Path, id: &str) -> SessionRecord {
+        SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            cwd: dir.to_string_lossy().into_owned(),
+            goal_count: 1,
+            id: id.into(),
+            last_goal: Some("goal".into()),
+            project_slug: "test".into(),
+            status: "completed".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn app_selecting(dir: &std::path::Path, id: &str) -> WatchApp {
+        let mut app = WatchApp::new(test_project(dir));
+        app.vm.recent.push(recent_session(dir, id));
+        app.vm.session_focus = 2; // Recent list
+        app.vm.sel_recent = 0;
+        app
+    }
+
+    fn state_with_goal(goal: &str) -> HarnessState {
+        HarnessState {
+            created_at: "2026-01-01T00:00:00Z".into(),
+            goal: goal.into(),
+            ..Default::default()
+        }
+    }
+
+    fn row_texts(rows: &[RowCell]) -> Vec<String> {
+        rows.iter().map(|r| r.text.clone()).collect()
+    }
+
+    /// The mtime guard: one stat per tick, parse only when path+mtime moves,
+    /// and no error on a missing or unreadable file.
+    #[test]
+    fn refresh_state_uses_the_mtime_guard() {
+        let dir = tmp_dir("guard");
+        let state_path = dir.join("sessions").join("s1").join("state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let mut app = app_selecting(&dir, "s1");
+
+        // Missing file: no rows, no error.
+        app.refresh_state();
+        assert!(
+            app.vm.state_rows.is_none(),
+            "missing state.json must stay None"
+        );
+        assert!(
+            app.state_mtime_ns == i64::MIN,
+            "absent file records the sentinel mtime"
+        );
+
+        // First valid state.json: rows appear.
+        crate::core::state::save_harness_state(&state_path, &state_with_goal("goal one")).unwrap();
+        app.refresh_state();
+        assert!(
+            app.vm.state_rows.is_some()
+                && row_texts(app.vm.state_rows.as_ref().unwrap())
+                    .iter()
+                    .any(|t| t.contains("goal one")),
+            "rows must appear once state.json exists"
+        );
+        let before = row_texts(app.vm.state_rows.as_ref().unwrap());
+
+        // Unchanged file: guard early-returns without re-reading. Proved by
+        // stripping read permission WITHOUT touching mtime (chmod updates
+        // ctime only) — if the guard reloaded, the load would fail and rows
+        // would become None.
+        let mode = std::fs::metadata(&state_path).unwrap().permissions().mode();
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(mode & !0o444))
+            .unwrap();
+        app.refresh_state();
+        assert_eq!(
+            row_texts(app.vm.state_rows.as_ref().unwrap()),
+            before,
+            "unchanged mtime must not reload the file"
+        );
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        // Changed content (mtime moves): rows rebuild from the new state.
+        let mut st = state_with_goal("goal two");
+        st.memory.push(crate::core::types::HarnessMemoryNote {
+            id: "n1".into(),
+            created_at_iteration: 1,
+            text: "a durable fact".into(),
+        });
+        crate::core::state::save_harness_state(&state_path, &st).unwrap();
+        app.refresh_state();
+        let texts = row_texts(app.vm.state_rows.as_ref().unwrap());
+        assert!(
+            texts.iter().any(|t| t.contains("goal two")),
+            "changed mtime must reload: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("a durable fact")),
+            "changed mtime must reload: {texts:?}"
+        );
+
+        // Nothing selected: guard resets so stale rows do not leak.
+        app.vm.sel_recent = 99;
+        app.refresh_state();
+        assert!(app.vm.state_rows.is_none());
+        assert!(app.state_file.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

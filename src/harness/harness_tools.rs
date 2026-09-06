@@ -15,8 +15,80 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::core::types::{HarnessSurveyOption, HarnessSurveyQuestion, QuestionSurvey};
+
 /// Default cap on review rounds before a rejected task is blocked.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 2;
+
+/// Default seconds the ask_user tool waits for answers.jsonl before the run
+/// ends with reason "awaiting-input" (overridable via `--ask-timeout`).
+/// A complete answer batch is accepted only when it covers every survey
+/// question exactly once and each answer resolves against that question's
+/// options (a listed `choice`, or free `other` text when the question allows
+/// it). Partial or mismatched batches are rejected so the poll keeps waiting
+/// instead of consuming a stale or malformed line.
+pub fn validate_survey_answers(
+    survey: &QuestionSurvey,
+    answers: &crate::core::types::HarnessSurveyAnswers,
+) -> Result<(), String> {
+    let total = survey.questions.len();
+    let mut seen = vec![false; total];
+    for answer in &answers.answers {
+        if answer.index < 0 || answer.index as usize >= total {
+            return Err(format!(
+                "answer index {} is outside this survey's 0-{} question range",
+                answer.index,
+                total.saturating_sub(1)
+            ));
+        }
+        let slot = answer.index as usize;
+        if seen[slot] {
+            return Err(format!("question {slot} was answered more than once"));
+        }
+        seen[slot] = true;
+        let question = &survey.questions[slot];
+        match (&answer.choice, &answer.other) {
+            // Exactly one of choice/other — matches the answers.jsonl codec
+            // (state.rs parse_answer), so a hand-written record cannot pass
+            // one validator and fail the other.
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "question {slot}: answer cannot have both choice and other"
+                ));
+            }
+            (Some(choice), None) => {
+                let listed = question
+                    .options
+                    .iter()
+                    .any(|option| &option.label == choice);
+                if !listed && !question.allow_other {
+                    return Err(format!(
+                        "question {slot}: \"{choice}\" is not one of the listed options"
+                    ));
+                }
+            }
+            (None, None) => {
+                return Err(format!("question {slot}: answer has neither choice nor other"));
+            }
+            (None, Some(other)) => {
+                if !question.allow_other {
+                    return Err(format!(
+                        "question {slot}: this question requires one of the listed options"
+                    ));
+                }
+                if other.trim().is_empty() {
+                    return Err(format!("question {slot}: free-text answer is empty"));
+                }
+            }
+        }
+    }
+    if seen.iter().any(|covered| !covered) {
+        return Err("batch is incomplete: every survey question needs an answer".to_string());
+    }
+    Ok(())
+}
+
+pub const DEFAULT_ASK_USER_TIMEOUT_SECONDS: i64 = 900;
 
 /// A named role (see roles.rs), optionally one whose completed work must be
 /// verified by another role.
@@ -108,11 +180,13 @@ pub enum HarnessOp {
     },
     /// forget
     Forget { scope: MemoryScope, note_id: String },
+    /// ask_user: clarification survey; the run loop blocks on answers.jsonl.
+    AskUser { survey: QuestionSurvey },
 }
 
-/// The 10 harness (framework) tool definitions as OpenAI function-call
-/// specs, in HARNESS_TOOL_SPECS order (alphabetical by function name — the
-/// same order the fixture dumps them in).
+/// The 11 harness (framework) tool definitions as OpenAI function-call
+/// specs, in HARNESS_TOOL_SPECS order (the same order the fixture dumps
+/// them in).
 pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -356,6 +430,59 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "ask_user",
+                "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Use ONLY when the goal is ambiguous or an approach tradeoff needs the operator's decision — preferably during planning, before implementing. Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing.",
+                "parameters": {
+                    "properties": {
+                        "questions": {
+                            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first).",
+                            "items": {
+                                "properties": {
+                                    "allow_other": {
+                                        "description": "When true (the default) the operator may answer with free text instead of a listed option.",
+                                        "type": "boolean"
+                                    },
+                                    "header": {
+                                        "description": "Short label shown above the question.",
+                                        "type": "string"
+                                    },
+                                    "options": {
+                                        "description": "2-4 choices; put your best guess first.",
+                                        "items": {
+                                            "properties": {
+                                                "description": {
+                                                    "description": "What choosing this option means.",
+                                                    "type": "string"
+                                                },
+                                                "label": {
+                                                    "description": "Short choice label recorded back as the answer's choice.",
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "required": ["label", "description"],
+                                            "type": "object"
+                                        },
+                                        "type": "array"
+                                    },
+                                    "question": {
+                                        "description": "The question itself.",
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["header", "options", "question"],
+                                "type": "object"
+                            },
+                            "type": "array"
+                        }
+                    },
+                    "required": ["questions"],
+                    "type": "object"
+                }
+            }
+        }),
 
     ]
 }
@@ -411,7 +538,8 @@ pub fn looks_like_build_task(title: &str) -> bool {
 pub fn is_harness_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "drop_task"
+        "ask_user"
+            | "drop_task"
             | "finish_task"
             | "forget"
             | "note_task"
@@ -766,8 +894,97 @@ pub fn parse_harness_op_with_gate(
             scope: parse_scope(&input),
             note_id: string_or_default(&input, "noteId", ""),
         }),
+        "ask_user" => parse_ask_user_op(&input),
         _ => Err(format!("Unknown harness tool \"{tool_name}\".")),
     }
+}
+
+/// ask_user: the operator-clarification survey. Validates 1-4 questions, each
+/// with a non-empty question/header and 2-4 label/description options;
+/// allow_other defaults to true when omitted. The blocking/answer half lives
+/// in the run loop; this only builds the parsed survey.
+fn parse_ask_user_op(input: &serde_json::Value) -> Result<HarnessOp, String> {
+    let questions_array = input
+        .get("questions")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "ask_user requires a 'questions' array (1-4 items).".to_string())?;
+    if questions_array.is_empty() || questions_array.len() > 4 {
+        return Err(format!(
+            "ask_user requires 1-4 questions; got {}.",
+            questions_array.len()
+        ));
+    }
+    let mut questions = Vec::with_capacity(questions_array.len());
+    for (position, entry) in questions_array.iter().enumerate() {
+        let ordinal = position + 1;
+        let question = entry
+            .get("question")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("ask_user question {ordinal}: 'question' is required."))?;
+        let header = entry
+            .get("header")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("ask_user question {ordinal}: 'header' is required."))?;
+        let options_value = entry
+            .get("options")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| {
+                format!(
+                    "ask_user question {ordinal}: 'options' must be an array of 2-4 choices."
+                )
+            })?;
+        if options_value.len() < 2 || options_value.len() > 4 {
+            return Err(format!(
+                "ask_user question {ordinal}: 'options' must contain 2-4 entries; got {}.",
+                options_value.len()
+            ));
+        }
+        let mut options = Vec::with_capacity(options_value.len());
+        for option_value in options_value {
+            let label = option_value
+                .get("label")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!("ask_user question {ordinal}: every option needs a non-empty 'label'.")
+                })?;
+            let description = option_value
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "ask_user question {ordinal}: option '{label}' needs a non-empty 'description'."
+                    )
+                })?;
+            options.push(HarnessSurveyOption {
+                label: label.to_string(),
+                description: description.to_string(),
+            });
+        }
+        let allow_other = entry
+            .get("allow_other")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        questions.push(HarnessSurveyQuestion {
+            header: header.to_string(),
+            question: question.to_string(),
+            options,
+            allow_other,
+        });
+    }
+    Ok(HarnessOp::AskUser {
+        survey: QuestionSurvey {
+            questions,
+            answers_cursor: None,
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,6 +1371,9 @@ pub struct HarnessOpContext {
     pub gate: Option<HarnessRoleGate>,
     /// Repo memory bank directory + disabled flag (remember/forget repo scope).
     pub repo_memory: RepoMemoryConfig,
+    /// Whether the ask_user tool is enabled for this run (--ask). When false,
+    /// an AskUser op registers as a failed tool call with a clear message.
+    pub ask_user_enabled: bool,
 }
 
 /// The raw status field as text ("completed", "dropped"), for messages like
@@ -2002,6 +2222,29 @@ pub fn apply_harness_op(
                 direct_response: None,
             }
         }
+        HarnessOp::AskUser { survey } => {
+            if !ctx.ask_user_enabled {
+                return HarnessOpOutcome {
+                    text: "ask_user is not enabled for this run: start drip with --ask to allow clarification questions. Decide from the goal and repository context instead of asking.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+            // Persist the pending survey; the run loop turns this into the
+            // question event + blocking answers.jsonl wait (and owns the
+            // timeout/awaiting-input path). No answer is available yet, so
+            // this is deliberately not a successful completion.
+            state.pending_questions = Some(survey);
+            HarnessOpOutcome {
+                text: "ask_user: clarification survey pending — blocked waiting for the operator's answers.".to_string(),
+                state_changed: true,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
         HarnessOp::Forget { scope, note_id } => {
             let text;
             let mut state_changed = false;
@@ -2198,6 +2441,103 @@ mod apply_harness_op_tests {
     }
 
     /// recorded on state, and the loop ends.
+    /// ask_user parse: a valid survey builds the AskUser op; allow_other
+    /// defaults to true when the model omits it.
+    #[test]
+    fn ask_user_parses_a_valid_survey_and_defaults_allow_other() {
+        let op = parse_harness_op(
+            "ask_user",
+            r#"{"questions":[{"header":"DB","question":"Which database?","options":[{"label":"SQLite","description":"embedded"},{"label":"Postgres","description":"server"}]}]}"#,
+        )
+        .expect("ask_user input parses");
+        match op {
+            HarnessOp::AskUser { survey } => {
+                assert_eq!(survey.questions.len(), 1);
+                assert_eq!(survey.questions[0].header, "DB");
+                assert_eq!(survey.questions[0].question, "Which database?");
+                assert_eq!(survey.questions[0].options.len(), 2);
+                assert_eq!(survey.questions[0].options[0].label, "SQLite");
+                assert!(survey.questions[0].allow_other);
+            }
+            _ => panic!("expected AskUser op"),
+        }
+    }
+
+    /// ask_user parse rejections: out-of-range question/option counts and a
+    /// blank required header fail with clear messages.
+    #[test]
+    fn ask_user_rejects_out_of_range_questions_and_options() {
+        let five = serde_json::json!({
+            "questions": (0..5).map(|index| serde_json::json!({
+                "header": format!("Q{index}"),
+                "question": format!("question {index}?"),
+                "options": [
+                    {"label": "a", "description": "d"},
+                    {"label": "b", "description": "d"}
+                ]
+            })).collect::<Vec<_>>()
+        });
+        let err = parse_harness_op("ask_user", &five.to_string()).unwrap_err();
+        assert!(err.contains("1-4 questions"), "{err}");
+
+        let one_option = serde_json::json!({
+            "questions": [{"header": "Q", "question": "q?", "options": [{"label": "a", "description": "d"}]}]
+        });
+        let err = parse_harness_op("ask_user", &one_option.to_string()).unwrap_err();
+        assert!(err.contains("2-4"), "{err}");
+
+        let blank_header = serde_json::json!({
+            "questions": [{"header": "   ", "question": "q?", "options": [{"label": "a", "description": "d"}, {"label": "b", "description": "d"}]}]
+        });
+        let err = parse_harness_op("ask_user", &blank_header.to_string()).unwrap_err();
+        assert!(err.contains("'header' is required"), "{err}");
+
+        let empty = serde_json::json!({"questions": []});
+        let err = parse_harness_op("ask_user", &empty.to_string()).unwrap_err();
+        assert!(err.contains("1-4 questions"), "{err}");
+    }
+
+    /// Gating: with ask_user disabled (the default) a call registers as a
+    /// failed tool call with a clear message and no pending state is set.
+    #[test]
+    fn ask_user_disabled_registers_a_failed_call_without_pending_state() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op(
+            "ask_user",
+            r#"{"questions":[{"header":"Q","question":"q?","options":[{"label":"a","description":"d"},{"label":"b","description":"d"}]}]}"#,
+        )
+        .unwrap();
+        let outcome = apply_harness_op(&mut state, op, &HarnessOpContext::default());
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(state.pending_questions.is_none());
+        assert!(outcome.text.contains("--ask"), "{}", outcome.text);
+    }
+
+    /// Enabled: the pending survey is persisted on state and the outcome
+    /// reports the blocked/pending condition (never a fake answered success).
+    #[test]
+    fn ask_user_enabled_persists_the_pending_survey() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op(
+            "ask_user",
+            r#"{"questions":[{"header":"Q","question":"q?","options":[{"label":"a","description":"d"},{"label":"b","description":"d"}],"allow_other":false}]}"#,
+        )
+        .unwrap();
+        let ctx = HarnessOpContext {
+            ask_user_enabled: true,
+            ..HarnessOpContext::default()
+        };
+        let outcome = apply_harness_op(&mut state, op, &ctx);
+        assert!(outcome.state_changed);
+        let pending = state.pending_questions.expect("pending survey persisted");
+        assert_eq!(pending.questions.len(), 1);
+        assert_eq!(pending.questions[0].options[0].label, "a");
+        assert!(!pending.questions[0].allow_other);
+        assert!(outcome.text.contains("pending"), "{}", outcome.text);
+        assert!(outcome.direct_response.is_none());
+    }
+
     #[test]
     fn respond_records_the_direct_answer_and_ends_the_loop() {
         let mut state = create_harness_state("test goal: respond");

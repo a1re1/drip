@@ -50,7 +50,9 @@ use crate::core::sessions::{
     create_session, list_all_sessions, open_session_index, resolve_any_session_ref, session_paths_for, CreateSessionArgs,
     ProjectPaths, SessionPaths, SessionRecord,
 };
-use crate::core::types::HarnessEvent;
+use crate::core::types::{
+    HarnessEvent, HarnessEventType, HarnessSurveyAnswer, HarnessSurveyAnswers, QuestionSurvey,
+};
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
 use crate::tui::pane_title::{FALLBACK_LABEL, PaneTitle, SPINNER_INTERVAL_MS};
@@ -70,6 +72,10 @@ use crate::watch::ansi::{string_width, wrap_ansi};
 /// What `drip --tui` needs from entry.rs to start.
 pub struct TuiBootstrap {
     pub allow_net: bool,
+    /// `--ask` opt-in: the ask_user tool surveys the operator via an overlay.
+    pub ask: bool,
+    /// `--ask-timeout <seconds>` override for the survey answer wait.
+    pub ask_timeout_secs: Option<i64>,
     /// oasis corpus roots for the REFERENCE tool (empty = no corpus).
     pub reference_roots: Vec<std::path::PathBuf>,
     pub config: CliConfig,
@@ -156,6 +162,7 @@ fn short_id(id: &str) -> String {
 enum OverlayKind {
     Model,
     Prompt,
+    Question,
     Sessions,
     ToolModel,
 }
@@ -164,7 +171,25 @@ struct Overlay {
     items: Vec<PickerItem>,
     kind: OverlayKind,
     selected: usize,
-    title: &'static str,
+    title: String,
+}
+
+/// Sentinel PickerItem id for the survey's free-text escape hatch — a NUL
+/// prefix keeps it disjoint from any real option label.
+const SURVEY_OTHER_ID: &str = "\u{0}other";
+
+/// A live ask_user survey being answered one question at a time. The harness
+/// thread stays blocked on answers.jsonl; the overlay/composer only collect.
+struct SurveyState {
+    survey: QuestionSurvey,
+    /// Question currently shown (0-based).
+    current: usize,
+    answers: Vec<HarnessSurveyAnswer>,
+    /// Some while the operator is typing a free-text "Other…" answer.
+    other_input: Option<String>,
+    /// answers.jsonl of the session whose run asked — captured at open so a
+    /// later session switch cannot redirect the answers to the wrong file.
+    answers_path: std::path::PathBuf,
 }
 
 enum Msg {
@@ -438,6 +463,12 @@ struct TuiApp {
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
     skill_suggestions: Vec<(String, String)>,
+    /// Live ask_user clarification survey (staged multiple-choice overlay).
+    survey: Option<SurveyState>,
+    /// Session the current (or last) goal run belongs to — a late Question
+    /// event from an old run must not open a survey against a switched
+    /// session (mirrors the title/rename epoch guards).
+    run_session_id: Option<String>,
     session: SessionRecord,
     status_line_next_refresh: Option<Instant>,
     status_line_output: Option<crate::tui::status_line::StatusLineOutput>,
@@ -559,6 +590,8 @@ impl TuiApp {
             overlay: None,
             paste_buffer: None,
             paths,
+            survey: None,
+            run_session_id: None,
             pending_cells: Vec::new(),
             pending_detail: None,
             prompt_history: PromptHistory::new(64),
@@ -697,8 +730,19 @@ impl TuiApp {
             rows.extend(render_tool_group(group, self.cols));
         }
 
-        if let Some(overlay) = &self.overlay {
-            rows.extend(render_picker(overlay.title, &overlay.items, overlay.selected, self.cols));
+        if let Some(state) = self.survey.as_ref().filter(|state| state.other_input.is_some()) {
+            let question = state
+                .survey
+                .questions
+                .get(state.current)
+                .map(|question| question.question.as_str())
+                .unwrap_or("");
+            let input = state.other_input.as_deref().unwrap_or("");
+            rows.push(format!("Other — {question}"));
+            rows.push(format!("> {input}▏"));
+            rows.push("enter to submit · esc back to choices".to_string());
+        } else if let Some(overlay) = &self.overlay {
+            rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
         } else {
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
             rows.extend(render_composer(
@@ -1068,9 +1112,56 @@ impl TuiApp {
     // ----- keys -----------------------------------------------------------
 
     fn on_key(&mut self, key: Key) {
+        // Free-text "Other…" survey answer: collected before the overlay arm
+        // and the running guard so typing works mid-run.
+        if self.survey.as_ref().is_some_and(|state| state.other_input.is_some()) {
+            match key {
+                Key::Return => {
+                    let text = self
+                        .survey
+                        .as_ref()
+                        .and_then(|state| state.other_input.clone())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    if !text.is_empty() {
+                        self.record_survey_answer(None, Some(text));
+                    }
+                }
+                Key::Escape => {
+                    if let Some(state) = self.survey.as_mut() {
+                        state.other_input = None;
+                    }
+                    self.open_survey_question();
+                }
+                Key::Backspace => {
+                    if let Some(input) = self.survey.as_mut().and_then(|state| state.other_input.as_mut()) {
+                        input.pop();
+                    }
+                }
+                Key::Text(text) | Key::Paste(text) => {
+                    if let Some(input) = self.survey.as_mut().and_then(|state| state.other_input.as_mut()) {
+                        input.push_str(&text);
+                    }
+                }
+                Key::Ctrl('c') => self.quit = true,
+                _ => {}
+            }
+            return;
+        }
+
         if let Some(overlay) = self.overlay.as_mut() {
             match key {
-                Key::Escape => self.overlay = None,
+                Key::Escape => {
+                    let kind = overlay.kind;
+                    self.overlay = None;
+                    if kind == OverlayKind::Question {
+                        self.survey = None;
+                        self.push_info(
+                            "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
+                        );
+                    }
+                }
                 Key::Return => {
                     let selected = overlay.items.get(overlay.selected).cloned();
                     let kind = overlay.kind;
@@ -1243,6 +1334,9 @@ impl TuiApp {
     fn open_overlay(&mut self, kind: OverlayKind) {
         let settings = &self.config.settings;
         let (title, items): (&'static str, Vec<PickerItem>) = match kind {
+            // Question overlays carry live survey data — opened by
+            // open_survey_question, never through this static menu path.
+            OverlayKind::Question => return,
             OverlayKind::Model => (
                 "model profiles",
                 list_cli_model_profiles(settings)
@@ -1319,11 +1413,139 @@ impl TuiApp {
                     .collect(),
             ),
         };
-        self.overlay = Some(Overlay { items, kind, selected: 0, title });
+        self.overlay = Some(Overlay { items, kind, selected: 0, title: title.to_string() });
+    }
+
+    // ----- ask_user surveys ----------------------------------------------
+
+    fn begin_survey(&mut self, survey: QuestionSurvey) {
+        if survey.questions.is_empty() {
+            return;
+        }
+        if let Some(live) = self.survey.as_ref() {
+            // A resume re-emits the same pending survey; keep the operator's
+            // staged progress instead of silently restarting from question 1.
+            if live.survey.questions == survey.questions {
+                return;
+            }
+            self.push_info("a new clarification survey replaced the one in progress");
+        }
+        self.survey = Some(SurveyState {
+            survey,
+            current: 0,
+            answers: Vec::new(),
+            other_input: None,
+            // The exact file the blocked harness thread polls (loop.rs answers_path()).
+            answers_path: Path::new(&self.paths.state_path).with_file_name("answers.jsonl"),
+        });
+        self.open_survey_question();
+    }
+
+    fn open_survey_question(&mut self) {
+        let Some(state) = &self.survey else { return };
+        let Some(question) = state.survey.questions.get(state.current) else { return };
+        let mut items: Vec<PickerItem> = question
+            .options
+            .iter()
+            .map(|option| PickerItem {
+                detail: Some(option.description.clone()),
+                id: option.label.clone(),
+                label: option.label.clone(),
+            })
+            .collect();
+        if question.allow_other {
+            items.push(PickerItem {
+                detail: Some("answer with free text instead".to_string()),
+                id: SURVEY_OTHER_ID.to_string(),
+                label: "Other…".to_string(),
+            });
+        }
+        let title = format!(
+            "clarification {}/{} · {} — {}",
+            state.current + 1,
+            state.survey.questions.len(),
+            question.header,
+            question.question
+        );
+        self.overlay = Some(Overlay { items, kind: OverlayKind::Question, selected: 0, title });
+    }
+
+    fn record_survey_answer(&mut self, choice: Option<String>, other: Option<String>) {
+        let done = {
+            let Some(state) = self.survey.as_mut() else { return };
+            state.answers.push(HarnessSurveyAnswer {
+                index: state.current as i64,
+                choice,
+                other,
+            });
+            state.other_input = None;
+            state.current += 1;
+            state.current >= state.survey.questions.len()
+        };
+        if done {
+            self.finish_survey();
+        } else {
+            self.open_survey_question();
+        }
+    }
+
+    /// Tear down a live survey and its overlay (session switch, run end).
+    /// The blocked run, if still alive, waits for `drip --answer` or times out.
+    fn drop_survey(&mut self, message: &str) {
+        if self.survey.take().is_none() {
+            return;
+        }
+        if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::Question) {
+            self.overlay = None;
+        }
+        self.push_info(message.to_string());
+    }
+
+    fn finish_survey(&mut self) {
+        let Some(state) = self.survey.as_ref() else { return };
+        let record = HarnessSurveyAnswers { at: now_iso(), answers: state.answers.clone() };
+        // A single local append syscall: transient failures are worth two
+        // cheap retries before falling back to the manual re-answer path.
+        let mut outcome = crate::core::state::answers::append_answers(&state.answers_path, &record);
+        for _ in 0..2 {
+            if outcome.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            outcome = crate::core::state::answers::append_answers(&state.answers_path, &record);
+        }
+        match outcome {
+            Ok(()) => {
+                self.survey = None;
+                self.overlay = None;
+                self.push_info("clarification answers recorded — the run continues");
+            }
+            Err(error) => {
+                // Keep the staged answers: reopen the last question so
+                // re-answering retries the write instead of losing the survey.
+                self.push_error(format!(
+                    "could not record survey answers: {error} — re-answer the last question to retry"
+                ));
+                if let Some(state) = self.survey.as_mut() {
+                    state.answers.pop();
+                    state.current = state.current.saturating_sub(1);
+                }
+                self.open_survey_question();
+            }
+        }
     }
 
     fn on_pick(&mut self, kind: OverlayKind, item: PickerItem) {
         match kind {
+            OverlayKind::Question => {
+                if item.id == SURVEY_OTHER_ID {
+                    if let Some(state) = self.survey.as_mut() {
+                        state.other_input = Some(String::new());
+                    }
+                } else {
+                    self.record_survey_answer(Some(item.id), None);
+                }
+            }
             OverlayKind::Model => match set_active_cli_profile(self.config.clone(), &item.id) {
                 Ok(next) => self.save_config(next, format!("model profile set to {}", item.id)),
                 Err(error) => self.push_error(error.to_string()),
@@ -1365,6 +1587,9 @@ impl TuiApp {
 
     fn switch_session(&mut self, record: SessionRecord) {
         self.flush_pending_cells();
+        // A survey belongs to the session whose run asked it; never carry it
+        // (or write its answers) across a switch.
+        self.drop_survey("survey dismissed by session switch — answer that run with `drip --answer`");
         // History stays in memory across sessions, but browsing state and the
         // saved draft must not leak into the newly loaded session.
         self.prompt_history.reset();
@@ -1978,6 +2203,7 @@ impl TuiApp {
 
     fn run_goal(&mut self, goal_text: String) {
         let goal_images = std::mem::take(&mut self.attachments);
+        self.run_session_id = Some(self.session.id.clone());
         self.running = true;
         self.running_detail = Some("resolving context".to_string());
         // Mention resolution can read a whole directory tree; show the
@@ -2041,6 +2267,8 @@ impl TuiApp {
         let cwd = self.bootstrap.cwd.clone();
         let max_iterations = self.bootstrap.max_iterations;
         let no_repo_memory = self.bootstrap.no_repo_memory;
+        let ask_user_enabled = self.bootstrap.ask;
+        let ask_user_timeout_seconds = self.bootstrap.ask_timeout_secs;
         let tool_options = self.tool_options();
         let skills = self.active_skills.clone();
         let redact_secrets = load_env_vars(Path::new(&self.bootstrap.home.env_vars_path)).unwrap_or_default();
@@ -2066,6 +2294,8 @@ impl TuiApp {
                 let _ = event_tx.send(Msg::Event(event));
             });
             let result = runtime.block_on(run_session_goal(SessionGoalArgs {
+                ask_user_enabled,
+                ask_user_timeout_seconds,
                 cwd,
                 goal: goal_text,
                 goal_context,
@@ -2279,6 +2509,8 @@ impl TuiApp {
     fn finish_run(&mut self) {
         self.abort = None;
         self.pending_detail = None;
+        // The asking run is over — an unanswered survey has no one to answer to.
+        self.drop_survey("the run ended before the survey was answered — resume to be asked again");
         self.flush_pending_cells();
         // Run end is a visible boundary: settle any still-open tool group
         // into scrollback exactly once (completion, cancel, or error).
@@ -2393,6 +2625,32 @@ impl TuiApp {
                     self.repaint();
                 }
                 Ok(Msg::Event(event)) => {
+                    // ask_user surveys open the staged answer overlay; the
+                    // harness thread is blocked on answers.jsonl meanwhile.
+                    if event.r#type == HarnessEventType::Question
+                        // A late event from a run that started before a session
+                        // switch must not bind a survey to the new session.
+                        && self.run_session_id.as_deref() == Some(self.session.id.as_str())
+                    {
+                        if let Some(survey) =
+                            event.data.as_ref().and_then(|data| data.question_survey.clone())
+                        {
+                            self.begin_survey(survey);
+                        }
+                    }
+                    // The survey was satisfied elsewhere (drip --answer):
+                    // close the overlay instead of collecting a dead batch.
+                    // Gated on the accept event's full identity, not just the
+                    // payload field, so no future survey-answers-bearing event
+                    // can close a live overlay by accident.
+                    if event.r#type == HarnessEventType::HarnessOp
+                        && event.data.as_ref().is_some_and(|data| {
+                            data.survey_answers.is_some()
+                                && data.tool_name.as_deref() == Some("ask_user")
+                        })
+                    {
+                        self.drop_survey("survey answered via drip --answer — the run continues");
+                    }
                     self.pending_detail = Some(format!("cycle {}", event.iteration));
                     self.queue_cell(TranscriptEntry::Event(TranscriptEventEntry {
                         at: now_iso(),
@@ -3148,6 +3406,8 @@ mod rename_tests {
         );
         index.close();
         let bootstrap = TuiBootstrap {
+            ask: false,
+            ask_timeout_secs: None,
             allow_net: false,
             reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),
@@ -3541,6 +3801,8 @@ mod skill_activation_tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let bootstrap = TuiBootstrap {
+            ask: false,
+            ask_timeout_secs: None,
             allow_net: false,
             reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),
@@ -3966,6 +4228,8 @@ mod prompt_history_wiring_tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let bootstrap = TuiBootstrap {
+            ask: false,
+            ask_timeout_secs: None,
             allow_net: false,
             reference_roots: Vec::new(),
             config: crate::core::config::create_default_cli_config(),

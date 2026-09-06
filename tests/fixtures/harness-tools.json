@@ -278,5 +278,67 @@
         "type": "object"
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ask_user",
+      "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Use ONLY when the goal is ambiguous or an approach tradeoff needs the operator's decision — preferably during planning, before implementing. Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing.",
+      "parameters": {
+        "properties": {
+          "questions": {
+            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first).",
+            "items": {
+              "properties": {
+                "allow_other": {
+                  "description": "When true (the default) the operator may answer with free text instead of a listed option.",
+                  "type": "boolean"
+                },
+                "header": {
+                  "description": "Short label shown above the question.",
+                  "type": "string"
+                },
+                "options": {
+                  "description": "2-4 choices; put your best guess first.",
+                  "items": {
+                    "properties": {
+                      "description": {
+                        "description": "What choosing this option means.",
+                        "type": "string"
+                      },
+                      "label": {
+                        "description": "Short choice label recorded back as the answer's choice.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "label",
+                      "description"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "question": {
+                  "description": "The question itself.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "header",
+                "options",
+                "question"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions"
+        ],
+        "type": "object"
+      }
+    }
   }
 ]

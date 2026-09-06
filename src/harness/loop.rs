@@ -1275,6 +1275,8 @@ pub struct SolidStateHarnessOptions {
     pub roles: Option<Vec<HarnessRoleRuntime>>,
     pub signal: Option<AbortSignal>,
     pub sleep_impl: Option<SleepFn>,
+    /// Session answers.jsonl path for ask_user surveys (None = no ask_user).
+    pub answers_path: Option<PathBuf>,
     pub stall_limit: Option<i64>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
@@ -1283,6 +1285,13 @@ pub struct SolidStateHarnessOptions {
     pub initial_inbox_cursor: Option<i64>,
     /// `collectOperatorMessages(consumedCount)`: steering that arrived while the run executes.
     pub collect_operator_messages: Option<Box<dyn FnMut(i64) -> Vec<OperatorInboxEntry> + Send>>,
+    /// Opt-in `--ask` clarification surveys: when false, the ask_user spec is
+    /// not sent to the model and calls to it register as failed tool calls.
+    pub ask_user_enabled: bool,
+    /// `--ask-timeout <seconds>`: how long ask_user waits for answers.jsonl
+    /// before persisting the pending survey and ending with awaiting-input
+    /// (default DEFAULT_ASK_USER_TIMEOUT_SECONDS = 900).
+    pub ask_user_timeout_seconds: Option<i64>,
     pub system_prompt: Option<String>,
     pub telemetry: Option<PartialHarnessTelemetryConfig>,
     pub redact_secrets: Vec<(String, String)>,
@@ -1341,6 +1350,9 @@ pub struct HarnessRun {
     pub idle_loops: i64,
     pub escalations_without_progress: i64,
     pub run_futile: bool,
+    pub ask_user_awaiting: bool,
+    pub answers_path: Option<PathBuf>,
+    pub continue_command: Option<String>,
     pub aborted: bool,
     pub run_error: Option<String>,
     pub plan_stopped: bool,
@@ -1465,10 +1477,19 @@ fn build_transport_tools(tools: &[ChatToolDefinition]) -> Vec<OpenAICompatibleRe
 /// The harness (framework) tool specs. Starts from `harness_tool_definitions()`
 /// JSON converted with create_request_tool; when roles are configured,
 /// plan_tasks gains the `role` enum property (order dependsOn, role, title).
-fn build_harness_tool_specs(role_names: &[String]) -> Vec<OpenAICompatibleRequestTool> {
+fn build_harness_tool_specs(
+    role_names: &[String],
+    ask_user_enabled: bool,
+) -> Vec<OpenAICompatibleRequestTool> {
     let mut specs: Vec<OpenAICompatibleRequestTool> =
         crate::harness::harness_tools::harness_tool_definitions()
             .iter()
+            // The opt-in ask_user survey tool is only offered to the model
+            // when the run enables it (--ask); every other spec is unchanged.
+            .filter(|definition| {
+                ask_user_enabled
+                    || definition["function"]["name"].as_str() != Some("ask_user")
+            })
             .map(|definition| {
                 let function = &definition["function"];
                 let name = function["name"].as_str().unwrap_or_default();
@@ -1606,10 +1627,16 @@ impl HarnessRun {
 
         let stall_limit = options.stall_limit.unwrap_or(3);
         let max_task_reopens = options.max_task_reopens.unwrap_or(2);
-        let system_prompt = options
+        let mut system_prompt = options
             .system_prompt
             .clone()
             .unwrap_or_else(|| crate::harness::prompt::DEFAULT_HARNESS_SYSTEM_PROMPT.to_string());
+        // Opt-in clarification guidance: appended ONLY when ask_user is
+        // enabled, so the disabled-path system prompt stays byte-identical.
+        if options.ask_user_enabled {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(crate::harness::prompt::ASK_USER_GUIDANCE_FRAGMENT);
+        }
 
         let telemetry_defaults = default_telemetry_config();
         let telemetry_overrides = options.telemetry.unwrap_or_default();
@@ -1677,7 +1704,8 @@ impl HarnessRun {
             })
         };
         let role_names: Vec<String> = role_map.keys().cloned().collect();
-        let harness_tool_specs = build_harness_tool_specs(&role_names);
+        let harness_tool_specs =
+            build_harness_tool_specs(&role_names, options.ask_user_enabled);
         let mut default_transport_tools = build_transport_tools(&tools);
         default_transport_tools.extend(harness_tool_specs.iter().cloned());
 
@@ -1756,6 +1784,7 @@ impl HarnessRun {
             },
         );
 
+        let run_answers_path = options.answers_path.clone();
         Ok(HarnessRun {
             usage_inbox,
             options,
@@ -1789,6 +1818,9 @@ impl HarnessRun {
             idle_loops: 0,
             escalations_without_progress: 0,
             run_futile: false,
+            ask_user_awaiting: false,
+            answers_path: run_answers_path,
+            continue_command: None,
             aborted: false,
             run_error: None,
             plan_stopped: false,
@@ -1925,9 +1957,221 @@ impl HarnessRun {
         }
     }
 
+    /// Directory-side answers.jsonl path for ask_user surveys: an explicit
+    /// option when set, otherwise next to the run's state.json.
+    fn answers_path(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.answers_path {
+            return Some(path.clone());
+        }
+        self.options
+            .state_path
+            .as_ref()
+            .map(|state_path| state_path.with_file_name("answers.jsonl"))
+    }
+
+    /// `drip --resume <id>` target: the persisted session directory name when
+    /// derivable, else the state path itself.
+    fn resume_target(&self) -> Option<String> {
+        self.options
+            .state_path
+            .as_ref()
+            .and_then(|state_path| state_path.parent())
+            .and_then(|dir| dir.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .or_else(|| {
+                self.options
+                    .state_path
+                    .as_ref()
+                    .map(|state_path| state_path.display().to_string())
+            })
+    }
+
+    /// Run end while an ask_user survey is still pending: persist the survey
+    /// and finish cleanly with reason "awaiting-input" so `drip --resume`
+    /// picks the session (and its answers.jsonl cursor) back up.
+    fn awaiting_input_result(&mut self) -> HarnessRunResult {
+        self.continue_command = self
+            .resume_target()
+            .map(|target| format!("drip --resume {target}"));
+        self.persist();
+        HarnessRunResult {
+            continue_command: self.continue_command.clone(),
+            error_message: None,
+            iterations: self.state.iteration - self.start_iteration,
+            r#loops: self.state.r#loop - self.start_loop,
+            leaked_jobs: None,
+            reason: HarnessRunReason::AwaitingInput,
+            state: self.state.clone(),
+            usage: self.finalize_usage(),
+            stop_latency_ms: self.stop_latency_ms(),
+        }
+    }
+
+    /// Question-event emission shared by live dispatch and resume re-emission.
+    fn emit_question_event(&mut self, survey: &crate::core::types::QuestionSurvey) {
+        self.emit(crate::core::types::HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                question_survey: Some(survey.clone()),
+                ..Default::default()
+            }),
+            detail: format!(
+                "ask_user: {} question(s) pending operator answers",
+                survey.questions.len()
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::Question,
+        });
+    }
+
+    /// Block after a question event until a complete matching answer batch
+    /// arrives in answers.jsonl (~500 ms poll), the run aborts, or the
+    /// ask_user timeout expires. On timeout the pending survey is preserved
+    /// and the run is flagged to end with reason "awaiting-input".
+    async fn run_survey_block(
+        &mut self,
+        survey: crate::core::types::QuestionSurvey,
+    ) -> SurveyWait {
+        let Some(answers_path) = self.answers_path() else {
+            self.ask_user_awaiting = true;
+            return SurveyWait::Aborted;
+        };
+        // A boundary right before the wait marks every earlier line stale for
+        // this survey; persisting the cursor keeps a timeout+resume from
+        // replaying pre-boundary records.
+        let boundary_cursor = crate::core::state::answers::append_boundary(&answers_path)
+            .ok()
+            .and_then(|()| crate::core::state::answers::line_count(&answers_path).ok());
+        if let Some(boundary_cursor) = boundary_cursor {
+            if let Some(pending) = self.state.pending_questions.as_mut() {
+                if pending.answers_cursor.is_none() {
+                    pending.answers_cursor = Some(boundary_cursor);
+                }
+            }
+            self.persist();
+        }
+        let mut cursor = self
+            .state
+            .pending_questions
+            .as_ref()
+            .and_then(|pending| pending.answers_cursor)
+            .or(boundary_cursor)
+            // Boundary append failed (IO): a fresh line count still fences off
+            // earlier surveys' lines — never fall back to replaying from 0.
+            .or_else(|| crate::core::state::answers::line_count(&answers_path).ok())
+            .unwrap_or(0);
+        let timeout_seconds = self
+            .options
+            .ask_user_timeout_seconds
+            .unwrap_or(crate::harness::harness_tools::DEFAULT_ASK_USER_TIMEOUT_SECONDS)
+            .max(0) as u64;
+        let deadline_ms = (self.now)().timestamp_millis() + (timeout_seconds as i64) * 1000;
+        loop {
+            if self
+                .options
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.is_aborted())
+            {
+                return SurveyWait::Aborted;
+            }
+            if let Some(answers) = poll_survey_answers(&answers_path, &survey, &mut cursor) {
+                if let Some(pending) = self.state.pending_questions.as_mut() {
+                    pending.answers_cursor = Some(cursor);
+                }
+                self.accept_survey_answers(survey, answers);
+                return SurveyWait::Answered;
+            }
+            if (self.now)().timestamp_millis() >= deadline_ms {
+                // Keep the pending survey (with its cursor) for --resume.
+                if let Some(pending) = self.state.pending_questions.as_mut() {
+                    pending.answers_cursor = Some(cursor);
+                }
+                self.ask_user_awaiting = true;
+                self.persist();
+                return SurveyWait::TimedOut;
+            }
+            crate::harness::model_call::sleep_unless_aborted(500, self.options.signal.as_ref())
+                .await;
+        }
+    }
+
+    /// Resume path: a persisted pending survey is processed before the next
+    /// model/implementation step — consume an already-matching answer batch
+    /// from answers.jsonl, or re-emit the question event and block again.
+    async fn resume_pending_survey(&mut self) {
+        let Some(survey) = self.state.pending_questions.clone() else {
+            return;
+        };
+        let Some(answers_path) = self.answers_path() else {
+            self.ask_user_awaiting = true;
+            return;
+        };
+        // A missing cursor means the survey never reached its boundary append
+        // (crash or IO failure before run_survey_block persisted it), so there
+        // is no fence to respect: scan from 0 and let validate_survey_answers
+        // filter stale batches — fencing at end-of-file here would silently
+        // skip an answer that legitimately arrived while the run was down.
+        let mut cursor = survey.answers_cursor.unwrap_or(0);
+        // A batch that arrived while the run was down is consumed first; the
+        // question event is only re-emitted when we actually have to wait.
+        for entry in crate::core::state::answers::read_answer_batches_after(&answers_path, cursor) {
+            cursor = cursor.max(entry.line_number + 1);
+            if crate::harness::harness_tools::validate_survey_answers(&survey, &entry.record)
+                .is_ok()
+            {
+                if let Some(pending) = self.state.pending_questions.as_mut() {
+                    pending.answers_cursor = Some(cursor);
+                }
+                self.accept_survey_answers(survey, entry.record);
+                return;
+            }
+            // Rejected batches advance the persisted cursor too, so the next
+            // resume does not re-read (and re-log) the same dead lines.
+            if let Some(pending) = self.state.pending_questions.as_mut() {
+                pending.answers_cursor = Some(cursor);
+            }
+            self.persist();
+        }
+        self.emit_question_event(&survey);
+        self.run_survey_block(survey).await;
+    }
+
+    /// Record accepted answers: clear the pending survey, inject the rendered
+    /// Q->A summary as an operator message (the plan-revision directive is
+    /// part of the rendered text), persist, and emit the completed harness-op
+    /// event.
+    fn accept_survey_answers(
+        &mut self,
+        survey: crate::core::types::QuestionSurvey,
+        answers: crate::core::types::HarnessSurveyAnswers,
+    ) {
+        self.state.pending_questions = None;
+        let mut operator_messages = self.state.operator_messages.take().unwrap_or_default();
+        operator_messages.push(HarnessOperatorMessage {
+            // Iteration disambiguates two accepts stamped in the same instant.
+            id: format!("ask-user-{}-{}", self.state.iteration, answers.at),
+            received_at_iteration: self.state.iteration,
+            text: render_survey_answers(&survey, &answers),
+        });
+        self.state.operator_messages = Some(operator_messages);
+        self.persist();
+        self.emit(crate::core::types::HarnessEvent {
+            data: Some(HarnessEventData {
+                survey_answers: Some(answers.clone()),
+                tool_name: Some("ask_user".to_string()),
+                ..Default::default()
+            }),
+            detail: format!("ask_user: {} answer(s) received", answers.answers.len()),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+    }
+
     pub fn aborted_result(&mut self) -> HarnessRunResult {
         self.persist();
         HarnessRunResult {
+            continue_command: None,
             error_message: None,
             iterations: self.state.iteration - self.start_iteration,
             r#loops: self.state.r#loop - self.start_loop,
@@ -2146,6 +2390,11 @@ impl HarnessRun {
     /// (abort/error paths); None when the outer loop exits normally.
     pub async fn run_loops(&mut self) -> Option<HarnessRunResult> {
         self.fire_hook(crate::harness::hooks::HookEvent::SessionStart, None);
+        // Resume: a pending survey is processed before the next model step.
+        self.resume_pending_survey().await;
+        if self.ask_user_awaiting {
+            return Some(self.awaiting_input_result());
+        }
         while self.state.iteration - self.start_iteration < self.max_iterations {
             if self.signal_aborted() {
                 self.aborted = true;
@@ -2205,7 +2454,7 @@ impl HarnessRun {
                     }
                 }
 
-                if self.run_error.is_some() || self.aborted {
+                if self.run_error.is_some() || self.aborted || self.ask_user_awaiting {
                     break;
                 }
 
@@ -2248,6 +2497,9 @@ impl HarnessRun {
             self.fire_hook(crate::harness::hooks::HookEvent::LoopFinish, None);
             self.fire_hook(crate::harness::hooks::HookEvent::TaskFinish, None);
 
+            if self.ask_user_awaiting {
+                return Some(self.awaiting_input_result());
+            }
             if self.aborted {
                 return Some(self.aborted_result());
             }
@@ -2257,6 +2509,10 @@ impl HarnessRun {
             if self.run_futile {
                 break;
             }
+        }
+
+        if self.ask_user_awaiting {
+            return Some(self.awaiting_input_result());
         }
 
         None
@@ -3190,7 +3446,10 @@ impl HarnessRun {
             ..Default::default()
         });
 
-        self.dispatch_tool_calls(scope, normalized_calls);
+        self.dispatch_tool_calls(scope, normalized_calls).await;
+        if self.ask_user_awaiting {
+            return RoundOutcome::Break;
+        }
 
         RoundOutcome::Continue
     }
@@ -3261,9 +3520,17 @@ impl HarnessRun {
     /// harness ops, or workspace tools (verification tracking, spill,
     /// telemetry, footprint, tool-call/tool-result events), appending the
     /// tool-role messages to the transcript.
-    pub fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
+    pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
         for call in calls {
             let NormalizedCall { call_id, raw_input, tool_name, .. } = call;
+
+            // A survey timeout or a mid-wait abort ends the run: the calls
+            // after it in this same model response must not execute — they
+            // could mutate the workspace past run end or overwrite the
+            // pending survey with a second ask_user.
+            if self.ask_user_awaiting || self.signal_aborted() {
+                break;
+            }
 
             // Once a call ends the loop, later task-terminal calls in the same
             // response are not executed: a worker emitting finish_task twice
@@ -3310,9 +3577,45 @@ impl HarnessRun {
                             memory_dir: String::new(),
                             disabled: true,
                         }),
+                    ask_user_enabled: self.options.ask_user_enabled,
                 };
                 let outcome = match op {
-                    Ok(op) => apply_harness_op(&mut self.state, op, &op_context),
+                    Ok(op) => {
+                        let ask_user_pending = matches!(
+                            op,
+                            crate::harness::harness_tools::HarnessOp::AskUser { .. }
+                        );
+                        let outcome = apply_harness_op(&mut self.state, op, &op_context);
+                        // ask_user accepted: expose the survey as a question
+                        // event (the blocking answers.jsonl wait and the
+                        // awaiting-input timeout land with the lifecycle task).
+                        if ask_user_pending && outcome.state_changed {
+                            if let Some(survey) = self.state.pending_questions.clone() {
+                                let question_count = survey.questions.len();
+                                self.emit(HarnessEvent {
+                                    data: Some(HarnessEventData {
+                                        r#loop: Some(self.state.r#loop),
+                                        question_survey: Some(survey.clone()),
+                                        task_id: scope.current_task_id.clone(),
+                                        ..Default::default()
+                                    }),
+                                    detail: format!(
+                                        "ask_user: {question_count} question(s) pending operator answers"
+                                    ),
+                                    iteration: self.state.iteration,
+                                    r#type: HarnessEventType::Question,
+                                });
+                                let wait = self.run_survey_block(survey.clone()).await;
+                                if !matches!(wait, SurveyWait::Answered) {
+                                    scope.digest_actions.push(
+                                        "ask_user: no answers — run ending (awaiting-input or abort)"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        outcome
+                    }
                     Err(err) => {
                         // Parse failure keeps the run alive: surface the
                         // model-facing error as this call's tool result.
@@ -3958,6 +4261,8 @@ impl HarnessRun {
 
         let reason: HarnessRunReason = if self.run_error.is_some() {
             HarnessRunReason::Error
+        } else if self.ask_user_awaiting {
+            HarnessRunReason::AwaitingInput
         } else if self.plan_stopped {
             HarnessRunReason::Planned
         } else if self.run_futile {
@@ -4026,6 +4331,7 @@ impl HarnessRun {
         }
 
         let reason_wire = match &reason {
+            HarnessRunReason::AwaitingInput => "awaiting-input",
             HarnessRunReason::Aborted => "aborted",
             HarnessRunReason::Completed => "completed",
             HarnessRunReason::Error => "error",
@@ -4047,6 +4353,7 @@ impl HarnessRun {
         self.persist();
 
         HarnessRunResult {
+            continue_command: self.continue_command.clone(),
             error_message: self.run_error.clone(),
             // Per-run counts: resumed and follow-up runs report their own
             // work, not the session-cumulative counters.
@@ -4161,6 +4468,58 @@ impl HarnessRun {
     }
 }
 
+/// Outcome of a blocking ask_user survey wait.
+enum SurveyWait {
+    Answered,
+    TimedOut,
+    Aborted,
+}
+
+/// One answers.jsonl poll: return the first complete batch that validates
+/// against the pending survey, or None to keep waiting. Stale, malformed, and
+/// mismatched batches only advance the cursor — they are never accepted.
+fn poll_survey_answers(
+    answers_path: &Path,
+    survey: &crate::core::types::QuestionSurvey,
+    cursor: &mut usize,
+) -> Option<crate::core::types::HarnessSurveyAnswers> {
+    for entry in crate::core::state::answers::read_answer_batches_after(answers_path, *cursor) {
+        *cursor = (*cursor).max(entry.line_number + 1);
+        if crate::harness::harness_tools::validate_survey_answers(survey, &entry.record).is_ok() {
+            return Some(entry.record);
+        }
+    }
+    None
+}
+
+/// Rendered Q->A summary injected into the conversation as an operator
+/// message; the leading directive tells the model to revise its plan with
+/// plan_tasks/revise_task before continuing.
+fn render_survey_answers(
+    survey: &crate::core::types::QuestionSurvey,
+    answers: &crate::core::types::HarnessSurveyAnswers,
+) -> String {
+    let mut lines = vec![
+        crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE.to_string(),
+    ];
+    for answer in &answers.answers {
+        if answer.index < 0 {
+            continue;
+        }
+        let Some(question) = survey.questions.get(answer.index as usize) else {
+            continue;
+        };
+        let response = match (&answer.choice, &answer.other) {
+            (Some(choice), Some(other)) => format!("{choice} (free text: {other})"),
+            (Some(choice), None) => choice.clone(),
+            (None, Some(other)) => format!("Other: {other}"),
+            (None, None) => continue,
+        };
+        lines.push(format!("Q: {} — A: {}", question.question, response));
+    }
+    lines.join("\n")
+}
+
 /// the public entry point.
 pub async fn run_solid_state_harness(options: SolidStateHarnessOptions) -> Result<HarnessRunResult, String> {
     let mut run = HarnessRun::new(options).await?;
@@ -4168,4 +4527,390 @@ pub async fn run_solid_state_harness(options: SolidStateHarnessOptions) -> Resul
         return Ok(result);
     }
     Ok(run.finish().await)
+}
+
+#[cfg(test)]
+mod ask_user_survey_tests {
+    use super::*;
+    use crate::core::types::{
+        HarnessEventType, HarnessSurveyAnswer, HarnessSurveyAnswers, HarnessSurveyOption,
+        HarnessSurveyQuestion, QuestionSurvey,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![HarnessSurveyQuestion {
+                header: "Approach".into(),
+                question: "Which approach should the run take?".into(),
+                options: vec![
+                    HarnessSurveyOption {
+                        label: "Poll".into(),
+                        description: "poll answers.jsonl".into(),
+                    },
+                    HarnessSurveyOption {
+                        label: "Channel".into(),
+                        description: "in-process channel".into(),
+                    },
+                ],
+                allow_other: true,
+            }],
+        }
+    }
+
+    fn two_question_survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![
+                HarnessSurveyQuestion {
+                    header: "Approach".into(),
+                    question: "Poll or channel?".into(),
+                    options: vec![
+                        HarnessSurveyOption { label: "Poll".into(), description: "file".into() },
+                        HarnessSurveyOption { label: "Channel".into(), description: "pipe".into() },
+                    ],
+                    allow_other: true,
+                },
+                HarnessSurveyQuestion {
+                    header: "Scope".into(),
+                    question: "Include tests?".into(),
+                    options: vec![
+                        HarnessSurveyOption { label: "Yes".into(), description: "with tests".into() },
+                        HarnessSurveyOption { label: "No".into(), description: "without tests".into() },
+                    ],
+                    allow_other: false,
+                },
+            ],
+        }
+    }
+
+    fn batch(index: i64, choice: &str) -> HarnessSurveyAnswers {
+        HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: vec![HarnessSurveyAnswer {
+                index,
+                choice: Some(choice.into()),
+                other: None,
+            }],
+        }
+    }
+
+    fn other_batch(index: i64, text: &str) -> HarnessSurveyAnswers {
+        HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: vec![HarnessSurveyAnswer {
+                index,
+                choice: None,
+                other: Some(text.into()),
+            }],
+        }
+    }
+
+    /// A HarnessRun against a temp session dir with fake monotonic clock
+    /// (60s per now() call) and a 1s survey timeout: deadlines trip
+    /// deterministically with no live waits.
+    async fn test_run_in(
+        dir: &tempfile::TempDir,
+        configure: impl FnOnce(&mut SolidStateHarnessOptions),
+    ) -> HarnessRun {
+        std::fs::create_dir_all(dir.path().join("session")).unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now: NowFn = Arc::new(move || {
+            let step = ticks.fetch_add(1, Ordering::SeqCst) as i64 * 60;
+            base + chrono::Duration::seconds(step)
+        });
+        let mut options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            now: Some(now),
+            state_path: Some(dir.path().join("session/state.json")),
+            ask_user_enabled: true,
+            ask_user_timeout_seconds: Some(1),
+            ..SolidStateHarnessOptions::default()
+        };
+        configure(&mut options);
+        HarnessRun::new(options).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn timeout_persists_pending_survey_and_ends_awaiting_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        run.state.pending_questions = Some(survey());
+        let outcome = run.run_survey_block(survey()).await;
+        assert!(matches!(outcome, SurveyWait::TimedOut));
+        assert!(
+            run.state.pending_questions.is_some(),
+            "timeout must keep the pending survey for --resume"
+        );
+        assert!(
+            run.state.pending_questions.as_ref().unwrap().answers_cursor.is_some(),
+            "timeout must persist the replay cursor with the survey"
+        );
+        let result = run.awaiting_input_result();
+        assert_eq!(result.reason, HarnessRunReason::AwaitingInput);
+        assert_ne!(result.reason, HarnessRunReason::Completed);
+        assert!(
+            result
+                .continue_command
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("drip --resume "),
+            "awaiting-input result needs a usable continueCommand, got {:?}",
+            result.continue_command
+        );
+        let loaded = crate::core::state::load_harness_state(
+            &dir.path().join("session/state.json"),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            loaded.pending_questions.is_some(),
+            "pending survey must be persisted to state.json on timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_exits_the_survey_poll_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let signal = AbortSignal::new();
+        signal.abort();
+        let mut run = test_run_in(&dir, |o| o.signal = Some(signal)).await;
+        run.state.pending_questions = Some(survey());
+        let started = std::time::Instant::now();
+        let outcome = run.run_survey_block(survey()).await;
+        assert!(matches!(outcome, SurveyWait::Aborted));
+        assert!(
+            started.elapsed().as_secs() < 2,
+            "abort must exit the poll promptly, took {:?}",
+            started.elapsed()
+        );
+        assert!(run.state.pending_questions.is_some());
+    }
+
+    #[tokio::test]
+    async fn resume_with_answers_consumes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        run.state.pending_questions = Some(survey());
+        let path = run.answers_path().unwrap();
+        crate::core::state::answers::append_answers(&path, &batch(0, "Poll")).unwrap();
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_none(),
+            "a matching answer batch must consume the pending survey"
+        );
+        let messages = run.state.operator_messages.as_ref().expect("accepted answers must record an operator feedback message");
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].text.contains("Q: Which approach should the run take?"),
+            "operator feedback must carry the rendered Q->A summary, got: {}",
+            messages[0].text
+        );
+        // Resuming again with the cursor already past the consumed line must
+        // not replay the same answers.
+        let cursor = crate::core::state::answers::line_count(&path).unwrap();
+        run.state.pending_questions = Some(survey());
+        run.state.pending_questions.as_mut().unwrap().answers_cursor = Some(cursor);
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_some(),
+            "already-consumed answers must not be replayed"
+        );
+        assert_eq!(
+            run.state.operator_messages.as_ref().map(|m| m.len()),
+            Some(1),
+            "exactly one feedback message despite a second resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_without_answers_reemits_the_question_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut run = test_run_in(&dir, move |o| {
+            o.on_event = Some(Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            }));
+        })
+        .await;
+        run.state.pending_questions = Some(survey());
+        let path = run.answers_path().unwrap();
+        std::fs::write(&path, "").unwrap();
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_some(),
+            "without answers the survey must stay pending"
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event.r#type, HarnessEventType::Question)),
+            "resume without answers must re-emit the question event"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_and_invalid_batches_are_not_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        run.state.pending_questions = Some(survey());
+        let path = run.answers_path().unwrap();
+        crate::core::state::answers::append_line(&path, "not json at all").unwrap();
+        crate::core::state::answers::append_answers(&path, &batch(5, "Poll")).unwrap();
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_some(),
+            "malformed and out-of-range records must be skipped, not consumed"
+        );
+        assert!(run.state.operator_messages.is_none());
+        // A complete valid batch arriving afterwards is still consumed.
+        crate::core::state::answers::append_answers(&path, &batch(0, "Channel")).unwrap();
+        run.state.pending_questions = Some(survey());
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_none(),
+            "a complete valid batch after invalid ones must be consumed"
+        );
+    }
+
+    #[test]
+    fn validate_survey_answers_rejects_out_of_range_duplicate_and_partial() {
+        let survey = two_question_survey();
+        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(0, "Poll")).is_err());
+        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(2, "Poll")).is_err());
+        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(-1, "Poll")).is_err());
+        let duplicate = HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: vec![
+                HarnessSurveyAnswer { index: 0, choice: Some("Poll".into()), other: None },
+                HarnessSurveyAnswer { index: 0, choice: Some("Channel".into()), other: None },
+            ],
+        };
+        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &duplicate).is_err());
+    }
+
+    #[test]
+    fn validate_survey_answers_enforces_allow_other_and_full_coverage() {
+        let validate = crate::harness::harness_tools::validate_survey_answers;
+        let survey = two_question_survey();
+        // Full coverage first: one answer in a two-question survey is partial.
+        assert!(validate(&survey, &other_batch(0, "do it my way")).is_err());
+        assert!(validate(&survey, &batch(0, "Poll")).is_err());
+        assert!(validate(&survey, &batch(1, "Yes")).is_err());
+        let pair = |first: HarnessSurveyAnswer, second: HarnessSurveyAnswer| HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: vec![first, second],
+        };
+        let other = |index: i64, text: &str| HarnessSurveyAnswer { index, choice: None, other: Some(text.into()) };
+        let pick = |index: i64, label: &str| HarnessSurveyAnswer { index, choice: Some(label.into()), other: None };
+        // allow_other: question 0 accepts free text, question 1 does not.
+        assert!(validate(&survey, &pair(other(0, "do it my way"), pick(1, "Yes"))).is_ok());
+        assert!(validate(&survey, &pair(pick(0, "Poll"), other(1, "surprise me"))).is_err());
+        // Choices must be listed labels.
+        assert!(validate(&survey, &pair(pick(0, "Poll"), pick(1, "NotListed"))).is_err());
+        assert!(validate(&survey, &pair(pick(0, "Channel"), pick(1, "No"))).is_ok());
+        let empty = HarnessSurveyAnswers { at: "2026-01-01T00:00:00Z".into(), answers: vec![] };
+        assert!(validate(&survey, &empty).is_err());
+    }
+
+    /// The injected operator feedback must carry the exact mandated
+    /// plan-revision directive.
+    #[test]
+    fn ask_user_answer_directive_matches_the_mandated_text() {
+        assert_eq!(
+            crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE,
+            "The operator answered your clarification questions. Revise the plan now with plan_tasks/revise_task to reflect these answers before continuing."
+        );
+    }
+
+    /// Enabled runs append the clarification guidance; disabled runs append
+    /// nothing at all — the enabled prompt must be exactly the disabled
+    /// prompt plus the fragment, proving the disabled path is unchanged.
+    #[tokio::test]
+    async fn ask_user_guidance_is_appended_only_when_enabled() {
+        let disabled_dir = tempfile::tempdir().unwrap();
+        let disabled = test_run_in(&disabled_dir, |o| o.ask_user_enabled = false).await;
+        assert!(
+            !disabled.system_prompt.contains("Clarification questions"),
+            "disabled run: the guidance fragment must be absent entirely"
+        );
+        let enabled_dir = tempfile::tempdir().unwrap();
+        let enabled = test_run_in(&enabled_dir, |_| {}).await;
+        let fragment = crate::harness::prompt::ASK_USER_GUIDANCE_FRAGMENT;
+        assert_eq!(
+            enabled.system_prompt,
+            format!("{}\n\n{}", disabled.system_prompt, fragment),
+            "enabling ask_user may only append the guidance fragment"
+        );
+        for mandated in [
+            "planning",
+            "single ask_user call",
+            "best-guess option FIRST",
+            "revise the plan with plan_tasks/revise_task",
+        ] {
+            assert!(
+                enabled.system_prompt.contains(mandated),
+                "guidance must instruct the model to {mandated}"
+            );
+        }
+    }
+
+    /// Live delivery: an answer batch appended DURING the blocking wait (the
+    /// real live path, after the stale-line boundary) injects the directive-
+    /// prefixed summary exactly once. The clock holds t0 for the first 8
+    /// now() calls so the poll survives a few real 500 ms sleeps; a writer
+    /// thread appends at ~150 ms. A pathological environment still times out
+    /// via the 60 s jumps instead of hanging.
+    #[tokio::test]
+    async fn live_answers_inject_the_directive_prefixed_summary_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let clock_ticks = ticks.clone();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now: NowFn = Arc::new(move || {
+            let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
+            base + chrono::Duration::seconds(if step < 8 { 0 } else { 60 * (step - 7) })
+        });
+        let mut run = test_run_in(&dir, move |o| o.now = Some(now)).await;
+        run.state.pending_questions = Some(survey());
+        let path = run.answers_path().unwrap();
+        let writer_path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            crate::core::state::answers::append_answers(&writer_path, &batch(0, "Channel"))
+                .unwrap();
+        });
+        let outcome = run.run_survey_block(survey()).await;
+        assert!(
+            matches!(outcome, SurveyWait::Answered),
+            "an answer appended during the wait must be accepted live"
+        );
+        assert!(run.state.pending_questions.is_none());
+        let messages = run
+            .state
+            .operator_messages
+            .as_ref()
+            .expect("live answers must inject an operator feedback message");
+        assert_eq!(messages.len(), 1, "live delivery must happen exactly once");
+        assert!(
+            messages[0].text.starts_with(crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE),
+            "injected summary must start with the plan-revision directive, got: {}",
+            messages[0].text
+        );
+        assert!(
+            messages[0].text.contains("Q: Which approach should the run take?")
+                && messages[0].text.contains("Channel"),
+            "injected summary must render the question and the chosen answer, got: {}",
+            messages[0].text
+        );
+    }
 }

@@ -283,6 +283,10 @@ pub struct HarnessState {
 	/// Live streak of identical verification failures; cleared by a pass or a changed failure.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verification_streak: Option<HarnessVerificationStreak>,
+	/// Survey awaiting operator answers (an ask_user timeout or run end while
+	/// the question was open) — resumed runs re-emit it instead of losing it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pending_questions: Option<QuestionSurvey>,
 	pub iteration: i64,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub last_activation: Option<HarnessActivationDigest>,
@@ -313,6 +317,7 @@ impl Default for HarnessState {
 			workspace_edits: None,
 			verifications: None,
 			verification_streak: None,
+			pending_questions: None,
 			iteration: 0,
 			last_activation: None,
 			r#loop: 0,
@@ -409,6 +414,8 @@ pub enum HarnessEventType {
 	LoopStart,
 	#[serde(rename = "model-text")]
 	ModelText,
+	#[serde(rename = "question")]
+	Question,
 	#[serde(rename = "operator-message")]
 	OperatorMessage,
 	#[serde(rename = "rate-limited")]
@@ -427,6 +434,74 @@ pub enum HarnessEventType {
 	ToolCall,
 	#[serde(rename = "tool-result")]
 	ToolResult,
+}
+
+/// One staged multiple-choice clarification question the model asks the
+/// operator (the ask_user harness tool's survey payload).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSurveyOption {
+	/// Short choice label — what answers.jsonl records back as `choice`.
+	pub label: String,
+	/// One-line explanation of what choosing this option means.
+	pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSurveyQuestion {
+	/// Short label shown above the question.
+	pub header: String,
+	/// The question itself.
+	pub question: String,
+	/// 2-4 choices; the model's best guess goes first.
+	pub options: Vec<HarnessSurveyOption>,
+	/// When true (the default) the operator may answer with free text instead of a listed option.
+	#[serde(default = "default_allow_other")]
+	pub allow_other: bool,
+}
+
+fn default_allow_other() -> bool {
+	true
+}
+
+/// The full survey carried by a question event and by
+/// HarnessState.pendingQuestions while the run waits for answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionSurvey {
+	pub questions: Vec<HarnessSurveyQuestion>,
+	/// 0-based next-unconsumed answers.jsonl line (stale-line replay guard).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub answers_cursor: Option<usize>,
+}
+
+/// One recorded answer to the question at `index` (0-based within the survey).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSurveyAnswer {
+	pub index: i64,
+	/// Chosen option label, or null when the operator answered with free text.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub choice: Option<String>,
+	/// Free-text answer (the "Other..." path), or null when a listed option was chosen.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub other: Option<String>,
+}
+
+/// One answers.jsonl record: a batch of answers plus when they arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessSurveyAnswers {
+	pub at: String,
+	pub answers: Vec<HarnessSurveyAnswer>,
+}
+
+impl HarnessSurveyAnswers {
+	/// RFC3339 UTC timestamp with millisecond precision — drip's transcript convention.
+	pub fn now_iso() -> String {
+		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+	}
 }
 
 /// Structured payload carried by events so consumers (transcript analytics,
@@ -482,6 +557,13 @@ pub struct HarnessEventData {
 	pub task_id: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_js_number_option")]
 	pub wait_seconds: Option<f64>,
+	// question events carry the survey; survey-answer harness-ops carry the
+	// recorded batch. NDJSON field order is the contract: surveyAnswers
+	// before questionSurvey, like toolName before taskId.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub survey_answers: Option<HarnessSurveyAnswers>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub question_survey: Option<QuestionSurvey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -499,6 +581,8 @@ pub struct HarnessEvent {
 /// the way — the goal was not fully accomplished and should not read as done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HarnessRunReason {
+	#[serde(rename = "awaiting-input")]
+	AwaitingInput,
 	#[serde(rename = "aborted")]
 	Aborted,
 	#[serde(rename = "completed")]
@@ -561,6 +645,9 @@ pub struct HarnessLeakedJob {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRunResult {
+	/// Set when the run ended awaiting operator input (drip --resume picks it up).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub continue_command: Option<String>,
 	/// Set when reason is "error": what killed the run (endpoint/network/harness).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error_message: Option<String>,
@@ -633,6 +720,10 @@ mod tests {
 			"iteration-start"
 		);
 		assert_eq!(
+			serde_json::to_value(HarnessEventType::Question).unwrap(),
+			"question"
+		);
+		assert_eq!(
 			serde_json::to_value(HarnessTaskStatus::Dropped).unwrap(),
 			"dropped"
 		);
@@ -681,6 +772,7 @@ mod tests {
 	#[test]
 	fn run_result_round_trips() {
 		let result = HarnessRunResult {
+			continue_command: None,
 			error_message: None,
 			iterations: 9,
 			r#loops: 4,

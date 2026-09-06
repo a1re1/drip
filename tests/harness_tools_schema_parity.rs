@@ -21,7 +21,7 @@ fn harness_tool_definitions_match_the_fixture() {
 }
 
 #[test]
-fn fixture_covers_exactly_the_ten_harness_tools_in_declaration_order() {
+fn fixture_covers_exactly_the_eleven_harness_tools_in_declaration_order() {
     let raw = include_str!("fixtures/harness-tools.json");
     let fixture: Vec<serde_json::Value> =
         serde_json::from_str(raw).expect("tests/fixtures/harness-tools.json must be a JSON array");
@@ -44,6 +44,7 @@ fn fixture_covers_exactly_the_ten_harness_tools_in_declaration_order() {
             "note_task",
             "remember",
             "forget",
+            "ask_user",
         ]
     );
     assert_eq!(harness_tool_definitions().len(), names.len());

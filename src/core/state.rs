@@ -48,6 +48,7 @@ pub fn create_harness_state(goal: &str) -> HarnessState {
 		workspace_edits: None,
 		verifications: None,
 		verification_streak: None,
+		pending_questions: None,
 		iteration: 0,
 		last_activation: None,
 		r#loop: 0,
@@ -88,6 +89,9 @@ pub fn start_follow_up_goal(state: &mut HarnessState, goal: &str) {
 	// Steering consumed during the previous goal was steering FOR that goal;
 	// a new goal's text is the operator's latest word.
 	state.operator_messages = None;
+	// An unanswered survey asked FOR the previous goal must not re-block the
+	// new one (same leak class as the debt-audit list above).
+	state.pending_questions = None;
 }
 
 pub fn has_unfinished_tasks(state: &HarnessState) -> bool {
@@ -787,6 +791,204 @@ pub fn count_task_stats(tasks: &[HarnessTask])
 	}
 }
 
+// ---- answers.jsonl ----------------------------------------------------------
+// The operator's replies to ask_user clarification surveys, shared by the
+// `drip --answer` CLI and the TUI survey overlay: both append exactly one
+// record per survey; the harness polls and consumes them. Parsing is strict
+// per record — malformed lines are skipped by readers and rejected by the
+// writer rather than crashing a run. A {"boundary":"consumed"} marker line is
+// appended after each survey's answers are consumed, and callers persist a
+// 0-based line cursor past everything they have read, so stale records from
+// an earlier survey can never be replayed on resume.
+
+pub mod answers {
+	use std::path::Path;
+
+	use serde_json::Value;
+
+	use crate::core::types::{HarnessSurveyAnswer, HarnessSurveyAnswers};
+
+	/// Marker line appended after a survey's answers are consumed.
+	pub const ANSWERS_BOUNDARY: &str = r#"{"boundary":"consumed"}"#;
+
+	/// Validate one {index, choice, other} answer object: index must be a
+	/// non-negative integer, exactly one of choice/other must be a non-empty
+	/// string.
+	pub fn parse_answer(value: &Value) -> Result<HarnessSurveyAnswer, String> {
+		let object = value
+			.as_object()
+			.ok_or_else(|| "answer must be a JSON object".to_string())?;
+		let index = object
+			.get("index")
+			.ok_or_else(|| "answer missing index".to_string())?
+			.as_i64()
+			.ok_or_else(|| "answer index must be an integer".to_string())?;
+		if index < 0 {
+			return Err(format!("answer index must be >= 0, got {index}"));
+		}
+		let choice = parse_optional_text(object.get("choice"), "choice")?;
+		let other = parse_optional_text(object.get("other"), "other")?;
+		if choice.is_none() && other.is_none() {
+			return Err("answer needs a choice label or other text".to_string());
+		}
+		if choice.is_some() && other.is_some() {
+			return Err("answer cannot have both choice and other".to_string());
+		}
+		Ok(HarnessSurveyAnswer { index, choice, other })
+	}
+
+	fn parse_optional_text(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
+		match value {
+			None | Some(Value::Null) => Ok(None),
+			Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.clone())),
+			Some(Value::String(_)) => Err(format!("answer {field} must not be empty")),
+			Some(_) => Err(format!("answer {field} must be a string or null")),
+		}
+	}
+
+	/// Strictly parse one complete answers.jsonl line:
+	/// {"at": <rfc3339>, "answers": [{index, choice, other}, ...]}.
+	/// `at` must be a valid RFC3339 timestamp when present (the writer
+	/// always writes it); readers default a missing `at` to an empty string.
+	pub fn parse_answers_line(line: &str) -> Result<HarnessSurveyAnswers, String> {
+		let value: Value = serde_json::from_str(line)
+			.map_err(|error| format!("invalid JSON in answers.jsonl: {error}"))?;
+		let object = value
+			.as_object()
+			.ok_or_else(|| "answers line must be a JSON object".to_string())?;
+		let at = match object.get("at") {
+			None => String::new(),
+			Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
+			Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
+		};
+		let items = object
+			.get("answers")
+			.and_then(Value::as_array)
+			.ok_or_else(|| "answers line needs an answers array".to_string())?;
+		if items.is_empty() {
+			return Err("answers array must not be empty".to_string());
+		}
+		let mut answers = Vec::with_capacity(items.len());
+		for item in items {
+			answers.push(parse_answer(item)?);
+		}
+		Ok(HarnessSurveyAnswers { at, answers })
+	}
+
+	/// RFC3339 timestamp validator shared by writers and tests.
+	pub fn is_rfc3339(value: &str) -> bool {
+		chrono::DateTime::parse_from_rfc3339(value).is_ok()
+	}
+
+	/// Validate one complete answers record from an already-parsed JSON value
+	/// (the strict codec behind both `drip --answer` writers: the CLI and the
+	/// TUI survey overlay). Same shape rules as `parse_answers_line`.
+	pub fn parse_answers_value(value: &Value) -> Result<HarnessSurveyAnswers, String> {
+		let object = value
+			.as_object()
+			.ok_or_else(|| "answers payload must be a JSON object".to_string())?;
+		let at = match object.get("at") {
+			None => HarnessSurveyAnswers::now_iso(),
+			Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
+			Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
+		};
+		let items = object
+			.get("answers")
+			.and_then(Value::as_array)
+			.ok_or_else(|| "answers payload needs an answers array".to_string())?;
+		if items.is_empty() {
+			return Err("answers array must not be empty".to_string());
+		}
+		let mut answers = Vec::with_capacity(items.len());
+		for item in items {
+			answers.push(parse_answer(item)?);
+		}
+		Ok(HarnessSurveyAnswers { at, answers })
+	}
+
+	/// Append one answers record as a single JSONL line (creating the file).
+	pub fn append_answers(path: &Path, record: &HarnessSurveyAnswers) -> std::io::Result<()> {
+		let line = serde_json::to_string(record).expect("answers record serializes");
+		append_line(path, &line)
+	}
+
+	/// Append one raw JSONL line (also used for the boundary marker).
+	pub fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+		use std::io::Write;
+		if let Some(parent) = path.parent() {
+			if !parent.as_os_str().is_empty() {
+				std::fs::create_dir_all(parent)?;
+			}
+		}
+		let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+		// A trailing line without a newline is a torn write that is not yet
+		// durable; terminate it so the new record starts on its own line.
+		let torn_tail = std::fs::read(path)
+			.map(|bytes| bytes.last().is_some_and(|&byte| byte != b'\n'))
+			.unwrap_or(false);
+		if torn_tail {
+			file.write_all(b"\n")?;
+		}
+		file.write_all(format!("{line}\n").as_bytes())
+	}
+
+	/// Append the consumed-boundary marker line.
+	pub fn append_boundary(path: &Path) -> std::io::Result<()> {
+		append_line(path, ANSWERS_BOUNDARY)
+	}
+
+	/// One parsed answers.jsonl record with its 0-based line number.
+	pub struct AnswersFileRecord {
+		pub line_number: usize,
+		pub record: HarnessSurveyAnswers,
+	}
+
+	/// Read complete records from the file, skipping blank lines, boundary
+	/// markers, and malformed lines. A partial trailing line (no trailing
+	/// newline) is not yet durable and is ignored.
+	pub fn read_answer_batches(path: &Path) -> Vec<AnswersFileRecord> {
+		let Ok(content) = std::fs::read_to_string(path) else {
+			return Vec::new();
+		};
+		let complete = content.ends_with('\n');
+		let lines: Vec<&str> = content.lines().collect();
+		let mut records = Vec::new();
+		for (position, line) in lines.iter().enumerate() {
+			if position + 1 == lines.len() && !complete {
+				break;
+			}
+			let trimmed = line.trim();
+			if trimmed.is_empty() || trimmed == ANSWERS_BOUNDARY {
+				continue;
+			}
+			if let Ok(record) = parse_answers_line(trimmed) {
+				records.push(AnswersFileRecord { line_number: position, record });
+			}
+		}
+		records
+	}
+
+	/// Batches at or after the given 0-based line cursor — the persisted
+	/// "next line I have not consumed" pointer that keeps stale records from
+	/// an earlier survey (or a replayed resume) from being accepted twice.
+	pub fn read_answer_batches_after(path: &Path, cursor: usize) -> Vec<AnswersFileRecord> {
+		read_answer_batches(path)
+			.into_iter()
+			.filter(|entry| entry.line_number >= cursor)
+			.collect()
+	}
+
+	/// Total number of lines currently in the file (0 when missing) — the
+	/// 0-based cursor value just past a freshly appended boundary.
+	pub fn line_count(path: &Path) -> std::io::Result<usize> {
+		match std::fs::read_to_string(path) {
+			Ok(content) => Ok(content.lines().count()),
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+			Err(err) => Err(err),
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,5 +1463,137 @@ mod tests {
         let saved: Value = serde_json::from_str(&fs::read_to_string(&saved_path).unwrap()).unwrap();
 
         assert_eq!(expected, saved);
+    }
+// ---- clarification survey protocol (ask_user groundwork) ---------------
+
+    use crate::core::types::{
+		HarnessSurveyAnswer, HarnessSurveyAnswers, HarnessSurveyOption,
+		HarnessSurveyQuestion, QuestionSurvey,
+    };
+
+    fn sample_survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![HarnessSurveyQuestion {
+                header: "Approach".into(),
+                question: "Should the run block for operator answers?".into(),
+                options: vec![
+                    HarnessSurveyOption { label: "Poll answers.jsonl".into(), description: "Simple synchronous wait".into() },
+                    HarnessSurveyOption { label: "Channel".into(), description: "More plumbing".into() },
+                ],
+                allow_other: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn old_state_without_pending_questions_deserializes() {
+        let legacy = r#"{"createdAt":"2026-01-01T00:00:00.000Z","goal":"g","history":[],"iteration":0,"loop":0,"memory":[],"observations":[],"promotedContext":[],"tasks":[],"telemetry":{},"version":1}"#;
+        let state: HarnessState = serde_json::from_str(legacy).expect("legacy state parses");
+        assert!(state.pending_questions.is_none());
+    }
+
+    #[test]
+    fn pending_questions_roundtrip() {
+        let mut state = create_harness_state("survey goal");
+        assert!(state.pending_questions.is_none());
+        state.pending_questions = Some(sample_survey());
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains("\"pendingQuestions\""));
+        assert!(!text.contains("\"pending_questions\""));
+        let back: HarnessState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.pending_questions, Some(sample_survey()));
+    }
+
+    #[test]
+    fn allow_other_defaults_true() {
+        let json = serde_json::json!({
+            "header": "h",
+            "question": "q",
+            "options": [
+                {"label": "a", "description": "d"},
+                {"label": "b", "description": "e"}
+            ]
+        });
+        let parsed: HarnessSurveyQuestion = serde_json::from_value(json).unwrap();
+        assert!(parsed.allow_other);
+        assert_eq!(parsed.options.len(), 2);
+    }
+
+    #[test]
+    fn answer_record_roundtrip() {
+        let record = HarnessSurveyAnswers {
+            at: "2026-02-03T04:05:06.789Z".into(),
+            answers: vec![
+                HarnessSurveyAnswer { index: 0, choice: Some("Poll answers.jsonl".into()), other: None },
+                HarnessSurveyAnswer { index: 1, choice: None, other: Some("do it yourself".into()) },
+            ],
+        };
+        assert!(answers::is_rfc3339(&record.at));
+        let line = serde_json::to_string(&record).unwrap();
+        assert!(line.contains("\"choice\"") && !line.contains("\"other\":null"));
+        let parsed = answers::parse_answers_line(&line).unwrap();
+        assert_eq!(parsed, record);
+        let reparsed = answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert_eq!(reparsed, record);
+    }
+
+    #[test]
+    fn invalid_answer_shapes_are_rejected() {
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": "x"})).is_ok());
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "other": "t"})).is_ok());
+        assert!(answers::parse_answer(&serde_json::json!({"index": -1, "choice": "x"})).is_err());
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0})).is_err());
+        assert!(answers::parse_answer(&serde_json::json!({"index": "0", "choice": "x"})).is_err());
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": "x", "other": "y"})).is_err());
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": ""})).is_err());
+        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": 3})).is_err());
+        assert!(answers::parse_answers_line("[1,2]").is_err());
+        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[]}").is_err());
+        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[{\"index\":0}]}").is_err());
+        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[{\"index\":0,\"choice\":\"a\"}]}").is_err());
+    }
+
+    #[test]
+    fn malformed_lines_and_partial_trailing_jsonl_are_handled() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("answers.jsonl");
+        let record = HarnessSurveyAnswers {
+            at: "2026-02-03T04:05:06.789Z".into(),
+            answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+        };
+        let line = serde_json::to_string(&record).unwrap();
+        // good line, malformed line, good line, partial trailing line (no newline)
+        std::fs::write(&path, format!("{line}\nnot json\n{line}\n{{\"at\":\"2026")).unwrap();
+        let batches = answers::read_answer_batches(&path);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].line_number, 0);
+        assert_eq!(batches[1].line_number, 2);
+        // appending the missing half makes it readable
+        answers::append_answers(&path, &record).unwrap();
+        assert_eq!(answers::read_answer_batches(&path).len(), 3);
+    }
+
+    #[test]
+    fn boundary_marker_and_cursor_prevent_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("answers.jsonl");
+        answers::append_boundary(&path).unwrap();
+        assert!(answers::read_answer_batches(&path).is_empty());
+        let record = HarnessSurveyAnswers {
+            at: "2026-02-03T04:05:06.789Z".into(),
+            answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+        };
+        answers::append_answers(&path, &record).unwrap();
+        answers::append_answers(&path, &record).unwrap();
+        answers::append_boundary(&path).unwrap();
+        assert_eq!(answers::read_answer_batches(&path).len(), 2);
+        // cursor semantics: line_number is the 0-based raw file line; the
+		// harness persists "next unconsumed line" (here 3) across resumes.
+        assert_eq!(answers::read_answer_batches_after(&path, 0).len(), 2);
+        assert_eq!(answers::read_answer_batches_after(&path, 2).len(), 1);
+        assert!(answers::read_answer_batches_after(&path, 3).is_empty());
+        // missing file reads as empty
+        assert!(answers::read_answer_batches(&temp.path().join("missing.jsonl")).is_empty());
     }
 }

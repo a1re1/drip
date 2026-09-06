@@ -32,6 +32,10 @@ pub struct CliGoalRunArgs {
     pub inference: ResolvedInferenceConfig,
     /// Session inbox file (drip --send); polled at cycle boundaries when set.
     pub inbox_path: Option<PathBuf>,
+    /// Opt-in `--ask` clarification surveys (the ask_user tool).
+    pub ask_user_enabled: bool,
+    /// `--ask-timeout <seconds>` override for the survey answer wait.
+    pub ask_user_timeout_seconds: Option<i64>,
     /// Liveness lease file: written at run start, heartbeated per event, cleared at run end.
     pub lease_path: Option<PathBuf>,
     pub max_iterations: Option<i64>,
@@ -362,6 +366,8 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
             .as_ref()
             .map(|path| read_inbox_messages(path, 0).len() as i64),
         collect_run_facts: Some(Box::new(move || collect_workspace_run_facts(&facts_cwd))),
+        ask_user_enabled: args.ask_user_enabled,
+        ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: Some(args.cwd.clone()),
         // When an unfinished ledger continues under a new prompt, the harness
         // keeps working the ORIGINAL goal; the new prompt rides in as steering.

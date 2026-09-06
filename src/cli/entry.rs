@@ -176,6 +176,25 @@ fn resolve_session_ref(project: &DripProject, reference: Option<&str>) -> Resolv
     }
 }
 
+/// Resolve the `--answer` payload into an answers record: strict JSON when the
+/// text parses as JSON (validated by the shared codec the harness poller reads
+/// back), otherwise the plain-text shorthand {"index":0,"choice":null,"other":<text>}.
+/// Only syntactically invalid JSON falls back to shorthand — valid JSON with a
+/// wrong shape fails, so a caller never silently answers the wrong survey.
+fn answers_from_payload(payload: &str) -> Result<crate::core::types::HarnessSurveyAnswers, String> {
+    match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) => crate::core::state::answers::parse_answers_value(&value),
+        Err(_) => Ok(crate::core::types::HarnessSurveyAnswers {
+            at: crate::core::types::HarnessSurveyAnswers::now_iso(),
+            answers: vec![crate::core::types::HarnessSurveyAnswer {
+                index: 0,
+                choice: None,
+                other: Some(payload.to_string()),
+            }],
+        }),
+    }
+}
+
 fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: &DripProject) -> ResolvedSessionRef {
     if args.resume {
         let resolved = resolve_session_ref(project, args.resume_id.as_deref());
@@ -770,11 +789,27 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
     let pinned_profile = args.cli_args.profile.clone().or_else(|| effective.profile.clone());
 
+    // --ask pins like --profile: explicit flags win, and a resume-like run
+    // inherits the session's stored choice so a continueCommand keeps the
+    // ask_user tool (and its timeout) without restating the flags.
+    let resume_like = args.cli_args.resume || args.cli_args.continue_latest;
+    let ask_user_enabled = args.cli_args.ask
+        || (resume_like && stored.as_ref().and_then(|s| s.ask_enabled).unwrap_or(false));
+    let ask_user_timeout_seconds = args.cli_args.ask_timeout_secs.or_else(|| {
+        if resume_like {
+            stored.as_ref().and_then(|s| s.ask_timeout_seconds)
+        } else {
+            None
+        }
+    });
+
     let _ = save_skill_activation(
         Path::new(&paths.activation_path),
         &SessionRunConfig {
             profile: pinned_profile,
             skills: activated_entries,
+            ask_enabled: if ask_user_enabled { Some(true) } else { None },
+            ask_timeout_seconds: ask_user_timeout_seconds,
         },
     );
 
@@ -851,6 +886,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     };
 
     let mut outcome: SessionGoalOutcome = match run_session_goal(SessionGoalArgs {
+        ask_user_enabled,
+        ask_user_timeout_seconds,
         cwd: args.cwd.to_string(),
         goal: args.goal.to_string(),
         goal_context: resolved.context_block.clone(),
@@ -983,6 +1020,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
         let result = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(run_session_goal(SessionGoalArgs {
+                ask_user_enabled,
+                ask_user_timeout_seconds,
                 cwd: args.cwd.to_string(),
                 goal: queued.goal.clone(),
                 goal_context: queued_mentions.context_block.clone(),
@@ -1132,7 +1171,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 12] = [
+    let exclusive_modes: [(&str, bool); 13] = [
+        ("--answer", cli_args.answer),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
         ("--inspect", cli_args.inspect),
@@ -1155,7 +1195,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
         return 1;
     }
 
-    if active_modes.len() == 1 && has_goal_like && active_modes[0] != "--send" {
+    // --send and --answer carry their payload in the goal positional.
+    if active_modes.len() == 1 && has_goal_like && !matches!(active_modes[0], "--send" | "--answer") {
         eprintln!("{} cannot be combined with a goal or --tui — run them separately.", active_modes[0]);
         return 1;
     }
@@ -1632,6 +1673,95 @@ pub async fn main(argv: Vec<String>) -> i32 {
         return 0;
     }
 
+    if cli_args.answer {
+        // Mode conflicts are handled by the exclusive_modes table above.
+        // Target an existing session; --answer never mints .drip state.
+        if !has_any_session_index(&project) {
+            eprintln!("No sessions recorded for {cwd} yet — nothing to answer.");
+            return 1;
+        }
+
+        let resolved = resolve_session_ref(&project, cli_args.answer_id.as_deref());
+
+        let Some(record) = resolved.record else {
+            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            return 1;
+        };
+
+        let Some(payload) = goal_text.as_deref().filter(|text| !text.is_empty()) else {
+            eprintln!("Provide the answers: drip --answer [id] '{{\"answers\":[{{\"index\":0,\"choice\":\"Option A\",\"other\":null}}]}}' (or plain text shorthand).");
+            return 1;
+        };
+
+        let answers = match answers_from_payload(payload) {
+            Ok(record) => record,
+            Err(error) => {
+                eprintln!("Invalid answers payload: {error}");
+                return 1;
+            }
+        };
+
+        // answers.jsonl lives in the session directory next to state.json —
+        // exactly the path the harness poller derives (loop.rs answers_path()).
+        let paths = session_paths_for(&project, &record);
+        // Pre-validate against the session's pending survey: the poller
+        // silently skips mismatched batches, so accepting one here would
+        // leave the run blocked for the full ask timeout on a dead answer.
+        let pending_survey = crate::core::state::load_harness_state(Path::new(&paths.state_path))
+            .ok()
+            .flatten()
+            .and_then(|state| state.pending_questions);
+        match &pending_survey {
+            Some(survey) => {
+                if let Err(error) =
+                    crate::harness::harness_tools::validate_survey_answers(survey, &answers)
+                {
+                    eprintln!(
+                        "Answer does not match the session's pending survey ({} question(s)): {error}",
+                        survey.questions.len()
+                    );
+                    return 1;
+                }
+            }
+            None => {
+                eprintln!(
+                    "Note: session {} has no pending survey on record — recording the answer anyway.",
+                    short_id(&record.id)
+                );
+            }
+        }
+        let answers_path = Path::new(&paths.state_path)
+            .with_file_name("answers.jsonl")
+            .to_path_buf();
+        if let Err(error) = crate::core::state::answers::append_answers(&answers_path, &answers) {
+            eprintln!("Could not append the answer to {}: {error}", answers_path.display());
+            return 1;
+        }
+
+        // Liveness comes from the lease (pid + fresh heartbeat), not the index
+        // status column — a crashed run leaves the index saying "active".
+        let run_active = check_lease(Path::new(&paths.lease_path), &chrono::Utc::now).alive();
+
+        if cli_args.json {
+            println!(
+                "{}",
+                json!({ "answersPath": answers_path, "runActive": run_active, "sessionId": record.id, "type": "answered" })
+            );
+        } else if run_active {
+            println!(
+                "Answer recorded for session {} — the running goal's survey poller picks it up within ~500ms.",
+                short_id(&record.id)
+            );
+        } else {
+            println!(
+                "Answer recorded for session {} — no goal is running; the next run (drip --resume) consumes it.",
+                short_id(&record.id)
+            );
+        }
+
+        return 0;
+    }
+
     if cli_args.send || cli_args.follow {
         if cli_args.send && cli_args.follow {
             eprintln!("Pass either --send or --follow, not both.");
@@ -1862,6 +1992,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
     tokio::task::block_in_place(|| {
         crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
             allow_net,
+            ask: cli_args.ask,
+            ask_timeout_secs: cli_args.ask_timeout_secs,
             reference_roots,
             config,
             cwd: cwd.clone(),
@@ -2018,7 +2150,7 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
 
 #[cfg(test)]
 mod tests {
-    use super::{non_empty, to_fixed_2};
+    use super::{answers_from_payload, non_empty, to_fixed_2};
 
     #[test]
     fn non_empty_follows_js_truthiness() {
@@ -2026,6 +2158,56 @@ mod tests {
         assert!(!non_empty(&Some(String::new())));
         assert!(non_empty(&Some(" ".to_string())));
         assert!(non_empty(&Some("goal".to_string())));
+    }
+
+    #[test]
+    fn answers_from_payload_parses_strict_json_with_multiple_answers() {
+        let answers = answers_from_payload(
+            r#"{"answers":[{"index":0,"choice":"Option A","other":null},{"index":1,"choice":null,"other":"free text"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(answers.answers.len(), 2);
+        assert_eq!(answers.answers[0].index, 0);
+        assert_eq!(answers.answers[0].choice.as_deref(), Some("Option A"));
+        assert_eq!(answers.answers[1].index, 1);
+        assert_eq!(answers.answers[1].other.as_deref(), Some("free text"));
+        assert!(crate::core::state::answers::is_rfc3339(&answers.at));
+    }
+
+    #[test]
+    fn answers_from_payload_rejects_valid_json_with_a_wrong_shape() {
+        // Wrong shape must fail, not silently become shorthand text.
+        assert!(answers_from_payload(r#"{"answers":"nope"}"#).is_err());
+        assert!(answers_from_payload(r#"{"answers":[]}"#).is_err());
+        assert!(answers_from_payload(r#"{"answers":42}"#).is_err());
+        assert!(answers_from_payload("[1,2,3]").is_err());
+        // An answer with neither choice nor other is incomplete.
+        assert!(answers_from_payload(r#"{"answers":[{"index":0}]}"#).is_err());
+    }
+
+    #[test]
+    fn answers_from_payload_falls_back_to_text_shorthand_only_for_non_json() {
+        let answers = answers_from_payload("use the cache instead").unwrap();
+        assert_eq!(answers.answers.len(), 1);
+        assert_eq!(answers.answers[0].index, 0);
+        assert_eq!(answers.answers[0].choice, None);
+        assert_eq!(answers.answers[0].other.as_deref(), Some("use the cache instead"));
+        assert!(crate::core::state::answers::is_rfc3339(&answers.at));
+    }
+
+    #[test]
+    fn answer_writer_roundtrips_through_the_reader_preserving_earlier_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("answers.jsonl");
+        let first =
+            answers_from_payload(r#"{"answers":[{"index":0,"choice":"A","other":null}]}"#).unwrap();
+        let second = answers_from_payload("later clarification").unwrap();
+        crate::core::state::answers::append_answers(&path, &first).unwrap();
+        crate::core::state::answers::append_answers(&path, &second).unwrap();
+        let batches = crate::core::state::answers::read_answer_batches(&path);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].record.answers[0].choice.as_deref(), Some("A"));
+        assert_eq!(batches[1].record.answers[0].other.as_deref(), Some("later clarification"));
     }
 
     #[test]

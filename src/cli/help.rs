@@ -95,6 +95,10 @@ OPTIONS
 	                              goal consumes it at its next cycle boundary (the model treats
 	                              it as fresh operator instructions that outrank the original
 	                              goal); otherwise the session's next run consumes it
+	--answer [id] <json|text>     Answer a pending ask_user clarification survey: appends
+	                              {"answers":[{"index":0,"choice":"...","other":null}]} to the
+	                              session's answers.jsonl (plain text = free-text answer to
+	                              question 0); the blocked run picks it up within ~500ms
 	--follow [id]                 Replay the transcript tail, then stream new entries as they
 	                              are appended (with --json: raw JSONL passthrough)
 	--stop [id]                   SIGTERM the session's running goal — it aborts at the next
@@ -163,6 +167,13 @@ OPTIONS
 	                              corpus (repeatable; also DRIP_REFERENCE_ROOTS or
 	                              OASIS_ROOTS, colon-separated). Without a root the tool
 	                              is left out of the pack; requires the `oasis` binary
+	--ask                         Opt the run into operator clarification surveys: enables the
+	                              ask_user tool (staged multiple-choice questions; the run
+	                              blocks for answers via --answer or the TUI overlay, then
+	                              replans). Pinned on the session, so --resume keeps it
+	--ask-timeout <seconds>       How long a blocked survey waits for answers before the run
+	                              ends with reason awaiting-input (default 900); resume later
+	                              after answering
 	--allow-destructive           Downgrade destructive-command policy blocks (rm -rf
 	                              outside the workspace, git push --force / reset --hard /
 	                              clean -f, sudo, curl|sh, device writes) to warnings for
@@ -272,6 +283,9 @@ mod tests {
             "--roles",
             "--skills",
             "--no-skills",
+            "--answer",
+            "--ask",
+            "--ask-timeout",
             "--allow-destructive",
             "--allow-net",
             "--reference-root",

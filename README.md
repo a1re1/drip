@@ -388,6 +388,92 @@ Behavior:
 ---
 
 
+## Hooks
+
+drip can run your own shell commands at fixed points in a session's
+lifecycle — the same idea as Claude Code's hooks and Codex hooks. Hook
+commands live in drip's persisted config file, `~/.drip/config.json`
+(`DRIP_HOME` relocates the home directory), as a top-level `hooks` object
+next to `settings` and `statusLine`:
+
+```json
+{
+  "hooks": {
+    "timeout_seconds": 10,
+    "pre_tool_use":  { "matcher": "Bash|rm *", "command": "~/.drip/hooks/guard.sh" },
+    "post_tool_use": { "matcher": "Edit|Write", "command": "~/.drip/hooks/fmt-changed.sh" },
+    "task_start":    "date '+task start %H:%M:%S' >> ~/.drip/hooks.log",
+    "stop":          "~/.drip/hooks/notify-done.sh"
+  }
+}
+```
+
+| Key | Fires when | Value |
+| --- | --- | --- |
+| `session_start` | the run loop starts for a session | command string |
+| `loop_start` / `loop_finish` | a harness loop begins / ends | command string |
+| `task_start` / `task_finish` | a task inside a loop begins / ends | command string |
+| `pre_tool_use` | just before a workspace tool executes | `{ "matcher", "command" }` |
+| `post_tool_use` | just after a workspace tool executed | `{ "matcher", "command" }` |
+| `stop` | the run finishes | command string |
+| `timeout_seconds` | — (not an event) | per-hook deadline in seconds, default `10` |
+
+The `matcher` of the two tool events is a `|`-separated list of tool names
+with an optional trailing `*` wildcard (`Edit|Write`, `Bash*`); an empty or
+missing matcher matches every tool. Lifecycle hooks always fire.
+
+Behavior:
+
+- Each hook command runs under your user shell (`$SHELL -c`) with the
+  session's working directory as its cwd and one JSON document piped to
+  its stdin:
+
+```json
+{
+  "event": "PreToolUse",
+  "cwd": "/path/to/repo",
+  "tool_name": "BASH",
+  "tool_input": { "command": "cargo test" },
+  "timestamp": "<RFC 3339 timestamp>"
+}
+```
+
+  `tool_name` and `tool_input` are present only for `pre_tool_use` and
+  `post_tool_use`; for `post_tool_use` the tool's output text arrives in
+  `tool_input`. Long inputs are truncated at 24,000 characters, and hook
+  output is capped (first 4 KiB) — it is only surfaced in warnings.
+- Hooks never block a run: a missing binary, a non-zero exit, or a
+  timeout (the process is killed at the deadline) becomes a `RunWarning`
+  naming the event and the hook, and the session continues. A
+  `pre_tool_use` hook exiting `2` to veto a tool call is planned but not
+  yet honored.
+- Payload strings pass through drip's secret redactor before they reach
+  a hook's stdin.
+- Hooks are commands from your own config, so they run with your user's
+  privileges in your session directory — drip does not sandbox them and
+  does not require `DRIP_ALLOW_NET` to run them. Only add entries you
+  trust, and treat a shared config's `hooks` block like a Makefile you
+  did not write.
+- A malformed `hooks` block prints one nonfatal warning (naming the
+  config file) and is ignored; the rest of the config still loads.
+
+Planned next on this branch (parity with drip's own machinery):
+drip-specific `relay_start` / `relay_finish` (subagent relay loops),
+`memory_write` (the remember/forget memory tools), and `pr_ready` (when
+`/navis` publishes a PR).
+
+This mirrors Claude Code's hooks
+([code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks)):
+`session_start` → `SessionStart`, `pre_tool_use` → `PreToolUse`,
+`post_tool_use` → `PostToolUse`, `stop` → `Stop`; `loop_*` and `task_*`
+are drip's own loop/task lifecycle, which Claude Code does not have a
+direct equivalent for. Payload field names and the matcher concept follow
+Claude Code; Codex' hook surface
+([developers.openai.com/codex/hooks](https://developers.openai.com/codex/hooks))
+covers a similar lifecycle with different payload conventions.
+
+---
+
 ## Terminal pane title
 
 While a goal runs, drip sets the terminal window title (OSC 2) so activity is

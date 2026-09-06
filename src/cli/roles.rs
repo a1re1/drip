@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::marketplaces::MarketplaceRoleEntry;
-use crate::cli::skills::{CliSkill, LoadedCliSkill};
+use crate::cli::skills::{CliSkill, LoadedCliSkill, SkillRoleHints};
 use crate::core::config::CliConfig;
 use crate::core::inference::EnvSource;
 use crate::harness::roles::{
@@ -824,6 +824,7 @@ pub fn load_skill_content(
 		return Ok(LoadedCliSkill {
 			content: raw.trim().to_string(),
 			name: skill.name.clone(),
+			role_hints: parse_skill_roles_hints(&raw),
 		});
 	};
 
@@ -894,6 +895,7 @@ pub fn load_skill_content(
 	Ok(LoadedCliSkill {
 		content,
 		name: skill.name.clone(),
+		role_hints: parse_skill_roles_hints(&raw),
 	})
 }
 
@@ -947,6 +949,59 @@ fn parse_skill_frontmatter_args(markdown: &str) -> Option<Vec<SkillArgDef>> {
 	}
 
 	Some(defs)
+}
+
+/// Parse the advisory `roles:` block from a skill's frontmatter. Tolerates
+/// tab- or space-indented keys; the first `default:` and first occurrence of
+/// each stage win; blank values or non-`key: value` lines end the block
+/// rather than misreading adjacent YAML.
+fn parse_skill_roles_hints(markdown: &str) -> Option<SkillRoleHints> {
+	let frontmatter = extract_frontmatter(markdown)?;
+	let mut default: Option<String> = None;
+	let mut stages: Vec<(String, String)> = Vec::new();
+	let mut in_roles = false;
+
+	for line in frontmatter.lines() {
+		if line.trim_end() == "roles:" {
+			in_roles = true;
+			continue;
+		}
+		if !in_roles {
+			continue;
+		}
+		let trimmed = line.trim_start();
+		if trimmed == line || trimmed.is_empty() {
+			// Not indented (or blank): the roles block has ended.
+			if trimmed.is_empty() {
+				continue;
+			}
+			in_roles = false;
+			continue;
+		}
+		let Some((key, value)) = trimmed.split_once(':') else {
+			in_roles = false;
+			continue;
+		};
+		let key = key.trim();
+		let value = value.trim();
+		if key.is_empty() || value.is_empty() {
+			in_roles = false;
+			continue;
+		}
+		if key == "default" {
+			if default.is_none() {
+				default = Some(value.to_string());
+			}
+		} else if !stages.iter().any(|(name, _)| name == key) {
+			stages.push((key.to_string(), value.to_string()));
+		}
+	}
+
+	if default.is_none() && stages.is_empty() {
+		None
+	} else {
+		Some(SkillRoleHints { default, stages })
+	}
 }
 
 fn extract_frontmatter(markdown: &str) -> Option<String> {

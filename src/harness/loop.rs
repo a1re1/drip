@@ -2038,14 +2038,10 @@ impl HarnessRun {
         let tool_content = (self.redact)(&executed.tool_content);
         self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
         // drip-specific: memory-bank writes (remember/forget) get their own
-        // event so hooks can react to state changes without parsing tool
-        // names; the payload carries the redacted input (the note itself).
-        if tool_name == "remember" || tool_name == "forget" {
-            self.fire_hook(
-                crate::harness::hooks::HookEvent::MemoryWrite,
-                Some((tool_name, redacted_input.as_str())),
-            );
-        }
+        // event, but harness ops dispatch in dispatch_tool_calls and never
+        // reach execute_workspace_tool, so MemoryWrite fires there — gated
+        // on apply_harness_op's state_changed so failures and no-ops stay
+        // silent.
         WorkspaceToolExecution {
             failed,
             tool_content,
@@ -3372,6 +3368,18 @@ impl HarnessRun {
                 scope.task_finished = scope.task_finished || outcome.task_finished;
                 scope.made_progress = scope.made_progress || outcome.state_changed;
                 scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
+                // drip-specific: memory-bank writes (remember/forget) get their
+                // own event, gated on apply_harness_op's state_changed so a
+                // failed, denied, or no-op op never announces a state change.
+                // Fires at this choke point (not execute_workspace_tool) because
+                // harness ops never reach it. Payload = redacted input (the note).
+                if (tool_name == "remember" || tool_name == "forget") && outcome.state_changed {
+                    let redacted_input = (self.redact)(&raw_input);
+                    self.fire_hook(
+                        crate::harness::hooks::HookEvent::MemoryWrite,
+                        Some((tool_name.as_str(), redacted_input.as_str())),
+                    );
+                }
                 scope
                     .transport_messages
                     .push(crate::harness::transport::TransportRequestMessage {
@@ -3668,6 +3676,17 @@ impl HarnessRun {
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::ToolResult,
             });
+
+            // drip-specific: PRReady fires only after a publish-matching tool
+            // call actually succeeded (git commit/push, `gh pr create`). The
+            // veto and failure paths return failed:true above, so they stay
+            // silent. Lifecycle payload (no tool fields); reuses fire_hook so
+            // hook failures surface as RunWarning in the transcript.
+            if !execution.failed
+                && crate::harness::hooks::git_publish_pattern().is_match(&raw_input)
+            {
+                self.fire_hook(crate::harness::hooks::HookEvent::PRReady, None);
+            }
 
             scope
                 .transport_messages

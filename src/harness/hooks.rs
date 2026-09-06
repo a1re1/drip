@@ -10,8 +10,10 @@
 //!   user-configured commands, not harness tool calls.
 //! - The payload is a single JSON object on stdin:
 //!   `{ event, cwd, tool_name, tool_input, timestamp }` — `tool_*` fields are
-//!   only present for `PreToolUse` / `PostToolUse`, and `tool_input` is the
-//!   (already-redacted) raw input, truncated.
+//!   present for `PreToolUse` / `PostToolUse` and for `MemoryWrite`, and
+//!   `tool_input` is the (already-redacted) raw input as a JSON string,
+//!   truncated. Known divergence: for `PostToolUse` the string carries the
+//!   tool's output text, not its input (there is no separate `tool_output`).
 //! - A hook that exits non-zero, times out, or fails to spawn is logged to
 //!   stderr and never blocks the run — except `PreToolUse` exit code 2, which
 //!   blocks the tool call (Claude Code's veto semantics) and feeds the hook's
@@ -19,10 +21,23 @@
 //! - Every hook is bounded by `timeout_seconds` (default 10): on expiry the
 //!   child is killed and the run continues.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The heuristic that decides whether a tool call "published": git commit or
+/// push, or `gh pr create`. Shared by the runner's published-run dirty-tree
+/// tracking and the harness's PRReady hook firing so both agree on what a
+/// publish attempt is. Best-effort by command text — not a verified PR.
+pub(crate) fn git_publish_pattern() -> &'static Regex {
+    static PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| Regex::new(r"\bgit\s+(commit|push)\b|\bgh\s+pr\s+create\b").unwrap())
+}
 
 /// Default per-hook timeout. Claude Code documents a 60s ceiling; drip uses a
 /// tighter default so hooks never stall a relay round, and it is configurable.
@@ -76,7 +91,8 @@ impl HookEvent {
 
 /// One `PreToolUse`/`PostToolUse` hook with an optional tool-name matcher.
 /// Matcher syntax: `|`-separated alternatives with optional trailing `*`
-/// wildcards (e.g. `Edit|Write`, `Bash*`); empty/None matches every tool.
+/// wildcards (e.g. `PATCH|READ`, `BASH*`); matching is case-sensitive
+/// against canonical uppercase tool names, and empty/None matches every tool.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct HookMatcher {
@@ -224,9 +240,11 @@ impl HookOutcome {
     }
 }
 
-/// The JSON payload piped to a hook's stdin. `tool_name`/`tool_input` are only
-/// present for tool events; `tool_input` is the raw (already-redacted) input
-/// JSON, truncated to `MAX_TOOL_INPUT_CHARS`.
+/// The JSON payload piped to a hook's stdin. `tool_name`/`tool_input` are
+/// present for tool events and for `MemoryWrite`; `tool_input` is the raw
+/// (already-redacted) input as a JSON string, truncated to
+/// `MAX_TOOL_INPUT_CHARS`. For `PostToolUse` the string carries the tool's
+/// output text rather than its input (no separate `tool_output` field).
 pub fn build_hook_payload(
     event: HookEvent,
     cwd: &str,
@@ -261,15 +279,26 @@ pub fn run_hook_command(command: &str, cwd: &str, payload: &str, timeout: Durati
         stderr_excerpt: String::new(),
     };
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut child = match Command::new(&shell)
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match unsafe {
+        Command::new(&shell)
+            .arg("-c")
+            .arg(command)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // The child leads its own process group (done in the child itself
+            // to avoid the classic setpgid race) so a timeout can kill the
+            // whole tree — the shell AND any backgrounded grandchildren that
+            // inherited the pipes.
+            .pre_exec(|| {
+                // Best effort: failure just means the fallback child.kill()
+                // path below still applies to the shell itself.
+                let _ = libc::setpgid(0, 0);
+                Ok(())
+            })
+            .spawn()
+    } {
         Ok(child) => child,
         Err(error) => {
             return HookOutcome {
@@ -280,22 +309,60 @@ pub fn run_hook_command(command: &str, cwd: &str, payload: &str, timeout: Durati
         }
     };
 
+    // The child's process group id equals its pid (set via unsafe_pre_exec
+    // above); killing the group reaps the shell plus any grandchildren that
+    // inherited the pipes. Without this, a grandchild holding stdout/stderr
+    // keeps the drain threads from ever seeing EOF and the run hangs.
+    let pgid = child.id();
+
     // Feed the payload from a helper thread: writing blocks once the pipe
     // buffer fills, and a hook that never reads stdin must not wedge the run.
+    // Threads poll a done-flag and give up once the hook is finished/dead, so
+    // a grandchild holding the write end cannot block the run's joins.
+    let done = Arc::new(AtomicBool::new(false));
     let stdin = child.stdin.take();
     let payload = payload.to_string();
+    let writer_done = Arc::clone(&done);
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel::<()>();
     let writer = std::thread::spawn(move || {
         if let Some(mut stdin) = stdin {
-            let _ = stdin.write_all(payload.as_bytes());
+            // Poll instead of blocking in write_all forever: if the hook
+            // finished without reading stdin (or died), stop writing and
+            // close the pipe so the child's read side sees EOF.
+            let chunks = payload.as_bytes();
+            let mut offset = 0;
+            while offset < chunks.len() {
+                if writer_done.load(Ordering::Relaxed) {
+                    break;
+                }
+                match stdin.write(&chunks[offset..]) {
+                    Ok(0) => break,
+                    Ok(n) => offset += n,
+                    Err(_) => break,
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             let _ = stdin.flush();
         }
+        // `stdin` drops here, closing the pipe so a `cat`-style hook sees EOF.
+        let _ = writer_tx.send(());
     });
     // Drain stdout/stderr concurrently so a chatty hook cannot fill the pipe
-    // and deadlock itself into a spurious timeout.
+    // and deadlock itself into a spurious timeout. Each thread reports its
+    // captured output through a channel so the run can collect it with a
+    // deadline instead of an unconditional blocking join.
+    let stdout_done = Arc::clone(&done);
     let stdout_pipe = child.stdout.take();
-    let stdout_reader = std::thread::spawn(move || drain_capped(stdout_pipe));
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel::<String>();
+    let stdout_reader = std::thread::spawn(move || {
+        let _ = stdout_tx.send(drain_capped(stdout_pipe, &stdout_done));
+    });
+    let stderr_done = Arc::clone(&done);
     let stderr_pipe = child.stderr.take();
-    let stderr_reader = std::thread::spawn(move || drain_capped(stderr_pipe));
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel::<String>();
+    let stderr_reader = std::thread::spawn(move || {
+        let _ = stderr_tx.send(drain_capped(stderr_pipe, &stderr_done));
+    });
 
     let deadline = Instant::now() + timeout;
     let status: Option<std::process::ExitStatus> = loop {
@@ -303,6 +370,7 @@ pub fn run_hook_command(command: &str, cwd: &str, payload: &str, timeout: Durati
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    kill_process_group(pgid);
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -313,10 +381,26 @@ pub fn run_hook_command(command: &str, cwd: &str, payload: &str, timeout: Durati
         }
     };
 
-    // The pipes are closed (child exited or was killed), so these join fast.
-    let _ = writer.join();
-    let _ = stdout_reader.join();
-    let stderr_excerpt = stderr_reader.join().unwrap_or_default();
+    // The direct child is reaped. Signal the pipe threads to stop and kill
+    // any grandchildren still holding the pipe ends so EOF arrives promptly.
+    // Completion is then collected with a deadline, NEVER an unconditional
+    // blocking join: a reader blocked inside read(2) cannot observe the
+    // done-flag, so a descendant that escaped the process group (or survived
+    // the kill, e.g. under sandboxed signal denial) must not wedge the run
+    // past its bound. Stragglers finish in the background; their pipes close
+    // when they eventually exit.
+    done.store(true, Ordering::Relaxed);
+    kill_process_group(pgid);
+
+    let drain_grace = Duration::from_millis(250);
+    let _ = writer_rx.recv_timeout(drain_grace);
+    let _stdout_excerpt = stdout_rx.recv_timeout(drain_grace).unwrap_or_default();
+    let stderr_excerpt = stderr_rx.recv_timeout(drain_grace).unwrap_or_default();
+    // Detach any straggler pipe threads: dropping the JoinHandle is safe —
+    // a detached thread only owns its pipe end, never the run's progress.
+    drop(writer);
+    drop(stdout_reader);
+    drop(stderr_reader);
 
     match status {
         None => HookOutcome {
@@ -331,8 +415,34 @@ pub fn run_hook_command(command: &str, cwd: &str, payload: &str, timeout: Durati
     }
 }
 
-/// Drain a pipe to EOF, keeping at most the first 4 KiB.
-fn drain_capped<R: Read>(pipe: Option<R>) -> String {
+/// Kill a whole process group (SIGTERM, then SIGKILL for stragglers). Used
+/// both on timeout and after the direct child exits: a backgrounded
+/// grandchild that inherited the pipes would otherwise keep the drain
+/// threads from ever seeing EOF. Best effort — a race with process exit is
+/// harmless (`ESRCH` is ignored); a killed group can be momentarily a zombie.
+fn kill_process_group(pgid: u32) {
+    unsafe {
+        if libc::kill(pgid as libc::pid_t, libc::SIGTERM) != 0 {
+            // Group already gone (or we raced) — nothing more to do.
+            let _ = libc::kill(pgid as libc::pid_t, libc::SIGKILL);
+            return;
+        }
+        // Give the group a short grace period to exit on SIGTERM before
+        // escalating to SIGKILL; keeps flushing hooks graceful in practice.
+        for _ in 0..20 {
+            if libc::kill(pgid as libc::pid_t, 0) != 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        libc::kill(pgid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+/// Drain a pipe to EOF, keeping at most the first 4 KiB. Bails out early when
+/// `done` flips — so a grandchild that inherited the pipe and never closes it
+/// cannot wedge the reader thread past the hook's deadline.
+fn drain_capped<R: Read>(pipe: Option<R>, done: &AtomicBool) -> String {
     let mut pipe = match pipe {
         Some(pipe) => pipe,
         None => return String::new(),
@@ -340,6 +450,9 @@ fn drain_capped<R: Read>(pipe: Option<R>) -> String {
     let mut kept: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
+        if done.load(Ordering::Relaxed) {
+            break;
+        }
         match pipe.read(&mut chunk) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
@@ -457,6 +570,56 @@ mod tests {
     }
 
     #[test]
+    fn run_hook_command_times_out_on_compound_command() {
+        // A compound command defeats the shell's exec-optimization for a bare
+        // command, so the shell itself outlives the deadline. The group kill
+        // plus bounded drain must still return promptly (regression: without
+        // process-group cleanup this could hang well past timeout_seconds).
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("echo hi; sleep 5", ".", "{}", Duration::from_millis(150));
+        assert!(outcome.timed_out);
+        assert!(!outcome.succeeded());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "compound timeout took {:?}; bounded-drain regression",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_hook_command_survives_background_grandchild_holding_pipes() {
+        // The shell exits quickly but leaves a backgrounded grandchild holding
+        // stdout/stderr. The hook must return on the shell's own exit via the
+        // bounded drain grace, never waiting out the grandchild.
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("sleep 5 & echo done", ".", "{}", Duration::from_secs(5));
+        assert!(outcome.succeeded());
+        assert!(!outcome.timed_out);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "drain collection blocked on a pipe-holding grandchild ({:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_hook_command_large_payload_unread_stdin_does_not_wedge() {
+        // A 1 MiB payload to a hook that never reads stdin and outlives the
+        // deadline: the writer thread must stop on the done-flag and the call
+        // must return bounded instead of blocking in write/read.
+        let payload = "x".repeat(1024 * 1024);
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("sleep 2", ".", &payload, Duration::from_millis(150));
+        assert!(outcome.timed_out);
+        assert!(!outcome.succeeded());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "unread-stdin payload wedge ({:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
     fn payload_shape_for_drip_specific_events() {
         let memory = build_hook_payload(
             HookEvent::MemoryWrite,
@@ -503,5 +666,45 @@ mod tests {
             vec!["echo pr".to_string()]
         );
         assert!(!config.is_empty());
+    }
+
+    /// Regression for the P1 timeout finding: a compound foreground command
+    /// ("echo; sleep 5") cannot be exec-optimized away by the shell, so the
+    /// old kill-only-the-shell path plus unconditional joins would stall the
+    /// run past the deadline. The whole run must stay bounded.
+    #[test]
+    fn run_hook_command_bounds_compound_foreground_sleep() {
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("echo hi; sleep 5", ".", "{}", Duration::from_millis(150));
+        assert!(outcome.timed_out);
+        assert!(!outcome.succeeded());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Regression for the P1 finding: the shell exits 0 but a backgrounded
+    /// grandchild keeps stdout open, so the old code joined the drain threads
+    /// for the grandchild's full lifetime. The group kill must reap the
+    /// grandchild and return promptly. (Uses a bounded 10s sleep so a
+    /// regression fails this test rather than wedging CI forever.)
+    #[test]
+    fn run_hook_command_returns_when_backgrounded_grandchild_holds_pipes() {
+        let started = std::time::Instant::now();
+        let outcome = run_hook_command("sleep 10 & echo done", ".", "{}", Duration::from_millis(500));
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.succeeded());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Regression: a payload larger than the pipe buffer fed to a hook that
+    /// never reads stdin must not wedge the writer thread — the run stays
+    /// bounded by the deadline and the timeout kill.
+    #[test]
+    fn run_hook_command_survives_oversized_payload_with_unread_stdin() {
+        let started = std::time::Instant::now();
+        let payload = "x".repeat(2 * 1024 * 1024);
+        let outcome = run_hook_command("sleep 2", ".", &payload, Duration::from_millis(500));
+        assert!(outcome.timed_out);
+        assert!(!outcome.succeeded());
+        assert!(started.elapsed() < Duration::from_secs(8));
     }
 }

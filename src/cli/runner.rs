@@ -3,7 +3,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use regex::Regex;
 
 use crate::cli::follow::{read_inbox_entries, read_inbox_messages};
 use crate::cli::skills::{compose_skill_system_prompt, LoadedCliSkill};
@@ -18,6 +17,7 @@ use crate::harness::harness_tools::RepoMemoryConfig;
 use crate::harness::model_call::AbortSignal;
 use crate::harness::prompt::compose_harness_system_prompt;
 use crate::harness::r#loop::{run_solid_state_harness, EmitFn, OperatorInboxEntry, SolidStateHarnessOptions};
+use crate::harness::hooks::git_publish_pattern;
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
@@ -129,11 +129,6 @@ pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> 
 /// printed something shorter (a slice would panic on it).
 fn short_sha(sha: &str) -> &str {
     sha.get(..12).unwrap_or(sha)
-}
-
-fn git_publish_pattern() -> &'static Regex {
-    static PATTERN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    PATTERN.get_or_init(|| Regex::new(r"\bgit\s+(commit|push)\b|\bgh\s+pr\s+create\b").unwrap())
 }
 
 // The PR #19 incident shape: a run pushes a branch, then keeps editing the
@@ -331,34 +326,16 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
 
     let on_event = args.on_event.clone();
     let published_flag = published_from_workspace.clone();
-    let hooks_for_emit = args.hooks.clone();
-    let cwd_for_emit = args.cwd.clone();
+    // PRReady hooks are NOT fired here: the emit closure is event transport,
+    // and spawning hook subprocesses here blocked every subsequent event and
+    // surfaced failures only via eprintln. The harness fires PRReady after a
+    // successful publish-matching tool execution (loop.rs dispatch_tool_calls),
+    // reusing fire_hook so failures surface as RunWarning.
     let emit: EmitFn = Arc::new(move |event: HarnessEvent| {
         let published = event.r#type == HarnessEventType::ToolCall
             && git_publish_pattern().is_match(&event.detail);
         if published {
             published_flag.store(true, Ordering::Relaxed);
-            // drip-specific: PRReady fires when the run publishes (git
-            // commit/push, `gh pr create`). Best-effort like every hook: a
-            // failing or timed-out command is reported to stderr, never blocks.
-            let payload = crate::harness::hooks::build_hook_payload(
-                crate::harness::hooks::HookEvent::PRReady,
-                &cwd_for_emit,
-                None,
-                &chrono::Utc::now().to_rfc3339(),
-            );
-            let commands = hooks_for_emit.commands_for(crate::harness::hooks::HookEvent::PRReady, None);
-            for command in &commands {
-                let outcome = crate::harness::hooks::run_hook_command(
-                    command,
-                    &cwd_for_emit,
-                    &payload,
-                    hooks_for_emit.timeout(),
-                );
-                if !outcome.succeeded() {
-                    eprintln!("drip: pr_ready hook failed: {}", outcome.describe());
-                }
-            }
         }
 
         on_event(event);

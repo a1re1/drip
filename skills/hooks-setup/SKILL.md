@@ -13,7 +13,9 @@ notify on session/tool activity:
    `loop_start` / `loop_finish`, `task_start` / `task_finish`,
    `pre_tool_use`, `post_tool_use`, `stop`, plus the drip-specific
    `relay_start` / `relay_finish` (relay rounds), `memory_write`
-   (`remember`/`forget`), and `pr_ready` (the run publishes). The two
+   (`remember`/`forget` — fires only when the call actually changed the
+   memory bank), and `pr_ready` (fires only after a publish-matching
+   tool call succeeds; failed or vetoed publishes stay silent). The two
    tool events take arrays of `{ "matcher", "command" }` objects
    (matcher is a `|`-separated tool list with optional trailing `*`);
    every other event takes an array of command strings — a bare string
@@ -25,9 +27,15 @@ notify on session/tool activity:
    Failures only surface as warnings — a hook must never stall a run;
    the one exception is `pre_tool_use` exiting `2`, which vetoes the tool
    call and returns the hook's stderr to the model.
-4. Never put untrusted commands in a hooks block: hooks run with the
-   user's privileges and are not sandboxed. Prefer small scripts under
-   `~/.drip/hooks/` over long inline one-liners.
+   Match tool events by canonical uppercase tool names (`BASH`, `PATCH`,
+   `READ`, …) — matching is case-sensitive and never sees command text,
+   so `"Bash"` or `"rm *"` never match anything.
+4. Hooks are the user's own commands run with the user's privileges in
+   the session directory — drip does not sandbox them, and they are not
+   a policy boundary: delegated child runs and the internal review child
+   omit user hooks entirely, so a `pre_tool_use` veto can be bypassed by
+   delegating. Never put untrusted commands in a hooks block, and prefer
+   small scripts under `~/.drip/hooks/` over long inline one-liners.
 5. Verify before done: the config still parses (a malformed `hooks`
    block is ignored with a warning), and one hook fires by hand — pipe a
    sample payload into the command exactly as drip would.

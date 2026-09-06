@@ -1253,6 +1253,7 @@ pub struct SolidStateHarnessOptions {
     pub goal_context: Option<String>,
     pub goal_images: Option<Vec<String>>,
     pub headers: Vec<(String, String)>,
+    pub hooks: crate::harness::hooks::HooksConfig,
     pub initial_state: Option<HarnessState>,
     pub r#loop: Option<crate::harness::roles::PartialHarnessLoopConfig>,
     pub max_iterations: Option<i64>,
@@ -1982,6 +1983,13 @@ impl HarnessRun {
             .filter(|index| registry.map_or(true, |allowed| allowed.contains(index)))
             .and_then(|index| self.tools.get(index));
 
+        // Privacy: hook payloads go to user-configured commands over stdin,
+        // so redact the tool input before it leaves the process.
+        let redacted_input = (self.redact)(raw_input);
+        self.fire_hook(
+            crate::harness::hooks::HookEvent::PreToolUse,
+            Some((tool_name, redacted_input.as_str())),
+        );
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
             history: &[],
@@ -2002,14 +2010,17 @@ impl HarnessRun {
             tool_name,
         });
 
+        let failed = executed
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed));
+        // The one choke point every consumer shares: context injection,
+        // telemetry, transcript events, and the NDJSON stream all read this.
+        let tool_content = (self.redact)(&executed.tool_content);
+        self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
         WorkspaceToolExecution {
-            failed: executed
-                .blocks
-                .iter()
-                .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed)),
-            // The one choke point every consumer shares: context injection,
-            // telemetry, transcript events, and the NDJSON stream all read this.
-            tool_content: (self.redact)(&executed.tool_content),
+            failed,
+            tool_content,
         }
     }
 
@@ -2061,11 +2072,38 @@ impl HarnessRun {
         }
     }
 
+    /// Fire user-configured hooks for `event`. A hook failure or timeout
+    /// never blocks the run: it is only surfaced as a RunWarning event.
+    /// Deliberately blocking (bounded by the configured timeout) so the sync
+    /// tool-dispatch sites can call it; PreToolUse exit-2 blocking semantics
+    /// land with the drip-specific events task.
+    fn fire_hook(&self, event: crate::harness::hooks::HookEvent, tool: Option<(&str, &str)>) {
+        let commands = self.options.hooks.commands_for(event, tool.map(|(name, _)| name));
+        if commands.is_empty() {
+            return;
+        }
+        let timeout = self.options.hooks.timeout();
+        let timestamp = (self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        for command in commands {
+            let payload = crate::harness::hooks::build_hook_payload(event, &self.cwd, tool, &timestamp);
+            let outcome = crate::harness::hooks::run_hook_command(&command, &self.cwd, &payload, timeout);
+            if !outcome.succeeded() {
+                self.emit(HarnessEvent {
+                    data: None,
+                    detail: format!("hook {}: {}", event.as_str(), outcome.describe()),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::RunWarning,
+                });
+            }
+        }
+    }
+
     /// the outer `while` loop: one task loop per iteration
     /// of this method's loop, delegating to `begin_loop` / `run_cycle` /
     /// `end_loop`. Returns Some(result) when the run ends inside the loop
     /// (abort/error paths); None when the outer loop exits normally.
     pub async fn run_loops(&mut self) -> Option<HarnessRunResult> {
+        self.fire_hook(crate::harness::hooks::HookEvent::SessionStart, None);
         while self.state.iteration - self.start_iteration < self.max_iterations {
             if self.signal_aborted() {
                 self.aborted = true;
@@ -2094,6 +2132,8 @@ impl HarnessRun {
             }
 
             let mut scope = self.begin_loop();
+            self.fire_hook(crate::harness::hooks::HookEvent::LoopStart, None);
+            self.fire_hook(crate::harness::hooks::HookEvent::TaskStart, None);
 
             for cycle in 1..=scope.loop_budget.max_cycles {
                 if scope.task_finished || scope.concluded_naturally || self.aborted {
@@ -2163,6 +2203,8 @@ impl HarnessRun {
             }
 
             self.end_loop(&mut scope);
+            self.fire_hook(crate::harness::hooks::HookEvent::LoopFinish, None);
+            self.fire_hook(crate::harness::hooks::HookEvent::TaskFinish, None);
 
             if self.aborted {
                 return Some(self.aborted_result());
@@ -3834,6 +3876,7 @@ impl HarnessRun {
     /// decide the run reason, generate the run summary,
     /// report leaked tmux jobs, emit `run-complete`, persist, build the result.
     pub async fn finish(mut self) -> HarnessRunResult {
+        self.fire_hook(crate::harness::hooks::HookEvent::Stop, None);
         if self.aborted {
             return self.aborted_result();
         }

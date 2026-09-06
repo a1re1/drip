@@ -1882,6 +1882,7 @@ impl TuiApp {
         let goal_context = resolved.context_block.clone();
         let mentions = resolved.mentions.clone();
         let images: Vec<String> = goal_images.iter().map(|attachment| attachment.data_url.clone()).collect();
+        let hooks = self.config.hooks.clone();
 
         std::thread::spawn(move || {
             // A panic anywhere below must still release the composer: the
@@ -1904,6 +1905,7 @@ impl TuiApp {
                 goal: goal_text,
                 goal_context,
                 goal_images: if images.is_empty() { None } else { Some(images) },
+                hooks,
                 index: &index,
                 inference,
                 max_iterations,

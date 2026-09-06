@@ -124,6 +124,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                         wiring.parent_session_id
                     )),
                     goal_images: None,
+                    hooks: Default::default(),
                     index: &index,
                     inference: wiring.inference.clone(),
                     max_iterations: Some(max_iterations),

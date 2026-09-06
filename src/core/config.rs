@@ -993,6 +993,8 @@ pub struct CliConfig {
     pub settings: IndexMap<String, String>,
     #[serde(rename = "statusLine", default, skip_serializing_if = "Option::is_none")]
     pub status_line: Option<StatusLineSetting>,
+    #[serde(default, skip_serializing_if = "crate::harness::hooks::HooksConfig::is_empty")]
+    pub hooks: crate::harness::hooks::HooksConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
 }
@@ -1002,6 +1004,7 @@ pub fn create_default_cli_config() -> CliConfig {
         path: None,
         settings: default_setting_values(),
         status_line: None,
+        hooks: crate::harness::hooks::HooksConfig::default(),
         version: Some(1),
     }
 }
@@ -1170,6 +1173,22 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     upgrade_cerebras_profiles(&mut settings);
     upgrade_retired_vendor_profiles(&mut settings);
 
+    // hooks are opt-in and never fatal: a malformed entry warns and the
+    // rest of the config still loads. No process is spawned here.
+    let hooks = parsed_value
+        .get("hooks")
+        .map(|hooks_value| {
+            serde_json::from_value::<crate::harness::hooks::HooksConfig>(hooks_value.clone())
+                .unwrap_or_else(|error| {
+                    eprintln!(
+                        "warning: {}: ignoring \"hooks\": {error}",
+                        path.display()
+                    );
+                    crate::harness::hooks::HooksConfig::default()
+                })
+        })
+        .unwrap_or_default();
+
     // statusLine is opt-in and never fatal: a malformed entry warns and the
     // rest of the config still loads. No process is spawned here.
     let (status_line, warnings) = match parse_status_line_setting(parsed_value.get("statusLine")) {
@@ -1187,6 +1206,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         path: None,
         settings,
         status_line,
+        hooks,
         version: Some(1),
     })
 }
@@ -1791,6 +1811,63 @@ mod tests {
         .unwrap();
         let config = load_cli_config(&path).unwrap();
         assert_eq!(config.status_line, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_cli_config_parses_hooks_block() {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-config-hooks-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // No hooks section -> default (empty) hooks; existing behavior preserved.
+        std::fs::write(&path, "{\n  \"settings\": {},\n  \"version\": 1\n}\n").unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert!(config.hooks.is_empty());
+
+        // A valid hooks block survives the load.
+        std::fs::write(
+            &path,
+            r#"{
+  "settings": {},
+  "version": 1,
+  "hooks": {
+    "pre_tool_use": [{"matcher": "Bash|rm *", "command": "echo blocked"}],
+    "task_start": ["echo task-start"],
+    "stop": ["echo stop"],
+    "timeout_seconds": 5
+  }
+}"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(config.hooks.pre_tool_use.len(), 1);
+        assert_eq!(
+            config.hooks.pre_tool_use[0].matcher.as_deref(),
+            Some("Bash|rm *")
+        );
+        assert_eq!(config.hooks.pre_tool_use[0].command, "echo blocked");
+        assert_eq!(config.hooks.task_start, vec!["echo task-start".to_string()]);
+        assert_eq!(config.hooks.stop, vec!["echo stop".to_string()]);
+        assert_eq!(config.hooks.timeout_seconds, Some(5));
+        assert!(!config.hooks.is_empty());
+
+        // A malformed hooks block is nonfatal: the rest of the config still
+        // loads, hooks fall back to default, and nothing was executed.
+        std::fs::write(
+            &path,
+            r#"{ "settings": {}, "version": 1, "hooks": {"task_start": "echo not-a-list"} }"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert!(config.hooks.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }

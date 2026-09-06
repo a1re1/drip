@@ -28,6 +28,7 @@ pub struct CliGoalRunArgs {
     pub goal: String,
     pub goal_context: Option<String>,
     pub goal_images: Option<Vec<String>>,
+    pub hooks: crate::harness::hooks::HooksConfig,
     pub inference: ResolvedInferenceConfig,
     /// Session inbox file (drip --send); polled at cycle boundaries when set.
     pub inbox_path: Option<PathBuf>,
@@ -393,6 +394,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         tools: args.tools,
         tool_services: args.tool_services.clone(),
         url: Some(args.inference.url.clone()),
+        hooks: args.hooks.clone(),
         ..SolidStateHarnessOptions::default()
     };
 

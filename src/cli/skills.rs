@@ -118,11 +118,11 @@ impl SkillRoleHints {
 }
 
 #[derive(Debug, Default)]
-struct SkillFrontmatter {
-    args: Option<SkillArgs>,
-    description: Option<String>,
-    name: Option<String>,
-    roles: Option<SkillRoleHints>,
+pub(crate) struct SkillFrontmatter {
+    pub(crate) args: Option<SkillArgs>,
+    pub(crate) description: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) roles: Option<SkillRoleHints>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +178,18 @@ fn normalize_content(raw: &str) -> String {
     stripped.replace("\r\n", "\n")
 }
 
-fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
+/// Parse a skill's frontmatter: `name`, `description`, an optional `args:`
+/// block and an optional advisory `roles:` block. This is the ONE shared
+/// parser behind every activation path (`--skill`, `--roles`-loaded roles,
+/// slash activation), so all paths agree on block syntax:
+///
+/// - A block opens at `args:` / `roles:` alone on its own line; its entries
+///   are exactly-two-space-indented `key: value` lines.
+/// - A blank line, a non-indented line, or a deeper-indented line (nested
+///   YAML) ends the block; later entries are never read as hints.
+/// - First `default:` wins; a repeated stage name keeps its first role.
+/// - The scalar form `roles: author` is unsupported and ignored (no hints).
+pub(crate) fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
     // Normalize BOM/CRLF up front so parsing is byte-layout agnostic. The
     // production load paths already call normalize_content, but normalizing
     // here too keeps the parser correct for any caller and is idempotent.
@@ -253,11 +264,16 @@ fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
             in_args_block = false;
         }
 
-        // If we're in the roles block, parse indented "  key: value" lines.
+        // If we're in the roles block, parse exactly-two-space-indented
+        // "  key: value" lines. Deeper indentation (nested YAML) or a
+        // non-indented line ends the block.
         if in_roles_block {
             // Match "  default: value" or "  stage: role"
             if let Some(rest) = line.strip_prefix("  ") {
-                if let Some(colon_idx) = rest.find(':') {
+                if rest.starts_with(' ') || rest.starts_with('\t') {
+                    // Nested/deeper-indented YAML is not a role hint.
+                    in_roles_block = false;
+                } else if let Some(colon_idx) = rest.find(':') {
                     let key = rest[..colon_idx].trim();
                     let value = rest[colon_idx + 1..].trim();
                     if !key.is_empty() && !value.is_empty() {
@@ -1497,6 +1513,36 @@ mod tests {
         assert_eq!(hints.stage_role("review"), Some("reviewer"));
         // The garbage line ends the block; "fixes" is not misread as a stage.
         assert_eq!(hints.stages.len(), 1);
+    }
+
+    #[test]
+    fn frontmatter_roles_blank_line_ends_block_consistently() {
+        // P1 parity repro: a blank line between `default:` and a stage used
+        // to parse differently through the roles.rs loader (block stayed
+        // alive) than through skills.rs (block ended). One shared parser now
+        // means both see the same thing: the block ends at the blank line.
+        let content = "---\nname: x\ndescription: d\nroles:\n  default: author\n\n  review: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.expect("default line is inside the block");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stages.len(), 0);
+    }
+
+    #[test]
+    fn frontmatter_roles_tab_or_deep_indent_rejected_not_flattened() {
+        // Tab-indented and deeper-indented (nested YAML) entries end the
+        // block instead of being flattened into bogus stages.
+        let tabbed = "---\nname: x\ndescription: d\nroles:\n  default: author\n\treview: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(tabbed);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        assert!(hints.stages.is_empty());
+
+        let deep = "---\nname: x\ndescription: d\nroles:\n  review: reviewer\n    nested: role\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(deep);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert!(hints.stages.iter().all(|(name, _)| name != "nested"));
     }
 
     #[test]

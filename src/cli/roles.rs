@@ -660,8 +660,12 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 
 				match load_skill_content(skill, None) {
 					Ok(loaded) => {
-						prompt_sections
-							.push(format!("# Skill: {}\n\n{}", loaded.name, loaded.content));
+						// Compose through the shared composer so role-embedded
+						// skills get the same "# Skill role hints (advisory)"
+						// section as CLI/slash-activated skills (README contract).
+						prompt_sections.push(crate::cli::skills::compose_skill_system_prompt(
+							"", std::slice::from_ref(&loaded),
+						));
 					}
 					Err(error) => {
 						issues.push(format!(
@@ -951,57 +955,12 @@ fn parse_skill_frontmatter_args(markdown: &str) -> Option<Vec<SkillArgDef>> {
 	Some(defs)
 }
 
-/// Parse the advisory `roles:` block from a skill's frontmatter. Tolerates
-/// tab- or space-indented keys; the first `default:` and first occurrence of
-/// each stage win; blank values or non-`key: value` lines end the block
-/// rather than misreading adjacent YAML.
+/// Parse the advisory `roles:` block from a skill's frontmatter via the one
+/// shared parser (`parse_skill_frontmatter`), so CLI, slash, and role-loaded
+/// skills all agree on block syntax (two-space indent, blank line ends the
+/// block, first `default:`/first occurrence of each stage wins).
 fn parse_skill_roles_hints(markdown: &str) -> Option<SkillRoleHints> {
-	let frontmatter = extract_frontmatter(markdown)?;
-	let mut default: Option<String> = None;
-	let mut stages: Vec<(String, String)> = Vec::new();
-	let mut in_roles = false;
-
-	for line in frontmatter.lines() {
-		if line.trim_end() == "roles:" {
-			in_roles = true;
-			continue;
-		}
-		if !in_roles {
-			continue;
-		}
-		let trimmed = line.trim_start();
-		if trimmed == line || trimmed.is_empty() {
-			// Not indented (or blank): the roles block has ended.
-			if trimmed.is_empty() {
-				continue;
-			}
-			in_roles = false;
-			continue;
-		}
-		let Some((key, value)) = trimmed.split_once(':') else {
-			in_roles = false;
-			continue;
-		};
-		let key = key.trim();
-		let value = value.trim();
-		if key.is_empty() || value.is_empty() {
-			in_roles = false;
-			continue;
-		}
-		if key == "default" {
-			if default.is_none() {
-				default = Some(value.to_string());
-			}
-		} else if !stages.iter().any(|(name, _)| name == key) {
-			stages.push((key.to_string(), value.to_string()));
-		}
-	}
-
-	if default.is_none() && stages.is_empty() {
-		None
-	} else {
-		Some(SkillRoleHints { default, stages })
-	}
+	crate::cli::skills::parse_skill_frontmatter(markdown).roles
 }
 
 fn extract_frontmatter(markdown: &str) -> Option<String> {

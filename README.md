@@ -244,6 +244,23 @@ The contract, as rendered into the prompt:
   produces findings — so every role change goes through the existing
   scheduler.
 
+### Frontmatter syntax
+
+The `roles:` block is intentionally lightweight — no YAML engine is used:
+
+- `roles:` alone on its own line opens the block; entries are
+  two-space-indented `key: value` lines (`default: <role>` and/or
+  `<stage>: <role>`).
+- A blank line, a non-indented line, or a deeper-indented line (nested YAML)
+  ends the block; later entries are not read as hints.
+- The first `default:` wins, and a repeated stage name keeps its first role.
+- The scalar form `roles: author` is not supported; it is ignored and the
+  skill simply carries no hints.
+
+One shared parser backs every activation path (`--skill`, `--roles`-loaded
+roles, and slash activation), so a given file yields the same hints however
+the skill was activated.
+
 ### Example: a ship skill with per-stage roles
 
 `examples/skills/navis/SKILL.md` shows the full pattern. Copy it into your

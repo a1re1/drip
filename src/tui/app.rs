@@ -1954,20 +1954,57 @@ impl TuiApp {
 
     // ----- terminal pane title --------------------------------------------
 
-    /// Captures the first goal of the session exactly once (the initial CLI
-    /// goal or the first submitted chat goal): shows a readable fallback
-    /// immediately with the spinner running, and on an interactive TTY with
-    /// the feature enabled spawns ONE background request for a model label.
-    /// Later goals and spinner ticks never re-request. TTY-gated: headless,
-    /// JSON, and redirected runs never emit escapes or make a model call.
+    /// Starts a goal run: shows a readable fallback (or the persisted /rename
+    /// name) immediately with the spinner running. On an interactive TTY with
+    /// the feature enabled the busy spinner is armed for EVERY goal run; only
+    /// the background model-label request is one-shot per session, so later
+    /// goals reuse the existing title and never re-request a label. TTY-gated:
+    /// headless, JSON, and redirected runs never emit escapes or make a model
+    /// call.
     fn begin_title(&mut self, goal_text: &str, env: &HashMap<String, String>) {
+        self.begin_title_with(goal_text, env, stdout_is_tty());
+    }
+
+    /// `is_tty` is injected so lifecycle tests can drive the spinner wiring
+    /// without a real terminal.
+    fn begin_title_with(
+        &mut self,
+        goal_text: &str,
+        env: &HashMap<String, String>,
+        is_tty: bool,
+    ) {
         let settings = self.config.settings.clone();
         // An explicit /rename name wins over a generated title: when
         // session.json already carries one, the one-shot auto-title never
         // runs, so the next goal cannot overwrite the user's choice.
         let persisted_name = read_session_name(Path::new(&self.paths.meta_path));
+        // The busy spinner is per-run, not per-title-request: every goal on
+        // a real terminal spins, even when a persisted /rename name means no
+        // auto-title request is made this run (or one was already made).
+        // Escapes stay TTY- and feature-gated; headless runs materialize
+        // nothing and arm no tick.
+        if is_tty && terminal_title_enabled(&settings) {
+            let mut title = match self.pane_title.take() {
+                Some(title) => title,
+                None => {
+                    let mut fresh = PaneTitle::new(goal_text);
+                    // A fresh title on a session that already carries a
+                    // /rename name shows that name, not the goal fallback.
+                    if let Some(name) = persisted_name.as_deref() {
+                        fresh.set_label(name, Instant::now());
+                    }
+                    fresh
+                }
+            };
+            if let Some(escape) = title.set_busy(true, Instant::now()) {
+                crate::tui::pane_title::emit(Some(&escape));
+                self.title_next_tick =
+                    Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
+            }
+            self.pane_title = Some(title);
+        }
         if !should_request_auto_title(
-            stdout_is_tty(),
+            is_tty,
             &settings,
             self.title_requested,
             persisted_name.as_deref(),
@@ -1975,13 +2012,6 @@ impl TuiApp {
             return;
         }
         self.title_requested = true;
-        let mut title = PaneTitle::new(goal_text);
-        if let Some(escape) = title.set_busy(true, Instant::now()) {
-            crate::tui::pane_title::emit(Some(&escape));
-            self.title_next_tick =
-                Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
-        }
-        self.pane_title = Some(title);
 
         // Background, nonblocking, one-shot: the thread only sends a message
         // and never writes title escapes itself.
@@ -3116,6 +3146,54 @@ mod rename_tests {
             .is_none());
         }
         assert_eq!(label(&app), "Ops");
+    }
+
+    #[test]
+    fn persisted_rename_name_still_spins_and_settles_across_runs() {
+        let dir = temp_dir("busy-spinner");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        app.dispatch_command("rename", "Ops");
+        assert_eq!(label(&app), "Ops");
+
+        // A goal on a session with a persisted manual name: the one-shot
+        // auto-title is suppressed, but the spinner must still start...
+        app.begin_title_with("second goal", &HashMap::new(), true);
+        let title = app.pane_title.as_ref().expect("title exists");
+        assert!(title.is_busy(), "spinner must run even with a manual name");
+        assert!(app.title_next_tick.is_some(), "spinner tick must be armed");
+        assert_eq!(title.label(), "Ops", "manual name keeps the label");
+        // ...tick while busy...
+        let escape = app.pane_title.as_mut().and_then(|title| {
+            title.tick(Instant::now() + Duration::from_millis(2 * SPINNER_INTERVAL_MS))
+        });
+        assert!(escape.is_some(), "a due tick advances the spinner");
+        // ...and the run end settles busy -> idle with the name intact.
+        app.finish_run();
+        let title = app.pane_title.as_ref().expect("title exists");
+        assert!(!title.is_busy());
+        assert_eq!(title.label(), "Ops");
+        assert!(app.title_next_tick.is_none());
+
+        // The next goal spins again on the same label, then settles again.
+        app.begin_title_with("third goal", &HashMap::new(), true);
+        assert!(app.pane_title.as_ref().expect("title exists").is_busy());
+        app.finish_run();
+        assert!(!app.pane_title.as_ref().expect("title exists").is_busy());
+        assert_eq!(label(&app), "Ops");
+    }
+
+    #[test]
+    fn headless_runs_never_materialize_a_title_or_arm_the_spinner() {
+        let dir = temp_dir("busy-headless");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        // Tests run headless (no TTY): begin_title materializes nothing and
+        // arms no tick, and never spawns the auto-title worker.
+        app.begin_title("first goal", &HashMap::new());
+        assert!(app.pane_title.is_none());
+        assert!(app.title_next_tick.is_none());
     }
 }
 

@@ -128,24 +128,6 @@ fn sgr_split_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new("(\x1b\\[[0-9;?]*[ -/]*[@-~])").unwrap())
 }
 
-// `String::split` with a capturing group keeps the captures in the result —
-// replicate that for the SGR segment walker.
-fn split_with_captures<'a>(text: &'a str, re: &Regex) -> Vec<&'a str> {
-    let mut parts = Vec::new();
-    let mut last = 0;
-    for m in re.find_iter(text) {
-        if m.start() > last {
-            parts.push(&text[last..m.start()]);
-        }
-        parts.push(m.as_str());
-        last = m.end();
-    }
-    if last < text.len() {
-        parts.push(&text[last..]);
-    }
-    parts
-}
-
 fn sgr_closers() -> &'static [(&'static str, Regex)] {
     static TABLE: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
     TABLE.get_or_init(|| {

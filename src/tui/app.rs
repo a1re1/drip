@@ -329,7 +329,8 @@ impl PromptHistory {
         }
     }
 
-    /// Number of stored entries (introspection for tests and callers).
+    /// Number of stored entries (introspection for tests).
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
     }

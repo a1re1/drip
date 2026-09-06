@@ -14,7 +14,6 @@ use crate::tools::helpers::{
 use super::{ToolCtx, ToolOutcome};
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB cap for scanned files
-const BINARY_PROBE_SIZE: usize = 1024; // 1KB
 
 // ── internal types ────────────────────────────────────────────────────────────
 

@@ -267,6 +267,27 @@ current name is kept.
 
 ---
 
+## Compact TUI timeline
+
+In the interactive TUI (`drip --tui`), back-to-back tool activity within a
+cycle is folded into a single summary row such as
+
+```
+[  3] ── 5 Tools called: READ, PATCH, BASH ──
+```
+
+The count updates in place while the tools run, and the row is finalized
+once the cycle ends. Each new cycle begins with a short transition line
+(numbered cycle, task preview, budget) instead of per-tool chatter, so the
+scrollback reads as goals → tool summaries → model responses.
+
+This is a presentation-only projection: compaction is a TUI default and
+nothing is deleted from the record. The full transcript — every tool call,
+arguments, results and inference telemetry — is still written to the
+session JSONL and remains visible in `dripw`, the headless output and the
+logs. Replays, session switches and terminal resizes use the same compact
+projection, so raw tool rows are not re-revealed.
+
 ## Custom status line
 
 

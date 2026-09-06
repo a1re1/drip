@@ -60,7 +60,10 @@ use crate::tui::terminal_title::{
     terminal_title_enabled, terminal_title_timeout_ms,
 };
 use crate::tui::term::{terminal_size, write_out, RawMode};
-use crate::tui::timeline::{render_timeline_cell, select_repaint_tail_start};
+use crate::tui::compact::{
+	render_compact_cell, render_tool_group, select_compact_tail_start,
+	CompactCell, CompactEmitter, CompactProjection,
+};
 use crate::tui::widgets::{render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps};
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -302,6 +305,9 @@ struct TuiApp {
     bootstrap: TuiBootstrap,
     /// Every timeline cell rendered so far (for the repaint tail after a resize).
     cells: Vec<TranscriptEntry>,
+    /// Presentation-only projection folding tool activity per cycle into the
+    /// compact `-- N Tools called: ... --` rows. Never persisted.
+    compact: CompactEmitter,
     cols: usize,
     config: CliConfig,
     cursor: usize,
@@ -380,6 +386,7 @@ impl TuiApp {
             attachments: Vec::new(),
             bootstrap,
             cells,
+            compact: CompactEmitter::new(),
             cols,
             config,
             cursor: 0,
@@ -417,19 +424,66 @@ impl TuiApp {
 
     // ----- timeline -------------------------------------------------------
 
+    /// Rendered rows for projected compact cells (no trailing newlines).
+    fn projected_rows(&self, cells: &[CompactCell]) -> Vec<String> {
+        let mut out = Vec::new();
+        for cell in cells {
+            out.extend(render_compact_cell(cell, self.cols));
+        }
+        out
+    }
+
     /// Prints cells above the live region (Ink's <Static>).
+    ///
+    /// Raw entries still land in `cells` (repaint tail budgeting) and feed
+    /// the compact projection, but scrollback shows the COMPACT view: tool
+    /// activity folds into one summary row per cycle while goals, model
+    /// text and boundaries stay visible. The active group is never painted
+    /// here -- it lives in the erasable live region until a boundary
+    /// finalizes it, and then it is emitted exactly once.
     fn emit_static(&mut self, entries: Vec<TranscriptEntry>) {
-        if entries.is_empty() {
+        let cells = self.compact.absorb(&entries);
+        if !entries.is_empty() {
+            self.cells.extend(entries);
+        }
+
+        let rows = self.projected_rows(&cells);
+        if rows.is_empty() {
+            // Telemetry-only batches change nothing on scrollback, but the
+            // live summary may have grown -- repaint it in place.
+            self.repaint();
             return;
         }
         let mut out = String::new();
-        for entry in &entries {
-            for row in render_timeline_cell(entry, self.cols) {
-                out.push_str(&row);
-                out.push('\n');
-            }
+        for row in rows {
+            out.push_str(&row);
+            out.push('\n');
         }
-        self.cells.extend(entries);
+        self.paint(&out);
+    }
+
+    /// Rebuild the compact projection from raw transcript entries (startup
+    /// replay / session switch). Finalized cells are returned as painted
+    /// rows; an unfinished trailing group stays in the live region.
+    fn rebuild_compact(&mut self, entries: &[TranscriptEntry]) -> Vec<String> {
+        self.compact.rebuild(entries);
+        self.projected_rows(&self.compact.projection.cells)
+    }
+
+    /// End-of-run boundary: finalize any still-open tool group exactly once
+    /// and paint it, so the live summary row settles into scrollback.
+    fn finalize_compact(&mut self) {
+        let cells = self.compact.finalize();
+        let rows = self.projected_rows(&cells);
+        if rows.is_empty() {
+            self.repaint();
+            return;
+        }
+        let mut out = String::new();
+        for row in rows {
+            out.push_str(&row);
+            out.push('\n');
+        }
         self.paint(&out);
     }
 
@@ -471,6 +525,13 @@ impl TuiApp {
 
     fn live_region(&self) -> Vec<String> {
         let mut rows = vec![String::new()]; // marginTop 1
+
+        // Erasable in-place summary of the current tool cycle: grows in one
+        // row above the composer and is finalized into scrollback exactly
+        // once, when a visible boundary flushes the projection.
+        if let Some(group) = self.compact.projection.active_group() {
+            rows.extend(render_tool_group(group, self.cols));
+        }
 
         if let Some(overlay) = &self.overlay {
             rows.extend(render_picker(overlay.title, &overlay.items, overlay.selected, self.cols));
@@ -566,13 +627,15 @@ impl TuiApp {
     /// After a settle-repaint clears the screen, only the most recent cells
     /// that fit above the live region are re-emitted.
     fn full_repaint(&mut self) {
-        let start = select_repaint_tail_start(&self.cells, self.rows);
+        // Budget the tail over COMPACT cells so raw tool rows never re-appear
+        // after a resize; the active group is excluded here -- it is drawn by
+        // the live region (and accounted for via its own row there).
+        let finalized = &self.compact.projection.cells;
+        let start = select_compact_tail_start(finalized, self.rows);
         let mut out = String::from(CLEAR_VISIBLE_SCREEN);
-        for entry in &self.cells[start..] {
-            for row in render_timeline_cell(entry, self.cols) {
-                out.push_str(&row);
-                out.push('\n');
-            }
+        for row in self.projected_rows(&finalized[start..]) {
+            out.push_str(&row);
+            out.push('\n');
         }
         self.live_rows = 0;
         self.paint(&out);
@@ -1049,14 +1112,21 @@ impl TuiApp {
         // the previous session's rows stay in scrollback (ink cannot take
         // static output back) and the new transcript is printed below them.
         self.cells = read_transcript(Path::new(&self.paths.transcript_path));
-        let mut out = String::new();
-        for entry in &self.cells {
-            for row in render_timeline_cell(entry, self.cols) {
-                out.push_str(&row);
-                out.push('\n');
+        // Same projection as the live path: raw tool rows never re-appear on
+        // session switch; an unfinished trailing group stays in the live row.
+        let cells = std::mem::take(&mut self.cells);
+        let out = self.rebuild_compact(&cells);
+        self.cells = cells;
+        if out.is_empty() {
+            self.repaint();
+        } else {
+            let mut text = String::new();
+            for row in out {
+                text.push_str(&row);
+                text.push('\n');
             }
+            self.paint(&text);
         }
-        self.paint(&out);
     }
 
     // ----- skills ---------------------------------------------------------
@@ -1773,6 +1843,9 @@ impl TuiApp {
         self.abort = None;
         self.pending_detail = None;
         self.flush_pending_cells();
+        // Run end is a visible boundary: settle any still-open tool group
+        // into scrollback exactly once (completion, cancel, or error).
+        self.finalize_compact();
         self.running = false;
         self.running_detail = None;
         // Idle title (bare label, no spinner) whatever ended the run:

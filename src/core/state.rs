@@ -15,12 +15,12 @@ use std::path::Path;
 use anyhow::bail;
 use chrono::{SecondsFormat, Utc};
 use indexmap::IndexMap;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::core::types::{
-	HarnessActivationDigest, HarnessDirectResponse, HarnessGoalRecord,
-HarnessMemoryNote, HarnessObservation, HarnessOperatorMessage, HarnessRunSummaryNote, HarnessState,
-HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, HarnessVerificationRecord, TaskStats,
+	HarnessGoalRecord,
+HarnessMemoryNote, HarnessObservation, HarnessState,
+HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats,
 VerificationSummary,
 };
 use crate::lib_fs::write_file_atomic;

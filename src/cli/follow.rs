@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -7,11 +6,6 @@ use std::path::Path;
 use crate::cli::transcript::format_model_route;
 use crate::cli::transcript::read_jsonl_records;
 use crate::cli::transcript::TranscriptEntry;
-use crate::cli::transcript::TranscriptEventEntry;
-use crate::cli::transcript::TranscriptGoalEntry;
-use crate::cli::transcript::TranscriptModelEntry;
-use crate::cli::transcript::TranscriptNoteEntry;
-use crate::cli::transcript::TranscriptRunEndEntry;
 
 // One formatted line per transcript entry, matching the headless runner's
 // event format so following a session reads like watching the run itself.

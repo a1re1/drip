@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 
@@ -468,7 +468,7 @@ impl AsyncToolJobManager {
     /// An already-settled job returns completed immediately; otherwise block
     /// until the job settles or the (non-negative) timeout elapses.
     pub fn wait_for_job(&self, job_id: &str, timeout_ms: i64) -> Result<ChatAsyncToolWaitResult> {
-        let mut guard = self
+        let guard = self
             .records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -510,7 +510,7 @@ impl AsyncToolJobManager {
                     record.job.status == ChatAsyncToolJobStatus::Running
                 })
         };
-        let (guard, timeout_result) = self
+        let (guard, _timeout_result) = self
             .settled
             .wait_timeout_while(guard, Duration::from_millis(normalized_timeout_ms), still_running)
             .unwrap_or_else(|poisoned| poisoned.into_inner());

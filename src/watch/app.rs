@@ -506,7 +506,7 @@ impl WatchApp {
     fn setup_resize(&mut self) {
         // SAFETY: installing an async-signal-safe handler that only stores a flag.
         unsafe {
-            libc::signal(libc::SIGWINCH, on_winch as libc::sighandler_t);
+            libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
         }
     }
 
@@ -515,8 +515,8 @@ impl WatchApp {
         // flag; the loop (which wakes at least every TAIL_MS) performs the stop.
         // SAFETY: installing an async-signal-safe handler that only stores a flag.
         unsafe {
-            libc::signal(libc::SIGINT, on_halt as libc::sighandler_t);
-            libc::signal(libc::SIGTERM, on_halt as libc::sighandler_t);
+            libc::signal(libc::SIGINT, on_halt as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_halt as *const () as libc::sighandler_t);
         }
     }
 

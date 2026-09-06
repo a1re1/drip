@@ -5,7 +5,7 @@
 
 use crate::cli::images::GoalImageAttachment;
 use crate::tui::theme::{paint, ACCENT_COLOR, DIM_COLOR};
-use crate::watch::ansi::{fit, string_width, strip_ansi, wrap_ansi};
+use crate::watch::ansi::{fit, string_width, wrap_ansi};
 
 use crate::cli::commands::SlashCommandSpec;
 

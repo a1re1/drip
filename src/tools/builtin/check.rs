@@ -149,7 +149,7 @@ fn scope_result(
     all_diags: Vec<DiagnosticEntry>,
     target: Option<&PathBuf>,
     workspace_root: &Path,
-    cwd: &Path,
+    _cwd: &Path,
 ) -> CheckToolResult {
     // Maps every diagnostic file to its display path (relative to the
     // workspace root when it starts with it) as diagnostics are collected, so

@@ -62,7 +62,7 @@ use crate::tui::terminal_title::{
 use crate::tui::term::{terminal_size, write_out, RawMode};
 use crate::tui::compact::{
 	render_compact_cell, render_tool_group, select_compact_tail_start,
-	CompactCell, CompactEmitter, CompactProjection,
+	CompactCell, CompactEmitter,
 };
 use crate::tui::widgets::{render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps};
 use crate::watch::ansi::{string_width, wrap_ansi};
@@ -2298,9 +2298,9 @@ impl TuiApp {
     fn run(&mut self, rx: Receiver<Msg>) -> i32 {
         // SAFETY: installing async-signal-safe handlers that only store flags.
         unsafe {
-            libc::signal(libc::SIGWINCH, on_winch as libc::sighandler_t);
-            libc::signal(libc::SIGINT, on_halt as libc::sighandler_t);
-            libc::signal(libc::SIGTERM, on_halt as libc::sighandler_t);
+            libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, on_halt as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_halt as *const () as libc::sighandler_t);
         }
 
         // Replay the transcript from the top, then the live region.

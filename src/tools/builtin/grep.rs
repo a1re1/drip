@@ -605,7 +605,7 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
         }
     };
 
-    let (grep_result, output_text) = execute_prepared(&input);
+    let (grep_result, _output_text) = execute_prepared(&input);
     let tool_content = complete_output(&input, &grep_result);
 
     // No-match is not a failure

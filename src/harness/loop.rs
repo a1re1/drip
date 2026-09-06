@@ -1183,7 +1183,7 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 
 use crate::core::types::{
-    HarnessActivationDigest, HarnessLeakedJob, HarnessLoopConfig, HarnessOperatorMessage,
+    HarnessActivationDigest, HarnessLoopConfig, HarnessOperatorMessage,
     HarnessState, HarnessTask, HarnessTelemetryConfig, HarnessUsageByTask,
 };
 use crate::harness::harness_tools::{
@@ -1194,7 +1194,7 @@ use crate::harness::telemetry::{
 };
 use crate::core::types::{HarnessVerificationRecord, HarnessVerificationStreak};
 use crate::harness::model_call::{
-    AbortSignal, ModelCallRecord, ModelCaller, ModelRoute, OpenAICompatibleResponse, SleepFn,
+    AbortSignal, ModelCallRecord, ModelCaller, ModelRoute, SleepFn,
 };
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::harness::transport::OpenAICompatibleRequestTool;
@@ -2874,7 +2874,7 @@ impl HarnessRun {
         outcome
     }
 
-    async fn run_round_inner(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
+    async fn run_round_inner(&mut self, scope: &mut LoopScope, _cycle: i64, round: i64) -> RoundOutcome {
         use crate::harness::model_call::ModelCallOptions;
 
         if self.options.signal.as_ref().map(AbortSignal::is_aborted) == Some(true) {

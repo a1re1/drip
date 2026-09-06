@@ -9,7 +9,7 @@ use crate::cli::transcript::{
 use crate::core::types::{HarnessEventType, HarnessRunReason};
 use crate::tui::markdown_ansi::render_markdown_ansi;
 use crate::tui::theme::{event_label, event_paint};
-use crate::watch::ansi::{c, string_width, strip_ansi, wrap_ansi};
+use crate::watch::ansi::{c, string_width, wrap_ansi};
 
 /// Collapse all whitespace runs to a single space, trim, and hard-cut to
 /// `max_chars` characters (appending "...") when longer.

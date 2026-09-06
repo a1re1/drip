@@ -2,8 +2,7 @@
 // probes) lives in this file (below the sync half) and in
 // drip/src/tools/async_jobs.rs.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use regex::Regex;

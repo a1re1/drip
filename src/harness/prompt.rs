@@ -1,6 +1,5 @@
-use crate::core::types::{HarnessGoalRecord, HarnessRunReason, HarnessState, HarnessTask, HarnessTaskStatus};
+use crate::core::types::{HarnessRunReason, HarnessState, HarnessTask, HarnessTaskStatus};
 use crate::harness::chat_types::ChatRoleTag;
-use crate::harness::telemetry::truncate_text;
 use crate::harness::transport::{
     build_multimodal_user_content, TransportContent, TransportRequestMessage,
 };

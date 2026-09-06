@@ -11,7 +11,7 @@
 // drip/tests/fixtures/harness-tools.json — see
 // drip/tests/harness_tools_schema_parity.rs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::json;
 
@@ -1928,7 +1928,7 @@ pub fn apply_harness_op(
                 None => crate::core::state::get_current_task(state).map(|task| (task.id.clone(), String::new())),
             };
 
-            let (target_id, requested_task_id) = match target_task {
+            let (target_id, _requested_task_id) = match target_task {
                 Some(pair) => pair,
                 None => {
                     let text = match task_id.as_deref() {

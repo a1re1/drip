@@ -189,7 +189,7 @@ pub fn attachment_from_image_file(
     source_path: &str,
     args: (&str, &Path),
 ) -> Option<GoalImageAttachment> {
-    let (cwd, images_dir) = args;
+    let (cwd, _images_dir) = args;
     let extension = extname(source_path).to_lowercase();
     let mime = mime_for_extension(&extension)?;
 

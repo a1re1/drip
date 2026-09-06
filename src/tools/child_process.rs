@@ -104,8 +104,8 @@ pub fn install_stop_signal_handlers() {
         }
 
         unsafe {
-            libc::signal(libc::SIGTERM, on_stop_signal as libc::sighandler_t);
-            libc::signal(libc::SIGINT, on_stop_signal as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_stop_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, on_stop_signal as *const () as libc::sighandler_t);
         }
     });
 }

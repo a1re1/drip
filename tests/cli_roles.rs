@@ -8,6 +8,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use drip::cli::marketplaces::MarketplaceRoleEntry;
+use drip::cli::roles::{load_skill_content as load_roles_skill_content, RoleDefinition};
+use drip::cli::skills::{
+    load_skill_content as load_cli_skill_content, CliSkill, SkillSource,
+};
 use drip::cli::roles::{
     builtin_role_preset, load_roles_from_file, resolve_role_setup,
     resolve_roles_flag, ResolveRoleSetupArgs,
@@ -627,4 +631,116 @@ fn resolve_role_setup_extra_bindings_override_config_bindings() {
     let bindings = setup.bindings.as_ref().unwrap();
     assert_eq!(bindings.planning.as_deref(), Some("architect"));
     assert_eq!(bindings.task.as_deref(), Some("author"));
+}
+
+
+// ---------------------------------------------------------------------------
+// Skill role hints: role-embedded composition + cross-loader parity
+// ---------------------------------------------------------------------------
+
+fn write_skill_file(root: &std::path::Path, dir_name: &str, content: &str) -> CliSkill {
+    let skill_dir = root.join(dir_name);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let path = skill_dir.join("SKILL.md");
+    fs::write(&path, content).unwrap();
+    CliSkill {
+        description: "d".to_string(),
+        key: None,
+        name: dir_name.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        source: SkillSource::Project,
+    }
+}
+
+fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
+    let cwd = make_temp_root("drip-role-hints-cwd-");
+    let config = default_config();
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: cwd.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: Some(vec![RoleDefinition {
+            description: None,
+            r#loop: None,
+            model: None,
+            name: "reviewer".to_string(),
+            prompt: None,
+            skills: Some(vec![skill.name.clone()]),
+            tools: None,
+            verified_by: None,
+        }]),
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![skill],
+        tool_names: vec![],
+    });
+    assert!(setup.issues.is_empty(), "unexpected issues: {:?}", setup.issues);
+    setup.roles.into_iter().find(|r| r.name == "reviewer").unwrap()
+}
+
+#[test]
+fn role_embedded_skill_with_hints_gets_advisory_guidance_section() {
+    let root = make_temp_root("drip-role-hints-");
+    let skill = write_skill_file(
+        &root,
+        "hinted",
+        "---\nname: hinted\ndescription: d\nroles:\n  default: author\n  review: reviewer\n  triage: planner\n---\n\nShip body.",
+    );
+
+    let reviewer = reviewer_setup(skill);
+    let suffix = reviewer.system_prompt_suffix.as_deref().expect("suffix composed");
+    // Role-embedded skills go through the shared composer: skill section AND
+    // the advisory hints block the README promises.
+    assert!(suffix.contains("# Skill: hinted"));
+    assert!(suffix.contains("Skill role hints (advisory)"));
+    assert!(suffix.contains("default role suggestion: author"));
+    assert!(suffix.contains("role suggestion planner"));
+}
+
+#[test]
+fn role_embedded_skill_without_hints_keeps_legacy_layout() {
+    let root = make_temp_root("drip-role-legacy-");
+    let skill = write_skill_file(
+        &root,
+        "plain-skill",
+        "---\nname: plain-skill\ndescription: d\n---\n\nJust the body.",
+    );
+
+    let reviewer = reviewer_setup(skill);
+    let suffix = reviewer.system_prompt_suffix.as_deref().expect("suffix composed");
+    assert!(suffix.contains("# Skill: plain-skill"));
+    assert!(suffix.contains("Just the body."));
+    // No hints declared -> no advisory section, legacy prompt layout intact.
+    assert!(!suffix.contains("role hints"));
+}
+
+#[test]
+fn skill_role_hints_parity_between_cli_and_role_loaders() {
+    // One file, both production loaders. BOM + CRLF + a blank line + a
+    // tab-indented entry: every hard case that used to diverge.
+    let root = make_temp_root("drip-role-parity-");
+    let raw = "\u{FEFF}---\r\nname: parity\r\ndescription: d\r\nroles:\r\n  default: author\r\n\treview: reviewer\r\n\r\n  fixes: author\r\n---\r\n\r\nBody.";
+    let skill = write_skill_file(&root, "parity", raw);
+
+    let via_cli = load_cli_skill_content(&skill, None).unwrap();
+    let via_roles = load_roles_skill_content(&skill, None).unwrap();
+    assert_eq!(via_cli.role_hints, via_roles.role_hints, "loaders disagree");
+    let hints = via_cli.role_hints.expect("hints present on both paths");
+    assert_eq!(hints.default_role(), Some("author"));
+    // Tab entry ended the block; the blank line would have too. Both loaders
+    // must agree that no stage survived.
+    assert!(hints.stages.is_empty());
+
+    // Args-expanded path: same parity + hints carried alongside substitution.
+    let skill_args = write_skill_file(
+        &root,
+        "parity-args",
+        "---\nname: parity-args\ndescription: d\nargs:\n  from: vitest\nroles:\n  default: planner\n  review: reviewer\n---\n\nFrom {{from}}.",
+    );
+    let args: HashMap<String, String> = HashMap::new();
+    let a = load_cli_skill_content(&skill_args, Some(&args)).unwrap();
+    let b = load_roles_skill_content(&skill_args, Some(&args)).unwrap();
+    assert_eq!(a.role_hints, b.role_hints, "args-path loaders disagree");
+    assert_eq!(a.role_hints.unwrap().default_role(), Some("planner"));
+    assert!(a.content.contains("vitest"));
 }

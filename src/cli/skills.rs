@@ -78,6 +78,8 @@ pub struct SkillFileEntry {
 pub struct LoadedCliSkill {
     pub content: String,
     pub name: String,
+    /// Advisory `roles:` frontmatter hints, when the skill declares any.
+    pub role_hints: Option<SkillRoleHints>,
 }
 
 /// A declared parameter: required when default is None, optional otherwise.
@@ -90,11 +92,40 @@ pub struct SkillArgDef {
 /// The parsed args block from a skill's frontmatter.
 pub type SkillArgs = Vec<SkillArgDef>;
 
+/// A frontmatter `roles:` mapping. `default` names the role suggested when a
+/// task influenced by this skill has no explicit role; `stages` maps arbitrary
+/// phase names (e.g. "review", "implementation") to role suggestions. This is
+/// advisory prompt metadata only: it never forces routing, tools, or models.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SkillRoleHints {
+    pub default: Option<String>,
+    /// Arbitrary phase-name -> role-name suggestions, insertion-ordered.
+    pub stages: Vec<(String, String)>,
+}
+
+impl SkillRoleHints {
+    /// The role suggested for a named stage, falling back to the default.
+    pub fn stage_role(&self, stage: &str) -> Option<&str> {
+        let stage_lc = stage.trim().to_ascii_lowercase();
+        self.stages
+            .iter()
+            .find(|(name, _)| name.to_ascii_lowercase() == stage_lc)
+            .map(|(_, role)| role.as_str())
+            .or(self.default.as_deref())
+    }
+
+    /// The role suggested when no stage is known.
+    pub fn default_role(&self) -> Option<&str> {
+        self.default.as_deref()
+    }
+}
+
 #[derive(Debug, Default)]
-struct SkillFrontmatter {
-    args: Option<SkillArgs>,
-    description: Option<String>,
-    name: Option<String>,
+pub(crate) struct SkillFrontmatter {
+    pub(crate) args: Option<SkillArgs>,
+    pub(crate) description: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) roles: Option<SkillRoleHints>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +181,22 @@ fn normalize_content(raw: &str) -> String {
     stripped.replace("\r\n", "\n")
 }
 
-fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
+/// Parse a skill's frontmatter: `name`, `description`, an optional `args:`
+/// block and an optional advisory `roles:` block. This is the ONE shared
+/// parser behind every activation path (`--skill`, `--roles`-loaded roles,
+/// slash activation), so all paths agree on block syntax:
+///
+/// - A block opens at `args:` / `roles:` alone on its own line; its entries
+///   are exactly-two-space-indented `key: value` lines.
+/// - A blank line, a non-indented line, or a deeper-indented line (nested
+///   YAML) ends the block; later entries are never read as hints.
+/// - First `default:` wins; a repeated stage name keeps its first role.
+/// - The scalar form `roles: author` is unsupported and ignored (no hints).
+pub(crate) fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
+    // Normalize BOM/CRLF up front so parsing is byte-layout agnostic. The
+    // production load paths already call normalize_content, but normalizing
+    // here too keeps the parser correct for any caller and is idempotent.
+    let markdown = normalize_content(markdown);
     // Match ---\n...\n---
     let body = if let Some(rest) = markdown.strip_prefix("---\n") {
         if let Some(idx) = rest.find("\n---") {
@@ -165,11 +211,22 @@ fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
     let mut fields = SkillFrontmatter::default();
     let mut in_args_block = false;
     let mut args: SkillArgs = Vec::new();
+    let mut in_roles_block = false;
+    let mut roles_default: Option<String> = None;
+    let mut roles_stages: Vec<(String, String)> = Vec::new();
 
     for line in body.split('\n') {
         // Detect the start of the args block
         if line.trim_end() == "args:" {
             in_args_block = true;
+            in_roles_block = false;
+            continue;
+        }
+
+        // Detect the start of the roles block
+        if line.trim_end() == "roles:" {
+            in_roles_block = true;
+            in_args_block = false;
             continue;
         }
 
@@ -210,6 +267,44 @@ fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
             in_args_block = false;
         }
 
+        // If we're in the roles block, parse exactly-two-space-indented
+        // "  key: value" lines. Deeper indentation (nested YAML) or a
+        // non-indented line ends the block.
+        if in_roles_block {
+            // Match "  default: value" or "  stage: role"
+            if let Some(rest) = line.strip_prefix("  ") {
+                if rest.starts_with(' ') || rest.starts_with('\t') {
+                    // Nested/deeper-indented YAML is not a role hint.
+                    in_roles_block = false;
+                } else if let Some(colon_idx) = rest.find(':') {
+                    let key = rest[..colon_idx].trim();
+                    let value = rest[colon_idx + 1..].trim();
+                    if !key.is_empty() && !value.is_empty() {
+                        if key == "default" {
+                            if roles_default.is_none() {
+                                roles_default = Some(value.to_string());
+                            }
+                        } else if !roles_stages
+                            .iter()
+                            .any(|(name, _)| name == key)
+                        {
+                            roles_stages.push((key.to_string(), value.to_string()));
+                        }
+                        // Duplicate or malformed keys after the first are ignored.
+                        continue;
+                    }
+                    // "  key:" with no value, or an unreadable line, ends the
+                    // roles block rather than silently misreading adjacent YAML.
+                    in_roles_block = false;
+                } else {
+                    in_roles_block = false;
+                }
+            } else {
+                // A non-indented line ends the roles block.
+                in_roles_block = false;
+            }
+        }
+
         // Parse name: or description: fields
         if let Some(rest) = line.strip_prefix("name:") {
             let v = rest.trim();
@@ -226,6 +321,13 @@ fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
 
     if !args.is_empty() {
         fields.args = Some(args);
+    }
+
+    if roles_default.is_some() || !roles_stages.is_empty() {
+        fields.roles = Some(SkillRoleHints {
+            default: roles_default,
+            stages: roles_stages,
+        });
     }
 
     fields
@@ -589,6 +691,7 @@ pub fn load_skill_content(
         return Ok(LoadedCliSkill {
             content: markdown.trim().to_string(),
             name: skill.name.clone(),
+            role_hints: frontmatter.roles,
         });
     };
 
@@ -663,6 +766,7 @@ pub fn load_skill_content(
     Ok(LoadedCliSkill {
         content,
         name: skill.name.clone(),
+        role_hints: frontmatter.roles,
     })
 }
 
@@ -670,18 +774,56 @@ pub fn load_skill_content(
 // composeSkillSystemPrompt
 // ---------------------------------------------------------------------------
 
+/// Renders the advisory role-hint guidance block for active skills that
+/// declare `roles:` frontmatter. Returns None when no active skill carries
+/// hints so legacy prompts stay byte-identical.
+fn render_skill_role_hints_guidance(skills: &[LoadedCliSkill]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for skill in skills {
+        let hints = match &skill.role_hints {
+            Some(h) => h,
+            None => continue,
+        };
+        lines.push(format!("- Skill '{}':", skill.name));
+        if let Some(default) = hints.default_role() {
+            lines.push(format!("  - default role suggestion: {}", default));
+        }
+        for (stage, role) in &hints.stages {
+            lines.push(format!("  - stage '{}': role suggestion {}", stage, role));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str("# Skill role hints (advisory)\n\n");
+    out.push_str("Skills below suggest roles for their stages. These are hints, not routing:\n");
+    out.push_str("- An explicit role the user assigned, or one a task already carries, always wins over a hint.\n");
+    out.push_str("- Use only roles that already exist in this session's role configuration. If a suggested role is unknown or unavailable there, keep the configured default behavior for that task instead of inventing a role or granting it extra tools.\n");
+    out.push_str("- A stage hint applies to that skill's own stage. With multiple skills active, take each hint from the skill most relevant to the work; if two skills suggest different roles for the same stage, surface the conflict and pick explicitly rather than silently overriding one another.\n");
+    out.push_str("- Realize stage transitions through the normal task list: schedule explicitly role-tagged plan_tasks entries per stage (for example a separate planner triage task after a review produces findings) so every role change goes through the existing scheduler.\n\n");
+    out.push_str("Hints:\n");
+    out.push_str(&lines.join("\n"));
+    out.push('\n');
+    Some(out)
+}
+
 pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill]) -> String {
     if skills.is_empty() {
         return base_prompt.to_string();
     }
 
-    let skill_sections: Vec<String> = skills
+    let mut sections: Vec<String> = skills
         .iter()
         .map(|s| format!("# Skill: {}\n\n{}", s.name, s.content))
         .collect();
 
+    if let Some(guidance) = render_skill_role_hints_guidance(skills) {
+        sections.push(guidance);
+    }
+
     std::iter::once(base_prompt)
-        .chain(skill_sections.iter().map(|s| s.as_str()))
+        .chain(sections.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -1249,6 +1391,216 @@ mod tests {
         assert_eq!(args[1].default.as_deref(), Some("vitest"));
     }
 
+    // --- frontmatter roles: hints ---
+
+    #[test]
+    fn frontmatter_roles_combined_default_and_stages() {
+        let content = "---\nname: navis\ndescription: Ship loop\nroles:\n  default: author\n  planning: planner\n  implementation: author\n  review: reviewer\n  triage: planner\n  fixes: author\n  shipping: author\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.expect("roles hints should parse");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert_eq!(hints.stage_role("triage"), Some("planner"));
+        assert_eq!(hints.stage_role("implementation"), Some("author"));
+        assert_eq!(hints.stage_role("shipping"), Some("author"));
+        // Unknown stage falls back to the default; lookup is case-insensitive.
+        assert_eq!(hints.stage_role("unknown"), Some("author"));
+        assert_eq!(hints.stage_role("REVIEW"), Some("reviewer"));
+        assert!(fm.args.is_none());
+    }
+
+    #[test]
+    fn frontmatter_roles_default_only() {
+        let content = "---\nname: x\ndescription: d\nroles:\n  default: author\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        assert!(hints.stages.is_empty());
+        assert_eq!(hints.stage_role("anything"), Some("author"));
+    }
+
+    #[test]
+    fn frontmatter_roles_stages_only_no_default() {
+        let content = "---\nname: x\ndescription: d\nroles:\n  review: reviewer\n  implementation: author\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), None);
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert_eq!(hints.stage_role("unknown"), None);
+    }
+
+    #[test]
+    fn frontmatter_roles_absent_parses_legacy_file_unchanged() {
+        let content = "---\nname: legacy\ndescription: Old skill\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        assert!(fm.roles.is_none());
+        assert_eq!(fm.name.as_deref(), Some("legacy"));
+        assert_eq!(fm.description.as_deref(), Some("Old skill"));
+        assert!(fm.args.is_none());
+    }
+
+    #[test]
+    fn frontmatter_roles_empty_block_yields_none() {
+        let content = "---\nname: x\nroles:\ndescription: d\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        assert!(fm.roles.is_none());
+        assert_eq!(fm.description.as_deref(), Some("d"));
+    }
+
+    #[test]
+    fn frontmatter_roles_crlf_line_endings() {
+        let content = "---\r\nname: crlf\r\ndescription: d\r\nroles:\r\n  default: author\r\n  review: reviewer\r\n---\r\n\r\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.expect("CRLF roles block should parse");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+    }
+
+    #[test]
+    fn frontmatter_roles_coexists_with_args_block() {
+        let content = "---\nname: migrate\nargs:\n  from: vitest\nroles:\n  default: author\n  review: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        assert_eq!(fm.args.unwrap().len(), 1);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+    }
+
+    #[test]
+    fn frontmatter_roles_block_before_args_block() {
+        let content = "---\nname: migrate\nroles:\n  review: reviewer\nargs:\n  from: vitest\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert_eq!(fm.args.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn frontmatter_roles_duplicate_keys_first_wins() {
+        let content = "---\nname: x\ndescription: d\nroles:\n  default: author\n  default: reviewer\n  review: planner\n  review: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(
+            hints.stages,
+            vec![("review".to_string(), "planner".to_string())]
+        );
+    }
+
+    #[test]
+    fn frontmatter_roles_empty_value_ends_block() {
+        let content = "---\nname: x\ndescription: d\nroles:\n  default: author\n  review:\n  fixes: planner\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        // "review:" has no value: the block ends there and later indented
+        // lines are not misread as stages.
+        assert!(hints.stages.is_empty());
+    }
+
+    #[test]
+    fn frontmatter_roles_non_indented_line_ends_block() {
+        let content = "---\nname: x\nroles:\n  review: reviewer\ndescription: Ship loop\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        // The top-level description after the block is still parsed.
+        assert_eq!(fm.description.as_deref(), Some("Ship loop"));
+    }
+
+    #[test]
+    fn frontmatter_roles_garbage_line_ends_block() {
+        let content = "---\nname: x\ndescription: d\nroles:\n  review: reviewer\n  not a mapping line\n  fixes: author\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        // The garbage line ends the block; "fixes" is not misread as a stage.
+        assert_eq!(hints.stages.len(), 1);
+    }
+
+    #[test]
+    fn frontmatter_roles_blank_line_ends_block_consistently() {
+        // P1 parity repro: a blank line between `default:` and a stage used
+        // to parse differently through the roles.rs loader (block stayed
+        // alive) than through skills.rs (block ended). One shared parser now
+        // means both see the same thing: the block ends at the blank line.
+        let content = "---\nname: x\ndescription: d\nroles:\n  default: author\n\n  review: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(content);
+        let hints = fm.roles.expect("default line is inside the block");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stages.len(), 0);
+    }
+
+    #[test]
+    fn frontmatter_roles_tab_or_deep_indent_rejected_not_flattened() {
+        // Tab-indented and deeper-indented (nested YAML) entries end the
+        // block instead of being flattened into bogus stages.
+        let tabbed = "---\nname: x\ndescription: d\nroles:\n  default: author\n\treview: reviewer\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(tabbed);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.default_role(), Some("author"));
+        assert!(hints.stages.is_empty());
+
+        let deep = "---\nname: x\ndescription: d\nroles:\n  review: reviewer\n    nested: role\n---\n\nBody.";
+        let fm = parse_skill_frontmatter(deep);
+        let hints = fm.roles.unwrap();
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert!(hints.stages.iter().all(|(name, _)| name != "nested"));
+    }
+
+    #[test]
+    fn load_skill_content_plain_path_carries_role_hints() {
+        let tmp = make_temp_dir();
+        let skill_dir = tmp.path().join("hints-plain");
+        fs::create_dir_all(&skill_dir).unwrap();
+        write_file(
+            &skill_dir,
+            "SKILL.md",
+            "---\nname: hints-plain\ndescription: d\nroles:\n  default: author\n  review: reviewer\n---\n\nBody with {{literal}} braces.",
+        );
+
+        let skill = CliSkill {
+            description: "d".to_string(),
+            key: None,
+            name: "hints-plain".to_string(),
+            path: skill_dir.join("SKILL.md").to_string_lossy().into_owned(),
+            source: SkillSource::User,
+        };
+
+        let loaded = load_skill_content(&skill, None).unwrap();
+        let hints = loaded.role_hints.expect("hints carried on plain path");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert!(loaded.content.contains("{{literal}}"));
+        assert_eq!(loaded.name, "hints-plain");
+    }
+
+    #[test]
+    fn load_skill_content_args_path_carries_role_hints() {
+        let tmp = make_temp_dir();
+        let skill_dir = tmp.path().join("hints-args");
+        fs::create_dir_all(&skill_dir).unwrap();
+        write_file(
+            &skill_dir,
+            "SKILL.md",
+            "---\nname: hints-args\ndescription: d\nargs:\n  from: vitest\nroles:\n  default: planner\n  review: reviewer\n---\n\nMigrate from {{from}}.",
+        );
+
+        let skill = CliSkill {
+            description: "d".to_string(),
+            key: None,
+            name: "hints-args".to_string(),
+            path: skill_dir.join("SKILL.md").to_string_lossy().into_owned(),
+            source: SkillSource::User,
+        };
+
+        let args: HashMap<String, String> = HashMap::new();
+        let loaded = load_skill_content(&skill, Some(&args)).unwrap();
+        let hints = loaded.role_hints.expect("hints carried on args path");
+        assert_eq!(hints.default_role(), Some("planner"));
+        assert_eq!(hints.stage_role("review"), Some("reviewer"));
+        assert!(loaded.content.contains("vitest"));
+    }
     #[test]
     fn load_skill_content_substitutes_placeholders() {
         // "loadSkillContent substitution happy path"
@@ -1421,6 +1773,7 @@ mod tests {
     fn compose_skill_system_prompt_with_skills() {
         let base = "You are a helpful assistant.";
         let skills = vec![LoadedCliSkill {
+            role_hints: None,
             content: "Always write tests first.".to_string(),
             name: "tdd".to_string(),
         }];
@@ -1428,6 +1781,100 @@ mod tests {
         assert!(result.starts_with(base));
         assert!(result.contains("# Skill: tdd"));
         assert!(result.contains("Always write tests first."));
+    }
+
+    // --- skill role hints in composed prompts ---
+
+    #[test]
+    fn compose_prompt_renders_navis_stage_role_hints_advisory() {
+        let base = "Base prompt.";
+        let hints = SkillRoleHints {
+            default: Some("author".to_string()),
+            stages: vec![
+                ("review".to_string(), "reviewer".to_string()),
+                ("triage".to_string(), "planner".to_string()),
+                ("fixes".to_string(), "author".to_string()),
+            ],
+        };
+        let skills = vec![LoadedCliSkill {
+            role_hints: Some(hints),
+            content: "Ship it.".to_string(),
+            name: "navis".to_string(),
+        }];
+        let result = compose_skill_system_prompt(base, &skills);
+        assert!(result.starts_with(base));
+        assert!(result.contains("# Skill: navis"));
+        assert!(result.contains("advisory"));
+        // navis stage sequence: author default; review -> reviewer; triage -> planner; fixes -> author.
+        assert!(result.contains("- Skill 'navis':"));
+        assert!(result.contains("default role suggestion: author"));
+        assert!(result.contains("stage 'review': role suggestion reviewer"));
+        assert!(result.contains("stage 'triage': role suggestion planner"));
+        assert!(result.contains("stage 'fixes': role suggestion author"));
+        // Precedence and unknown-role fallback semantics are stated in the block.
+        assert!(result.contains("always wins over a hint"));
+        assert!(result.contains("inventing a role"));
+        // Stage transitions route through the existing scheduler via explicit role-tagged tasks.
+        assert!(result.contains("plan_tasks"));
+        assert!(result.contains("planner triage"));
+    }
+
+    #[test]
+    fn compose_prompt_legacy_unchanged_and_multi_skill_hints_scoped() {
+        let base = "Base.";
+        let plain = LoadedCliSkill {
+            role_hints: None,
+            content: "Always write tests first.".to_string(),
+            name: "tdd".to_string(),
+        };
+        let legacy = compose_skill_system_prompt(base, &[plain.clone()]);
+        assert!(legacy.contains("# Skill: tdd"));
+        assert!(!legacy.contains("advisory"), "no hints -> no guidance block");
+
+        let navis = LoadedCliSkill {
+            role_hints: Some(SkillRoleHints {
+                default: Some("author".to_string()),
+                stages: vec![("review".to_string(), "reviewer".to_string())],
+            }),
+            content: "Ship loop.".to_string(),
+            name: "navis".to_string(),
+        };
+        let both = compose_skill_system_prompt(base, &[navis, plain]);
+        assert!(both.contains("Skill 'navis':"));
+        assert!(
+            !both.contains("Skill 'tdd':"),
+            "hint-less skills must not appear in the hints block"
+        );
+        assert!(both.contains("# Skill: tdd"), "content still composed normally");
+    }
+
+    // --- documented example fixture (examples/skills/navis/SKILL.md) ---
+
+    #[test]
+    fn documented_navis_example_matches_parser() {
+        let raw = std::fs::read_to_string("examples/skills/navis/SKILL.md")
+            .expect("README-linked example must exist");
+        let fm = parse_skill_frontmatter(&raw);
+        assert_eq!(fm.name.as_deref(), Some("navis"));
+        let hints = fm
+            .roles
+            .expect("example must carry a roles: block matching the README contract");
+        assert_eq!(hints.default_role(), Some("author"));
+        assert_eq!(
+            hints.stages,
+            vec![
+                ("planning".to_string(), "planner".to_string()),
+                ("implementation".to_string(), "author".to_string()),
+                ("review".to_string(), "reviewer".to_string()),
+                ("triage".to_string(), "planner".to_string()),
+                ("fixes".to_string(), "author".to_string()),
+                ("shipping".to_string(), "author".to_string()),
+            ]
+        );
+        // README-documented lookups behave as written.
+        assert_eq!(hints.stage_role("Review"), Some("reviewer"));
+        assert_eq!(hints.stage_role("Triage"), Some("planner"));
+        assert_eq!(hints.stage_role("unknown-stage"), Some("author"));
     }
 
     // --- Built-in skills embedded ---

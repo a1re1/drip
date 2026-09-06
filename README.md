@@ -1,4 +1,4 @@
-# drip — Local Code Inference, in Rust
+# drip — Goal based coding harness
 
 A headless-first coding-agent harness driven from the terminal.  
 `drip "goal"` spawns an agent loop, persists its session under `~/.drip/projects/<slug>/sessions/<id>/`,
@@ -223,6 +223,90 @@ drip --roles team "migrate the test suite from jest to vitest, verified end to e
 ```
 
 ---
+
+## Skill role hints (frontmatter)
+
+Skills may carry an optional `roles:` block in their frontmatter that hints
+which roles should handle which stages of the skill. Hints are **advisory
+only** — drip does not route work automatically. A short guidance block is
+added to the composed session prompt (for skills activated via `--skill`,
+`--roles`-loaded roles, or slash activation), and every role change happens
+the way it always does: through explicitly role-tagged `plan_tasks` entries.
+
+The contract, as rendered into the prompt:
+
+- An explicit role the user assigned, or one a task already carries, always
+  wins over a hint.
+- Only roles that already exist in the session's role configuration are used.
+  If a suggested role is unknown or unavailable there, the task keeps the
+  configured default role — hints never invent roles or grant extra tools.
+- A stage hint applies to that skill's own stage. With multiple skills active,
+  take each hint from the most relevant skill; if two skills suggest
+  different roles for the same stage, surface the conflict and pick
+  explicitly rather than silently overriding.
+- Realize stage transitions by scheduling explicitly role-tagged tasks per
+  stage — for example, a separate planner triage task after a review
+  produces findings — so every role change goes through the existing
+  scheduler.
+
+### Frontmatter syntax
+
+The `roles:` block is intentionally lightweight — no YAML engine is used:
+
+- `roles:` alone on its own line opens the block; entries are
+  two-space-indented `key: value` lines (`default: <role>` and/or
+  `<stage>: <role>`).
+- A blank line, a non-indented line, or a deeper-indented line (nested YAML)
+  ends the block; later entries are not read as hints.
+- The first `default:` wins, and a repeated stage name keeps its first role.
+- The scalar form `roles: author` is not supported; it is ignored and the
+  skill simply carries no hints.
+
+One shared parser backs every activation path (`--skill`, `--roles`-loaded
+roles, and slash activation), so a given file yields the same hints however
+the skill was activated.
+
+### Example: a ship skill with per-stage roles
+
+`examples/skills/navis/SKILL.md` shows the full pattern. Copy it into your
+project at `.drip/skills/navis/SKILL.md` (or `~/.drip/skills/navis/` for
+user-wide use) — it is an example file, not a built-in. The frontmatter:
+
+```markdown
+---
+name: navis
+description: Full ship workflow — implement, verify, review, triage findings, fix, and open a draft PR
+roles:
+  default: author
+  planning: planner
+  implementation: author
+  review: reviewer
+  triage: planner
+  fixes: author
+  shipping: author
+---
+```
+
+The stages mirror the ship loop: planning and the post-review triage want the
+planner, review wants a reviewer, and the rest stay with the author. Activate
+with `drip --skill navis "ship this goal"` (or `/navis` in a session). After
+the independent review runs, the planner triages its findings and queues the
+warranted fixes for the author, all through the normal task list:
+
+```json
+{ "placement": "next", "tasks": [
+  { "title": "Read saved review report; verify findings; queue warranted fixes as author tasks; do not implement", "role": "planner", "dependsOn": ["<review-task-id>"] },
+  { "title": "Fix <finding>", "role": "author", "dependsOn": ["<triage-task-id>"] }
+] }
+```
+
+### Role names are configuration, not built-ins
+
+Hints reference role names, so they port across presets and custom configs:
+the `reviewed` preset provides `planner`/`author`/`reviewer`, while `planned`
+provides `architect`/`author` (no reviewer). A skill suggesting
+`review: reviewer` under `planned` simply falls back to the configured
+default for that stage until you add a `reviewer` role to your `roles.json`.
 
 ## Code review (`--review`)
 
@@ -511,6 +595,38 @@ Claude Code; Codex' hook surface
 covers a similar lifecycle with different payload conventions.
 
 ---
+## Config file: nested JSON and automatic migration
+
+Structured settings inside `~/.drip/config.json` are stored as real nested
+JSON — `runtime.role_profiles`, `runtime.model_profiles`,
+`runtime.system_prompt_profiles`, and `credentials.stored_api_keys` as JSON
+arrays, and `runtime.role_bindings` as a JSON object:
+
+```json
+{
+  "settings": {
+    "runtime.active_profile_id": "glm-5-3-flash",
+    "runtime.role_profiles": [
+      { "id": "planner", "description": "Plans the loop", "model": "glm-5-3-flash" }
+    ],
+    "runtime.role_bindings": { "planner": "author" },
+    "credentials.stored_api_keys": []
+  },
+  "version": 1
+}
+```
+
+Older versions of drip flattened these values into single-line JSON strings.
+Both forms are accepted on load, and drip migrates legacy files automatically:
+the first time a config containing valid encoded strings is loaded, those
+values are rewritten as nested containers (pretty-printed, atomically) while
+everything else — unknown keys, ordinary settings, `version`, and
+`statusLine` — is preserved as-is. The migration is one-time and idempotent:
+values that are already nested, malformed legacy strings, and the default
+profiles drip merges in at load time are never written back, so the file only
+changes when an actual legacy value is unflattened. Any string setting that
+merely *looks* like JSON (prompts, key references, notes) is always left
+untouched.
 
 ## Terminal pane title
 

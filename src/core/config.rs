@@ -1,6 +1,8 @@
 // Settings are a flat map of string -> string (IndexMap keeps JSON object key
 // order stable across load/save). Profile lists are stored as JSON-string-
-// encoded settings values. The shipped defaults are embedded byte-exact.
+// encoded settings values in the runtime map, while the on-disk config now
+// uses real nested JSON for the known structured settings (see the codec
+// below). The shipped defaults are embedded byte-exact.
 #![allow(non_snake_case)]
 
 use anyhow::{anyhow, bail, Result};
@@ -983,6 +985,128 @@ fn coerce_status_line_number(
 }
 
 // ---------------------------------------------------------------------------
+// JSON-setting boundary codec
+// ---------------------------------------------------------------------------
+//
+// A handful of settings carry structured JSON: the profile lists and stored
+// API keys are arrays, and the role bindings are an object. On disk these have
+// historically been JSON-encoded strings; the runtime map keeps that string
+// shape, while the file/serde boundary now accepts and emits real nested JSON
+// containers for these known ids. Ordinary string settings — including
+// strings that merely look like JSON — pass through untouched, and legacy
+// values that are malformed or do not match the expected container shape are
+// preserved verbatim rather than silently replaced.
+
+/// `Some(true)` when the setting id is stored as a JSON array on disk,
+/// `Some(false)` for a JSON object, `None` for a plain string setting.
+fn structured_setting_container(id: &str) -> Option<bool> {
+    match id {
+        MODEL_PROFILES_SETTING_ID
+        | SYSTEM_PROMPT_PROFILES_SETTING_ID
+        | STORED_API_KEYS_SETTING_ID
+        | ROLE_PROFILES_SETTING_ID => Some(true),
+        ROLE_BINDINGS_SETTING_ID => Some(false),
+        _ => None,
+    }
+}
+
+/// Decodes one settings value into the runtime string form: strings are kept
+/// verbatim; native containers for known structured ids are compactly encoded
+/// back into their runtime string form; other scalars are stringified
+/// losslessly.
+fn decode_setting_value(id: &str, value: &Value) -> String {
+    match value {
+        Value::String(raw) => raw.clone(),
+        Value::Array(_) | Value::Object(_) if structured_setting_container(id).is_some() => {
+            serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Encodes one runtime string back into its on-disk JSON value: known
+/// structured settings whose value parses as the expected container shape are
+/// written as real nested JSON; everything else — including ordinary strings,
+/// malformed JSON, and wrong-shaped legacy values — is preserved verbatim.
+fn encode_setting_value(id: &str, raw: &str) -> Value {
+    let Some(expect_array) = structured_setting_container(id) else {
+        return Value::String(raw.to_string());
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return Value::String(raw.to_string());
+    };
+    let shape_matches = if expect_array {
+        parsed.is_array()
+    } else {
+        parsed.is_object()
+    };
+    if shape_matches {
+        parsed
+    } else {
+        Value::String(raw.to_string())
+    }
+}
+
+/// Builds the migrated on-disk `settings` object from the original parsed
+/// document: known structured settings stored as encoded JSON strings are
+/// lifted to native containers via `encode_setting_value`; already-native
+/// values, unknown keys, scalars, and malformed legacy strings are preserved
+/// exactly as they were. Load-time-only content (merged defaults, vendor
+/// upgrades) is never added here, so a rewrite happens only when a real
+/// legacy value was unflattened.
+fn migrated_settings_object(original: &Value) -> Value {
+    let mut migrated = serde_json::Map::new();
+    if let Some(object) = original.as_object() {
+        for (key, value) in object {
+            let value = match (structured_setting_container(key), value.as_str()) {
+                (Some(_), Some(raw)) => encode_setting_value(key, raw),
+                _ => value.clone(),
+            };
+            migrated.insert(key.clone(), value);
+        }
+    }
+    Value::Object(migrated)
+}
+
+/// Serde adapter for `CliConfig::settings`: keeps the runtime
+/// `IndexMap<String, String>` shape while translating between it and the
+/// on-disk nested-JSON representation at the serde boundary.
+mod setting_map_codec {
+    use super::{decode_setting_value, encode_setting_value};
+    use indexmap::IndexMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IndexMap<String, String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw: IndexMap<String, Value> = IndexMap::deserialize(deserializer)?;
+        Ok(raw
+            .into_iter()
+            .map(|(id, value)| {
+                let decoded = decode_setting_value(&id, &value);
+                (id, decoded)
+            })
+            .collect())
+    }
+
+    pub fn serialize<S>(
+        settings: &IndexMap<String, String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded: IndexMap<&str, Value> = settings
+            .iter()
+            .map(|(id, raw)| (id.as_str(), encode_setting_value(id, raw)))
+            .collect();
+        encoded.serialize(serializer)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI layer
 // ---------------------------------------------------------------------------
 
@@ -990,6 +1114,7 @@ fn coerce_status_line_number(
 pub struct CliConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    #[serde(with = "setting_map_codec")]
     pub settings: IndexMap<String, String>,
     #[serde(rename = "statusLine", default, skip_serializing_if = "Option::is_none")]
     pub status_line: Option<StatusLineSetting>,
@@ -1202,6 +1327,37 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         eprintln!("warning: {}: {warning}", path.display());
     }
 
+    // One-time on-disk migration: lift legacy encoded JSON strings to native
+    // nested containers. Only keys present in the original file are rewritten
+    // — defaults merged above and vendor upgrades stay load-time-only — and
+    // the file is left byte-for-byte untouched when nothing needs converting.
+    let original_settings = parsed_value
+        .get("settings")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let migrated_settings = migrated_settings_object(&original_settings);
+    if migrated_settings != original_settings {
+        let mut document = parsed_value.clone();
+        document["settings"] = migrated_settings;
+        match serde_json::to_string_pretty(&document) {
+            Ok(body) => {
+                if let Err(error) = crate::lib_fs::write_file_atomic(path, &format!("{body}\n"), true)
+                {
+                    eprintln!(
+                        "warning: {}: could not migrate legacy settings to nested JSON: {error}",
+                        path.display()
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: {}: could not serialize migrated settings: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+
     Ok(CliConfig {
         path: None,
         settings,
@@ -1212,15 +1368,21 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
 }
 
 // The result carries exactly the known setting ids, each defaulting to its
-// definition default and overwritten only where the input holds a string.
+// definition default and overwritten only where the input holds a string or,
+// for known structured settings, a real nested JSON container.
 fn normalize_web_setting_values(input: &Value) -> IndexMap<String, String> {
     let mut normalized = default_setting_values();
     if let Some(object) = input.as_object() {
         for (key, value) in object {
-            if value.is_string() {
-                if let Some(slot) = normalized.get_mut(key) {
-                    *slot = value.as_str().unwrap_or_default().to_string();
-                }
+            let decoded = match (structured_setting_container(key), value) {
+                (Some(_), Value::String(_))
+                | (Some(_), Value::Array(_))
+                | (Some(_), Value::Object(_)) => decode_setting_value(key, value),
+                (None, Value::String(raw)) => raw.clone(),
+                _ => continue,
+            };
+            if let Some(slot) = normalized.get_mut(key) {
+                *slot = decoded;
             }
         }
     }
@@ -1813,6 +1975,384 @@ mod tests {
         assert_eq!(config.status_line, None);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ----- nested JSON settings (boundary codec) -----
+
+    #[test]
+    fn structured_settings_accept_mixed_legacy_and_native_input() {
+        let doc = serde_json::json!({
+            "runtime.model_profiles": [
+                {"id": "m1", "model": "gpt-test", "provider": "openai"}
+            ],
+            "runtime.role_bindings": "{\"planner\": {\"task\": \"author\"}}",
+            "runtime.active_profile_id": "m1"
+        });
+        let settings = normalize_web_setting_values(&doc);
+
+        // The native container decodes into the runtime string form.
+        let parsed = parse_inference_model_profiles(&settings).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "m1");
+
+        // The legacy encoded string still reaches the runtime verbatim.
+        assert_eq!(
+            settings.get(ROLE_BINDINGS_SETTING_ID).map(String::as_str),
+            Some("{\"planner\": {\"task\": \"author\"}}")
+        );
+        assert_eq!(
+            settings
+                .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
+                .map(String::as_str),
+            Some("m1")
+        );
+    }
+
+    #[test]
+    fn cli_config_serde_accepts_legacy_and_native_forms_and_round_trips() {
+        let legacy_json = r#"{"settings": {"runtime.role_bindings": "{\"planner\":{\"task\":\"author\"}}"}, "version": 1}"#;
+        let native_json = r#"{"settings": {"runtime.role_bindings": {"planner": {"task": "author"}}}, "version": 1}"#;
+
+        let legacy: CliConfig = serde_json::from_str(legacy_json).unwrap();
+        let native: CliConfig = serde_json::from_str(native_json).unwrap();
+        assert_eq!(legacy.settings, native.settings);
+
+        // Reserialization lifts the structured setting to real nested JSON.
+        let saved = serde_json::to_string_pretty(&native).unwrap();
+        assert!(saved.contains("\"runtime.role_bindings\": {"), "{saved}");
+        assert!(!saved.contains("\\\"planner\\\""), "{saved}");
+
+        let reparsed: CliConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reparsed.settings, native.settings);
+    }
+
+    #[test]
+    fn setting_codec_preserves_plain_strings_scalars_and_malformed_values() {
+        // Ordinary strings — even JSON-looking ones — stay untouched.
+        let odd: CliConfig = serde_json::from_str(
+            r#"{"settings": {"runtime.cerebras_api_key": "[\"not\",\"keys\"]", "runtime.active_profile_id": "{\"looks\":\"like json\"}"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            odd.settings
+                .get(CEREBRAS_API_KEY_SETTING_ID)
+                .map(String::as_str),
+            Some("[\"not\",\"keys\"]")
+        );
+        assert_eq!(
+            odd.settings
+                .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
+                .map(String::as_str),
+            Some("{\"looks\":\"like json\"}")
+        );
+
+        // Scalars stringify losslessly; string scalars are never re-coerced.
+        let scalars: CliConfig = serde_json::from_str(
+            r#"{"settings": {"runtime.active_profile_id": 5, "runtime.active_tool_profile_id": true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            scalars
+                .settings
+                .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
+                .map(String::as_str),
+            Some("5")
+        );
+        assert_eq!(
+            scalars
+                .settings
+                .get(ACTIVE_TOOL_PROFILE_SETTING_ID)
+                .map(String::as_str),
+            Some("true")
+        );
+
+        // A malformed legacy value is preserved verbatim, never replaced.
+        let malformed: CliConfig =
+            serde_json::from_str(r#"{"settings": {"runtime.model_profiles": "{oops"}}"#).unwrap();
+        let saved = serde_json::to_string(&malformed).unwrap();
+        assert!(
+            saved.contains(r#""runtime.model_profiles":"{oops""#),
+            "{saved}"
+        );
+
+        // A native container of the wrong shape is also preserved as-is.
+        let wrong_shape: CliConfig =
+            serde_json::from_str(r#"{"settings": {"runtime.model_profiles": {}}}"#).unwrap();
+        assert_eq!(
+            wrong_shape
+                .settings
+                .get(MODEL_PROFILES_SETTING_ID)
+                .map(String::as_str),
+            Some("{}")
+        );
+        let resaved = serde_json::to_string(&wrong_shape).unwrap();
+        assert!(
+            resaved.contains(r#""runtime.model_profiles":"{}""#),
+            "{resaved}"
+        );
+    }
+
+    #[test]
+    fn load_and_save_cli_config_write_nested_containers_and_keep_runtime_semantics() {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-nested-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // A legacy file (string blobs) still loads with full runtime semantics.
+        std::fs::write(
+            &path,
+            r#"{"settings": {"runtime.role_bindings": "{\"planner\":{\"task\":\"author\"}}"}, "version": 1}"#,
+        )
+        .unwrap();
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(
+            config.settings.get(ROLE_BINDINGS_SETTING_ID).map(String::as_str),
+            Some("{\"planner\":{\"task\":\"author\"}}")
+        );
+        assert!(!parse_inference_model_profiles(&config.settings).unwrap().is_empty());
+
+        // Saving writes real nested containers in the pretty file JSON.
+        save_cli_config(&path, &config).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&saved).unwrap();
+        assert!(value["settings"][MODEL_PROFILES_SETTING_ID].is_array(), "{saved}");
+        assert!(
+            value["settings"][SYSTEM_PROMPT_PROFILES_SETTING_ID].is_array(),
+            "{saved}"
+        );
+        assert!(value["settings"][STORED_API_KEYS_SETTING_ID].is_array(), "{saved}");
+        assert!(value["settings"][ROLE_PROFILES_SETTING_ID].is_array(), "{saved}");
+        assert!(value["settings"][ROLE_BINDINGS_SETTING_ID].is_object(), "{saved}");
+        assert!(
+            value["settings"][ROLE_BINDINGS_SETTING_ID]["planner"].is_object(),
+            "{saved}"
+        );
+        assert_eq!(
+            value["settings"][ROLE_BINDINGS_SETTING_ID]["planner"]["task"],
+            serde_json::json!("author")
+        );
+        assert_eq!(value["version"], serde_json::json!(1));
+
+        // The saved nested file loads again with the same runtime semantics.
+        let reloaded = load_cli_config(&path).unwrap();
+        assert_eq!(
+            reloaded.settings.get(ROLE_BINDINGS_SETTING_ID),
+            config.settings.get(ROLE_BINDINGS_SETTING_ID)
+        );
+        assert_eq!(
+            parse_inference_model_profiles(&reloaded.settings).unwrap(),
+            parse_inference_model_profiles(&config.settings).unwrap()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+
+    // ---- nested-JSON migration on load (task: unflatten legacy blobs) ----
+
+    fn unique_config_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-nested-config-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_cli_config_migrates_legacy_strings_to_nested_json_once() {
+        let dir = unique_config_dir("migrate");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "settings": {
+    "runtime.active_profile_id": "glm-5-3-flash",
+    "runtime.role_profiles": "[{\"id\":\"planner\",\"description\":\"plans\"}]",
+    "runtime.role_bindings": "{\"planner\":\"author\"}",
+    "custom.thing": "keep-me"
+  },
+  "version": 1,
+  "statusLine": {"type":"command","command":"echo hi"}
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+
+        // Runtime semantics retained: the settings map still carries the
+        // encoded string form for legacy consumers.
+        assert_eq!(
+            config.settings.get("runtime.role_profiles").map(String::as_str),
+            Some("[{\"id\":\"planner\",\"description\":\"plans\"}]")
+        );
+        assert_eq!(
+            config.settings.get("runtime.role_bindings").map(String::as_str),
+            Some("{\"planner\":\"author\"}")
+        );
+
+        // On disk the values are now real nested containers...
+        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let settings = on_disk.get("settings").unwrap().as_object().unwrap();
+        assert_eq!(
+            settings
+                .get("runtime.role_profiles")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            settings
+                .get("runtime.role_bindings")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .get("planner")
+                .unwrap(),
+            "author"
+        );
+        // ...while unknown keys, scalars, version, and statusLine survive.
+        assert_eq!(settings.get("custom.thing").unwrap(), "keep-me");
+        assert_eq!(
+            settings.get("runtime.active_profile_id").unwrap(),
+            "glm-5-3-flash"
+        );
+        assert_eq!(on_disk.get("version"), Some(&Value::from(1)));
+        assert_eq!(
+            on_disk.get("statusLine").unwrap().get("command").unwrap(),
+            "echo hi"
+        );
+
+        // Consumers see the profiles through the normal parse path.
+        let profiles = parse_inference_model_profiles(&config.settings).expect("parse models");
+        assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
+        let prompts = parse_system_prompt_profiles(&config.settings).expect("parse prompts");
+        assert!(prompts.iter().any(|p| p.id == "default-coding-agent"));
+
+        // Idempotent: a second load does not rewrite the file.
+        let before = std::fs::read_to_string(&path).unwrap();
+        let _ = load_cli_config(&path).unwrap();
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_leaves_native_nested_files_untouched() {
+        let dir = unique_config_dir("native");
+        let path = dir.join("config.json");
+        let original = r#"{
+  "settings": {
+    "runtime.role_profiles": [ { "id": "planner" } ],
+    "runtime.role_bindings": { "planner": "author" }
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(
+            config.settings.get("runtime.role_profiles").map(String::as_str),
+            Some(r#"[{"id":"planner"}]"#)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_preserves_malformed_legacy_values_on_disk() {
+        let dir = unique_config_dir("malformed");
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "settings": {
+    "runtime.role_profiles": "not-json{{",
+    "runtime.role_bindings": "[wrong-shape]"
+  },
+  "version": 1
+}"#,
+        )
+        .unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        assert_eq!(
+            config.settings.get("runtime.role_profiles").map(String::as_str),
+            Some("not-json{{")
+        );
+        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let settings = on_disk.get("settings").unwrap().as_object().unwrap();
+        assert_eq!(settings.get("runtime.role_profiles").unwrap(), "not-json{{");
+        assert_eq!(settings.get("runtime.role_bindings").unwrap(), "[wrong-shape]");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_does_not_persist_merged_defaults_or_upgrades() {
+        let dir = unique_config_dir("defaults");
+        let path = dir.join("config.json");
+        let original = r#"{
+  "settings": {
+    "runtime.active_profile_id": "glm-5-3-flash"
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        // Defaults are merged into the runtime map...
+        let profiles = parse_inference_model_profiles(&config.settings).expect("parse models");
+        assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
+        // ...but never written back as an accidental migration.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_missing_config_writes_defaults_and_save_round_trips_nested() {
+        let dir = unique_config_dir("missing");
+        let path = dir.join("config.json");
+        assert!(!path.exists());
+
+        let config = load_cli_config(&path).unwrap();
+        assert!(path.exists());
+        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let settings = on_disk.get("settings").unwrap().as_object().unwrap();
+        assert!(settings.get("runtime.model_profiles").unwrap().is_array());
+        assert!(settings.get("runtime.system_prompt_profiles").unwrap().is_array());
+        assert!(settings.get("credentials.stored_api_keys").unwrap().is_array());
+        assert_eq!(on_disk.get("version"), Some(&Value::from(1)));
+
+        // A subsequent save keeps the nested form and the runtime round trip.
+        let mut config = config;
+        config.settings.insert(
+            "runtime.role_bindings".to_string(),
+            r#"{"planner":"author"}"#.to_string(),
+        );
+        save_cli_config(&path, &config).unwrap();
+        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["settings"]["runtime.role_bindings"]["planner"],
+            "author"
+        );
+        let reloaded = load_cli_config(&path).unwrap();
+        assert_eq!(
+            reloaded.settings.get("runtime.role_bindings").map(String::as_str),
+            Some(r#"{"planner":"author"}"#)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

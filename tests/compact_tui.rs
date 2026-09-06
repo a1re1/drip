@@ -169,6 +169,45 @@ fn temp_jsonl(name: &str) -> PathBuf {
 // ---------- TUI folding ----------
 
 #[test]
+fn failed_tool_calls_surface_in_the_compact_row_and_raw_result_text_stays_hidden() {
+	let entries = vec![
+		tool_call(1, "READ", "c1", "{\"path\":\"src/lib.rs\"}"),
+		tool_result("c1", "READ", true),
+		tool_call(1, "PATCH", "c2", "{\"path\":\"src/lib.rs\"}"),
+		tool_result("c2", "PATCH", true),
+		inference(1, "z-ai/glm-5.3-flash — 21018 prompt / 864 completion"),
+		tool_call(1, "BASH", "c3", "cargo test"),
+		tool_result("c3", "BASH", false),
+	];
+	let mut p = CompactProjection::rebuild(&entries);
+	p.finalize();
+
+	let group = p
+		.cells
+		.iter()
+		.find_map(|cell| match cell {
+			CompactCell::ToolGroup(group) => Some(group.clone()),
+			_ => None,
+		})
+		.expect("one folded tool group");
+	assert_eq!(group.count, 3);
+	assert_eq!(group.failed, 2);
+
+	let rows: Vec<String> = p
+		.cells
+		.iter()
+		.flat_map(|cell| render_compact_cell(cell, 200))
+		.map(|row| strip_ansi(&row))
+		.collect();
+	assert!(
+		rows.iter().any(|row| row.contains("3 Tools called") && row.contains("(2 failed)")),
+		"{rows:?}"
+	);
+	// Raw result text stays hidden behind the fold even when calls fail.
+	assert!(!rows.iter().any(|row| row.contains("result text")), "{rows:?}");
+}
+
+#[test]
 fn read_result_infer_patch_result_folds_into_one_two_tool_row() {
 	let p = feed(&one_exchange());
 

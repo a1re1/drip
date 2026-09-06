@@ -122,6 +122,10 @@ impl CompactProjection {
 					// as a normal event row rather than losing it.
 					self.flush_active();
 					self.cells.push(CompactCell::Passthrough(TranscriptEntry::Event(event.clone())));
+				} else if event.data.as_ref().and_then(|data| data.failed) == Some(true) {
+					// Failure signal from the transcript: keep the compact row
+					// honest about calls that did not succeed.
+					self.open.as_mut().unwrap().failed += 1;
 				}
 			}
 			HarnessEventType::Inference => {
@@ -338,7 +342,6 @@ pub fn render_cycle_transition(event: &TranscriptEventEntry, width: usize) -> Ve
 
 	vec![c::white(&plain)]
 }
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -442,6 +445,34 @@ mod tests {
 
 		assert_eq!(last_group(&p.cells).count, 2);
 		assert_eq!(last_group(&p.cells).tools, vec!["READ", "BASH"]);
+	}
+
+	#[test]
+	fn failed_results_increment_the_group_failed_count() {
+		let mut p = CompactProjection::new();
+		p.append(&tool_call(1, "READ", "c1"));
+		p.append(&tool_result("c1", true));
+		p.append(&tool_call(1, "BASH", "c2"));
+		p.append(&tool_result("c2", false));
+		p.append(&tool_call(1, "FETCH", "c3"));
+		p.append(&tool_result("c3", true));
+		p.finalize();
+
+		let group = last_group(&p.cells);
+		assert_eq!(group.count, 3, "{group:?}");
+		assert_eq!(group.failed, 2, "{group:?}");
+		assert_eq!(
+			group_rows(&p, 120).last().unwrap(),
+			"[  1] ── 3 Tools called: READ, BASH, FETCH ── (2 failed)"
+		);
+
+		// Narrow terminal: the failed suffix is dropped before the summary
+		// is hard-clipped, and the group still renders as exactly one row.
+		let rows = group_rows(&p, 40);
+		assert_eq!(rows.len(), 1, "{rows:?}");
+		assert!(string_width(rows[0].as_str()) <= 40, "{rows:?}");
+		assert!(rows[0].contains("3 Tools called"), "{rows:?}");
+		assert!(!rows[0].contains("failed"), "{rows:?}");
 	}
 
 	#[test]

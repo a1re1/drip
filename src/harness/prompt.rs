@@ -22,6 +22,7 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded.",
     " If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents.",
     " The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks.",
+    " Make file edits with PATCH rather than shell in-place editing (sed -i, or inline scripts that rewrite files) — PATCH validates the edit, journals an undo entry, and reports an honest per-edit result; shell edits bypass all three.",
     " Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
 );
 
@@ -842,6 +843,12 @@ pub(crate) fn build_plan_review_nudge(state: &HarnessState) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn default_system_prompt_favors_patch_over_shell_edits() {
+        assert!(DEFAULT_HARNESS_SYSTEM_PROMPT.contains("Make file edits with PATCH rather than shell in-place editing (sed -i, or inline scripts that rewrite files)"));
+        assert!(DEFAULT_HARNESS_SYSTEM_PROMPT.contains("PATCH validates the edit, journals an undo entry, and reports an honest per-edit result; shell edits bypass all three"));
+    }
 
     #[test]
     fn format_task_line_pending_task_with_no_telemetry() {

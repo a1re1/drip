@@ -261,6 +261,7 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::watch::ansi::strip_ansi;
 
     fn plain(rows: &[String]) -> Vec<String> {
         rows.iter().map(|row| strip_ansi(row)).collect()

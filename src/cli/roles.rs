@@ -169,6 +169,10 @@ fn planner_role() -> RoleDefinition {
 				"You are the planning agent. Decompose the goal into tasks for the author role to implement.",
 				"",
 				"- Read enough of the code to plan concretely: name real files and real functions.",
+				"- When the goal quantifies over an input space (\"any\", \"whatever\", \"all\", \"each\" input",
+				"  present at runtime), plan an explicit task that constructs variant inputs differing from",
+				"  the instance currently present and verifies against them — passing only on the instance",
+				"  at hand is not done.",
 				"- PATCH is not in your toolset; the implementing role makes the edits, so that every",
 				"  change goes through the review gate. Plan only.",
 			]
@@ -206,6 +210,15 @@ fn reviewer_role() -> RoleDefinition {
 				"- PATCH is not in your toolset: do not make edits. If changes are needed, clearly",
 				"  describe what must be fixed so the implementing role can address them. BASH is",
 				"  available for verification — never use it to modify the tree.",
+				"- Re-running the author's own test suite proves internal consistency, not conformance. When",
+				"  the goal quantifies over an input space, construct at least one input the author did not",
+				"  choose — build fixtures under a temp directory via BASH (the workspace stays unmodified) —",
+				"  and verify against it.",
+				"- A deferral or author note justified as \"correct for this app/case/shape\" when the goal is",
+				"  universally quantified is a blocking defect: reject with the fix described, do not accept.",
+				"- For a make-it-work goal, an abort or rejection path that fires on inputs the goal declares",
+				"  valid is a bug in the deliverable, not a safety feature — require the code to handle those",
+				"  inputs, not detect them and stop.",
 				"- Accept only when you have verified the work passes all relevant checks.",
 			]
 			.join("\n"),
@@ -237,6 +250,10 @@ fn architect_role() -> RoleDefinition {
 				"  it is verified (cargo test, bun run test, or the goal's own check).",
 				"- Keep tasks small (one file or one behaviour each) and ordered so every task leaves the",
 				"  build green.",
+				"- When the goal quantifies over an input space (\"any\", \"whatever\", \"all\", \"each\" input",
+				"  present at runtime), plan an explicit task that constructs variant inputs differing from",
+				"  the instance currently present and verifies against them — passing only on the instance",
+				"  at hand is not done.",
 				"- PATCH is not in your toolset; the author role makes every edit. Plan only."
 			]
 			.join("\n"),
@@ -1018,4 +1035,27 @@ fn resolve_model_profile_route(
 	let resolved = crate::core::inference::resolve_model_profile_route(settings, model_profile_id, env)?;
 
 	Ok(convert(&resolved))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn quantified_goal_guidance_is_present_in_planning_prompts() {
+		assert!(planner_role().prompt.as_deref().unwrap_or_default().contains("quantifies over an input space"));
+		assert!(planner_role().prompt.as_deref().unwrap_or_default().contains("constructs variant inputs"));
+		assert!(architect_role().prompt.as_deref().unwrap_or_default().contains("quantifies over an input space"));
+		assert!(architect_role().prompt.as_deref().unwrap_or_default().contains("constructs variant inputs"));
+	}
+
+	#[test]
+	fn reviewer_prompt_rejects_instance_only_verification() {
+		let role = reviewer_role();
+		let prompt = role.prompt.as_deref().unwrap_or_default();
+		assert!(prompt.contains("internal consistency, not conformance"));
+		assert!(prompt.contains("temp directory via BASH"));
+		assert!(prompt.contains("correct for this app/case/shape"));
+		assert!(prompt.contains("not a safety feature"));
+	}
 }

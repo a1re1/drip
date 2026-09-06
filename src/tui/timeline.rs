@@ -197,6 +197,7 @@ pub fn select_repaint_tail_start(entries: &[TranscriptEntry], terminal_rows: usi
 mod tests {
     use super::*;
     use crate::cli::transcript::{TranscriptEventEntry, TranscriptNoteEntry, TranscriptRunEndEntry};
+    use crate::watch::ansi::strip_ansi;
 
     fn note(text: &str) -> TranscriptEntry {
         TranscriptEntry::Info(TranscriptNoteEntry {

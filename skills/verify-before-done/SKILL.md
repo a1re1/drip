@@ -19,3 +19,7 @@ code, configuration, or build files:
    verification that did not happen.
 5. A task whose whole point is verification must never be completed with the
    checks red; finish_task status blocked with the failing output instead.
+6. When the goal quantifies over an input space, verification must include at
+   least one input you constructed that differs from what is present in the
+   workspace; a check that passes only on the shipped instance does not count
+   as verification.

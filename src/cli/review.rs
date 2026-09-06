@@ -15,6 +15,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::path::Path;
+
+use similar::TextDiff;
 
 use serde::Serialize;
 
@@ -78,6 +81,8 @@ pub struct ReviewWallClockMs {
 pub struct ReviewCommandArgs {
     /// The merge-base diff base (explicit --base, or the derived default branch).
     pub base_ref: String,
+    /// True when the caller passed --base explicitly (journal mode must reject it).
+    pub explicit_base: bool,
     /// Max simultaneous review children (from --concurrency).
     pub concurrency: Option<usize>,
     /// The --context text: what this change is trying to achieve.
@@ -462,6 +467,118 @@ impl Drop for Timebox {
     }
 }
 
+// --- no-git journal mode ----------------------------------------------------
+
+pub const JOURNAL_BASE_LABEL: &str = "patch-journal";
+
+/// True when `cwd` is inside a git work tree (git present and repo found).
+pub fn git_available(cwd: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(cwd)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Explicit --base has no meaning without git: reject before any review work.
+fn journal_base_rejection(explicit_base: bool) -> Result<(), String> {
+    if explicit_base {
+        Err("--base requires git: explicit --base cannot be combined with patch-journal review (no git repository found)".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct JournalFileDiff {
+    path: String,
+    current: String,
+    diff: String,
+}
+
+fn journal_unified_diff(path: &str, base: &str, current: &str) -> String {
+    TextDiff::from_lines(base, current)
+        .unified_diff()
+        .context_radius(3)
+        .header(path, path)
+        .to_string()
+}
+
+/// Rebuilds per-file diffs from .drip/patches.jsonl in first-seen path order.
+/// Base = the FIRST entry's pre_image (None or elided => empty); current = the
+/// file on disk now (missing => deleted => empty). Net no-ops are skipped.
+fn build_journal_file_diffs(cwd: &str) -> Result<(Vec<JournalFileDiff>, usize), String> {
+    // Same discovery PATCH uses to write the journal (nearest .drip up the tree),
+    // so a review from a subdirectory reads the journal the edits landed in.
+    let journal_path = crate::tools::patch_journal::patch_journal_path(Path::new(cwd));
+    let raw = match std::fs::read_to_string(&journal_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+        Err(error) => return Err(format!("read patch journal: {error}")),
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut base_by_path: HashMap<String, String> = HashMap::new();
+    let mut line_count = 0usize;
+    for line in raw.lines() {
+        if line.trim().is_empty() { continue; }
+        line_count += 1;
+        let entry: crate::tools::patch_journal::PatchJournalEntry = serde_json::from_str(line)
+            .map_err(|error| format!("parse patch journal line {line_count}: {error}"))?;
+        if !base_by_path.contains_key(&entry.path) {
+            order.push(entry.path.clone());
+            let base = if entry.pre_image_elided == Some(true) {
+                String::new()
+            } else {
+                entry.pre_image.unwrap_or_default()
+            };
+            base_by_path.insert(entry.path.clone(), base);
+        }
+    }
+    let mut files = Vec::new();
+    for path in order {
+        let base = base_by_path[&path].clone();
+        let current = match std::fs::read_to_string(&path) {
+            Ok(current) => current,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("read reviewed file {path}: {error}")),
+        };
+        if base == current { continue; }
+        let diff = journal_unified_diff(&path, &base, &current);
+        files.push(JournalFileDiff { path, current, diff });
+    }
+    Ok((files, line_count))
+}
+
+/// One +/- line-count entry per file, standing in for `git diff --stat`.
+fn journal_diff_stat(files: &[JournalFileDiff]) -> String {
+    let mut lines = Vec::new();
+    for file in files {
+        let added = file.diff.lines().filter(|line| line.starts_with('+') && !line.starts_with("+++")).count();
+        let removed = file.diff.lines().filter(|line| line.starts_with('-') && !line.starts_with("---")).count();
+        lines.push(format!(" {} | {} +{} -{}", file.path, added + removed, added, removed));
+    }
+    lines.join("\n")
+}
+
+fn journal_change_note(entries: usize, files: usize) -> String {
+    format!("patch journal: {entries} edit(s) across {files} file(s); edits made outside PATCH are not visible to this review.")
+}
+
+pub(crate) fn journal_line_count(journal_path: &Path) -> usize {
+    std::fs::read_to_string(journal_path)
+        .map(|raw| raw.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+fn journal_growth_error(journal_path: &Path, lines_at_start: usize) -> String {
+    format!(
+        "patch journal changed during review ({} -> {} edit records); results may be stale — re-run --review",
+        lines_at_start,
+        journal_line_count(journal_path)
+    )
+}
+
 fn default_run_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOutcome, SessionGoalError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -761,13 +878,65 @@ fn assemble_report(head: String, file_reports: &[String]) -> String {
 }
 
 pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, String> {
-    let base_ref = args.base_ref.clone();
+    let seam_injected = args.list_changed_files.is_some()
+        || args.read_diff.is_some()
+        || args.read_file_at_head.is_some()
+        || args.read_head.is_some();
+    // Callers that inject git seams are simulating git mode; only a real,
+    // seam-free cwd with no git repository falls back to patch-journal review.
+    let journal_mode = !seam_injected && !git_available(&args.cwd);
+    if journal_mode {
+        journal_base_rejection(args.explicit_base)?;
+    }
+    let journal_path = crate::tools::patch_journal::patch_journal_path(Path::new(&args.cwd));
+    let (journal_files, journal_lines) = if journal_mode {
+        build_journal_file_diffs(&args.cwd)?
+    } else {
+        (Vec::new(), 0usize)
+    };
+    let journal_count = journal_files.len();
+    let base_ref = if journal_mode {
+        JOURNAL_BASE_LABEL.to_string()
+    } else {
+        args.base_ref.clone()
+    };
     let concurrency = args.concurrency.unwrap_or(DEFAULT_REVIEW_CONCURRENCY);
-    let list_changed_files: ListChangedFilesFn = args.list_changed_files.clone().unwrap_or_else(|| Arc::new(default_list_changed_files));
-    let read_diff: ReadDiffFn = args.read_diff.clone().unwrap_or_else(|| Arc::new(default_read_diff));
-    let read_file_at_head: ReadFileAtHeadFn = args.read_file_at_head.clone().unwrap_or_else(|| Arc::new(default_read_file_at_head));
+    let list_changed_files: ListChangedFilesFn = if journal_mode {
+        let journal_files = journal_files.clone();
+        Arc::new(move |_: &str, _: &str| {
+            Ok(journal_files.iter().map(|file| file.path.clone()).collect::<Vec<String>>())
+        })
+    } else {
+        args.list_changed_files.clone().unwrap_or_else(|| Arc::new(default_list_changed_files))
+    };
+    let read_diff: ReadDiffFn = if journal_mode {
+        let journal_files = journal_files.clone();
+        Arc::new(move |_: &str, path: &str, _: &str| {
+            journal_files
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.diff.clone())
+                .ok_or_else(|| format!("no patch-journal diff for {path}"))
+        })
+    } else {
+        args.read_diff.clone().unwrap_or_else(|| Arc::new(default_read_diff))
+    };
+    let read_file_at_head: ReadFileAtHeadFn = if journal_mode {
+        // Journal analog of `git show HEAD:{path}` — the file AFTER the change
+        // (HEAD contains the change in git mode), i.e. the disk content now.
+        let journal_files = journal_files.clone();
+        Arc::new(move |path: &str, _: &str| {
+            journal_files.iter().find(|file| file.path == path).map(|file| file.current.clone())
+        })
+    } else {
+        args.read_file_at_head.clone().unwrap_or_else(|| Arc::new(default_read_file_at_head))
+    };
     let run_goal: RunGoalFn = args.run_goal.clone().unwrap_or_else(|| Arc::new(default_run_goal));
-    let read_head: ReadHeadFn = args.read_head.clone().unwrap_or_else(|| Arc::new(default_read_head));
+    let read_head: ReadHeadFn = if journal_mode {
+        Arc::new(|_: &str| Ok(String::new()))
+    } else {
+        args.read_head.clone().unwrap_or_else(|| Arc::new(default_read_head))
+    };
     let head_at_start = read_head(&args.cwd)?;
 
     let all_paths = list_changed_files(&base_ref, &args.cwd)?;
@@ -775,7 +944,7 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
         .into_iter()
         // Deleted files cannot be read for context; lockfiles, snapshots, and
         // binary noise cannot be reviewed meaningfully.
-        .filter(|path| head_has_path(path, &args.cwd) && !is_skipped_path(path))
+        .filter(|path| (journal_mode || head_has_path(path, &args.cwd)) && !is_skipped_path(path))
         .collect();
 
     if reviewable_paths.is_empty() {
@@ -916,7 +1085,13 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     let units_ms = elapsed_ms(command_started_at);
 
-    assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
+    if journal_mode {
+        if journal_line_count(&journal_path) != journal_lines {
+            return Err(journal_growth_error(&journal_path, journal_lines));
+        }
+    } else {
+        assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
+    }
 
     // Back to diff order: units are planned docs-first and grouped, but the
     // per-file reports (and files[]) should read in the order the diff lists.
@@ -980,8 +1155,16 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     let synthesis_wall_clock_ms = args.wall_clock_ms.and_then(|clock| clock.synthesis).unwrap_or(SYNTHESIS_WALL_CLOCK_MS);
     let synthesize = || -> Result<(String, ReviewUsage), String> {
-        let diff_stat = git_stdout(&["diff", "--stat", &format!("{base_ref}...HEAD")], &args.cwd)?;
-        let log = git_stdout(&["log", "--oneline", &format!("{base_ref}...HEAD")], &args.cwd)?;
+        let diff_stat = if journal_mode {
+        journal_diff_stat(&journal_files)
+    } else {
+        git_stdout(&["diff", "--stat", &format!("{base_ref}...HEAD")], &args.cwd)?
+    };
+        let log = if journal_mode {
+        journal_change_note(journal_lines, journal_count)
+    } else {
+        git_stdout(&["log", "--oneline", &format!("{base_ref}...HEAD")], &args.cwd)?
+    };
         let synth_prompt = build_synthesis_prompt(SynthesisPromptArgs {
             base_ref: &base_ref,
             context: &args.context,
@@ -1023,7 +1206,13 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
         }
     };
 
-    assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
+    if journal_mode {
+        if journal_line_count(&journal_path) != journal_lines {
+            return Err(journal_growth_error(&journal_path, journal_lines));
+        }
+    } else {
+        assert_head_unchanged(&head_at_start, &read_head(&args.cwd)?)?;
+    }
 
     Ok(ReviewOutcome {
         base: base_ref,
@@ -1185,6 +1374,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = mock_project(dir.path());
         let outcome = run_review_command(ReviewCommandArgs {
+            explicit_base: false,
             base_ref: "origin/main".into(),
             concurrency: None,
             context: "ctx".into(),
@@ -1211,4 +1401,183 @@ mod tests {
         assert_eq!(outcome.report, "No reviewable changed files against origin/main.");
         assert!(outcome.units.is_empty());
     }
+
+    // No git seams injected and no repository in cwd => journal mode end to end.
+    fn no_git_args(dir: &std::path::Path, explicit_base: bool) -> ReviewCommandArgs {
+        let project = mock_project(dir);
+        ReviewCommandArgs {
+            explicit_base,
+            base_ref: "origin/main".into(),
+            concurrency: None,
+            context: "ctx".into(),
+            cwd: dir.to_string_lossy().into_owned(),
+            file_inference: mock_inference(),
+            index_db_path: project.index_db_path.clone(),
+            project,
+            list_changed_files: None,
+            read_diff: None,
+            read_file_at_head: None,
+            read_head: None,
+            on_progress: None,
+            wall_clock_ms: None,
+            run_goal: None,
+            signal: None,
+            skills: vec![],
+            synth_inference: mock_inference(),
+            synthesis: None,
+            tools: Arc::new(Vec::new),
+        }
+    }
+
+    #[test]
+    fn explicit_base_without_git_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_review_command(no_git_args(dir.path(), true)).unwrap_err();
+        assert!(err.contains("--base requires git"), "{err}");
+    }
+
+    #[test]
+    fn journal_mode_with_empty_journal_short_circuits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".drip")).unwrap();
+        let outcome = run_review_command(no_git_args(dir.path(), false)).unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        assert_eq!(outcome.base, JOURNAL_BASE_LABEL);
+        assert_eq!(outcome.report, format!("No reviewable changed files against {JOURNAL_BASE_LABEL}."));
+        assert!(outcome.units.is_empty());
+    }
+
+    fn temp_review_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("drip-review-{}-{nanos}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn journal_line(path: &str, pre: Option<&str>, elided: bool) -> String {
+        let mut value = serde_json::json!({
+            "at": "2026-01-01T00:00:00.000Z",
+            "path": path,
+            "postSha256": "deadbeef",
+        });
+        if let Some(pre) = pre {
+            value["preImage"] = serde_json::json!(pre);
+        }
+        if elided {
+            value["preImageElided"] = serde_json::json!(true);
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn journal_mode_builds_ordered_diffs_from_patch_journal() {
+        let dir = temp_review_dir("units");
+        std::fs::create_dir_all(dir.join(".drip")).unwrap();
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("alpha.txt"), "first line\nsecond line\n").unwrap();
+        std::fs::write(dir.join("created.txt"), "born on disk\n").unwrap();
+        std::fs::write(dir.join("elided.txt"), "elided now\n").unwrap();
+        // noop.txt: journal pre_image equals disk content => net no-op, skipped.
+        std::fs::write(dir.join("nested/noop.txt"), "same\n").unwrap();
+        // deleted.txt: journaled but absent on disk => current is empty.
+        let abs = |rel: &str| dir.join(rel).to_string_lossy().replace('\\', "/");
+        let journal = [
+            journal_line(&abs("alpha.txt"), Some("first line\nCHANGED\n"), false),
+            // Repeated entries for one path: the FIRST pre_image must win.
+            journal_line(&abs("alpha.txt"), Some("even older\n"), false),
+            journal_line(&abs("created.txt"), None, false),
+            journal_line(&abs("deleted.txt"), Some("was here\n"), false),
+            // Elided pre-image falls back to an empty base.
+            journal_line(&abs("elided.txt"), None, true),
+            journal_line(&abs("nested/noop.txt"), Some("same\n"), false),
+        ]
+        .join("\n");
+        std::fs::write(dir.join(".drip/patches.jsonl"), journal).unwrap();
+
+        let (files, lines) = build_journal_file_diffs(dir.to_str().unwrap()).unwrap();
+        assert_eq!(lines, 6);
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                abs("alpha.txt").as_str(),
+                abs("created.txt").as_str(),
+                abs("deleted.txt").as_str(),
+                abs("elided.txt").as_str(),
+            ]
+        );
+        // First pre_image wins for repeated entries (the diff removes CHANGED,
+        // not "even older"); current comes from disk.
+        assert_eq!(files[0].current, "first line\nsecond line\n");
+        let diff = &files[0].diff;
+        assert!(diff.starts_with(&format!("--- {}\n+++ {}\n", abs("alpha.txt"), abs("alpha.txt"))), "{diff}");
+        assert!(diff.contains("@@"));
+        assert!(diff.contains("-CHANGED"));
+        assert!(diff.contains("+second line"));
+        // Created file: empty base (None pre_image), addition-only diff.
+        assert_eq!(files[1].current, "born on disk\n");
+        assert!(files[1].diff.contains("+born on disk"), "{}", files[1].diff);
+        // Deleted file: journaled base, empty current.
+        assert_eq!(files[2].current, "");
+        assert!(files[2].diff.contains("-was here"), "{}", files[2].diff);
+        // Elided pre-image behaves like a created file: addition-only diff.
+        assert!(files[3].diff.contains("+elided now"), "{}", files[3].diff);
+        // Journal base label is the literal contract string.
+        assert_eq!(JOURNAL_BASE_LABEL, "patch-journal");
+        // The fixture directory has no .git: detection must report no git...
+        assert!(!git_available(dir.to_str().unwrap()));
+        // ...and explicit --base without git is rejected before review work.
+        let rejection = journal_base_rejection(true).err().unwrap();
+        assert!(rejection.contains("--base requires git"), "{rejection}");
+        assert!(journal_base_rejection(false).is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn journal_mode_stats_note_and_growth_guard_match_contract() {
+        let files = vec![JournalFileDiff {
+            path: "a.txt".into(),
+            current: "x\nz\n".into(),
+            diff: journal_unified_diff("a.txt", "x\ny\n", "x\nz\n"),
+        }];
+        // Counts come from the diff body (one line swapped => +1 -1), not from
+        // whole-file line totals.
+        let stat = journal_diff_stat(&files);
+        assert!(stat.contains("a.txt | 2 +1 -1"), "{stat}");
+        let note = journal_change_note(3, 1);
+        assert_eq!(
+            note,
+            "patch journal: 3 edit(s) across 1 file(s); edits made outside PATCH are not visible to this review."
+        );
+
+        let dir = temp_review_dir("growth");
+        let journal_path = dir.join("patches.jsonl");
+        std::fs::write(&journal_path, journal_line("a", None, false)).unwrap();
+        assert_eq!(journal_line_count(&journal_path), 1);
+        std::fs::write(&journal_path, journal_line("a", None, false) + "\n" + &journal_line("b", None, false)).unwrap();
+        let growth = journal_growth_error(&journal_path, 1);
+        assert!(growth.contains("changed during review"), "{growth}");
+        assert!(growth.contains("1 -> 2"), "{growth}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn journal_mode_missing_or_empty_journal_yields_no_files() {
+        let dir = temp_review_dir("empty");
+        std::fs::create_dir_all(dir.join(".drip")).unwrap();
+        let (files, lines) = build_journal_file_diffs(dir.to_str().unwrap()).unwrap();
+        assert!(files.is_empty());
+        assert_eq!(lines, 0);
+        std::fs::write(dir.join(".drip/patches.jsonl"), "").unwrap();
+        let (files, lines) = build_journal_file_diffs(dir.to_str().unwrap()).unwrap();
+        assert!(files.is_empty());
+        assert_eq!(lines, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
 }

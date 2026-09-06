@@ -121,6 +121,8 @@ fn help_text() -> String {
         [
             "",
             "composer:",
+            "  /<skill-name> — enable a discovered skill for this session (idempotent; /skill <name> toggles)",
+            "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc dismisses",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  esc — clear the composer, or stop the running goal",
@@ -328,7 +330,10 @@ struct TuiApp {
     rows: usize,
     running: bool,
     running_detail: Option<String>,
+    selected_skill_index: usize,
     selected_suggestion_index: usize,
+    skill_catalog: Vec<(String, String)>,
+    skill_suggestions: Vec<(String, String)>,
     session: SessionRecord,
     status_line_next_refresh: Option<Instant>,
     status_line_output: Option<crate::tui::status_line::StatusLineOutput>,
@@ -368,6 +373,43 @@ fn custom_status_row_from(
     ))
 }
 
+/// A lone "/token" with no whitespace may be a not-yet-enabled skill name;
+/// the built-in slash command menu takes priority and suppresses this one.
+fn skill_suggestion_query(text: &str) -> Option<String> {
+    if !text.starts_with('/') || text.trim().chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(text[1..].to_ascii_lowercase())
+}
+
+/// Prefix filter over the cached skill catalog: full-name prefixes first,
+/// then prefixes of the last ':' segment of qualified names, catalog order
+/// preserved within each group. Built-in command names are excluded so Tab
+/// never completes into a shadowed token. Bounded to keep the menu short.
+fn filter_skill_catalog(
+    catalog: &[(String, String)],
+    query: &str,
+    builtins: &[&str],
+) -> Vec<(String, String)> {
+    let query = query.to_ascii_lowercase();
+    let mut exact: Vec<(String, String)> = Vec::new();
+    let mut qualified: Vec<(String, String)> = Vec::new();
+    for (name, description) in catalog {
+        if builtins.iter().any(|builtin| *builtin == name.as_str()) {
+            continue;
+        }
+        let last = name.rsplit(':').next().unwrap_or(name);
+        if name.to_ascii_lowercase().starts_with(&query) {
+            exact.push((name.clone(), description.clone()));
+        } else if last.to_ascii_lowercase().starts_with(&query) {
+            qualified.push((name.clone(), description.clone()));
+        }
+    }
+    exact.extend(qualified);
+    exact.truncate(8);
+    exact
+}
+
 impl TuiApp {
     fn new(bootstrap: TuiBootstrap, tx: Sender<Msg>, mention_tx: Sender<(u64, String)>) -> Self {
         let paths = session_paths_for(&bootstrap.project, &bootstrap.session);
@@ -379,6 +421,15 @@ impl TuiApp {
             .status_line
             .clone()
             .map(crate::tui::status_line::StatusLineRunner::new);
+
+        // Skill catalog is discovered ONCE at construction; the edit and draw
+        // paths only ever filter this cached copy.
+        let skill_catalog: Vec<(String, String)> =
+            discover_all_skills(Path::new(&bootstrap.cwd), &bootstrap.home)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|skill| (skill.name, skill.description))
+                .collect();
 
         Self {
             abort: None,
@@ -406,7 +457,10 @@ impl TuiApp {
             rows,
             running: false,
             running_detail: None,
+            selected_skill_index: 0,
             selected_suggestion_index: 0,
+            skill_catalog,
+            skill_suggestions: Vec::new(),
             session,
             status_line_next_refresh: None,
             pane_title: None,
@@ -543,7 +597,9 @@ impl TuiApp {
                     cursor: self.cursor,
                     disabled: self.running,
                     mention_suggestions: &self.mention_suggestions,
+                    selected_skill_index: self.selected_skill_index,
                     selected_suggestion_index: self.selected_suggestion_index,
+                    skill_suggestions: &self.skill_suggestions,
                     slash_suggestions: &slash,
                     text: &self.text,
                 },
@@ -736,6 +792,7 @@ impl TuiApp {
         self.cursor = next_cursor.min(len);
         if text_changed {
             self.selected_suggestion_index = 0;
+            self.refresh_skill_suggestions();
         }
         self.refresh_mentions();
     }
@@ -767,6 +824,37 @@ impl TuiApp {
         }
     }
 
+    /// Skill menu mirrors the slash/mention menus: refreshed on every text
+    /// edit from the catalog cached at construction (no filesystem scans in
+    /// the draw or edit path).
+    fn refresh_skill_suggestions(&mut self) {
+        self.skill_suggestions = match skill_suggestion_query(&self.text) {
+            Some(query) if get_slash_command_suggestions(&self.text).is_empty() => {
+                let builtins: Vec<&str> =
+                    SLASH_COMMANDS.iter().map(|command| command.name).collect();
+                filter_skill_catalog(&self.skill_catalog, &query, &builtins)
+            }
+            _ => Vec::new(),
+        };
+        self.selected_skill_index = 0;
+    }
+
+    /// Tab/Enter completion: inserts "/<name> " WITHOUT submitting or
+    /// activating the skill.
+    fn accept_skill_suggestion(&mut self) -> bool {
+        if self.skill_suggestions.is_empty() {
+            return false;
+        }
+        let (name, _) = self.skill_suggestions[self
+            .selected_skill_index
+            .min(self.skill_suggestions.len() - 1)]
+        .clone();
+        let next_text = format!("/{name} ");
+        let len = next_text.chars().count();
+        self.apply_edit(next_text, len);
+        true
+    }
+
     fn accept_suggestion(&mut self) -> bool {
         let slash = get_slash_command_suggestions(&self.text);
         if !slash.is_empty() {
@@ -775,6 +863,10 @@ impl TuiApp {
             let len = next_text.chars().count();
             self.apply_edit(next_text, len);
             return true;
+        }
+
+        if !self.skill_suggestions.is_empty() {
+            return self.accept_skill_suggestion();
         }
 
         if let Some(mention) = get_active_chat_file_mention(&self.text, self.cursor) {
@@ -800,6 +892,14 @@ impl TuiApp {
 
         if let Some(command) = parse_slash_command(&submitted) {
             self.dispatch_command(&command.name, &command.args);
+            return;
+        }
+
+        // Skill names allow characters the slash-command grammar rejects
+        // (qualified names like "spellcraft:navis", digits, dots), so a lone
+        // "/<token>" that parse_slash_command rejected still activates a
+        // discovered skill; anything else falls through to the goal run.
+        if submitted.starts_with('/') && self.enable_skill_if_discovered(&submitted[1..]) {
             return;
         }
 
@@ -850,7 +950,14 @@ impl TuiApp {
         }
 
         let slash_len = get_slash_command_suggestions(&self.text).len();
-        let menu_length = if slash_len > 0 { slash_len } else { self.mention_suggestions.len() };
+        let skill_len = self.skill_suggestions.len();
+        let menu_length = if slash_len > 0 {
+            slash_len
+        } else if skill_len > 0 {
+            skill_len
+        } else {
+            self.mention_suggestions.len()
+        };
 
         match key {
             Key::Escape => self.apply_edit(String::new(), 0),
@@ -859,7 +966,10 @@ impl TuiApp {
                 if menu_length > 0 {
                     let slash = get_slash_command_suggestions(&self.text);
                     let exact_slash = slash.len() == 1 && format!("/{}", slash[0].name) == self.text.trim();
-                    if !exact_slash && self.accept_suggestion() {
+                    let exact_skill = slash_len == 0
+                        && self.skill_suggestions.len() == 1
+                        && format!("/{}", self.skill_suggestions[0].0) == self.text.trim();
+                    if !exact_slash && !exact_skill && self.accept_suggestion() {
                         return;
                     }
                 }
@@ -870,12 +980,23 @@ impl TuiApp {
             }
             Key::Up => {
                 if menu_length > 0 {
-                    self.selected_suggestion_index = self.selected_suggestion_index.saturating_sub(1);
+                    if skill_len > 0 && slash_len == 0 {
+                        self.selected_skill_index = self.selected_skill_index.saturating_sub(1);
+                    } else {
+                        self.selected_suggestion_index =
+                            self.selected_suggestion_index.saturating_sub(1);
+                    }
                 }
             }
             Key::Down => {
                 if menu_length > 0 {
-                    self.selected_suggestion_index = (self.selected_suggestion_index + 1).min(menu_length - 1);
+                    if skill_len > 0 && slash_len == 0 {
+                        self.selected_skill_index =
+                            (self.selected_skill_index + 1).min(menu_length - 1);
+                    } else {
+                        self.selected_suggestion_index =
+                            (self.selected_suggestion_index + 1).min(menu_length - 1);
+                    }
                 }
             }
             Key::Left => {
@@ -1141,9 +1262,37 @@ impl TuiApp {
             return;
         }
 
-        let discovered = discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home).unwrap_or_default();
-        let Some(skill) = discovered.into_iter().find(|candidate| candidate.name == skill_name) else {
-            self.push_error(format!("No skill named \"{skill_name}\". Try /skills to list what is available."));
+        // Not currently active: enabling is the same path as direct `/name`
+        // activation (idempotent, never disables).
+        self.enable_skill(skill_name);
+    }
+
+    /// Enable a skill for this session without ever disabling it.
+    ///
+    /// Direct `/navis` activation is idempotent: repeating it never disables
+    /// or reloads a skill that is already active. Only `/skill <name>`
+    /// toggles a skill off. Enabling a skill never starts a prompt run.
+    fn enable_skill(&mut self, skill_name: &str) {
+        if self
+            .active_skills
+            .iter()
+            .any(|skill| skill.name == skill_name)
+        {
+            self.push_info(format!(
+                "skill \"{skill_name}\" is already enabled for this session."
+            ));
+            return;
+        }
+
+        let discovered = discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home)
+            .unwrap_or_default();
+        let Some(skill) = discovered
+            .into_iter()
+            .find(|candidate| candidate.name == skill_name)
+        else {
+            self.push_error(format!(
+                "No skill named \"{skill_name}\". Try /skills to list what is available."
+            ));
             return;
         };
 
@@ -1151,12 +1300,38 @@ impl TuiApp {
             Ok(loaded) => {
                 self.active_skills.push(loaded);
                 self.push_cell(
-                    TranscriptEntry::Skill(TranscriptSkillEntry { at: now_iso(), enabled: true, name: skill_name.to_string() }),
+                    TranscriptEntry::Skill(TranscriptSkillEntry {
+                        at: now_iso(),
+                        enabled: true,
+                        name: skill_name.to_string(),
+                    }),
                     true,
                 );
             }
-            Err(error) => self.push_error(format!("Could not load skill \"{skill_name}\": {error}")),
+            Err(error) => {
+                self.push_error(format!("Could not load skill \"{skill_name}\": {error}"))
+            }
         }
+    }
+
+    /// Try to treat an unbuilt-in slash token as a direct skill activation.
+    /// Returns true when `name` matches a discovered skill (now enabled);
+    /// false leaves the caller free to report an unknown command.
+    fn enable_skill_if_discovered(&mut self, name: &str) -> bool {
+        // Case-insensitive so a catalog name with uppercase (e.g. "Navis") can
+        // be direct-activated, matching the menu filter and parse_slash_command,
+        // which both lowercase the typed token. The canonical catalog spelling
+        // wins so active_skills and the load path agree with discovery.
+        let canonical = match self
+            .skill_catalog
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+        {
+            Some((candidate, _)) => candidate.clone(),
+            None => return false,
+        };
+        self.enable_skill(&canonical);
+        true
     }
 
     // ----- commands -------------------------------------------------------
@@ -1336,7 +1511,15 @@ impl TuiApp {
                 }
             }
             "env" => self.env_command(args),
-            _ => self.push_error(format!("Unknown command /{name}. Try /help.")),
+            // Not a built-in: a bare token matching a discovered skill (e.g.
+            // "/navis") enables that skill for the session. Built-in command
+            // names always win because their arms match first, and "/skill"
+            // keeps its toggle behavior unchanged.
+            _ => {
+                if !self.enable_skill_if_discovered(name) {
+                    self.push_error(format!("Unknown command /{name}. Try /help."));
+                }
+            }
         }
     }
 
@@ -2772,5 +2955,404 @@ mod rename_tests {
         assert_eq!(app.rename_epoch, 11, "/resume must bump the rename epoch");
         app.apply_rename_result(10, Some(stale_name.to_string()), true);
         assert_eq!(label(&app), FALLBACK_LABEL, "stale rename must not clobber /resume");
+    }
+}
+
+#[cfg(test)]
+mod skill_activation_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// A TuiApp wired against throwaway directories: `cwd` holds project
+    /// skills under .drip/skills, `home` is the drip home root, and `project`
+    /// is an explicit override so resolve_drip_project stays deterministic.
+    struct SkillFixture {
+        app: TuiApp,
+        _cwd: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _project: tempfile::TempDir,
+        _rx: mpsc::Receiver<Msg>,
+        _mention_rx: mpsc::Receiver<(u64, String)>,
+    }
+
+    fn write_skill(cwd: &Path, name: &str, markdown: &str) {
+        let dir = cwd.join(".drip").join("skills").join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        std::fs::write(dir.join("SKILL.md"), markdown).expect("write SKILL.md");
+    }
+
+    fn skill_markdown(name: &str) -> String {
+        format!("---\nname: {name}\ndescription: test skill {name}\n---\n\nBody for {name}.\n")
+    }
+
+    fn make_app_with_skills(skills: &[&str]) -> SkillFixture {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        for name in skills {
+            write_skill(cwd.path(), name, &skill_markdown(name));
+        }
+        let home_root = home.path().to_string_lossy().into_owned();
+        let cwd_str = cwd.path().to_string_lossy().into_owned();
+        let project_str = project.path().to_string_lossy().into_owned();
+
+        let drip_home = crate::core::home::open_drip_home(&home_root);
+        let drip_project =
+            crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
+                .expect("resolve drip project");
+        let session = crate::core::sessions::SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cwd: cwd_str.clone(),
+            goal_count: 0,
+            id: "sess-skill-test".to_string(),
+            last_goal: None,
+            project_slug: "skill-test".to_string(),
+            status: "active".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let bootstrap = TuiBootstrap {
+            allow_net: false,
+            config: crate::core::config::create_default_cli_config(),
+            cwd: cwd_str,
+            home: drip_home,
+            initial_goal: None,
+            max_iterations: None,
+            no_repo_memory: true,
+            project: drip_project,
+            roles_flag: None,
+            session,
+            status_line: None,
+        };
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
+        let app = TuiApp::new(bootstrap, tx, mention_tx);
+        SkillFixture {
+            app,
+            _cwd: cwd,
+            _home: home,
+            _project: project,
+            _rx: rx,
+            _mention_rx: mention_rx,
+        }
+    }
+
+    #[test]
+    fn direct_slash_token_activates_skill_for_session() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.text = "/navis".to_string();
+        fixture.app.submit();
+        assert_eq!(
+            fixture.app.active_skills.len(),
+            1,
+            "/navis should enable the navis skill"
+        );
+        assert_eq!(fixture.app.active_skills[0].name, "navis");
+        assert!(
+            !fixture.app.running,
+            "enabling a skill must not start a prompt run"
+        );
+        assert!(
+            fixture.app.text.is_empty(),
+            "submitting a slash command clears the composer"
+        );
+    }
+
+    #[test]
+    fn repeat_direct_activation_is_idempotent() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.dispatch_command("navis", "");
+        fixture.app.dispatch_command("navis", "");
+        assert_eq!(
+            fixture.app.active_skills.len(),
+            1,
+            "repeat activation must not duplicate, disable, or reload the skill"
+        );
+        assert_eq!(fixture.app.active_skills[0].name, "navis");
+    }
+
+    #[test]
+    fn built_in_commands_win_over_same_named_skills() {
+        let mut fixture = make_app_with_skills(&["skills", "help"]);
+        fixture.app.dispatch_command("skills", "");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "/skills must keep its list behavior"
+        );
+        fixture.app.dispatch_command("help", "");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "/help must keep its help behavior"
+        );
+        // /skill keeps its toggle path even for a name that collides with a
+        // built-in command, so such a skill is still usable.
+        fixture.app.dispatch_command("skill", "help");
+        assert_eq!(fixture.app.active_skills.len(), 1);
+        assert_eq!(fixture.app.active_skills[0].name, "help");
+    }
+
+    #[test]
+    fn unknown_slash_token_stays_inactive() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.dispatch_command("definitely-not-a-skill", "");
+        assert!(fixture.app.active_skills.is_empty());
+        assert!(!fixture.app.running);
+    }
+
+    #[test]
+    fn skill_that_fails_to_load_is_not_activated() {
+        let mut fixture = make_app_with_skills(&[]);
+        // An args frontmatter entry with no default is a required arg; loading
+        // without supplying it must fail and leave nothing half-activated.
+        let markdown = "---\nname: needsarg\ndescription: requires an arg\nargs:\n  - target:\n---\n\nUse {{target}}.\n";
+        write_skill(fixture._cwd.path(), "needsarg", markdown);
+        fixture.app.dispatch_command("needsarg", "");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "a failed load must not activate the skill"
+        );
+        assert!(!fixture.app.running);
+    }
+
+    fn type_text(app: &mut TuiApp, text: &str) {
+        app.apply_edit(text.to_string(), text.chars().count());
+    }
+
+    #[test]
+    fn skill_menu_suggests_by_prefix_with_description() {
+        let mut fixture = make_app_with_skills(&["navis", "other"]);
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 1);
+        assert_eq!(fixture.app.skill_suggestions[0].0, "navis");
+        assert_eq!(fixture.app.skill_suggestions[0].1, "test skill navis");
+        assert!(fixture.app.skill_suggestions.iter().all(|s| s.0 != "other"));
+    }
+
+    #[test]
+    fn skill_menu_orders_exact_names_before_qualified_segments() {
+        let mut fixture = make_app_with_skills(&["spellcraft:navis", "navis"]);
+        type_text(&mut fixture.app, "/na");
+        let names: Vec<&str> = fixture
+            .app
+            .skill_suggestions
+            .iter()
+            .map(|s| s.0.as_str())
+            .collect();
+        assert_eq!(names, vec!["navis", "spellcraft:navis"]);
+    }
+
+    #[test]
+    fn skill_menu_excludes_built_in_names_and_slash_menu_wins() {
+        let mut fixture = make_app_with_skills(&["help"]);
+        type_text(&mut fixture.app, "/he");
+        assert!(!get_slash_command_suggestions(&fixture.app.text).is_empty());
+        assert!(fixture.app.skill_suggestions.is_empty());
+    }
+
+    #[test]
+    fn arrows_move_skill_selection_and_tab_completes_without_submitting() {
+        let mut fixture = make_app_with_skills(&["navis", "nada"]);
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 2);
+        assert_eq!(fixture.app.selected_skill_index, 0);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.selected_skill_index, 1);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.selected_skill_index, 0);
+        let selected = fixture.app.skill_suggestions[fixture.app.selected_skill_index]
+            .0
+            .clone();
+        fixture.app.on_key(Key::Tab);
+        assert_eq!(fixture.app.text, format!("/{selected} "));
+        assert!(!fixture.app.running, "Tab completes; it must not submit");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "Tab must not activate the skill"
+        );
+    }
+
+    #[test]
+    fn enter_after_completion_activates_for_session() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "/na");
+        fixture.app.on_key(Key::Tab);
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.active_skills.len(), 1);
+        assert_eq!(fixture.app.active_skills[0].name, "navis");
+        assert!(!fixture.app.running);
+    }
+
+    #[test]
+    fn editing_resets_the_selection_and_closes_the_menu_on_no_match() {
+        let mut fixture = make_app_with_skills(&["navis", "nada"]);
+        type_text(&mut fixture.app, "/na");
+        fixture.app.on_key(Key::Down);
+        type_text(&mut fixture.app, "/zz");
+        assert!(fixture.app.skill_suggestions.is_empty());
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(
+            fixture.app.selected_skill_index, 0,
+            "an edit resets the selection"
+        );
+    }
+
+    #[test]
+    fn escape_clears_the_composer_and_closes_the_skill_menu() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "/na");
+        assert!(!fixture.app.skill_suggestions.is_empty());
+        fixture.app.on_key(Key::Escape);
+        assert!(fixture.app.skill_suggestions.is_empty());
+        assert!(fixture.app.text.is_empty());
+    }
+
+    #[test]
+    fn skill_menu_uses_a_cached_catalog_not_a_scan_per_edit() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        let dir = fixture._cwd.path().join(".drip").join("skills");
+        std::fs::remove_dir_all(&dir).expect("remove skills dir");
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(
+            fixture.app.skill_suggestions.len(),
+            1,
+            "catalog is cached at construction; edits must not rescan"
+        );
+    }
+
+    #[test]
+    fn skill_menu_selection_clamps_at_both_list_edges() {
+        let mut fixture = make_app_with_skills(&["navis", "nada"]);
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 2);
+        for _ in 0..5 {
+            fixture.app.on_key(Key::Down);
+        }
+        assert_eq!(
+            fixture.app.selected_skill_index, 1,
+            "Down clamps at the last row"
+        );
+        for _ in 0..5 {
+            fixture.app.on_key(Key::Up);
+        }
+        assert_eq!(
+            fixture.app.selected_skill_index, 0,
+            "Up clamps at the first row"
+        );
+        assert_eq!(
+            fixture.app.skill_suggestions.len(),
+            2,
+            "clamping must not dismiss the menu"
+        );
+    }
+
+    #[test]
+    fn tab_completes_the_highlighted_row_not_the_first() {
+        let mut fixture = make_app_with_skills(&["navis", "nada"]);
+        type_text(&mut fixture.app, "/na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 2);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
+            fixture.app.selected_skill_index, 1,
+            "Down moves to the second row"
+        );
+        let first = format!("/{} ", fixture.app.skill_suggestions[0].0);
+        let expected = format!("/{} ", fixture.app.skill_suggestions[1].0);
+        fixture.app.on_key(Key::Tab);
+        assert_eq!(
+            fixture.app.text, expected,
+            "Tab completes the highlighted row"
+        );
+        assert_ne!(
+            fixture.app.text, first,
+            "Tab must not complete row 0 after Down"
+        );
+        assert!(!fixture.app.running, "Tab must not submit");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "Tab must not activate a skill"
+        );
+    }
+
+    #[test]
+    fn draw_path_serves_the_menu_from_cached_state_without_rescanning() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "/na");
+        let dir = fixture._cwd.path().join(".drip").join("skills");
+        std::fs::remove_dir_all(&dir).expect("remove skills dir");
+        let rows = fixture.app.live_region();
+        let menu_rows = rows.iter().filter(|row| row.contains("/navis")).count();
+        assert_eq!(
+            menu_rows, 1,
+            "live_region must paint the menu from the cached catalog even after the skills dir is gone"
+        );
+    }
+
+    #[test]
+    fn qualified_skill_name_activates_instead_of_starting_a_goal_run() {
+        let mut fixture = make_app_with_skills(&["spellcraft:navis"]);
+        type_text(&mut fixture.app, "/spellcraft:navis");
+        fixture.app.on_key(Key::Return);
+        assert_eq!(
+            fixture.app.active_skills.len(),
+            1,
+            "/spellcraft:navis must enable the skill, not run it as a goal"
+        );
+        assert_eq!(fixture.app.active_skills[0].name, "spellcraft:navis");
+        assert!(
+            !fixture.app.running,
+            "activation must not start a prompt run"
+        );
+    }
+
+    #[test]
+    fn direct_activation_matches_catalog_case_insensitively() {
+        let mut fixture = make_app_with_skills(&["Navis"]);
+        fixture.app.text = "/navis".to_string();
+        fixture.app.submit();
+        assert_eq!(
+            fixture.app.active_skills.len(),
+            1,
+            "lowercase /navis must reach the catalog name Navis"
+        );
+        assert!(
+            fixture.app.active_skills[0]
+                .name
+                .eq_ignore_ascii_case("navis"),
+            "activation must use the canonical catalog spelling"
+        );
+    }
+
+    #[test]
+    fn non_skill_slash_text_still_falls_through_to_the_goal_run() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        // run_goal fails fast (before spawning a session) when the active
+        // inference profile is unknown; the reported error is the observable
+        // proof that path-like slash text still reaches the goal-run path.
+        fixture.app.config.settings.insert(
+            crate::core::config::ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "no-such-profile".to_string(),
+        );
+        type_text(&mut fixture.app, "/usr/bin/env");
+        fixture.app.submit();
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "a path-like token is not a skill"
+        );
+        assert!(!fixture.app.running);
+        assert!(
+            matches!(
+                fixture.app.cells.first(),
+                Some(TranscriptEntry::Goal(goal)) if goal.text == "/usr/bin/env"
+            ),
+            "the token must fall through to run_goal, which records it as a goal"
+        );
+        assert!(
+            fixture
+                .app
+                .cells
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Error(_))),
+            "run_goal reports the unresolvable inference profile as an error"
+        );
     }
 }

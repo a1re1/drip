@@ -86,8 +86,8 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "env",
     },
     SlashCommandSpec {
-        args: None,
-        description: "Rename this session from its transcript.",
+        args: Some("[name]"),
+        description: "Rename this session from its transcript, or give your own name.",
         name: "rename",
     },
     SlashCommandSpec {
@@ -196,10 +196,26 @@ mod tests {
 
     #[test]
     fn rename_is_registered_and_suggested() {
-        assert!(SLASH_COMMANDS.iter().any(|command| command.name == "rename"));
+        let spec = SLASH_COMMANDS
+            .iter()
+            .find(|command| command.name == "rename")
+            .expect("rename is registered");
+        assert_eq!(spec.args, Some("[name]"));
         assert!(get_slash_command_suggestions("/re")
             .iter()
             .any(|command| command.name == "rename"));
         assert!(get_slash_command_suggestions("/rename ").is_empty());
+    }
+
+    #[test]
+    fn rename_parses_bare_and_multiword_names() {
+        // Bare /rename (or whitespace-only args) auto-generates the name.
+        let parsed = parse_slash_command("/rename").expect("should parse");
+        assert_eq!(parsed.name, "rename");
+        assert_eq!(parsed.args, "");
+        // A manual name keeps the full multiword argument verbatim.
+        let parsed = parse_slash_command("/rename Ops: incident 42").expect("should parse");
+        assert_eq!(parsed.name, "rename");
+        assert_eq!(parsed.args, "Ops: incident 42");
     }
 }

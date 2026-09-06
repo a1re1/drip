@@ -133,6 +133,40 @@ pub fn resolve_title_route(
     }
 }
 
+/// /rename resolves through the same model profile as titles but is NOT gated
+/// on the terminal-title feature: an explicit command must work even when
+/// automatic titles are disabled. The empty tool profile keeps tool-profile
+/// resolution from interfering with the route.
+pub fn resolve_session_route(
+    settings: &indexmap::IndexMap<String, String>,
+    env: EnvSource<'_>,
+) -> Option<ModelRoute> {
+    let mut scoped = settings.clone();
+    scoped.insert(
+        ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+        terminal_title_profile_id(settings),
+    );
+    scoped.insert(ACTIVE_TOOL_PROFILE_SETTING_ID.to_string(), String::new());
+    match resolve_inference_config(&scoped, env) {
+        Ok(resolved) => Some(resolved.route.to_model_route()),
+        Err(_) => None,
+    }
+}
+
+/// The single inference request for /rename: a tool-free call against the
+/// session-name route, hard-bounded in time. Every failure (offline
+/// restriction, timeout, malformed or empty reply) is `None` so the caller
+/// keeps the current name; this never fails the session and never invokes
+/// harness tools.
+pub async fn generate_session_title(
+    route: ModelRoute,
+    goal: &str,
+    digest: &str,
+    timeout_ms: u64,
+) -> Option<String> {
+    crate::tui::session_name::generate_session_name(route, goal, digest, timeout_ms).await
+}
+
 /// The single inference request per chat: a tool-free call against the title
 /// route, hard-bounded in time, whose sanitized reply becomes the pane label.
 /// Every failure (offline restriction, timeout, malformed or empty reply) is

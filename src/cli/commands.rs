@@ -87,6 +87,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         args: None,
+        description: "Rename this session from its transcript.",
+        name: "rename",
+    },
+    SlashCommandSpec {
+        args: None,
         description: "Exit drip.",
         name: "quit",
     },
@@ -187,5 +192,14 @@ mod tests {
         assert_eq!(names("/").len(), SLASH_COMMANDS.len());
         assert!(get_slash_command_suggestions("hello").is_empty());
         assert!(get_slash_command_suggestions("hello").is_empty());
+    }
+
+    #[test]
+    fn rename_is_registered_and_suggested() {
+        assert!(SLASH_COMMANDS.iter().any(|command| command.name == "rename"));
+        assert!(get_slash_command_suggestions("/re")
+            .iter()
+            .any(|command| command.name == "rename"));
+        assert!(get_slash_command_suggestions("/rename ").is_empty());
     }
 }

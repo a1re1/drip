@@ -54,8 +54,10 @@ use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::builtin_tool_pack;
 use crate::tui::pane_title::{FALLBACK_LABEL, PaneTitle, SPINNER_INTERVAL_MS};
+use crate::tui::session_name::{persist_session_name, read_session_name, read_session_name_context};
 use crate::tui::terminal_title::{
-    generate_chat_title, resolve_title_route, terminal_title_enabled, terminal_title_timeout_ms,
+    generate_chat_title, generate_session_title, resolve_session_route, resolve_title_route,
+    terminal_title_enabled, terminal_title_timeout_ms,
 };
 use crate::tui::term::{terminal_size, write_out, RawMode};
 use crate::tui::timeline::{render_timeline_cell, select_repaint_tail_start};
@@ -168,6 +170,9 @@ enum Msg {
     /// One-shot title generation finished on the background thread. `label`
     /// is None on any failure; stale epochs are dropped by the handler.
     Title { epoch: u64, label: Option<String> },
+    /// An explicit /rename finished on a background thread. Unlike Msg::Title
+    /// the name is persisted to session.json when present.
+    Rename { epoch: u64, name: Option<String>, persisted: bool },
 }
 
 /// One decoded terminal input.
@@ -332,6 +337,8 @@ struct TuiApp {
     /// Bumped on session switch; in-flight generations from older epochs are
     /// stale and dropped without touching the title.
     title_epoch: u64,
+    /// Bumped on each /rename; stale in-flight renames are dropped.
+    rename_epoch: u64,
     title_next_tick: Option<Instant>,
     tx: Sender<Msg>,
 }
@@ -398,6 +405,7 @@ impl TuiApp {
             pane_title: None,
             title_requested: false,
             title_epoch: 0,
+            rename_epoch: 0,
             title_next_tick: None,
             status_line_output: None,
             status_line_request_width: None,
@@ -1023,9 +1031,19 @@ impl TuiApp {
         self.title_epoch = self.title_epoch.wrapping_add(1);
         self.title_requested = false;
         self.title_next_tick = None;
+        // Invalidate any in-flight /rename for the old session too: its late
+        // reply must fail the epoch guard in apply_rename_result instead of
+        // clobbering this session's restored or fallback label.
+        self.rename_epoch = self.rename_epoch.wrapping_add(1);
         if let Some(title) = self.pane_title.as_mut() {
             let escape = title.set_label(FALLBACK_LABEL, Instant::now());
             crate::tui::pane_title::emit(escape.as_deref());
+        }
+        // Restore this session's explicit /rename name, if it has one —
+        // materializing the pane title when no goal has created it yet, so
+        // a resumed session shows its persisted name immediately.
+        if let Some(name) = read_session_name(Path::new(&self.paths.meta_path)) {
+            apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
         }
         // Replay the new transcript from the top, like remounting <Static>:
         // the previous session's rows stay in scrollback (ink cannot take
@@ -1078,6 +1096,7 @@ impl TuiApp {
             "help" => self.push_info(help_text()),
             "quit" | "exit" => self.quit = true,
             "model" => self.open_overlay(OverlayKind::Model),
+            "rename" => self.begin_rename(),
             "toolmodel" => self.open_overlay(OverlayKind::ToolModel),
             "prompt" => self.open_overlay(OverlayKind::Prompt),
             "new" => {
@@ -1662,7 +1681,16 @@ impl TuiApp {
     /// JSON, and redirected runs never emit escapes or make a model call.
     fn begin_title(&mut self, goal_text: &str, env: &HashMap<String, String>) {
         let settings = self.config.settings.clone();
-        if !should_request_title(stdout_is_tty(), &settings, self.title_requested) {
+        // An explicit /rename name wins over a generated title: when
+        // session.json already carries one, the one-shot auto-title never
+        // runs, so the next goal cannot overwrite the user's choice.
+        let persisted_name = read_session_name(Path::new(&self.paths.meta_path));
+        if !should_request_auto_title(
+            stdout_is_tty(),
+            &settings,
+            self.title_requested,
+            persisted_name.as_deref(),
+        ) {
             return;
         }
         self.title_requested = true;
@@ -1685,6 +1713,60 @@ impl TuiApp {
             let label = generate_title_label(settings, env, goal, timeout_ms);
             let _ = tx.send(Msg::Title { epoch, label });
         });
+    }
+
+    // ----- /rename ---------------------------------------------------------
+
+    /// Names this session from its transcript with a one-shot model call.
+    /// Mirrors begin_title's background shape: the UI never blocks, the call
+    /// runs on its own thread, and busy runs are refused rather than queued
+    /// behind or interleaved with a goal.
+    fn begin_rename(&mut self) {
+        if self.running {
+            self.push_error("A goal is running; /rename is disabled until it finishes.");
+            return;
+        }
+        // A rename takes over the shared pane title: drop any in-flight
+        // auto-title reply now so a late Msg::Title cannot clobber the
+        // freshly applied name (apply_title_result rejects epoch mismatches).
+        self.title_epoch = self.title_epoch.wrapping_add(1);
+        let goal = self.session.last_goal.clone().unwrap_or_default();
+        let digest = read_session_name_context(&goal, &self.cells);
+        let env = self.merged_env();
+        let settings = self.config.settings.clone();
+        let Some(route) = resolve_session_route(&settings, Some(&env)) else {
+            self.push_error("/rename needs a configured inference profile (see /model).");
+            return;
+        };
+        let meta_path = self.paths.meta_path.clone();
+        self.rename_epoch = self.rename_epoch.wrapping_add(1);
+        let epoch = self.rename_epoch;
+        let timeout_ms = terminal_title_timeout_ms(&settings);
+        self.push_info("Renaming this session from its transcript…");
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let name = generate_rename_name(route, &goal, &digest, timeout_ms);
+            let persisted = name
+                .as_deref()
+                .map(|name| persist_session_name(Path::new(&meta_path), name))
+                .unwrap_or(false);
+            let _ = tx.send(Msg::Rename { epoch, name, persisted });
+        });
+    }
+
+    /// Applies a background /rename result: stale epochs (from /new or /resume
+    /// while the call was in flight) are dropped, the visible pane title is
+    /// updated, and any failure keeps the current name.
+    fn apply_rename_result(&mut self, msg_epoch: u64, name: Option<String>, persisted: bool) {
+        if msg_epoch != self.rename_epoch {
+            return;
+        }
+        let Some(name) = name.filter(|name| persisted) else {
+            self.push_error("Could not generate a session name; keeping the current one.");
+            return;
+        };
+        apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
+        self.push_info(format!("Session renamed to \"{name}\"."));
     }
 
     fn finish_run(&mut self) {
@@ -1836,6 +1918,10 @@ impl TuiApp {
                     );
                     crate::tui::pane_title::emit(escape.as_deref());
                 }
+                Ok(Msg::Rename { epoch, name, persisted }) => {
+                    self.apply_rename_result(epoch, name, persisted);
+                    self.repaint();
+                }
                 Ok(Msg::Info(text)) => self.push_info(text),
                 Ok(Msg::Error(text)) => self.push_error(text),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1955,6 +2041,33 @@ fn should_request_title(
     is_tty && terminal_title_enabled(settings) && !requested
 }
 
+/// Whether the next goal may request the one-shot auto-title: the usual
+/// TTY/enabled/one-shot gate, and never when an explicit /rename name is
+/// persisted — the user's chosen name wins over a generated one.
+fn should_request_auto_title(
+    is_tty: bool,
+    settings: &indexmap::IndexMap<String, String>,
+    requested: bool,
+    persisted_name: Option<&str>,
+) -> bool {
+    persisted_name.is_none() && should_request_title(is_tty, settings, requested)
+}
+
+/// Applies a /rename (or a restored session name) to the visible pane title:
+/// updates the existing title, or materializes one on a real terminal when
+/// no goal has created it yet. Headless runs never emit title escapes.
+fn apply_rename_label(pane_title: &mut Option<PaneTitle>, name: &str, is_tty: bool) {
+    if let Some(title) = pane_title.as_mut() {
+        let escape = title.set_label(name, Instant::now());
+        crate::tui::pane_title::emit(escape.as_deref());
+    } else if is_tty {
+        let mut title = PaneTitle::new(name);
+        let escape = title.set_label(name, Instant::now());
+        crate::tui::pane_title::emit(escape.as_deref());
+        *pane_title = Some(title);
+    }
+}
+
 /// Whether a consumed title tick re-arms the spinner deadline: only while a
 /// title exists and is busy. Idle and headless states never re-arm, so the
 /// event loop falls back to its plain wait instead of busy-polling.
@@ -1978,6 +2091,21 @@ fn generate_title_label(
         .build()
         .ok()?;
     runtime.block_on(generate_chat_title(route, &goal, timeout_ms))
+}
+
+/// Thread-side /rename half: resolve through the shared session route and run
+/// the one-shot naming request; every failure is None.
+fn generate_rename_name(
+    route: crate::harness::model_call::ModelRoute,
+    goal: &str,
+    digest: &str,
+    timeout_ms: u64,
+) -> Option<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(generate_session_title(route, goal, digest, timeout_ms))
 }
 
 /// Applies a background title result: only the current session's epoch is
@@ -2345,5 +2473,231 @@ mod pane_title_lifecycle_tests {
         assert!(row.contains("fix login bug"), "{row:?}");
         assert!(!row.contains('\x1b') && !row.contains('\x07'), "{row:?}");
         assert!(row.chars().count() <= 20);
+    }
+}
+
+/// Focused tests for the /rename wiring: command recognition, busy-session
+/// refusal, failure keeping the current title, stale-epoch protection, and
+/// resume restoring the persisted name.
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    /// A throwaway DRIP_HOME removed on drop.
+    struct TempHome(std::path::PathBuf);
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_dir(kind: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("drip-rename-{kind}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A TuiApp whose project + session live in an isolated temp home.
+    fn rename_app(dir: &Path) -> TuiApp {
+        let root = dir.to_string_lossy().to_string();
+        let home = crate::core::home::open_drip_home(&root);
+        let project = crate::core::home::resolve_drip_project("/tmp", &root, None)
+            .expect("project resolves");
+        let project = crate::core::home::ensure_drip_project(&project);
+        let index = crate::core::sessions::open_session_index(&project.index_db_path);
+        let session = crate::core::sessions::create_session(
+            &index,
+            crate::core::sessions::CreateSessionArgs {
+                cwd: "/tmp".to_string(),
+                project: &crate::core::sessions::ProjectPaths::from(&project),
+                now: "",
+            },
+        );
+        index.close();
+        let bootstrap = TuiBootstrap {
+            allow_net: false,
+            config: crate::core::config::create_default_cli_config(),
+            cwd: "/tmp".to_string(),
+            home,
+            initial_goal: Some("ship the release".to_string()),
+            max_iterations: None,
+            no_repo_memory: false,
+            project,
+            roles_flag: None,
+            session,
+            status_line: None,
+        };
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let (mention_tx, _mention_rx) = mpsc::channel::<(u64, String)>();
+        TuiApp::new(bootstrap, tx, mention_tx)
+    }
+
+    fn label(app: &TuiApp) -> String {
+        app.pane_title
+            .as_ref()
+            .expect("pane title exists")
+            .label()
+            .to_string()
+    }
+
+    #[test]
+    fn auto_title_yields_to_a_persisted_rename_name() {
+        let settings = crate::core::config::default_setting_values();
+        // An explicit /rename name wins: no auto-title even on a fresh,
+        // TTY-visible, enabled session.
+        assert!(!should_request_auto_title(true, &settings, false, Some("User Chosen Name")));
+        // Without one, the usual gate applies unchanged.
+        assert!(should_request_auto_title(true, &settings, false, None));
+        assert!(!should_request_auto_title(false, &settings, false, None));
+        assert!(!should_request_auto_title(true, &settings, true, None));
+    }
+
+    #[test]
+    fn rename_attempt_drops_in_flight_auto_title_replies() {
+        let dir = temp_dir("stale-title");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        let before = app.title_epoch;
+        // No profile is configured, so begin_rename refuses after the epoch
+        // bump — the bump guards every attempt, not just scheduled ones.
+        app.begin_rename();
+        assert_eq!(app.title_epoch, before.wrapping_add(1));
+        assert_eq!(app.rename_epoch, 0);
+        // The late auto-title reply for the old epoch is rejected and the
+        // current label survives.
+        assert!(apply_title_result(
+            app.pane_title.as_mut(),
+            before,
+            app.title_epoch,
+            Some("Late Auto Title".to_string()),
+            Instant::now(),
+        )
+        .is_none());
+        assert_eq!(
+            label(&app),
+            crate::tui::pane_title::fallback_title("ship the release")
+        );
+    }
+
+    #[test]
+    fn rename_label_materializes_a_title_only_on_a_tty() {
+        // Before any goal there is no pane title: on a real terminal the
+        // chosen name materializes one...
+        let mut pane_title: Option<PaneTitle> = None;
+        apply_rename_label(&mut pane_title, "Alpha Beta Gamma", true);
+        let title = pane_title.expect("materialized on a tty");
+        assert_eq!(title.label(), "Alpha Beta Gamma");
+        // ...headless runs never materialize one (no escapes on piped
+        // stdout).
+        let mut pane_title: Option<PaneTitle> = None;
+        apply_rename_label(&mut pane_title, "Alpha Beta Gamma", false);
+        assert!(pane_title.is_none());
+    }
+
+    #[test]
+    fn rename_command_is_recognized_and_busy_sessions_are_refused() {
+        let dir = temp_dir("dispatch");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        // /rename is recognized (it never starts a goal). With no inference
+        // profile configured it refuses before scheduling anything.
+        app.dispatch_command("rename", "");
+        assert!(!app.running);
+        assert_eq!(app.rename_epoch, 0);
+        // A busy session refuses /rename without scheduling another rename.
+        app.running = true;
+        app.dispatch_command("rename", "");
+        assert!(app.running);
+        assert_eq!(app.rename_epoch, 0);
+    }
+
+    #[test]
+    fn rename_failure_keeps_the_current_title() {
+        let dir = temp_dir("failure");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        let before = label(&app);
+        // A failed generation keeps the current name...
+        app.apply_rename_result(0, None, true);
+        assert_eq!(label(&app), before);
+        // ...and so does a success that could not be persisted.
+        app.apply_rename_result(0, Some("Alpha Beta Gamma".to_string()), false);
+        assert_eq!(label(&app), before);
+    }
+
+    #[test]
+    fn rename_success_updates_the_title_and_stale_epochs_are_ignored() {
+        let dir = temp_dir("success");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        let before = label(&app);
+        let name = "Ship the release candidate today";
+        app.apply_rename_result(0, Some(name.to_string()), true);
+        let after = label(&app);
+        assert_eq!(after, name);
+        assert_ne!(after, before);
+        // A late reply from an earlier epoch (the session changed meanwhile)
+        // is dropped instead of clobbering the live title.
+        app.apply_rename_result(99, Some("Totally Stale Name Here".to_string()), true);
+        assert_eq!(label(&app), after);
+    }
+
+    #[test]
+    fn resume_restores_the_persisted_rename() {
+        let dir = temp_dir("resume");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        let session = app.session.clone();
+        app.switch_session(session.clone());
+        let fallback = label(&app);
+        let name = "Ship the release candidate today";
+        let meta = std::path::PathBuf::from(&app.paths.meta_path);
+        assert!(crate::tui::session_name::persist_session_name(&meta, name));
+        app.switch_session(session);
+        let restored = label(&app);
+        assert_eq!(restored, name, "resume must restore the persisted rename");
+    }
+
+    #[test]
+    fn switching_sessions_drops_in_flight_renames() {
+        let dir = temp_dir("switch-epoch");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+        // A /rename issued in session A is in flight: the worker captured
+        // epoch 1 before the user switches away.
+        app.rename_epoch = 1;
+        let stale_name = "Session A Name Right Here";
+
+        // /new routes through switch_session, which must invalidate the
+        // in-flight rename so its late reply cannot clobber the new label.
+        app.dispatch_command("new", "");
+        assert_eq!(app.rename_epoch, 2, "/new must bump the rename epoch");
+        let fresh = label(&app);
+        app.apply_rename_result(1, Some(stale_name.to_string()), true);
+        assert_ne!(label(&app), stale_name, "stale rename must not clobber /new");
+        assert_eq!(label(&app), fresh);
+
+        // /resume is the other switch path; the same protection applies.
+        let index = crate::core::sessions::open_session_index(&app.bootstrap.project.index_db_path);
+        let other = crate::core::sessions::create_session(
+            &index,
+            crate::core::sessions::CreateSessionArgs {
+                cwd: app.bootstrap.cwd.clone(),
+                project: &crate::core::sessions::ProjectPaths::from(&app.bootstrap.project),
+                now: "",
+            },
+        );
+        index.close();
+        app.rename_epoch = 10;
+        app.dispatch_command("resume", &other.id);
+        assert_eq!(app.rename_epoch, 11, "/resume must bump the rename epoch");
+        app.apply_rename_result(10, Some(stale_name.to_string()), true);
+        assert_eq!(label(&app), FALLBACK_LABEL, "stale rename must not clobber /resume");
     }
 }

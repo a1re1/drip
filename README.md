@@ -472,6 +472,39 @@ Behavior:
 ---
 
 
+## Config file: nested JSON and automatic migration
+
+Structured settings inside `~/.drip/config.json` are stored as real nested
+JSON — `runtime.role_profiles`, `runtime.model_profiles`,
+`runtime.system_prompt_profiles`, and `credentials.stored_api_keys` as JSON
+arrays, and `runtime.role_bindings` as a JSON object:
+
+```json
+{
+  "settings": {
+    "runtime.active_profile_id": "glm-5-3-flash",
+    "runtime.role_profiles": [
+      { "id": "planner", "description": "Plans the loop", "model": "glm-5-3-flash" }
+    ],
+    "runtime.role_bindings": { "planner": "author" },
+    "credentials.stored_api_keys": []
+  },
+  "version": 1
+}
+```
+
+Older versions of drip flattened these values into single-line JSON strings.
+Both forms are accepted on load, and drip migrates legacy files automatically:
+the first time a config containing valid encoded strings is loaded, those
+values are rewritten as nested containers (pretty-printed, atomically) while
+everything else — unknown keys, ordinary settings, `version`, and
+`statusLine` — is preserved as-is. The migration is one-time and idempotent:
+values that are already nested, malformed legacy strings, and the default
+profiles drip merges in at load time are never written back, so the file only
+changes when an actual legacy value is unflattened. Any string setting that
+merely *looks* like JSON (prompts, key references, notes) is always left
+untouched.
+
 ## Terminal pane title
 
 While a goal runs, drip sets the terminal window title (OSC 2) so activity is

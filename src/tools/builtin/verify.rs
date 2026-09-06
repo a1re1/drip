@@ -638,8 +638,9 @@ pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOut
 }
 
 
+#[cfg(test)]
 mod tests {
-    
+    use super::parse_verify_output;
 
     // -- bun test ----------------------------------------------------------
 

@@ -471,6 +471,11 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     };
     let project = ensure_drip_project(project);
     let base_ref = cli_args.review_base.clone().unwrap_or_else(|| resolve_default_base_ref(cwd));
+    let review_source = if crate::cli::review::git_available(cwd) {
+        format!("{base_ref}...HEAD")
+    } else {
+        crate::cli::review::JOURNAL_BASE_LABEL.to_string()
+    };
     let tools_path = resolve_tools_path(&cli_args.tools_path);
     let tool_options = builtin_tool_options(cli_args);
 
@@ -481,7 +486,7 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
 
     // stderr, so --json stdout stays a single parseable object.
     eprintln!(
-        "review: {base_ref}...HEAD · files on {file_profile_id} ({}) · synthesis on {synth_profile_id} ({})",
+        "review: {review_source} · files on {file_profile_id} ({}) · synthesis on {synth_profile_id} ({})",
         file_inference.model, synth_inference.model
     );
 
@@ -499,6 +504,7 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     let outcome = tokio::task::block_in_place(|| {
         run_review_command(ReviewCommandArgs {
             base_ref,
+            explicit_base: cli_args.review_base.is_some(),
             concurrency: cli_args.review_concurrency.map(|n| n.max(0) as usize),
             context: cli_args.review_context.clone().unwrap_or_default(),
             cwd: cwd.to_string(),

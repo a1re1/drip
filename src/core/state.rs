@@ -790,7 +790,10 @@ pub fn count_task_stats(tasks: &[HarnessTask])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::{HarnessRunReason, HarnessVerificationStreak};
+    use crate::core::types::{
+        HarnessActivationDigest, HarnessRunReason, HarnessRunSummaryNote, HarnessVerificationRecord,
+        HarnessVerificationStreak,
+    };
     use serde_json::{json, Value};
     use std::fs;
     use tempfile::TempDir;

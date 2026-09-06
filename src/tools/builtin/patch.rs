@@ -374,7 +374,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 
             if has_content && (has_find || has_replace) {
                 return Err(anyhow!(
-                    "[entry {} \"{}\"] Pass either content, or find + replace — not both.",
+                    "[entry {} \"{}\"] Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file.",
                     i,
                     path
                 ));
@@ -479,7 +479,9 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     }
 
     if content.is_some() && (find.is_some() || replace.is_some()) {
-        return Err(anyhow!("Pass either content, or find + replace — not both."));
+        return Err(anyhow!(
+            "Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file."
+        ));
     }
 
     if content.is_none() {
@@ -654,7 +656,7 @@ pub fn validate_file_entry(
     // Mutual-exclusion: content XOR find/replace
     if entry.content.is_some() && (entry.find.is_some() || entry.replace.is_some()) {
         return Err(format!(
-            "{} Pass either content, or find + replace — not both.",
+            "{} Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file.",
             tag
         ));
     }
@@ -1345,6 +1347,48 @@ mod prepare_tests {
         assert_eq!(
             prepared.input.workspace_root,
             test_ctx().cwd.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn content_plus_find_replace_is_rejected_with_actionable_guidance() {
+        let err = prepare(
+            &json!({
+                "files": [
+                    {
+                        "path": "a.txt",
+                        "content": "hello\n",
+                        "find": "x",
+                        "replace": "y"
+                    }
+                ]
+            }),
+            &test_ctx(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "[entry 0 \"a.txt\"] Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file."
+        );
+    }
+
+    #[test]
+    fn single_file_content_plus_find_replace_names_both_recovery_paths() {
+        let err = prepare(
+            &json!({
+                "path": "a.txt",
+                "content": "x",
+                "find": "x",
+                "replace": "y"
+            }),
+            &test_ctx(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file."
         );
     }
 }

@@ -971,6 +971,7 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
     lines.push("## What counts as a finding".to_string());
     lines.push("- P0 blocks the change: a bug that breaks the stated intent, a security hole, data loss.".to_string());
     lines.push("- P1 important: a logic error, missing error handling on a path that will be hit, a real performance risk, a test that no longer pins the behaviour it names.".to_string());
+    lines.push("- P1 over-fit: the change hard-codes or assumes the specific instance in the workspace when the stated intent quantifies over an input space.".to_string());
     lines.push("- P2 worth fixing before merge: a missing test for new behaviour, a misleading contract or comment, a pattern the codebase avoids.".to_string());
     lines.push("- Nothing below P2 is a finding. Do not list naming, wording, formatting, comment alignment, or style preferences at all — not as P3, not as P4, not in the Context.".to_string());
     lines.push(String::new());
@@ -1331,6 +1332,14 @@ pub fn review_tools_from<T: Clone>(tools: &[T], name_of: &dyn Fn(&T) -> &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_review_prompt_flags_overfit_as_a_p1_finding() {
+        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/lib.rs".into(), paths: vec!["src/lib.rs".into()], diff_lines: 2, part: None };
+        let files = [UnitPromptFile { path: "src/lib.rs", diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n x\n+y\n", content: None }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "handle every config file", files: &files, unit: &unit });
+        assert!(prompt.contains("- P1 over-fit: the change hard-codes or assumes the specific instance in the workspace when the stated intent quantifies over an input space."));
+    }
 
     #[test]
     fn extract_findings_reads_levels_without_look_around() {

@@ -389,41 +389,10 @@ sessions or the session index.
 dripw
 ```
 
-Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, `[4]` State, plus the
-transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
+Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, plus the
+transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `w`
 toggles Recent between this worktree and all worktrees of the repo, `q` quits.
-
-### The State panel
-
-Panel `[4]` mirrors the harness sidebar. It reads the selected session's
-`state.json` — the goal plus the `iteration N · loop N` counters, then the
-four sections the harness maintains between task loops:
-
-- **Shared memory** — durable notes saved with `remember`, newest first
-  (8 shown, then `+N more notes`), each as `id · saved @ cycle N` with the
-  note text. Empty state: "Nothing remembered yet. Durable facts the model
-  saves with remember appear here."
-- **Warm context** — tool results promoted after being reached for in 2+
-  task loops (8 shown, then `+N more`): `toolName inputPreview` plus
-  `ttl N · ×N · live · failed` meta. Empty state: "Nothing promoted yet.
-  Tool results reached for in 2+ task loops get cached here so future loops
-  skip the call."
-- **Last activation** — what the previous task loop did and how it ended
-  (actions and outcome). Empty state: "Nothing yet. After each task loop, a
-  digest of what it did and how it ended is fed into the next prompt."
-- **Telemetry watchlist** — tracked workspace calls not yet promoted, top 10
-  by loops used, each with its activation and call counts, then
-  `+N more tracked`. Empty state: "No workspace tool calls tracked yet. Calls
-  used in 2+ task loops get promoted into warm context." (When every tracked
-  call has been promoted: "Every tracked call has been promoted into warm
-  context.")
-
-The panel follows the Running/Recent selection and reloads whenever the
-session writes `state.json` (checked on each 2s list refresh), so rows update
-live during a run. A session with no recorded state shows a dim
-"(no state recorded for this session)" placeholder, and when the selected
-session is not currently running the footer marks the view `stale`.
 
 ## Custom status line
 

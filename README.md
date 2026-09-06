@@ -669,6 +669,31 @@ the outer terminal window with `set -g set-titles on` (plus
 `allow-passthrough on` on tmux 3.3+ if needed). drip emits only OSC 2
 window-title escapes — no progress-bar protocols such as OSC 9;4.
 
+## Prompt history (TUI)
+
+The TUI input line keeps a bounded in-memory history of prompts you have
+accepted, so recent prompts can be reused without retyping:
+
+- Press `Up` to recall the previous prompt and `Up` again to walk to older
+  ones; navigation clamps at the oldest entry. Press `Down` to move back
+  toward newer prompts; stepping past the newest restores the draft you had
+  typed before navigating, exactly as it was.
+- The first `Up` starts navigation only when the cursor is on the first
+  line of a multiline prompt (and the first `Down` only from the last
+  line); everywhere else the arrows keep their normal multiline cursor
+  motion. Once navigation has started, `Up` and `Down` walk the history
+  regardless of cursor position. Slash-command, skill, and mention
+  suggestion menus keep priority over history navigation, and arrows are
+  inactive while a goal is running.
+- Each accepted prompt is recorded once. Blank submissions, slash commands,
+  and skill activations are never recorded, and consecutive duplicates are
+  collapsed. Recalled prompts are fully editable and resend with the normal
+  `Enter` path.
+- History is in-memory only (the last ~64 prompts for the drip process) and
+  is never persisted to disk. Switching sessions keeps the entries but drops
+  any in-progress navigation and the saved draft, so a draft never leaks
+  into another session.
+
 ## Contributing
 
 PRs welcome. Please run `cargo build --release && cargo test` before submitting.

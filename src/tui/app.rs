@@ -300,6 +300,106 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
     vec![Key::Paste(text)]
 }
 
+// ----- prompt history ------------------------------------------------------
+
+/// Bounded in-memory history of accepted prompts with Up/Down navigation and
+/// a saved unsent draft. Pure state, deliberately separate from the
+/// transcript/message storage (`cells`, `pending_cells`) and never persisted:
+/// a session switch simply resets navigation instead of restoring a draft.
+struct PromptHistory {
+    /// Accepted prompts, oldest first, bounded to `max_entries`.
+    entries: std::collections::VecDeque<String>,
+    max_entries: usize,
+    /// While browsing: index into `entries` of the currently recalled prompt.
+    browsing: Option<usize>,
+    /// The composer text saved when navigation started; `newer` restores it
+    /// exactly when the user walks back past the newest entry.
+    draft: Option<String>,
+}
+
+impl PromptHistory {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            max_entries: max_entries.max(1),
+            browsing: None,
+            draft: None,
+        }
+    }
+
+    /// Number of stored entries (introspection for tests and callers).
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether a navigation walk is in progress (Up started, not yet ended).
+    fn is_browsing(&self) -> bool {
+        self.browsing.is_some()
+    }
+
+    /// Records an accepted prompt. Blank text is ignored, a consecutive
+    /// duplicate of the newest entry is suppressed, and any in-flight
+    /// navigation (and its saved draft) resets: accepting a new prompt ends
+    /// browsing. Entries keep multiline text verbatim apart from the trim.
+    fn record(&mut self, text: &str) {
+        // Accepting a prompt always ends navigation, even when the text is a
+        // duplicate or blank and nothing is stored.
+        self.browsing = None;
+        self.draft = None;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.entries.back().map(|last| last.as_str()) == Some(trimmed) {
+            return;
+        }
+        self.entries.push_back(trimmed.to_string());
+        while self.entries.len() > self.max_entries {
+            self.entries.pop_front();
+        }
+    }
+
+    /// Up arrow: recall an older prompt. Starts at the newest entry, saving
+    /// the composer's current text as the draft; repeated calls walk older and
+    /// clamp at the oldest entry. The returned String is a fresh copy, so
+    /// editing it never mutates the stored entry.
+    fn older(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let next = match self.browsing {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.draft = Some(current.to_string());
+                self.entries.len() - 1
+            }
+        };
+        self.browsing = Some(next);
+        Some(self.entries[next].clone())
+    }
+
+    /// Down arrow: recall a newer prompt; stepping past the newest restores
+    /// the exact draft saved when navigation started. A no-op (returns None,
+    /// changes nothing) when not currently browsing.
+    fn newer(&mut self) -> Option<String> {
+        let index = self.browsing?;
+        if index + 1 < self.entries.len() {
+            self.browsing = Some(index + 1);
+            Some(self.entries[index + 1].clone())
+        } else {
+            self.browsing = None;
+            self.draft.take()
+        }
+    }
+
+    /// Ends navigation and discards the saved draft. Called on session switch
+    /// so a draft typed for one session never leaks into another.
+    fn reset(&mut self) {
+        self.browsing = None;
+        self.draft = None;
+    }
+}
+
 struct TuiApp {
     abort: Option<AbortSignal>,
     active_skills: Vec<LoadedCliSkill>,
@@ -324,6 +424,7 @@ struct TuiApp {
     paste_buffer: Option<Vec<u8>>,
     paths: SessionPaths,
     pending_cells: Vec<TranscriptEntry>,
+    prompt_history: PromptHistory,
     pending_detail: Option<String>,
     quit: bool,
     resize_at: Option<Instant>,
@@ -457,6 +558,7 @@ impl TuiApp {
             paths,
             pending_cells: Vec::new(),
             pending_detail: None,
+            prompt_history: PromptHistory::new(64),
             quit: false,
             resize_at: None,
             rows,
@@ -802,6 +904,43 @@ impl TuiApp {
         self.refresh_mentions();
     }
 
+    /// Recalls the previous prompt into the composer. Navigation is entered
+    /// only when the cursor sits on the first line (the unsent composer text
+    /// is saved as the draft); once browsing, repeated Up presses walk older
+    /// entries regardless of the cursor line.
+    fn recall_older_prompt(&mut self) {
+        if !self.prompt_history.is_browsing() {
+            let chars: Vec<char> = self.text.chars().collect();
+            let cursor = self.cursor.min(chars.len());
+            if chars[..cursor].iter().any(|&c| c == '\n') {
+                return;
+            }
+        }
+        if let Some(text) = self.prompt_history.older(&self.text) {
+            let cursor = text.chars().count();
+            self.apply_edit(text, cursor);
+        }
+    }
+
+    /// Steps toward newer prompts while browsing, restoring the exact draft
+    /// past the newest entry. Navigation is entered only from the last line;
+    /// once browsing, Down walks newer regardless of the cursor line, and it
+    /// stays a no-op when not browsing.
+    fn recall_newer_prompt(&mut self) {
+        // `newer()` itself is a no-op returning None when not browsing.
+        if !self.prompt_history.is_browsing() {
+            let chars: Vec<char> = self.text.chars().collect();
+            let cursor = self.cursor.min(chars.len());
+            if chars[cursor..].iter().any(|&c| c == '\n') {
+                return;
+            }
+        }
+        if let Some(text) = self.prompt_history.newer() {
+            let cursor = text.chars().count();
+            self.apply_edit(text, cursor);
+        }
+    }
+
     fn insert_text(&mut self, insertion: &str) {
         let chars: Vec<char> = self.text.chars().collect();
         let cursor = self.cursor.min(chars.len());
@@ -908,6 +1047,13 @@ impl TuiApp {
             return;
         }
 
+        // Only a goal that actually reaches run_goal enters history: UI-only
+        // command and skill submissions returned above, and blank prompts were
+        // rejected at the top, so each accepted prompt is recorded exactly
+        // once. (Recorded before `goal` moves `submitted`.)
+        if !submitted.is_empty() {
+            self.prompt_history.record(&submitted);
+        }
         let goal = if submitted.is_empty() {
             "Describe the attached image(s) in the context of this workspace.".to_string()
         } else {
@@ -991,6 +1137,8 @@ impl TuiApp {
                         self.selected_suggestion_index =
                             self.selected_suggestion_index.saturating_sub(1);
                     }
+                } else {
+                    self.recall_older_prompt();
                 }
             }
             Key::Down => {
@@ -1002,6 +1150,8 @@ impl TuiApp {
                         self.selected_suggestion_index =
                             (self.selected_suggestion_index + 1).min(menu_length - 1);
                     }
+                } else {
+                    self.recall_newer_prompt();
                 }
             }
             Key::Left => {
@@ -1212,6 +1362,9 @@ impl TuiApp {
 
     fn switch_session(&mut self, record: SessionRecord) {
         self.flush_pending_cells();
+        // History stays in memory across sessions, but browsing state and the
+        // saved draft must not leak into the newly loaded session.
+        self.prompt_history.reset();
         self.paths = session_paths_for(&self.bootstrap.project, &record);
         self.session = record;
         // New session: invalidate any in-flight title generation for the old
@@ -2500,6 +2653,128 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
 }
 
 #[cfg(test)]
+mod prompt_history_tests {
+    use super::PromptHistory;
+
+    fn history(entries: &[&str]) -> PromptHistory {
+        let mut history = PromptHistory::new(8);
+        for entry in entries {
+            history.record(entry);
+        }
+        history
+    }
+
+    #[test]
+    fn empty_history_never_recalls_and_never_saves_a_draft() {
+        let mut history = PromptHistory::new(8);
+        assert_eq!(history.older("current draft"), None);
+        assert_eq!(history.newer(), None);
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn up_starts_at_newest_and_repeated_up_clamps_at_oldest() {
+        let mut history = history(&["first", "second", "third"]);
+        assert_eq!(history.older("").as_deref(), Some("third"));
+        assert_eq!(history.older("").as_deref(), Some("second"));
+        assert_eq!(history.older("").as_deref(), Some("first"));
+        // Clamped: still the oldest entry, never wrapping or panicking.
+        assert_eq!(history.older("").as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn down_moves_newer_then_restores_the_exact_draft() {
+        let mut history = history(&["one", "two"]);
+        assert_eq!(history.older("draft text").as_deref(), Some("two"));
+        assert_eq!(history.older("").as_deref(), Some("one"));
+        assert_eq!(history.newer().as_deref(), Some("two"));
+        // Stepping past the newest restores the draft saved at navigation
+        // start, byte for byte.
+        assert_eq!(history.newer().as_deref(), Some("draft text"));
+        // Down outside navigation is a no-op.
+        assert_eq!(history.newer(), None);
+    }
+
+    #[test]
+    fn multiline_entries_and_drafts_are_kept_verbatim() {
+        let mut history = PromptHistory::new(8);
+        history.record("line one\nline two\n\nline four");
+        assert_eq!(
+            history.older("a\nb\nc").as_deref(),
+            Some("line one\nline two\n\nline four")
+        );
+        assert_eq!(history.newer().as_deref(), Some("a\nb\nc"));
+    }
+
+    #[test]
+    fn blank_and_consecutive_duplicate_prompts_are_not_recorded() {
+        let mut history = PromptHistory::new(8);
+        history.record("   ");
+        history.record("\n\t");
+        assert_eq!(history.older(""), None);
+        assert_eq!(history.len(), 0);
+
+        history.record("same");
+        history.record("same");
+        assert_eq!(history.len(), 1);
+
+        // A non-consecutive duplicate is kept.
+        history.record("other");
+        history.record("same");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.older("").as_deref(), Some("same"));
+        assert_eq!(history.older("").as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn history_is_bounded_to_the_capacity_oldest_dropped_first() {
+        let mut history = PromptHistory::new(3);
+        for n in 0..5 {
+            history.record(&format!("p{n}"));
+        }
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.older("").as_deref(), Some("p4"));
+        assert_eq!(history.older("").as_deref(), Some("p3"));
+        assert_eq!(history.older("").as_deref(), Some("p2"));
+    }
+
+    #[test]
+    fn editing_a_recalled_prompt_never_mutates_the_stored_entry() {
+        let mut history = history(&["original"]);
+        let recalled = history.older("").expect("recall");
+        let mut edited = recalled;
+        edited.push_str(" plus an edit");
+        // The stored entry is untouched by the caller's edit...
+        history.reset();
+        assert_eq!(history.older("").as_deref(), Some("original"));
+        // ...and walking navigation again still returns the stored text.
+        let again = history.older("").expect("recall again");
+        assert_eq!(again, "original");
+    }
+
+    #[test]
+    fn recording_a_new_prompt_resets_navigation_and_draft() {
+        let mut history = history(&["one", "two"]);
+        assert_eq!(history.older("draft").as_deref(), Some("two"));
+        history.record("three");
+        // Navigation ended: Down is a no-op and the old draft is gone.
+        assert_eq!(history.newer(), None);
+        assert_eq!(history.older("fresh").as_deref(), Some("three"));
+    }
+
+    #[test]
+    fn reset_discards_navigation_and_the_saved_draft() {
+        let mut history = history(&["one"]);
+        assert!(history.older("draft").is_some());
+        history.reset();
+        assert_eq!(history.newer(), None);
+        // History itself survives the reset; only navigation state clears.
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.older("").as_deref(), Some("one"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3622,5 +3897,267 @@ mod skill_activation_tests {
                 .all(|entry| !matches!(entry, TranscriptEntry::Skill(_))),
             "no skill activation may be recorded"
         );
+    }
+}
+
+/// Focused tests for prompt-recall wiring: Up/Down order, exact draft
+/// restoration, edited resend through the normal submit path, multiline
+/// first/last-line boundaries, menu precedence, what submit records, and
+/// session switches clearing browsing state.
+#[cfg(test)]
+mod prompt_history_wiring_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    struct HistoryFixture {
+        app: TuiApp,
+        _cwd: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _project: tempfile::TempDir,
+        _rx: mpsc::Receiver<Msg>,
+        _mention_rx: mpsc::Receiver<(u64, String)>,
+    }
+
+    fn make_history_app(skills: &[&str]) -> HistoryFixture {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        for name in skills {
+            let dir = cwd.path().join(".drip").join("skills").join(name);
+            std::fs::create_dir_all(&dir).expect("create skill dir");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: test skill {name}\n---\n\nBody for {name}.\n"
+                ),
+            )
+            .expect("write SKILL.md");
+        }
+        let home_root = home.path().to_string_lossy().into_owned();
+        let cwd_str = cwd.path().to_string_lossy().into_owned();
+        let project_str = project.path().to_string_lossy().into_owned();
+        let drip_home = crate::core::home::open_drip_home(&home_root);
+        let drip_project =
+            crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
+                .expect("resolve drip project");
+        let session = crate::core::sessions::SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cwd: cwd_str.clone(),
+            goal_count: 0,
+            id: "sess-history-test".to_string(),
+            last_goal: None,
+            project_slug: "history-test".to_string(),
+            status: "active".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let bootstrap = TuiBootstrap {
+            allow_net: false,
+            config: crate::core::config::create_default_cli_config(),
+            cwd: cwd_str,
+            home: drip_home,
+            initial_goal: None,
+            max_iterations: None,
+            no_repo_memory: true,
+            project: drip_project,
+            roles_flag: None,
+            session,
+            status_line: None,
+        };
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
+        let app = TuiApp::new(bootstrap, tx, mention_tx);
+        HistoryFixture {
+            app,
+            _cwd: cwd,
+            _home: home,
+            _project: project,
+            _rx: rx,
+            _mention_rx: mention_rx,
+        }
+    }
+
+    fn type_into(app: &mut TuiApp, text: &str) {
+        app.apply_edit(text.to_string(), text.chars().count());
+    }
+
+    #[test]
+    fn up_recalls_newest_first_then_older_and_clamps() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "first goal");
+        fixture.app.submit();
+        type_into(&mut fixture.app, "second goal");
+        fixture.app.submit();
+        assert_eq!(fixture.app.prompt_history.len(), 2);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "second goal");
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "first goal");
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "first goal", "clamps at oldest");
+    }
+
+    #[test]
+    fn down_restores_exact_draft_and_noops_outside_browsing() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        type_into(&mut fixture.app, "unsent draft");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "no-op outside browsing");
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "recorded goal");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "exact draft restored");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "browsing ended");
+    }
+
+    #[test]
+    fn recalled_prompt_edits_and_resends_through_enter_path() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "original wording");
+        fixture.app.submit();
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "original wording");
+        type_into(&mut fixture.app, "edited wording");
+        fixture.app.submit();
+        assert_eq!(fixture.app.prompt_history.len(), 2);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "edited wording");
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "original wording", "stored entry intact");
+    }
+
+    #[test]
+    fn repeated_up_walks_older_through_multiline_entries() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "newest single line");
+        fixture.app.submit();
+        let older_multiline = "older prompt\nwith a second line";
+        type_into(&mut fixture.app, older_multiline);
+        fixture.app.submit();
+        type_into(&mut fixture.app, "draft being typed");
+
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, older_multiline, "first Up recalls newest");
+        // Recall leaves the cursor at the end of the multiline entry, but the
+        // walk continues: browsing bypasses the first-line entry gate.
+        fixture.app.on_key(Key::Up);
+        assert_eq!(
+            fixture.app.text, "newest single line",
+            "second Up walks past a multiline entry"
+        );
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "newest single line", "clamped at oldest");
+
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, older_multiline);
+        // Off the last line mid-browsing, Down still walks newer.
+        for _ in 0..25 {
+            fixture.app.on_key(Key::Left);
+        }
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
+            fixture.app.text, "draft being typed",
+            "exact draft restored"
+        );
+    }
+
+    #[test]
+    fn arrows_respect_multiline_boundaries() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "old prompt");
+        fixture.app.submit();
+        let multiline = "line one\nline two";
+        type_into(&mut fixture.app, multiline);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, multiline, "cursor on line two: no recall");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, multiline, "no browsing was started");
+        fixture.app.apply_edit(multiline.to_string(), 0);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "old prompt", "first line: recall");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, multiline, "exact draft restored");
+        type_into(&mut fixture.app, "alpha\nbeta");
+        fixture.app.submit();
+        fixture.app.apply_edit(multiline.to_string(), 0);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "alpha\nbeta");
+        // While browsing, the last-line gate no longer applies: a mid-text
+        // Down still walks newer and restores the exact draft.
+        fixture.app.apply_edit("alpha\nbeta".to_string(), 2);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
+            fixture.app.text, multiline,
+            "browsing Down mid-text: draft restored"
+        );
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, multiline, "browsing ended: Down no-op");
+    }
+
+    #[test]
+    fn menu_arrows_take_precedence_over_history() {
+        let mut fixture = make_history_app(&["navis"]);
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        type_into(&mut fixture.app, "/na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 1);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "/na", "menu open: no recall");
+        assert_eq!(fixture.app.selected_skill_index, 0);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "/na", "menu open: no recall");
+        assert_eq!(fixture.app.selected_skill_index, 0);
+    }
+
+    #[test]
+    fn submit_records_goals_once_but_not_blank_or_commands() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "real goal");
+        fixture.app.submit();
+        assert_eq!(fixture.app.prompt_history.len(), 1);
+        type_into(&mut fixture.app, "/help");
+        fixture.app.submit();
+        assert_eq!(
+            fixture.app.prompt_history.len(),
+            1,
+            "slash command not recorded"
+        );
+        type_into(&mut fixture.app, "   ");
+        fixture.app.submit();
+        assert_eq!(fixture.app.prompt_history.len(), 1, "blank not recorded");
+        type_into(&mut fixture.app, "real goal");
+        fixture.app.submit();
+        assert_eq!(fixture.app.prompt_history.len(), 1, "consecutive duplicate");
+    }
+
+    #[test]
+    fn switch_session_drops_browsing_and_draft_but_keeps_entries() {
+        let mut fixture = make_history_app(&[]);
+        type_into(&mut fixture.app, "session one goal");
+        fixture.app.submit();
+        type_into(&mut fixture.app, "pending draft");
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "session one goal");
+        let record = crate::core::sessions::SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cwd: fixture.app.bootstrap.cwd.clone(),
+            goal_count: 0,
+            id: "sess-history-two".to_string(),
+            last_goal: None,
+            project_slug: "history-test".to_string(),
+            status: "active".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        fixture.app.switch_session(record);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
+            fixture.app.text, "session one goal",
+            "no draft restored from the previous session"
+        );
+        assert_eq!(fixture.app.prompt_history.len(), 1, "entries kept");
     }
 }

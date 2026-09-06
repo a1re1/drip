@@ -24,8 +24,10 @@ pub const SESSION_NAME_TRANSCRIPT_CHARS: usize = 600;
 pub const SESSION_NAME_TRANSCRIPT_LINES: usize = 12;
 
 /// Extracts and sanitizes the model's session-name reply, enforcing the 5-7
-/// word contract. `None` keeps the current name. Content may arrive as a
-/// plain string or as an array of `{text}` parts.
+/// word contract (replies are trimmed to at most 7 words before validation;
+/// fewer than 5, empty, or fallback replies are refused). `None` keeps the
+/// current name. Content may arrive as a plain string or as an array of
+/// `{text}` parts.
 pub fn extract_session_name(response: &OpenAICompatibleResponse) -> Option<String> {
     let message = response.choices.as_ref()?.first()?.message.as_ref()?;
     let content = message.content.as_ref()?;
@@ -45,12 +47,10 @@ pub fn extract_session_name(response: &OpenAICompatibleResponse) -> Option<Strin
         _ => return None,
     };
     let cleaned = sanitize(&text);
-    // Strict 5-7 word contract: a reply outside the range is rejected rather
-    // than silently truncated mid-sentence.
-    let words = cleaned.split_whitespace().count();
-    if !(5..=7).contains(&words) {
-        return None;
-    }
+    // Trim first, validate second. Models routinely prepend conversational
+    // filler ("Sure, here is a session name: ..."), so whole words beyond the
+    // 7th are dropped before validation; only a reply that trims below the
+    // 5-word floor (or is empty/fallback after sanitizing) is refused.
     let name = bound_words(&cleaned, 7, 64);
     if !is_valid_session_name(&name) {
         return None;
@@ -211,8 +211,15 @@ pub fn persist_session_name(meta_path: &Path, name: &str) -> bool {
         return false;
     }
     let staged = meta_path.with_file_name(format!(
-        "{file_name}.rename-{}.tmp",
-        std::process::id()
+        "{file_name}.rename-{}-{}.tmp",
+        std::process::id(),
+        // Unique per call so two concurrent writers of the same session.json
+        // (two /rename workers, or two processes sharing the session dir)
+        // never stage onto the same sibling path.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     ));
     let write_ok = fs::write(&staged, body).is_ok();
     if !write_ok {

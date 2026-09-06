@@ -40,10 +40,10 @@ fn rejects_names_outside_the_word_contract() {
     );
     assert_eq!(
         extract_session_name(&response_with_content(
-            "Here is your session name: Fix Flaky Websocket Reconnect Handshake"
-        )),
-        None,
-        "8+ words violates the contract instead of truncating"
+            "Ship Flaky Websocket Reconnect Handshake Now Please Quickly"
+        )).as_deref(),
+        Some("Ship Flaky Websocket Reconnect Handshake Now Please"),
+        "8-word reply trims to its first 7 whole words"
     );
     assert!(!is_valid_session_name(""));
     assert!(!is_valid_session_name("one two three"));

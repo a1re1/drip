@@ -495,4 +495,34 @@ mod tests {
         assert!(rows[2].contains("▸ /nab — three"), "{rows:?}");
         assert!(rows[3].starts_with("╭"), "{rows:?}");
     }
+
+    #[test]
+    fn skill_menu_yields_to_the_builtin_slash_menu() {
+        let skills = vec![("navis".to_string(), "one".to_string())];
+        let first_builtin = crate::cli::commands::SLASH_COMMANDS[0].name;
+        let builtins: Vec<&crate::cli::commands::SlashCommandSpec> =
+            crate::cli::commands::SLASH_COMMANDS.iter().collect();
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 1,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &skills,
+            slash_suggestions: &builtins,
+            text: "/",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        // Both suggestion sources are non-empty: the builtin slash menu wins
+        // and no skill rows may render.
+        assert!(
+            rows.iter().all(|row| !row.contains("/navis — one")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains(first_builtin)),
+            "{rows:?}"
+        );
+    }
 }

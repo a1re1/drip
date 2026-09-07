@@ -711,6 +711,9 @@ impl ReviewContext<'_> {
         let usage = Arc::new(Mutex::new(ReviewUsage::default()));
         let model_texts = Arc::new(Mutex::new(Vec::new()));
         let outcome = (self.run_goal)(SessionGoalArgs {
+            // Review children are read-only fan-out workers; never interactive.
+            ask_user_enabled: false,
+            ask_user_timeout_seconds: None,
             cwd: args.cwd.clone(),
             goal,
             goal_context: None,

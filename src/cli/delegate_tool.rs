@@ -117,6 +117,10 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
 
             let outcome = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(run_session_goal(SessionGoalArgs {
+                    // A delegated child blocking on operator answers would stall
+                    // the parent's tool call — children never get ask_user.
+                    ask_user_enabled: false,
+                    ask_user_timeout_seconds: None,
                     cwd: wiring.cwd.clone(),
                     goal: goal.clone(),
                     goal_context: Some(format!(

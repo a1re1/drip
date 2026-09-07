@@ -52,6 +52,10 @@ pub struct ParsedCliArgs {
     pub send: bool,
     /// Optional session id or prefix for --send (defaults to the latest session).
     pub send_id: Option<String>,
+    /// Answer a pending ask_user clarification survey in a session.
+    pub answer: bool,
+    /// Optional session id or prefix for --answer (defaults to the latest session).
+    pub answer_id: Option<String>,
     /// Stream a session's transcript, following new entries until interrupted.
     pub follow: bool,
     /// Optional session id or prefix for --follow (defaults to the latest session).
@@ -68,6 +72,10 @@ pub struct ParsedCliArgs {
     pub allow_destructive: bool,
     /// Opt this run into network access (enables the FETCH tool).
     pub allow_net: bool,
+    /// Opt this run into operator clarification surveys (enables the ask_user tool).
+    pub ask: bool,
+    /// Seconds a blocked ask_user survey waits for answers before ending the run (default 900).
+    pub ask_timeout_secs: Option<i64>,
     /// oasis corpus roots for the REFERENCE tool (repeatable --reference-root).
     pub reference_roots: Vec<String>,
     /// Queue the goal behind a live run instead of refusing (LiveRunError).
@@ -174,6 +182,8 @@ impl Default for ParsedCliArgs {
             json: false,
             send: false,
             send_id: None,
+            answer: false,
+            answer_id: None,
             follow: false,
             follow_id: None,
             help: false,
@@ -182,6 +192,8 @@ impl Default for ParsedCliArgs {
             roles_preset_or_path: None,
             allow_destructive: false,
             allow_net: false,
+            ask: false,
+            ask_timeout_secs: None,
             reference_roots: Vec::new(),
             enqueue: false,
             plan: false,
@@ -455,6 +467,14 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--answer" => {
+                parsed.answer = true;
+
+                if let Some(reference) = take_session_ref(argv, index) {
+                    parsed.answer_id = Some(reference);
+                    index += 1;
+                }
+            }
             "--follow" => {
                 parsed.follow = true;
 
@@ -542,6 +562,22 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--allow-net" => {
                 parsed.allow_net = true;
+            }
+            "--ask" => {
+                parsed.ask = true;
+            }
+            "--ask-timeout" => {
+                if let Some(raw) = take_required_value(argv, index, "--ask-timeout", &mut parsed.errors) {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.ask_timeout_secs = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--ask-timeout needs a positive integer (seconds), got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
             }
             "--reference-root" => {
                 if let Some(value) = take_required_value(argv, index, "--reference-root", &mut parsed.errors) {
@@ -782,6 +818,45 @@ mod tests {
         assert!(!parse(&["-x"]).errors.is_empty());
         assert!(parse(&["do the work"]).errors.is_empty());
         assert_eq!(parse(&["do the work"]).goal.as_deref(), Some("do the work"));
+    }
+
+    // --answer mirrors --send: optional session ref, then the payload stays in
+    // the goal slot for the entry writer to consume.
+    #[test]
+    fn parses_answer_flag_with_optional_session_ref() {
+        let bare = parse(&["--answer", "{\"answers\":[{\"index\":0,\"choice\":\"A\",\"other\":null}]}"]);
+        assert!(bare.answer);
+        assert!(bare.answer_id.is_none());
+        assert_eq!(
+            bare.goal.as_deref(),
+            Some("{\"answers\":[{\"index\":0,\"choice\":\"A\",\"other\":null}]}")
+        );
+
+        let with_id = parse(&["--answer", "abc1", "plain text answer"]);
+        assert!(with_id.answer);
+        assert_eq!(with_id.answer_id.as_deref(), Some("abc1"));
+        assert_eq!(with_id.goal.as_deref(), Some("plain text answer"));
+
+        let none = parse(&["goal"]);
+        assert!(!none.answer);
+        assert!(none.answer_id.is_none());
+    }
+
+    // --ask is a plain opt-in; --ask-timeout must be a positive integer so a
+    // typo cannot silently disable (or infinitely extend) the survey wait.
+    #[test]
+    fn parses_ask_flags_and_rejects_bad_timeouts() {
+        let none = parse(&["goal"]);
+        assert!(!none.ask);
+        assert!(none.ask_timeout_secs.is_none());
+
+        let enabled = parse(&["--ask", "--ask-timeout", "120", "goal"]);
+        assert!(enabled.ask);
+        assert_eq!(enabled.ask_timeout_secs, Some(120));
+
+        assert!(!parse(&["--ask-timeout", "0", "goal"]).errors.is_empty());
+        assert!(!parse(&["--ask-timeout", "abc", "goal"]).errors.is_empty());
+        assert!(!parse(&["--ask-timeout"]).errors.is_empty());
     }
 
     // --reference-root is repeatable and ordered: oasis searches the roots in

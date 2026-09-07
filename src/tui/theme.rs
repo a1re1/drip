@@ -15,6 +15,7 @@ pub fn event_color(kind: HarnessEventType) -> &'static str {
         HarnessEventType::LoopStart => "blueBright",
         HarnessEventType::ModelText => "white",
         HarnessEventType::OperatorMessage => "cyan",
+        HarnessEventType::Question => "purple",
         HarnessEventType::RateLimited => "red",
         HarnessEventType::RunComplete => "green",
         HarnessEventType::RunSummary => "green",
@@ -37,6 +38,7 @@ pub fn event_label(kind: HarnessEventType) -> &'static str {
         HarnessEventType::LoopStart => "loop",
         HarnessEventType::ModelText => "text",
         HarnessEventType::OperatorMessage => "steer",
+        HarnessEventType::Question => "ask",
         HarnessEventType::RateLimited => "wait",
         HarnessEventType::RunComplete => "done",
         HarnessEventType::RunSummary => "summary",
@@ -60,7 +62,7 @@ pub fn paint(color: &str) -> fn(&str) -> String {
         "red" => c::red,
         "green" => c::green,
         "white" => c::white,
-        "magenta" => c::magenta,
+        "magenta" | "purple" => c::magenta,
         _ => c::dim,
     }
 }

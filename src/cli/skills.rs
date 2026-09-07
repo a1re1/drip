@@ -163,6 +163,12 @@ pub struct SessionRunConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     pub skills: Vec<SkillActivationEntry>,
+    /// `--ask` opt-in pinned on the session so `--resume` keeps the ask_user tool.
+    #[serde(default, rename = "askEnabled", skip_serializing_if = "Option::is_none")]
+    pub ask_enabled: Option<bool>,
+    /// `--ask-timeout <seconds>` pinned alongside it.
+    #[serde(default, rename = "askTimeoutSeconds", skip_serializing_if = "Option::is_none")]
+    pub ask_timeout_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -892,8 +898,16 @@ pub fn load_skill_activation(path: &Path) -> Option<SessionRunConfig> {
     }
 
     let profile = parsed.get("profile").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // Absent in every pre-ask activation.json — old files keep deserializing.
+    let ask_enabled = parsed.get("askEnabled").and_then(|v| v.as_bool());
+    let ask_timeout_seconds = parsed.get("askTimeoutSeconds").and_then(|v| v.as_i64());
 
-    Some(SessionRunConfig { profile, skills })
+    Some(SessionRunConfig {
+        profile,
+        skills,
+        ask_enabled,
+        ask_timeout_seconds,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1289,8 @@ mod tests {
             no_skills: true,
             resume_like: true,
             stored: Some(&SessionRunConfig {
+                ask_enabled: None,
+                ask_timeout_seconds: None,
                 profile: Some("claude-sonnet-46".to_string()),
                 skills: vec![SkillActivationEntry {
                     args: HashMap::new(),
@@ -1292,6 +1308,8 @@ mod tests {
     fn resolve_effective_activation_resume_reactivates() {
         // "resume-like invocations re-activate stored skills"
         let stored = SessionRunConfig {
+            ask_enabled: None,
+            ask_timeout_seconds: None,
             profile: Some("claude-sonnet-46".to_string()),
             skills: vec![SkillActivationEntry {
                 args: HashMap::new(),
@@ -1316,6 +1334,8 @@ mod tests {
     fn resolve_effective_activation_fresh_session_no_inherit() {
         // "Fresh sessions never inherit another run's activation file"
         let stored = SessionRunConfig {
+            ask_enabled: None,
+            ask_timeout_seconds: None,
             profile: Some("claude-sonnet-46".to_string()),
             skills: vec![SkillActivationEntry {
                 args: HashMap::new(),
@@ -1337,6 +1357,8 @@ mod tests {
     fn resolve_effective_activation_explicit_replaces_stored() {
         // "Explicit flags replace the stored set"
         let stored = SessionRunConfig {
+            ask_enabled: None,
+            ask_timeout_seconds: None,
             profile: Some("claude-sonnet-46".to_string()),
             skills: vec![SkillActivationEntry {
                 args: HashMap::new(),
@@ -1362,6 +1384,8 @@ mod tests {
     fn resolve_effective_activation_explicit_profile_suppresses_stored() {
         // "An explicit --profile suppresses the stored one"
         let stored = SessionRunConfig {
+            ask_enabled: None,
+            ask_timeout_seconds: None,
             profile: Some("claude-sonnet-46".to_string()),
             skills: vec![],
         };
@@ -1941,6 +1965,8 @@ mod tests {
         let path = tmp.path().join("skills.json");
 
         let config = SessionRunConfig {
+            ask_enabled: None,
+            ask_timeout_seconds: None,
             profile: Some("claude-sonnet-46".to_string()),
             skills: vec![
                 SkillActivationEntry {
@@ -1968,6 +1994,35 @@ mod tests {
             Some("jest")
         );
         assert_eq!(loaded.skills[1].name, "tdd");
+    }
+
+    // The --ask pin must survive the camelCase JSON roundtrip, and files
+    // written before the fields existed must keep loading (as None).
+    #[test]
+    fn skill_activation_ask_fields_roundtrip_and_tolerate_old_files() {
+        let tmp = make_temp_dir();
+        let path = tmp.path().join("skills.json");
+
+        let config = SessionRunConfig {
+            ask_enabled: Some(true),
+            ask_timeout_seconds: Some(120),
+            profile: None,
+            skills: vec![],
+        };
+        save_skill_activation(&path, &config).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"askEnabled\": true"), "{raw}");
+        assert!(raw.contains("\"askTimeoutSeconds\": 120"), "{raw}");
+        let loaded = load_skill_activation(&path).unwrap();
+        assert_eq!(loaded.ask_enabled, Some(true));
+        assert_eq!(loaded.ask_timeout_seconds, Some(120));
+
+        // Pre-ask activation.json: no ask keys at all.
+        std::fs::write(&path, "{\"profile\": \"p1\", \"skills\": []}").unwrap();
+        let old = load_skill_activation(&path).unwrap();
+        assert_eq!(old.profile.as_deref(), Some("p1"));
+        assert_eq!(old.ask_enabled, None);
+        assert_eq!(old.ask_timeout_seconds, None);
     }
 
     #[test]

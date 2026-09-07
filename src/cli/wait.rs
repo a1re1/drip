@@ -150,7 +150,7 @@ mod tests {
     fn live_lease_with_timeout_returns_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let lease_path = dir.path().join("session.lease");
-        crate::core::lease::write_lease(&lease_path, &|| chrono::Utc::now());
+        let _ = crate::core::lease::write_lease(&lease_path, &|| chrono::Utc::now());
         let result = wait_for_run_end(WaitForRunEndArgs {
             lease_path: &lease_path,
             result_path: &dir.path().join("missing-result.json"),

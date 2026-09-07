@@ -114,6 +114,10 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
     let suggested_max_iterations = record.max_iterations;
     let continue_command = if completed {
         None
+    } else if let Some(command) = record.continue_command.clone() {
+        // The run itself proposed a continuation (e.g. awaiting-input's
+        // "drip --resume <id>") — the record is the source of truth.
+        Some(command)
     } else {
         Some(format!(
             "drip --resume {} --prompt {}{} --json",
@@ -173,6 +177,7 @@ mod tests {
 
     fn record(reason: &str, max_iterations: Option<i64>) -> RunRecord {
         RunRecord {
+            continue_command: None,
             ended_at: "2026-01-01T00:00:00.000Z".to_string(),
             error_message: None,
             goal: "do it".to_string(),
@@ -243,6 +248,21 @@ mod tests {
         assert_eq!(uncapped.continue_command.as_deref(), Some("drip --resume abcdefgh --prompt 'do it' --json"));
 
         assert_eq!(payload("error", None).exit_code, 3);
+
+        // awaiting-input (ask_user timeout) exits 2, and the run's own
+        // persisted continue command wins over the recomputed default.
+        let mut awaiting_record = record("awaiting-input", None);
+        awaiting_record.continue_command = Some("drip --resume abcdefgh".to_string());
+        let awaiting = headless_result_payload(HeadlessResultArgs {
+            record: &awaiting_record,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        });
+        assert_eq!(awaiting.exit_code, 2);
+        assert_eq!(awaiting.continue_command.as_deref(), Some("drip --resume abcdefgh"));
     }
 
     #[test]

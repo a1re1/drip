@@ -199,6 +199,29 @@ entirely — the model never sees a tool that cannot work. Pair it with
 quality and its effect on answers are measured by the benchmark in
 [`evals/reference/`](evals/reference/README.md).
 
+### Clarification questions (`--ask`)
+
+`--ask` opts a run into the `ask_user` harness tool: when the goal is ambiguous or an
+approach tradeoff needs the operator's call, the model asks a staged survey of
+multiple-choice questions (each with suggested options plus a free-text "other"),
+then revises its plan around the answers before implementing. Off by default — most
+goals should one-shot; enable it when accuracy matters more than autonomy. The opt-in
+is pinned on the session, so `--resume` keeps it.
+
+Headless, the survey arrives as a `question` event and the run blocks until answers
+land (or `--ask-timeout`, default 900s, ends it with reason `awaiting-input` — answer
+later and resume):
+
+```sh
+drip --json --ask "migrate the config loader"        # emits a question event, blocks
+drip --answer '{"answers":[{"index":0,"choice":"Keep JSON"},{"index":1,"other":"only the CLI half"}]}'
+drip --answer "just do whatever is least invasive"   # plain text = free-text answer (single-question surveys only)
+```
+
+In the TUI (`--tui --ask`), the survey opens as a picker overlay — arrow keys choose
+an option per question, `Other…` drops into free-text entry — and the answers feed the
+same channel.
+
 ---
 
 ## Built-in role presets

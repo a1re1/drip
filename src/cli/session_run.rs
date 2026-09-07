@@ -66,6 +66,10 @@ impl std::fmt::Display for SessionGoalError {
 /// Inputs to a session run: the session directory, the goal, and the model
 /// route override.
 pub struct SessionGoalArgs<'a> {
+    /// Opt-in `--ask` clarification surveys (the ask_user tool).
+    pub ask_user_enabled: bool,
+    /// `--ask-timeout <seconds>` override for the survey answer wait.
+    pub ask_user_timeout_seconds: Option<i64>,
     pub cwd: String,
     pub goal: String,
     pub goal_context: Option<String>,
@@ -244,6 +248,8 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
     });
 
     let result = run_cli_goal(CliGoalRunArgs {
+        ask_user_enabled: args.ask_user_enabled,
+        ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: args.cwd.clone(),
         goal: args.goal.clone(),
         goal_context: if goal_context.is_empty() { None } else { Some(goal_context) },

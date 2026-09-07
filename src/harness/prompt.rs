@@ -40,6 +40,19 @@ pub const STALL_WARNING_PREFIX: &str = "stall_warning:";
 pub const LAST_VERIFICATION_PREFIX: &str = "last_verification";
 pub const VERIFICATION_FAILED_DIRECTIVE: &str = "do not call finish_task status completed";
 pub const VERIFICATION_STUCK_PREFIX: &str = "verification_stuck:";
+/// Opt-in clarification-survey guidance, appended to the system prompt ONLY
+/// when ask_user is enabled for the run (`--ask`). Absent entirely when
+/// disabled, so the disabled-path system prompt stays byte-identical.
+pub const ASK_USER_GUIDANCE_FRAGMENT: &str = concat!(
+    "# Clarification questions (ask_user)",
+    " ask_user is enabled for this run. When the goal is ambiguous or an approach tradeoff needs the operator's decision, ask early — preferably during planning, before implementing.",
+    " Batch ALL of your questions into a single ask_user call as one survey, and put your best-guess option FIRST in each option list.",
+    " Never ask what the repo itself answers: read files and run tools first.",
+    " After the operator's answers arrive, revise the plan with plan_tasks/revise_task to reflect them before implementing."
+);
+/// Exact directive prefixed to the injected Q->A summary when the operator
+/// answers a pending ask_user survey (live or on resume).
+pub const ASK_USER_ANSWER_DIRECTIVE: &str = "The operator answered your clarification questions. Revise the plan now with plan_tasks/revise_task to reflect these answers before continuing.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HarnessRunBudget {
@@ -472,6 +485,7 @@ pub fn build_cycle_continuation_message(state: &HarnessState, args: &CycleContin
 
 fn run_reason_description(reason: HarnessRunReason) -> &'static str {
     match reason {
+        HarnessRunReason::AwaitingInput => "the run is paused while the operator answers the pending clarification questions — answer them (drip --answer) and resume the session",
         HarnessRunReason::Aborted => "the run was stopped before the goal completed",
         HarnessRunReason::Completed => "every task completed",
         HarnessRunReason::Error => "the run failed on an infrastructure or endpoint error — the state is persisted and the goal can be resumed",
@@ -484,6 +498,7 @@ fn run_reason_description(reason: HarnessRunReason) -> &'static str {
 
 fn reason_wire_tag(reason: HarnessRunReason) -> &'static str {
     match reason {
+        HarnessRunReason::AwaitingInput => "awaiting-input",
         HarnessRunReason::Aborted => "aborted",
         HarnessRunReason::Completed => "completed",
         HarnessRunReason::Error => "error",

@@ -20,6 +20,11 @@ use crate::core::types::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
+	/// How to continue an unfinished run (e.g. awaiting-input) — the same
+	/// command the headless result line carries, so `--result`/`--wait`
+	/// drivers can resume without having seen that stdout line.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub continue_command: Option<String>,
 	pub ended_at: String,
 	/// Present when reason is "error": what killed the run.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +67,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 	let tasks = &args.result.state.tasks;
 
 	RunRecord {
+		continue_command: args.result.continue_command.clone(),
 		ended_at: args.ended_at.to_string(),
 		// An empty error message is dropped, same as a missing one.
 		error_message: args
@@ -230,6 +236,7 @@ mod tests {
 			max_iterations: Some(10),
 			pending_operator_messages: 1,
 			result: &HarnessRunResult {
+				continue_command: None,
 				error_message: None,
 				iterations: 4,
 				r#loops: 2,

@@ -550,6 +550,7 @@ mod tests {
 			max_iterations: None,
 			pending_operator_messages: 0,
 			result: &HarnessRunResult {
+				continue_command: None,
 				error_message: None,
 				iterations: 5,
 				r#loops: 2,

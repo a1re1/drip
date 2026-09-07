@@ -577,8 +577,9 @@ dripw
 
 Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, plus the
 transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
-`j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `w`
-toggles Recent between this worktree and all worktrees of the repo, `q` quits.
+`j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
+
+dripw shows sessions started in the current directory or any directory beneath it.
 
 ## Custom status line
 

@@ -243,7 +243,7 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
 }
 
 fn print_session_list(cwd: &str, json: bool, project: &DripProject) {
-    let records = list_all_sessions(project, Some(30), false);
+    let records = list_all_sessions(project, Some(30));
 
     if json {
         // Same curated shape as bare `drip --json`, so callers get paths without

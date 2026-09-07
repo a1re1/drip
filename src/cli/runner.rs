@@ -65,6 +65,11 @@ pub struct CliGoalRunArgs {
     pub skills: Vec<LoadedCliSkill>,
     pub state_path: PathBuf,
     pub summarize_run: Option<bool>,
+    /// Draft mode (--lite): terminal reason "draft" and no run summary.
+    pub lite: bool,
+    /// Operator review/verify opt-out (implied by lite): no reviewer chain,
+    /// no completion-anchor gate.
+    pub no_review: bool,
     pub tools: Vec<ChatToolDefinition>,
     /// Runtime services for async tools (the web server owns one; CLI defaults inside the harness).
     pub tool_services: Option<ChatToolRuntimeServices>,
@@ -396,6 +401,8 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         signal: args.signal.clone(),
         state_path: Some(args.state_path.clone()),
         summarize_run: args.summarize_run,
+        lite: args.lite,
+        no_review: args.no_review || args.lite,
         system_prompt: Some(compose_harness_system_prompt(Some(&persona_with_skills))),
         fallback_route: args.inference.fallback_route.as_ref().map(|route| route.to_model_route()),
         tool_route: args.inference.tool_route.as_ref().map(|route| route.to_model_route()),

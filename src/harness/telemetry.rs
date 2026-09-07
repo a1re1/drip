@@ -250,6 +250,25 @@ pub struct RunTelemetryMaintenanceArgs {
 	pub dynamic_tool_names: std::collections::HashSet<String>,
 }
 
+/// Goal for a --lite draft run's harden resume: the original goal, prefixed
+/// and truncated so the hardening pass keeps the operator's original intent.
+pub fn draft_harden_goal(goal: &str) -> String {
+    const MAX_GOAL_CHARS: usize = 200;
+    let truncated: String = goal.chars().take(MAX_GOAL_CHARS).collect();
+    format!("Harden the draft: {truncated}")
+}
+
+/// Resume command printed for a --lite draft run: full session id, the harden
+/// goal as --new-goal, and the reviewed/verify-before-done settings that
+/// restore the gates the draft skipped.
+pub fn draft_continue_command(session_id: &str, goal: &str) -> String {
+    format!(
+        "drip --resume {} --roles reviewed --skill verify-before-done --new-goal {}",
+        session_id,
+        crate::cli::headless_output::shell_quote(&draft_harden_goal(goal))
+    )
+}
+
 // fields telemetry touches (loop, promotedContext, telemetry).
 #[cfg(test)]
 fn create_harness_state(goal: &str) -> HarnessState {

@@ -2358,6 +2358,8 @@ impl TuiApp {
                 signal: Some(signal),
                 skills,
                 summarize_run: None,
+                lite: false,
+                no_review: false,
                 tools: builtin_tool_pack(tool_options.clone()),
                 tool_services: None,
             }));

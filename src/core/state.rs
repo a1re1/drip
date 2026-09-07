@@ -753,13 +753,41 @@ pub fn save_harness_state(state_path: &Path, state: &HarnessState) -> std::io::R
 
 // The single derivation for the result contract's verification and task-stat
 // views (debt audit C2: these were hand-built in four files in lockstep).
-/// One verdict vocabulary for every surface that prints a verification:
-/// "passed" / "FAILED" / the green-but-empty case that must not read as evidence.
-pub fn describe_verification_outcome(failed: bool, ran_no_tests: Option<bool>) -> &'static str {
+/// One-line rendering of structured evidence for prompts/results. Returns the
+/// explicit unverified label for legacy records without evidence, and a compact descriptor
+/// otherwise. Counts are reported assertions, not proof of correctness.
+pub fn describe_verification_evidence(evidence: Option<&crate::core::types::VerificationEvidence>) -> String {
+	use crate::core::types::VerificationEvidenceKind;
+	let Some(evidence) = evidence else {
+		return "; evidence: unavailable (legacy record; unverified)".into();
+	};
+	let kind_word = match evidence.kind {
+		VerificationEvidenceKind::Tests => "tests",
+		VerificationEvidenceKind::Custom => "custom-check",
+		VerificationEvidenceKind::Build => "build",
+		VerificationEvidenceKind::Typecheck => "typecheck",
+		VerificationEvidenceKind::Unverified => "unverified",
+	};
+	let counts = match evidence.kind {
+		VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => format!("{} (no assertions)", kind_word),
+		_ => format!("{}: {} executed, {} passed, {} failed", kind_word, evidence.executed, evidence.passed, evidence.failed),
+	};
+	let detail = evidence
+		.detail
+		.as_deref()
+		.map(|detail| format!(" — {}", detail))
+		.unwrap_or_default();
+	format!("; evidence: {}{}", counts, detail)
+}
+
+/// One verdict vocabulary for every reporting surface, including legacy data.
+pub fn describe_verification_outcome(failed: bool, ran_no_tests: Option<bool>, evidence: Option<&crate::core::types::VerificationEvidence>) -> &'static str {
 	if failed {
 		"FAILED"
 	} else if ran_no_tests == Some(true) {
-		"passed but executed 0 tests (not evidence)"
+		"UNVERIFIED (executed 0 tests)"
+	} else if !evidence.is_some_and(|evidence| evidence.verifies_work()) {
+		"UNVERIFIED"
 	} else {
 		"passed"
 	}
@@ -774,6 +802,7 @@ pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationS
 		failed: verification.failed,
 		mutations_after: state.mutations_since_verification.unwrap_or(0),
 		ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
+		evidence: verification.evidence.clone(),
 	})
 }
 
@@ -1067,6 +1096,7 @@ mod tests {
             failed: true,
             output_tail: "1 fail".to_string(),
             ran_no_tests: None,
+            evidence: None,
         });
         state.verifications = Some(vec![state.last_verification.clone().unwrap()]);
         state.verification_streak = Some(HarnessVerificationStreak {

@@ -179,6 +179,47 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 | CHECK | Run incremental TypeScript diagnostics (semantic + syntactic) |
 | REFERENCE | Hybrid (BM25 + dense) search over an oasis-indexed markdown corpus — only in the pack when a corpus root is configured |
 
+### Verification evidence
+
+An exit code of zero alone does not verify an artifact. VERIFY records executed
+test/assertion counts, compiler/build evidence, or an unverified outcome in
+`lastVerification.evidence`. Unknown scripts, empty/all-skipped suites and legacy
+records without evidence cannot satisfy completion after workspace edits.
+Failed mutating calls also invalidate earlier checks because they may have
+changed files before failing. Repeating `finish_task completed` does not waive missing, failed or stale checks;
+use `blocked` when the necessary evidence cannot be obtained.
+
+For a custom checker, emit exactly one line after executing its assertions:
+
+```text
+DRIP_VERIFY {"executed":3,"passed":3,"failed":0}
+```
+
+Counts must be nonnegative integers with `executed = passed + failed`; at least
+one check must execute. Malformed or multiple records fail verification. A
+nonzero process exit, timeout or recognized failing assertion overrides a
+success record. VERIFY enables shell `pipefail` so piping output through `tail`
+does not hide a checker's failing exit. With BASH, preserve pipeline exit status
+explicitly (for example, `set -o pipefail`). Both tools consume this protocol; launching
+a background process is not verification. Use a test framework such as unittest
+when possible, or collect the counters from actual checks rather than printing
+hardcoded counts. Check formatting and values against the task's requirements.
+
+Direct compiler commands (for example `cargo check`, `cargo build`, `tsc --noEmit`
+and `go build`) provide build/typecheck evidence without inventing test counts.
+Arbitrary package scripts do not become evidence just because they are named
+`build` or `check`: use recognized runner output or invoke the underlying compiler
+directly. CHECK records compiler evidence for its requested scope. Build evidence
+does not establish runtime behavior or numerical correctness.
+
+These are reported checks, not proof that the checker chose the correct formula,
+constants or specification. Numeric deliverables need a different validation
+route and an explicit account of shared assumptions. Repeating the same arithmetic
+or comparing to a hardcoded expected file establishes internal consistency only.
+Known defects affecting a reported value or goal requirement must be resolved or
+reported as blocked, even if discovered in the author's own closing notes.
+Ordinary statistical uncertainty or a justified limitation is not itself a defect.
+
 ### Pointing REFERENCE at a corpus
 
 REFERENCE searches a markdown knowledge base through the

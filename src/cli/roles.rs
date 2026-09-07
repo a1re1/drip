@@ -186,7 +186,7 @@ fn coder_role() -> RoleDefinition {
 	RoleDefinition {
 		model: Some(PRESET_FAST_PROFILE_ID.to_string()),
 		name: "coder".to_string(),
-		prompt: Some("You are the coder agent. Implement the task fully using all available tools, building on the researcher's findings. When you finish, your work will be independently reviewed by the reviewer role before it is accepted.".to_string()),
+		prompt: Some("You are the coder agent. Implement the task fully using all available tools, building on the researcher's findings. When you finish, your work will be independently reviewed by the reviewer role before it is accepted. Known defects or unresolved assumptions that undermine a reported value or goal requirement are blocking P1s even in your own caveats/deviations: resolve them or finish blocked. Ordinary statistical uncertainty and justified limitations are not automatically defects. Numeric deliverables require a different validation method/reference, meaningful bound or simulation; identify shared assumptions. Repeating the same arithmetic or checking hardcoded expected output establishes consistency only.".to_string()),
 		verified_by: Some("reviewer".to_string()),
 		// no tools field = full tool access
 		..RoleDefinition::default()
@@ -220,6 +220,12 @@ fn reviewer_role() -> RoleDefinition {
 				"  valid is a bug in the deliverable, not a safety feature — require the code to handle those",
 				"  inputs, not detect them and stop.",
 				"- Accept only when you have verified the work passes all relevant checks.",
+				"- Known defects or unresolved assumptions that undermine a reported value or goal requirement",
+				"  are blocking P1s, including the author's own caveats/deviations: resolve or finish blocked.",
+				"  Ordinary statistical uncertainty and justified limitations are not automatically defects.",
+				"- For numeric deliverables, use a different validation method/reference, meaningful bound or",
+				"  simulation and identify shared assumptions. Repeating arithmetic or checking hardcoded",
+				"  expected output establishes consistency only, not correctness.",
 			]
 			.join("\n"),
 		),

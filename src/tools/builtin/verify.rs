@@ -50,7 +50,7 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "function": {
-            "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.",
+            "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification.",
             "name": "VERIFY",
             "parameters": {
                 "additionalProperties": false,
@@ -150,22 +150,15 @@ fn parse_bun_test(output: &str) -> Option<VerifyVerdict> {
 
 // vitest: "Tests  N passed | N failed | N skipped"
 fn parse_vitest(output: &str) -> Option<VerifyVerdict> {
-    // Match the summary line like: "Tests  3 passed | 1 failed | 2 skipped (6)"
-    let summary_match = Regex::new(
-        r"(?i)Tests\s+(\d+)\s+passed(?:\s+\|\s+(\d+)\s+failed)?(?:\s+\|\s+(\d+)\s+skipped)?",
-    )
-    .unwrap()
-    .captures(output)?;
-
-    let passed = summary_match[1].parse().unwrap_or(0);
-    let failed = summary_match
-        .get(2)
-        .map(|m| m.as_str().parse().unwrap_or(0))
-        .unwrap_or(0);
-    let skipped = summary_match
-        .get(3)
-        .map(|m| m.as_str().parse().unwrap_or(0))
-        .unwrap_or(0);
+    // Vitest can put failures first or omit passing tests entirely.
+    let summary = Regex::new(r"(?im)^\s*Tests\s+([^\n]+)").unwrap()
+        .captures_iter(output).map(|m| m[1].to_string()).collect::<Vec<_>>().join("\n");
+    if summary.is_empty() { return None; }
+    let count = |pattern: &str| Regex::new(pattern).unwrap().captures_iter(&summary)
+        .fold(0_i64, |total, m| total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX)));
+    let passed = count(r"(\d+)\s+passed");
+    let failed = count(r"(\d+)\s+failed");
+    let skipped = count(r"(\d+)\s+skipped");
 
     // vitest marks failures with "× " or "FAIL" lines
     let marker_re = Regex::new(r"^\s*[×✕✗]\s").unwrap();
@@ -191,37 +184,20 @@ fn parse_vitest(output: &str) -> Option<VerifyVerdict> {
 // pytest: "N passed, N failed, N warning"
 fn parse_pytest(output: &str) -> Option<VerifyVerdict> {
     // e.g. "5 passed, 2 failed, 1 warning in 0.45s"
-    // Find ALL =+...=+ lines and pick the last one that contains pass/fail/error
-    let mut all_matches: Vec<String> = Regex::new(r"={3,}\s*(.*?)\s*={3,}")
+    // Include every suite summary: a later pass must not hide a failure.
+    let all_matches: Vec<String> = Regex::new(r"={3,}\s*(.*?)\s*={3,}")
         .unwrap()
         .captures_iter(output)
         .map(|captures| captures[1].to_string())
         .collect();
-    all_matches.reverse();
-    let keyword_re = Regex::new(r"(?i)passed|failed|error").unwrap();
-    let summary = all_matches.into_iter().find(|m| keyword_re.is_match(m))?;
-
-    if !keyword_re.is_match(&summary) {
-        return None;
-    }
-
-    let passed_match = Regex::new(r"(\d+)\s+passed").unwrap().captures(&summary);
-    let failed_match = Regex::new(r"(\d+)\s+(?:failed|error)")
-        .unwrap()
-        .captures(&summary);
-    let skipped_match = Regex::new(r"(\d+)\s+(?:skipped|warning)")
-        .unwrap()
-        .captures(&summary);
-
-    let passed = passed_match
-        .map(|m| m[1].parse().unwrap_or(0))
-        .unwrap_or(0);
-    let failed = failed_match
-        .map(|m| m[1].parse().unwrap_or(0))
-        .unwrap_or(0);
-    let skipped = skipped_match
-        .map(|m| m[1].parse().unwrap_or(0))
-        .unwrap_or(0);
+    let keyword_re = Regex::new(r"(?i)\d+\s+(passed|failed|errors?|skipped)").unwrap();
+    let summary = all_matches.into_iter().filter(|m| keyword_re.is_match(m)).collect::<Vec<_>>().join("\n");
+    if summary.is_empty() { return None; }
+    let count = |pattern: &str| Regex::new(pattern).unwrap().captures_iter(&summary)
+        .fold(0_i64, |total, m| total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX)));
+    let passed = count(r"(\d+)\s+passed");
+    let failed = count(r"(\d+)\s+(?:failed|errors?)");
+    let skipped = count(r"(\d+)\s+skipped");
 
     // pytest FAILED lines: "FAILED test_foo.py::test_bar - ..."
     let failed_line_re = Regex::new(r"^FAILED\s").unwrap();
@@ -283,18 +259,20 @@ fn parse_unittest(output: &str) -> Option<VerifyVerdict> {
 
 // cargo test: "test result: ok. N passed; N failed; N ignored"
 fn parse_cargo_test(output: &str) -> Option<VerifyVerdict> {
-    let result_match = Regex::new(
+    let summary_re = Regex::new(
         r"(?i)test result:.*?(\d+)\s+passed;\s+(\d+)\s+failed(?:;\s+(\d+)\s+ignored)?",
     )
-    .unwrap()
-    .captures(output)?;
-
-    let passed = result_match[1].parse().unwrap_or(0);
-    let failed = result_match[2].parse().unwrap_or(0);
-    let skipped = result_match
-        .get(3)
-        .map(|m| m.as_str().parse().unwrap_or(0))
-        .unwrap_or(0);
+    .unwrap();
+    let summaries: Vec<_> = summary_re.captures_iter(output).collect();
+    if summaries.is_empty() { return None; }
+    let mut passed = 0_i64;
+    let mut failed = 0_i64;
+    let mut skipped = 0_i64;
+    for summary in summaries {
+        passed = passed.saturating_add(summary[1].parse::<i64>().unwrap_or(0));
+        failed = failed.saturating_add(summary[2].parse::<i64>().unwrap_or(0));
+        skipped = skipped.saturating_add(summary.get(3).and_then(|m| m.as_str().parse::<i64>().ok()).unwrap_or(0));
+    }
 
     // cargo test failure lines: "test foo::bar ... FAILED"
     let failed_re = Regex::new(r"\bFAILED$").unwrap();
@@ -333,7 +311,7 @@ fn parse_go_test(output: &str) -> Option<VerifyVerdict> {
     }
 
     let passed = pass_lines.len() as i64;
-    let failed = fail_lines.len() as i64;
+    let failed = (fail_lines.len() as i64).max(i64::from(Regex::new(r"(?m)^FAIL\s").unwrap().is_match(output)));
     // go test doesn't report skipped count explicitly
     let skipped = 0;
 
@@ -371,7 +349,7 @@ fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
     }
 
     let failed = error_lines.len() as i64;
-    let passed = if failed == 0 { 1 } else { 0 }; // 1 "passed" = no errors
+    let passed = 0; // compiler diagnostics are not executed assertions
     let first_failures: Vec<String> = error_lines
         .iter()
         .take(5)
@@ -393,7 +371,8 @@ fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
 // tsc clean pass: command was tsc and the output has no compiler errors —
 // detect by command hint
 fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
-    if !Regex::new(r"\btsc\b").unwrap().is_match(command) {
+    if build_evidence_kind(command) != Some(crate::core::types::VerificationEvidenceKind::Typecheck)
+        || !shell_words::split(command).ok()?.iter().any(|word| word == "tsc") {
         return None;
     }
     if Regex::new(r"error TS\d+").unwrap().is_match(output) {
@@ -406,7 +385,7 @@ fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
         failed: 0,
         first_failures: vec![],
         output: output.to_string(),
-        passed: 1,
+        passed: 0,
         runner: "tsc".to_string(),
         skipped: 0,
         timed_out: false,
@@ -417,27 +396,28 @@ fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
 /// parser in order and returns the first match's counts; falls back to the
 /// tsc-clean-pass check (recognized by the command text), then to the
 /// "unknown" runner.
-pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
+fn parse_native_output(command: &str, output: &str) -> VerifyParsed {
     let parsers: [fn(&str) -> Option<VerifyVerdict>; 7] = [
         parse_bun_test,
         parse_vitest,
-        parse_pytest,
         parse_unittest,
         parse_cargo_test,
         parse_go_test,
         parse_tsc,
+        parse_pytest,
     ];
 
-    for parser in parsers {
-        if let Some(result) = parser(output) {
-            return VerifyParsed {
-                runner: result.runner,
-                passed: result.passed,
-                failed: result.failed,
-                skipped: result.skipped,
-                first_failures: result.first_failures,
-            };
-        }
+    let mut results: Vec<_> = parsers.into_iter().filter_map(|parser| parser(output)).collect();
+    if !results.is_empty() {
+        let index = results.iter().position(|result| result.failed > 0).unwrap_or(0);
+        let result = results.remove(index);
+        return VerifyParsed {
+            runner: result.runner,
+            passed: result.passed,
+            failed: result.failed,
+            skipped: result.skipped,
+            first_failures: result.first_failures,
+        };
     }
 
     // tsc clean pass (no output, recognized by command)
@@ -457,6 +437,190 @@ pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
         failed: 0,
         skipped: 0,
         first_failures: vec![],
+    }
+}
+
+/// A custom checker emits one record after executing its assertions. Never
+/// accept a later success record that could conceal an earlier failure.
+pub const CUSTOM_RESULT_PREFIX: &str = "DRIP_VERIFY ";
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    use crate::core::types::{HarnessVerificationRecord, VerificationEvidenceKind as Kind};
+
+    #[test]
+    fn unknown_empty_and_help_commands_do_not_verify_work() {
+        for (command, output) in [
+            ("true", ""), ("python check.py", "file: 42 bytes SHA256 abc"),
+            ("python check.py", "VERIFY unknown: 0 passed, 0 failed (exit 0)"),
+            ("cargo test", "test result: ok. 0 passed; 0 failed; 4 ignored"),
+            ("python -m unittest", "Ran 4 tests in 0.02s\nOK (skipped=4)"),
+            ("echo tsc", ""), ("tsc --help", ""), ("cargo check --version", ""),
+            ("echo cargo check", ""), ("false; cargo build --help", ""),
+            ("tsc -v", "Version 5"), ("tsc --showConfig", "{}"),
+            ("tsc --init", "created tsconfig.json"), ("tsc --listFilesOnly", "src/a.ts"),
+            ("tsc --build --clean", ""), ("go build -n", "compiler command"),
+            ("cargo check --unit-graph", "{}"),
+        ] {
+            assert!(!verification_evidence(command, output).verifies_work(), "{command}: {output}");
+        }
+    }
+
+    #[test]
+    fn custom_results_validate_counts_and_preserve_failure() {
+        let pass = "DRIP_VERIFY {\"executed\":3,\"passed\":3,\"failed\":0}";
+        let evidence = verification_evidence("python check.py", pass);
+        assert!(evidence.verifies_work());
+        assert_eq!(evidence.kind, Kind::Custom);
+        assert_eq!(evidence.executed, 3);
+        for result in [
+            r#"{"executed":0,"passed":0,"failed":0}"#,
+            r#"{"executed":3,"passed":2,"failed":1}"#,
+            r#"{"executed":3,"passed":3,"failed":1}"#,
+            r#"{"executed":-1,"passed":-1,"failed":0}"#,
+            r#"{"executed":1.5,"passed":1.5,"failed":0}"#,
+            r#"{"executed":9223372036854775807,"passed":9223372036854775807,"failed":1}"#,
+            r#"{"passed":1,"failed":0}"#,
+            "not json",
+        ] {
+            assert!(!verification_evidence("python check.py", &format!("DRIP_VERIFY {result}")).verifies_work(), "{result}");
+        }
+        assert!(parse_verify_output("python check.py", &format!("{pass}\n{pass}")).failed > 0);
+        assert!(parse_verify_output("pytest", &format!("=== 1 failed in 0.1s ===\n{pass}")).failed > 0);
+    }
+
+    #[test]
+    fn cargo_counts_include_all_test_binaries_and_later_failures() {
+        let output = "test result: ok. 0 passed; 0 failed; 0 ignored\ntest result: ok. 7 passed; 0 failed; 2 ignored\ntest result: FAILED. 0 passed; 1 failed; 0 ignored";
+        let result = parse_verify_output("cargo test", output);
+        assert_eq!((result.passed, result.failed, result.skipped), (7, 1, 2));
+        assert!(!verification_evidence("cargo test", output).verifies_work());
+    }
+
+    #[test]
+    fn later_success_and_mixed_runner_output_cannot_hide_failure() {
+        let pytest = "=== 1 failed, 2 errors in 0.1s ===\n=== 4 passed in 0.1s ===";
+        assert_eq!(parse_verify_output("pytest", pytest).failed, 3);
+        let mixed = "2 pass\n0 fail\n=== 1 failed in 0.1s ===";
+        assert!(parse_verify_output("bun test; pytest", mixed).failed > 0);
+        assert_eq!(parse_verify_output("vitest", "Tests 2 failed | 3 passed (5)").failed, 2);
+        assert_eq!(parse_verify_output("vitest", "Tests 2 failed (2)").failed, 2);
+        assert!(!verification_evidence("vitest", "Tests 3 skipped (3)").verifies_work());
+    }
+
+    #[test]
+    fn compiler_evidence_is_not_an_assertion_count() {
+        for (command, kind) in [("cargo check", Kind::Typecheck), ("cargo build", Kind::Build), ("npx tsc --noEmit", Kind::Typecheck)] {
+            let evidence = verification_evidence(command, "");
+            assert_eq!(evidence.kind, kind);
+            assert_eq!((evidence.executed, evidence.passed), (0, 0));
+            assert!(evidence.verifies_work());
+        }
+    }
+
+    #[test]
+    fn legacy_records_load_but_do_not_render_as_verified() {
+        let record: HarnessVerificationRecord = serde_json::from_value(json!({
+            "atIteration":1,"command":"true","failed":false,"outputTail":""
+        })).unwrap();
+        assert!(record.evidence.is_none());
+        assert_eq!(crate::core::state::describe_verification_outcome(record.failed, record.ran_no_tests, record.evidence.as_ref()), "UNVERIFIED");
+        let mut record = record;
+        record.evidence = Some(verification_evidence("pytest", "=== 3 passed in 0.1s ==="));
+        assert!(record.evidence.as_ref().unwrap().verifies_work());
+        assert_eq!(serde_json::from_str::<HarnessVerificationRecord>(&serde_json::to_string(&record).unwrap()).unwrap(), record);
+    }
+
+    #[test]
+    fn actual_script_failures_dominate_reported_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = super::super::ToolCtx { cwd: dir.path().to_path_buf(), ..Default::default() };
+        for (command, failed) in [
+            ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", false),
+            ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":0,\"failed\":1}\\n'", true),
+            ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'; exit 7", true),
+            ("(printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'; exit 7) | cat", true),
+        ] {
+            let outcome = execute(&json!({"command":command}), &ctx);
+            assert_eq!(outcome.failed, failed, "{}", outcome.text);
+        }
+        let timeout = execute(&json!({"command":"sleep 2", "timeout":20}), &ctx);
+        assert!(timeout.failed);
+    }
+}
+
+pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
+    // Do not interpret the tool's own rendered header as runner counts.
+    let cleaned = output.lines().filter(|line| !line.starts_with("VERIFY ") && !line.starts_with("; evidence:"))
+        .collect::<Vec<_>>().join("\n");
+    let output = cleaned.as_str();
+    let native = parse_native_output(command, output);
+    let records: Vec<_> = output.lines().filter_map(|line| line.strip_prefix(CUSTOM_RESULT_PREFIX)).collect();
+    if records.is_empty() {
+        return native;
+    }
+    let counts = (|| {
+        if records.len() != 1 { return None; }
+        let value: Value = serde_json::from_str(records[0]).ok()?;
+        let executed = value.get("executed")?.as_i64()?;
+        let passed = value.get("passed")?.as_i64()?;
+        let failed = value.get("failed")?.as_i64()?;
+        if executed < 0 || passed < 0 || failed < 0 || passed.checked_add(failed)? != executed {
+            return None;
+        }
+        Some((passed, failed))
+    })();
+    match counts {
+        Some(_) if native.failed > 0 => native,
+        Some((passed, failed)) => VerifyParsed {
+            runner: "custom".into(), passed, failed, skipped: 0,
+            first_failures: native.first_failures,
+        },
+        None => VerifyParsed {
+            runner: "custom-invalid".into(), passed: 0, failed: native.failed.max(1), skipped: 0,
+            first_failures: vec!["Invalid DRIP_VERIFY result: emit exactly one JSON record with nonnegative integer executed/passed/failed counts and executed = passed + failed.".into()],
+        },
+    }
+}
+
+/// Recognize actual compiler/build invocations, not mentions in echo commands
+/// or shell scripts. Complex wrappers can emit a custom assertion result.
+fn build_evidence_kind(command: &str) -> Option<crate::core::types::VerificationEvidenceKind> {
+    use crate::core::types::VerificationEvidenceKind::{Build, Typecheck};
+    let words = shell_words::split(command).ok()?;
+    if words.iter().any(|word| word.contains([';', '|', '&', '\n', '`']) || word.contains("$(")
+        || matches!(word.as_str(), "--help" | "-h" | "--version" | "-V" | "--list" | "--dry-run")) {
+        return None;
+    }
+    let args: Vec<_> = words.iter().map(String::as_str).collect();
+    let has_option = |options: &[&str]| args.iter().any(|arg| options.iter().any(|option| option.eq_ignore_ascii_case(arg.split('=').next().unwrap_or(arg))));
+    match args.as_slice() {
+        ["cargo", "check", ..] if !has_option(&["--unit-graph"]) => Some(Typecheck),
+        ["cargo", "build", ..] if !has_option(&["--unit-graph"]) => Some(Build),
+        ["tsc", ..] | ["npx" | "bunx", "tsc", ..]
+            if !has_option(&["-v", "--version", "-h", "--help", "--init", "--showConfig", "--listFilesOnly", "--clean", "--dry"]) => Some(Typecheck),
+        ["go", "build", ..] if !has_option(&["-n"]) => Some(Build),
+        _ => None,
+    }
+}
+
+pub fn verification_evidence(command: &str, output: &str) -> crate::core::types::VerificationEvidence {
+    use crate::core::types::{VerificationEvidence, VerificationEvidenceKind as Kind};
+    let parsed = parse_verify_output(command, output);
+    let kind = match parsed.runner.as_str() {
+        "custom" => Kind::Custom,
+        "custom-invalid" => Kind::Unverified,
+        "unknown" | "tsc" => build_evidence_kind(command).unwrap_or(Kind::Unverified),
+        _ => Kind::Tests,
+    };
+    let assertions = matches!(kind, Kind::Tests | Kind::Custom);
+    let executed = if assertions { parsed.passed.checked_add(parsed.failed).unwrap_or(0) } else { 0 };
+    let kind = if assertions && executed == 0 { Kind::Unverified } else { kind };
+    VerificationEvidence {
+        kind, executed, passed: if assertions { parsed.passed } else { 0 }, failed: parsed.failed,
+        skipped: Some(parsed.skipped),
+        detail: (kind == Kind::Unverified).then(|| "No executed checks were established; use a supported runner or emit a DRIP_VERIFY assertion result.".into()),
     }
 }
 
@@ -543,7 +707,7 @@ pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyV
         command: "bash",
         cwd: Some(input.cwd.as_str()),
         env: None,
-        process_args: &["-lc".to_string(), input.command.clone()],
+        process_args: &["-o".to_string(), "pipefail".to_string(), "-lc".to_string(), input.command.clone()],
         timeout_ms: Some(input.timeout_ms),
         stdin_payload: None,
     })
@@ -565,10 +729,19 @@ pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyV
 }
 
 pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super::ToolCompletion {
+    let evidence = verification_evidence(&prepared.input.command, &verdict.output);
+    let failed = verdict.timed_out || verdict.failed > 0 || verdict.exit_code != Some(0);
+    let status = crate::core::state::describe_verification_outcome(failed, None, Some(&evidence));
+    let label = match evidence.kind {
+        crate::core::types::VerificationEvidenceKind::Build => "build",
+        crate::core::types::VerificationEvidenceKind::Typecheck => "typecheck",
+        _ => &verdict.runner,
+    };
     let verdict_line = format!(
-        "VERIFY {}: {} passed, {} failed (exit {})",
-        verdict.runner,
-        verdict.passed,
+        "VERIFY {}: {} — {} executed, {} failed (exit {})",
+        label,
+        status,
+        evidence.executed,
         verdict.failed,
         verdict
             .exit_code
@@ -576,6 +749,7 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
             .unwrap_or_else(|| "null".to_string())
     );
     let mut body_lines: Vec<String> = vec![verdict_line.clone()];
+    body_lines.push(crate::core::state::describe_verification_evidence(Some(&evidence)));
 
     if !verdict.first_failures.is_empty() {
         body_lines.push(String::new());
@@ -848,7 +1022,7 @@ mod tests {
         let result = parse_verify_output("go test ./...", output);
         assert_eq!(result.runner, "go test");
         assert_eq!(result.passed, 0);
-        assert_eq!(result.failed, 0); // no --- FAIL: lines
+        assert_eq!(result.failed, 1); // package failure remains blocking without per-test lines
     }
 
     // -- tsc -----------------------------------------------------------------
@@ -870,7 +1044,7 @@ mod tests {
     fn parses_tsc_clean_pass_empty_output_with_tsc_in_command() {
         let result = parse_verify_output("bunx tsc --noEmit", "");
         assert_eq!(result.runner, "tsc");
-        assert_eq!(result.passed, 1);
+        assert_eq!(result.passed, 0);
         assert_eq!(result.failed, 0);
         assert_eq!(result.first_failures, Vec::<String>::new());
     }

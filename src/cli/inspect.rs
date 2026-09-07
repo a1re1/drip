@@ -79,6 +79,8 @@ pub struct InspectVerification {
 	pub failed: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub ran_no_tests: Option<bool>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub evidence: Option<crate::core::types::VerificationEvidence>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -254,6 +256,7 @@ pub fn build_inspect_report(paths: &InspectPaths) -> InspectReport {
 				command: verification.command.clone(),
 				failed: verification.failed,
 				ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
+				evidence: verification.evidence.clone(),
 			})
 			.collect(),
 	}
@@ -323,13 +326,7 @@ pub fn format_inspect_report(report: &InspectReport) -> String {
 		for verification in &report.verifications {
 			lines.push(format!(
 				"  [{}] cycle {}: {}",
-				if verification.failed {
-					"FAIL"
-				} else if verification.ran_no_tests == Some(true) {
-					"pass, 0 tests"
-				} else {
-					"pass"
-				},
+				crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref()),
 				verification.at_iteration,
 				verification.command
 			));
@@ -528,6 +525,7 @@ mod tests {
 				failed: true,
 				output_tail: "1 fail".into(),
 				ran_no_tests: None,
+                evidence: None,
 			},
 			HarnessVerificationRecord {
 				at_iteration: 4,
@@ -535,6 +533,7 @@ mod tests {
 				failed: false,
 				output_tail: "5 pass".into(),
 				ran_no_tests: None,
+                evidence: None,
 			},
 		]);
 		std::fs::write(
@@ -640,7 +639,8 @@ mod tests {
 		assert!(text.contains("BASH ×1 (1 failed)"));
 		assert!(text.contains("rate-limited 1× (8s waiting)"));
 		assert!(text.contains("steering: 1 message(s) (adoption avg 4s)"));
-		assert!(text.contains("[FAIL] cycle 1: bun test"));
+		assert!(text.contains("[FAILED] cycle 1: bun test"));
+		assert!(text.contains("[UNVERIFIED] cycle 4: bun test"));
 		assert!(text.contains("stop latency 900ms"));
 	}
 

@@ -14,14 +14,27 @@ use drip::tools::async_jobs::{create_chat_tool_runtime_services, CreateChatToolR
 fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
     let handle = std::thread::spawn(move || {
         let mut bodies = Vec::new();
         for response_body in responses {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(std::time::Instant::now() < deadline, "scripted endpoint did not receive the expected call");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
             let mut data: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 8192];
             let body_start = loop {
-                let read = stream.read(&mut chunk).unwrap_or(0);
+                let read = stream.read(&mut chunk).expect("read scripted request");
                 assert!(read > 0, "client closed early");
                 data.extend_from_slice(&chunk[..read]);
                 if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -59,6 +72,54 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Str
 
 fn text_response(text: &str) -> String {
     serde_json::json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}).to_string()
+}
+
+#[tokio::test]
+async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
+    for (route, writer) in [("VERIFY", "PATCH"), ("BASH", "PATCH"), ("VERIFY", "WRITE")] {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+        let sink = events.clone();
+        let mut tools = drip::tools::pack::builtin_tool_pack(Default::default());
+        tools.iter_mut().find(|tool| tool.name == "PATCH").unwrap().name = writer.into();
+        let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
+        let (url, server) = spawn_scripted_server(vec![
+            tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"]})),
+            text_response("planned"),
+            tool_call_response("w", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+            tool_call_response("v", "VERIFY", serde_json::json!({"command":"true"})),
+            tool_call_response("f1", "finish_task", serde_json::json!({"status":"completed","summary":"done"})),
+            tool_call_response("f2", "finish_task", serde_json::json!({"status":"completed","summary":"done"})),
+            tool_call_response("a", route, serde_json::json!({"command":assertion})),
+            tool_call_response("bad-write", "BASH", serde_json::json!({"command":"printf corrupt > artifact.txt; exit 9"})),
+            tool_call_response("stale", "finish_task", serde_json::json!({"status":"completed","summary":"earlier check passed"})),
+            tool_call_response("restore", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+            tool_call_response("fresh", route, serde_json::json!({"command":assertion})),
+            tool_call_response("f3", "finish_task", serde_json::json!({"status":"completed","summary":"one assertion passed"})),
+            text_response("Artifact verified."),
+        ]);
+        let result = run_solid_state_harness(SolidStateHarnessOptions {
+            cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a verified artifact".into(),
+            max_iterations: Some(6), model: Some("mock".into()), url: Some(url),
+            tools,
+            on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+            state_path: Some(dir.path().join("state.json")),
+            tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+            })),
+            ..Default::default()
+        }).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(result.reason, HarnessRunReason::Completed, "{route}");
+        let records = result.state.verifications.as_ref().unwrap();
+        assert_eq!(records.len(), 3, "{route}");
+        assert!(!records[0].evidence.as_ref().unwrap().verifies_work());
+        assert!(records[1].evidence.as_ref().unwrap().verifies_work());
+        assert_eq!(records[1].evidence.as_ref().unwrap().executed, 1);
+        assert!(records[2].evidence.as_ref().unwrap().verifies_work());
+        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.contains("not accepted yet — this task edited")).count(), 3);
+        assert_eq!(std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(), "correct\n");
+    }
 }
 
 #[tokio::test]

@@ -281,10 +281,34 @@ fn run_tsc(tsconfig_path: &Path) -> Result<String> {
             }
             combined.push_str(&String::from_utf8_lossy(&output.stderr));
         }
-        return Ok(combined);
+        return checked_compiler_output(output.status.success(), combined);
     }
 
     Err(anyhow::anyhow!("CHECK requires tsc (bun or node) on PATH"))
+}
+
+fn checked_compiler_output(success: bool, combined: String) -> Result<String> {
+    // Preserve normal structured diagnostics; fail closed when a compiler or
+    // launcher failed without producing diagnostics the parser understands.
+    if !success && parse_diagnostics_output(&combined).is_empty() {
+        let tail: String = combined.chars().take(2000).collect();
+        return Err(anyhow::anyhow!("tsc exited unsuccessfully without recognized diagnostics: {tail}"));
+    }
+    Ok(combined)
+}
+
+#[cfg(test)]
+mod compiler_status_tests {
+    use super::*;
+
+    #[test]
+    fn unrecognized_errors_fail_but_type_errors_keep_structured_diagnostics() {
+        assert!(checked_compiler_output(false, "launcher could not execute tsc".into()).is_err());
+        assert!(checked_compiler_output(false, String::new()).is_err());
+        assert!(checked_compiler_output(true, String::new()).is_ok());
+        let output = checked_compiler_output(false, "src/a.ts(1,2): error TS2322: incompatible type".into()).unwrap();
+        assert_eq!(parse_diagnostics_output(&output).len(), 1);
+    }
 }
 
 /// Parse tsc's `file(line,col): error TSxxxx: message` lines into
@@ -516,4 +540,3 @@ mod tests {
         assert_eq!(result.scope, "project");
     }
 }
-

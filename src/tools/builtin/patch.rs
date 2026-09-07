@@ -27,7 +27,7 @@ pub fn definition() -> Value {
                         "type": "number"
                     },
                     "files": {
-                        "description": "Array of file edits to apply as a single atomic transaction. ALL entries are validated before any file is written; if any entry fails, NO files are changed. Each entry mirrors the single-file rules: pass content for a full write, or find + replace for a targeted edit.",
+                        "description": "Apply a batch of file edits. All entries are validated and duplicate/aliased destinations rejected before writing; use separate PATCH calls for multiple edits to one file. On an ordinary write failure, rollback is attempted and any restoration failures are reported explicitly. This is not crash-atomic across files. Each entry uses content for a full write or find + replace for a targeted edit.",
                         "items": {
                             "additionalProperties": false,
                             "properties": {
@@ -881,10 +881,99 @@ fn line_number_prefix_len(line: &str) -> Option<usize> {
 // Execute + complete stages
 // ---------------------------------------------------------------------------
 
-fn execute_transaction(resolved: &[ResolvedEntry], workspace_root: &str) -> Result<(), String> {
+/// Resolves a destination to a stable identity for duplicate detection.
+/// Existing paths canonicalize through the filesystem (so `./`, `..`, and
+/// symlink aliases collapse to the same identity). New paths keep their
+/// missing suffix under the nearest existing canonical parent. Existing
+/// symlinks resolve before subsequent `..` components, while missing suffixes
+/// normalize lexically as the writer would when creating their directories.
+fn canonical_destination_identity(absolute_path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(absolute_path);
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut identity = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => { identity.pop(); },
+            _ => {
+                identity.push(component.as_os_str());
+                // Resolve existing symlinks before processing a later `..`.
+                // Missing components can be normalized lexically because the
+                // writer would create those directories itself.
+                if let Ok(canonical) = identity.canonicalize() {
+                    identity = canonical;
+                }
+            }
+        }
+    }
+    identity
+}
+
+/// Rejects two entries that resolve to the same destination identity before
+/// any write happens. Sequential writes inside one transaction overwrite each
+/// other, so the first edit would be silently lost; separate PATCH calls are
+/// the simplest correct contract for multiple edits to one file.
+fn reject_duplicate_destinations(resolved: &[ResolvedEntry]) -> Result<(), String> {
+    let mut identities: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for entry in resolved {
-        crate::lib_fs::write_file_atomic(std::path::Path::new(&entry.absolute_path), &entry.new_text, true)
-            .map_err(|error| error.to_string())?;
+        let identity = canonical_destination_identity(&entry.absolute_path);
+        if !identities.insert(identity) {
+            return Err(format!(
+                "Transaction rejected: two entries target the same file (\"{}\"). Writes in one transaction overwrite each other and the earlier edit would be lost. Send separate PATCH calls for each edit to the same path, or merge them into one entry with a single content write.",
+                entry.display_path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn execute_transaction(resolved: &[ResolvedEntry], workspace_root: &str) -> Result<(), String> {
+    reject_duplicate_destinations(resolved)?;
+
+    // Pre-image per resolved index, captured before that destination's write:
+    // Some(bytes) = existing file whose bytes are restored on rollback,
+    // None = destination that did not exist yet and is removed on rollback.
+    let mut pre_images: std::collections::HashMap<usize, Option<Vec<u8>>> =
+        std::collections::HashMap::new();
+    // Indices whose writes were attempted, including the failing entry, which
+    // may have been partially written.
+    let mut attempted: Vec<usize> = Vec::new();
+    for (index, entry) in resolved.iter().enumerate() {
+        let pre_image = match std::fs::read(&entry.absolute_path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return report_rolled_back_transaction(
+                    resolved,
+                    &attempted,
+                    &pre_images,
+                    &entry.display_path,
+                    &error.to_string(),
+                );
+            }
+        };
+        attempted.push(index);
+        pre_images.insert(index, pre_image);
+        if let Err(error) = crate::lib_fs::write_file_atomic(
+            std::path::Path::new(&entry.absolute_path),
+            &entry.new_text,
+            true,
+        ) {
+            return report_rolled_back_transaction(
+                resolved,
+                &attempted,
+                &pre_images,
+                &entry.display_path,
+                &error.to_string(),
+            );
+        }
+    }
+
+    // Every write succeeded — only now record the journal entries, so a failed
+    // transaction never leaves success entries behind.
+    for entry in resolved {
         let _ = crate::tools::patch_journal::append_patch_journal(
             std::path::Path::new(workspace_root),
             &crate::tools::patch_journal::AppendPatchJournalEntry {
@@ -895,6 +984,68 @@ fn execute_transaction(resolved: &[ResolvedEntry], workspace_root: &str) -> Resu
         );
     }
     Ok(())
+}
+
+/// Restores every attempted destination after a failed write and reports the
+/// combined failure. Existing files are rewritten with their pre-image bytes
+/// (without creating parent directories); destinations that did not exist
+/// before the transaction are removed again. Rollback failures are reported
+/// next to the original error instead of being swallowed. This is best-effort
+/// rollback for ordinary write failures — it makes no claim of
+/// filesystem-wide or crash atomicity.
+fn report_rolled_back_transaction(
+    resolved: &[ResolvedEntry],
+    attempted: &[usize],
+    pre_images: &std::collections::HashMap<usize, Option<Vec<u8>>>,
+    failing_display_path: &str,
+    original_error: &str,
+) -> Result<(), String> {
+    let mut restored: Vec<String> = Vec::new();
+    let mut rollback_failures: Vec<String> = Vec::new();
+    for &index in attempted.iter().rev() {
+        let entry = &resolved[index];
+        let outcome = match pre_images.get(&index) {
+            Some(Some(bytes)) => match std::str::from_utf8(bytes) {
+                Ok(text) => crate::lib_fs::write_file_atomic(
+                    std::path::Path::new(&entry.absolute_path),
+                    text,
+                    false,
+                ),
+                Err(error) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("pre-image is not valid UTF-8: {error}"),
+                )),
+            },
+            _ => match std::fs::remove_file(std::path::Path::new(&entry.absolute_path)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            },
+        };
+        match outcome {
+            Ok(()) => restored.push(entry.display_path.clone()),
+            Err(error) => rollback_failures.push(format!(
+                "\"{}\" could not be restored: {}",
+                entry.display_path, error
+            )),
+        }
+    }
+    let original = format!(
+        "Transaction failed writing \"{}\": {}",
+        failing_display_path, original_error
+    );
+    if rollback_failures.is_empty() {
+        Err(format!(
+            "{original} Transaction rolled back: {} file(s) restored to their previous contents; the patch journal was not touched.",
+            restored.len()
+        ))
+    } else {
+        Err(format!(
+            "{original} ROLLBACK INCOMPLETE — {} file(s) may still hold this transaction's content: {}. Inspect these paths and restore them from your own records before continuing; this transaction has no success journal entries.",
+            rollback_failures.len(),
+            rollback_failures.join("; ")
+        ))
+    }
 }
 
 /// What the execute stage returns: { data, outputText }.
@@ -1263,6 +1414,406 @@ mod execute_tests {
             "failed patch must not touch the journal"
         );
     }
+
+    #[test]
+    fn same_path_edits_in_one_transaction_are_rejected_before_any_write() {
+        let workspace = temp_workspace("dup-same-path");
+        let ctx = ctx_for(&workspace);
+        let file = workspace.join("notes.txt");
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(&file, original).unwrap();
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "notes.txt", "find": "alpha", "replace": "ONE" },
+                    { "path": "notes.txt", "find": "gamma", "replace": "THREE" }
+                ]
+            }),
+            &ctx,
+        );
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            after, original,
+            "rejection must leave all original bytes unchanged; the file now reads:\n{}",
+            after
+        );
+        assert!(
+            outcome.failed,
+            "two edits to one path must be rejected with an error, got success: {}",
+            outcome.text
+        );
+        assert!(
+            outcome.text.contains("separate PATCH calls"),
+            "error must point at separate PATCH calls, got: {}",
+            outcome.text
+        );
+        assert!(
+            !crate::tools::patch_journal::patch_journal_path(&workspace).exists(),
+            "rejected transaction must not append journal entries"
+        );
+    }
+
+    #[test]
+    fn missing_directory_parent_components_cannot_hide_duplicate_destinations() {
+        let workspace = temp_workspace("dup-missing-parent");
+        let ctx = ctx_for(&workspace);
+        let first = workspace.join("a.txt");
+        let alias = workspace.join("new/../a.txt");
+        let outcome = execute(&serde_json::json!({"files":[
+            {"path":first,"content":"first\n"},
+            {"path":alias,"content":"second\n"}
+        ]}), &ctx);
+        assert!(outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("same file"));
+        assert!(!first.exists());
+        assert!(!workspace.join("new").exists());
+    }
+
+    #[test]
+    fn dot_slash_alias_of_the_same_file_is_rejected() {
+        let workspace = temp_workspace("dup-dot-slash");
+        let ctx = ctx_for(&workspace);
+        let file = workspace.join("notes.txt");
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(&file, original).unwrap();
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "notes.txt", "find": "alpha", "replace": "ONE" },
+                    { "path": "./notes.txt", "find": "gamma", "replace": "THREE" }
+                ]
+            }),
+            &ctx,
+        );
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            after, original,
+            "./ alias rejection must leave the file unchanged; the file now reads:\n{}",
+            after
+        );
+        assert!(
+            outcome.failed,
+            "./ alias of the same path must be rejected with an error, got success: {}",
+            outcome.text
+        );
+        assert!(
+            outcome.text.contains("separate PATCH calls"),
+            "error must point at separate PATCH calls, got: {}",
+            outcome.text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_of_the_same_file_is_rejected() {
+        let workspace = temp_workspace("dup-symlink");
+        let ctx = ctx_for(&workspace);
+        let real = workspace.join("real.txt");
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(&real, original).unwrap();
+        std::os::unix::fs::symlink("real.txt", workspace.join("link.txt")).expect("create symlink");
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "real.txt", "find": "alpha", "replace": "ONE" },
+                    { "path": "link.txt", "find": "gamma", "replace": "THREE" }
+                ]
+            }),
+            &ctx,
+        );
+
+        let after = std::fs::read_to_string(&real).unwrap();
+        assert_eq!(
+            after, original,
+            "symlink alias rejection must leave the real file unchanged; it now reads:\n{}",
+            after
+        );
+        assert!(
+            outcome.failed,
+            "symlink alias of the same file must be rejected with an error, got success: {}",
+            outcome.text
+        );
+        assert!(
+            outcome.text.contains("separate PATCH calls"),
+            "error must point at separate PATCH calls, got: {}",
+            outcome.text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_files_under_aliased_parent_dirs_are_rejected() {
+        let workspace = temp_workspace("dup-aliased-parent");
+        let ctx = ctx_for(&workspace);
+        std::fs::create_dir(workspace.join("real_dir")).expect("create real dir");
+        std::os::unix::fs::symlink("real_dir", workspace.join("link_dir"))
+            .expect("create dir symlink");
+        let content_one = "first\n";
+        let content_two = "second\n";
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "real_dir/new.txt", "content": content_one },
+                    { "path": "link_dir/new.txt", "content": content_two }
+                ]
+            }),
+            &ctx,
+        );
+
+        assert!(
+            !workspace.join("real_dir/new.txt").exists(),
+            "rejection must happen before any write: no file may be created"
+        );
+        assert!(
+            outcome.failed,
+            "two new files under aliased parents must be rejected, got success: {}",
+            outcome.text
+        );
+        assert!(
+            outcome.text.contains("separate PATCH calls"),
+            "error must point at separate PATCH calls, got: {}",
+            outcome.text
+        );
+        let _ = (content_one, content_two);
+    }
+
+    #[test]
+    fn distinct_files_in_one_transaction_both_edits_land() {
+        let workspace = temp_workspace("distinct-files");
+        let ctx = ctx_for(&workspace);
+        let a = workspace.join("a.txt");
+        let b = workspace.join("b.txt");
+        std::fs::write(&a, "alpha\n").unwrap();
+        std::fs::write(&b, "bravo\n").unwrap();
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "a.txt", "find": "alpha", "replace": "ONE" },
+                    { "path": "b.txt", "find": "bravo", "replace": "TWO" }
+                ]
+            }),
+            &ctx,
+        );
+
+        assert!(
+            !outcome.failed,
+            "distinct files must patch in one transaction, got: {}",
+            outcome.text
+        );
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "ONE\n");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "TWO\n");
+    }
+
+    #[test]
+    fn two_new_files_under_one_missing_parent_are_distinct_and_both_land() {
+        let workspace = temp_workspace("distinct-new-under-missing-parent");
+        let ctx = ctx_for(&workspace);
+        let first = workspace.join("new/a.txt");
+        let second = workspace.join("new/b.txt");
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "new/a.txt", "content": "alpha\n" },
+                    { "path": "new/b.txt", "content": "bravo\n" }
+                ]
+            }),
+            &ctx,
+        );
+
+        assert!(
+            !outcome.failed,
+            "two distinct new files under one missing parent must both be created, got: {}",
+            outcome.text
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "alpha\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "bravo\n");
+    }
+
+    #[test]
+    fn two_new_files_under_a_two_level_missing_parent_are_distinct() {
+        let workspace = temp_workspace("distinct-new-two-level-missing-parent");
+        let ctx = ctx_for(&workspace);
+        let first = workspace.join("deep/er/a.txt");
+        let second = workspace.join("deep/er/b.txt");
+
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "deep/er/a.txt", "content": "alpha\n" },
+                    { "path": "deep/er/b.txt", "content": "bravo\n" }
+                ]
+            }),
+            &ctx,
+        );
+
+        assert!(
+            !outcome.failed,
+            "two distinct new files under a two-level missing parent must both be created, got: {}",
+            outcome.text
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "alpha\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "bravo\n");
+    }
+
+    #[test]
+    fn later_write_failure_rolls_back_earlier_existing_file_and_journals_nothing() {
+        let workspace = temp_workspace("rollback-existing");
+        let first = workspace.join("first.txt");
+        let original = "original first\n";
+        std::fs::write(&first, original).unwrap();
+        // A file where the second entry's parent directory would be: the
+        // second write cannot create its parent, so the transaction fails
+        // deterministically without touching permissions root bypasses.
+        std::fs::write(workspace.join("doomed"), "blocker\n").unwrap();
+
+        let resolved = vec![
+            ResolvedEntry {
+                absolute_path: first.to_string_lossy().to_string(),
+                display_path: "first.txt".to_string(),
+                content: Some(String::new()),
+                effective_find: None,
+                effective_replace: None,
+                occurrences: None,
+                match_lines: None,
+                crlf_note: None,
+                existing_text: Some(original.to_string()),
+                new_text: "rewritten first\n".to_string(),
+            },
+            ResolvedEntry {
+                absolute_path: workspace.join("doomed/child.txt").to_string_lossy().to_string(),
+                display_path: "doomed/child.txt".to_string(),
+                content: Some(String::new()),
+                effective_find: None,
+                effective_replace: None,
+                occurrences: None,
+                match_lines: None,
+                crlf_note: None,
+                existing_text: None,
+                new_text: "never lands\n".to_string(),
+            },
+        ];
+
+        let error = execute_transaction(&resolved, &workspace.to_string_lossy())
+            .expect_err("second write must fail; the transaction must roll back");
+
+        assert!(
+            error.contains("doomed/child.txt"),
+            "error must name the failing entry, got: {error}"
+        );
+        assert!(
+            error.contains("rolled back"),
+            "error must report the rollback, got: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            original,
+            "earlier existing file must be restored byte-for-byte"
+        );
+        let journal_path = crate::tools::patch_journal::patch_journal_path(&workspace);
+        assert!(
+            !journal_path.exists(),
+            "failed transaction must not leave success journal entries"
+        );
+    }
+
+    #[test]
+    fn later_write_failure_removes_newly_created_files_and_journals_nothing() {
+        let workspace = temp_workspace("rollback-new-file");
+        let created = workspace.join("created.txt");
+        // A file where the second entry's parent directory would be, so the
+        // failing write never lands and the earlier new file must be removed.
+        std::fs::write(workspace.join("blocker"), "blocker\n").unwrap();
+
+        let resolved = vec![
+            ResolvedEntry {
+                absolute_path: created.to_string_lossy().to_string(),
+                display_path: "created.txt".to_string(),
+                content: Some(String::new()),
+                effective_find: None,
+                effective_replace: None,
+                occurrences: None,
+                match_lines: None,
+                crlf_note: None,
+                existing_text: None,
+                new_text: "created then rolled back\n".to_string(),
+            },
+            ResolvedEntry {
+                absolute_path: workspace.join("blocker/doomed.txt").to_string_lossy().to_string(),
+                display_path: "blocker/doomed.txt".to_string(),
+                content: Some(String::new()),
+                effective_find: None,
+                effective_replace: None,
+                occurrences: None,
+                match_lines: None,
+                crlf_note: None,
+                existing_text: None,
+                new_text: "never lands\n".to_string(),
+            },
+        ];
+
+        let error = execute_transaction(&resolved, &workspace.to_string_lossy())
+            .expect_err("second write must fail; the transaction must roll back");
+
+        assert!(
+            error.contains("blocker/doomed.txt"),
+            "error must name the failing entry, got: {error}"
+        );
+        assert!(
+            !created.exists(),
+            "newly created file must be removed by the rollback"
+        );
+        let journal_path = crate::tools::patch_journal::patch_journal_path(&workspace);
+        assert!(
+            !journal_path.exists(),
+            "failed transaction must not leave success journal entries"
+        );
+    }
+
+    #[test]
+    fn rollback_failure_is_reported_explicitly() {
+        let workspace = temp_workspace("rollback-failure");
+        let resolved = vec![ResolvedEntry {
+            absolute_path: workspace.join("gone/victim.txt").to_string_lossy().to_string(),
+            display_path: "gone/victim.txt".to_string(),
+            content: Some(String::new()),
+            effective_find: None,
+            effective_replace: None,
+            occurrences: None,
+            match_lines: None,
+            crlf_note: None,
+            existing_text: Some("previous\n".to_string()),
+            new_text: "rewritten\n".to_string(),
+        }];
+        let mut pre_images: std::collections::HashMap<usize, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        pre_images.insert(0usize, Some(b"previous\n".to_vec()));
+
+        let error = report_rolled_back_transaction(
+            &resolved,
+            &[0usize],
+            &pre_images,
+            "gone/victim.txt",
+            "parent directory vanished",
+        )
+        .expect_err("restore must fail when the destination's parent directory is gone");
+
+        assert!(
+            error.contains("ROLLBACK INCOMPLETE"),
+            "rollback failure must be explicit, got: {error}"
+        );
+        assert!(
+            error.contains("gone/victim.txt"),
+            "rollback failure must name the destination, got: {error}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1392,4 +1943,3 @@ mod prepare_tests {
         );
     }
 }
-

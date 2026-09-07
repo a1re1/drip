@@ -1678,13 +1678,12 @@ pub fn apply_harness_op(
             };
 
             // Snapshot the fields the gates read before any state mutation.
-            let (target_status, target_activations, has_review_of, target_verify_nudged, target_footprint, target_edit_nudged, target_title) = {
+            let (target_status, target_activations, has_review_of, target_footprint, target_edit_nudged, target_title) = {
                 let task = core_state::get_task_by_id(state, &target_id).expect("target task exists");
                 (
                     task.status.clone(),
                     task.activations,
                     task.review_of.is_some(),
-                    task.verify_nudged,
                     task.footprint.clone(),
                     task.edit_nudged,
                     task.title.clone(),
@@ -1789,13 +1788,9 @@ pub fn apply_harness_op(
             }
 
             // Verification honesty gate: completing a task that edited the
-            // workspace while the run's verification evidence is missing,
-            // stale, or red gets ONE bounce-back naming the exact problem. A
-            // second finish_task is accepted unchanged: the model may know
-            // why no check applies here.
+            // workspace requires fresh, substantive evidence. Repetition and
+            // completing by id cannot waive a failed or missing check.
             if status == FinishTaskStatus::Completed
-                && is_current_task
-                && !target_verify_nudged.unwrap_or(false)
             {
                 let edited_workspace = target_footprint
                     .iter()
@@ -1820,19 +1815,24 @@ pub fn apply_harness_op(
                         "{} workspace edit(s) landed after the last verification ({})",
                         stale_edits, record.command
                     )),
+                    Some(record) if !record.evidence.as_ref().is_some_and(|evidence| evidence.verifies_work()) => Some(format!(
+                        "the most recent verification ({}) did not establish executed checks or build/typecheck evidence", record.command
+                    )),
                     Some(_) => None,
                 };
 
                 if edited_workspace {
                     if let Some(problem) = verification_problem {
-                        if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                        let state_changed = if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                            let changed = task.verify_nudged != Some(true);
                             task.verify_nudged = Some(true);
-                        }
+                            changed
+                        } else { false };
                         return HarnessOpOutcome {
                             text: format!(
-                                "harness: not accepted yet — this task edited the workspace but {problem}. Run the check now (VERIFY, CHECK, the verification command the goal names, or the project's test/build command via BASH), then finish_task. If no check applies to this change, call finish_task again unchanged and it will be accepted."
+                                "harness: not accepted yet — this task edited the workspace but {problem}. Run a relevant check now (VERIFY, CHECK, or the project's test/build command via BASH), then finish_task. Custom assertion scripts can emit DRIP_VERIFY counts. If correctness cannot be verified, finish_task status blocked with the missing evidence; repeating completed does not waive this requirement."
                             ),
-                            state_changed: true,
+                            state_changed,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -2415,7 +2415,52 @@ mod apply_harness_op_tests {
         let bounced = apply_harness_op(&mut state, op, &ctx);
         assert!(!bounced.task_finished);
         assert!(bounced.text.contains("this task edited the workspace but"));
-        assert!(bounced.text.contains("the verification command the goal names"), "{}", bounced.text);
+        assert!(bounced.text.contains("DRIP_VERIFY counts"), "{}", bounced.text);
+    }
+
+    #[test]
+    fn completion_requires_fresh_evidence_even_after_retry_or_by_id() {
+        use crate::core::types::HarnessVerificationRecord;
+        let mut base = create_harness_state("produce a verified artifact");
+        let plan = parse_harness_op("plan_tasks", r#"{"tasks":["produce artifact"]}"#).unwrap();
+        apply_harness_op(&mut base, plan, &HarnessOpContext::default());
+        base.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        base.tasks[0].activations = Some(1);
+        base.tasks[0].footprint = Some(vec!["edited artifact.txt".into()]);
+        base.workspace_edits = Some(1);
+        let record = HarnessVerificationRecord {
+            at_iteration: 1, command: "python check.py".into(), failed: false,
+            output_tail: "".into(), ran_no_tests: None,
+            evidence: Some(crate::tools::builtin::verify::verification_evidence("python check.py", "DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}")),
+        };
+        for current in [None, Some("task-1".into())] {
+            let ctx = HarnessOpContext { current_task_id: current, ..Default::default() };
+            for problem in ["missing", "legacy", "unknown", "failed", "stale", "empty"] {
+                let mut state = base.clone();
+                state.last_verification = Some(record.clone());
+                match problem {
+                    "missing" => state.last_verification = None,
+                    "legacy" => state.last_verification.as_mut().unwrap().evidence = None,
+                    "unknown" => state.last_verification.as_mut().unwrap().evidence = Some(crate::tools::builtin::verify::verification_evidence("true", "")),
+                    "failed" => state.last_verification.as_mut().unwrap().failed = true,
+                    "stale" => state.mutations_since_verification = Some(1),
+                    "empty" => state.last_verification.as_mut().unwrap().ran_no_tests = Some(true),
+                    _ => unreachable!(),
+                }
+                for _ in 0..3 {
+                    let finish = parse_harness_op("finish_task", r#"{"taskId":"task-1","status":"completed","summary":"done"}"#).unwrap();
+                    let outcome = apply_harness_op(&mut state, finish, &ctx);
+                    assert!(!outcome.task_finished, "{problem}: {}", outcome.text);
+                }
+                let blocked = parse_harness_op("finish_task", r#"{"taskId":"task-1","status":"blocked","summary":"missing evidence"}"#).unwrap();
+                assert!(apply_harness_op(&mut state, blocked, &ctx).task_finished);
+                assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Blocked);
+            }
+            let mut state = base.clone();
+            state.last_verification = Some(record.clone());
+            let finish = parse_harness_op("finish_task", r#"{"taskId":"task-1","status":"completed","summary":"two assertions passed"}"#).unwrap();
+            assert!(apply_harness_op(&mut state, finish, &ctx).task_finished);
+        }
     }
 
     /// Planning-loop work: the run edited the workspace before the task was

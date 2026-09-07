@@ -227,6 +227,7 @@ mod tests {
 			failed: false,
 			output_tail: "2 pass".into(),
 			ran_no_tests: None,
+            evidence: None,
 		});
 
 		build_run_record(&BuildRunRecordArgs {
@@ -280,6 +281,7 @@ mod tests {
 				failed: false,
 				mutations_after: 0,
 				ran_no_tests: None,
+				evidence: None,
 			})
 		);
 		assert_eq!(record.goal, "build the thing");

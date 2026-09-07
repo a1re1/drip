@@ -563,6 +563,7 @@ fn resolve_role_setup_extra_roles_override_config_roles() {
 
     use drip::cli::roles::RoleDefinition;
     let extra_roles = vec![RoleDefinition {
+        blind: false,
         description: None,
         r#loop: None,
         model: None,
@@ -660,6 +661,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
         cwd: cwd.to_str().unwrap().to_string(),
         env: None,
         extra_roles: Some(vec![RoleDefinition {
+            blind: false,
             description: None,
             r#loop: None,
             model: None,

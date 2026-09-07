@@ -3,9 +3,31 @@
     "type": "function",
     "function": {
       "name": "plan_tasks",
-      "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish.",
+      "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish. When the goal produces a measurable output, register its expected shape in expectations before computing it.",
       "parameters": {
         "properties": {
+          "expectations": {
+            "description": "Values the work is expected to produce, stated from the domain before any result exists: sign, units, order of magnitude, row count, output shape, latency bound. Immutable once registered; finish_task records observations against them and a mismatch is a defect in the model, not a caveat on the value.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "expected": {
+                  "description": "The expected value or range, with units or shape.",
+                  "type": "string"
+                },
+                "subject": {
+                  "description": "What is being predicted (an output, a count, a measurement).",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "expected"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "placement": {
             "description": "Where to insert the new tasks: \"next\" places them immediately after the current task, before other pending work; \"end\" (default) appends them.",
             "enum": [
@@ -103,13 +125,94 @@
     "type": "function",
     "function": {
       "name": "finish_task",
-      "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, or status blocked with a summary of why and what is needed.",
+      "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external) or anchor=\"none\" with an anchorNote saying why no external anchor exists.",
       "parameters": {
         "properties": {
+          "anchor": {
+            "description": "How the completion is anchored. \"external\": a correctness-class check passed (the harness verifies this). \"none\": no external anchor exists for this claim; requires anchorNote and downgrades the completion in the run result.",
+            "enum": [
+              "external",
+              "none"
+            ],
+            "type": "string"
+          },
+          "anchorNote": {
+            "description": "Why no external anchor exists for this claim (required with anchor=\"none\").",
+            "type": "string"
+          },
+          "anomalies": {
+            "description": "With status unreconciled: each expectation the result could not be reconciled with.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "expected": {
+                  "type": "string"
+                },
+                "note": {
+                  "description": "What was tried and why the mismatch stands.",
+                  "type": "string"
+                },
+                "observed": {
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "expected",
+                "observed",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "confidence": {
+            "description": "Your honest confidence that the finished work is correct, recorded for calibration against later verification.",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          "observations": {
+            "description": "Observed values for pre-registered expectations. Every registered expectation must be observed before completion. A revised value for a subject already observed must cite evidence from outside the fix.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "evidence": {
+                  "description": "Evidence outside your own derivation that this value is closer to truth (required when the value changed from an earlier observation).",
+                  "type": "string"
+                },
+                "matches": {
+                  "description": "Whether the observed value satisfies the expectation.",
+                  "type": "boolean"
+                },
+                "observed": {
+                  "type": "string"
+                },
+                "subject": {
+                  "description": "The registered expectation's subject.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "subject",
+                "observed",
+                "matches"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "status": {
             "enum": [
               "blocked",
-              "completed"
+              "completed",
+              "unreconciled"
             ],
             "type": "string"
           },
@@ -124,7 +227,8 @@
         },
         "required": [
           "status",
-          "summary"
+          "summary",
+          "confidence"
         ],
         "type": "object"
       }

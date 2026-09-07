@@ -180,7 +180,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                 output_text: Some(lines[0].clone()),
                 // A child that did not complete is a failed delegation — the parent
                 // must see that honestly and decide (resume the child, or replan).
-                status: Some(if record.reason == "completed" {
+                status: Some(if crate::cli::headless_output::reason_is_complete(&record.reason) {
                     ToolCallStatus::Completed
                 } else {
                     ToolCallStatus::Failed

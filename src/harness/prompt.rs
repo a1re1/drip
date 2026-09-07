@@ -25,8 +25,142 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents.",
     " The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks.",
     " Make file edits with PATCH rather than shell in-place editing (sed -i, or inline scripts that rewrite files) — PATCH validates the edit, journals an undo entry, and reports an honest per-edit result; shell edits bypass all three.",
+    " Checks are either correctness-class (compared against something the agent did not author — a pre-existing project test, a task-provided fixture, a published constant, or an invariant independent of the implementation) or consistency-class (compared only against the agent's own derivation); completion needs at least one correctness-class check or an explicit anchor=none declaration saying why no external anchor exists for the claim. Declare the anchor on every VERIFY call (anchor.kind external or self; a check that names a file you edited is downgraded to self), state your confidence (low, medium, high) on every finish_task, and when a revision changes a reported output, cite evidence outside the fix that the new value is closer to truth.",
+    " When a goal produces a measurable output (a number, count, shape, sign, unit, latency, row count), register the expected value from the domain via plan_tasks.expectations BEFORE computing it, and treat a later mismatch as a defect in the model — finish with status unreconciled and record the anomaly rather than explaining the value away.",
     " Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
 );
+
+#[cfg(test)]
+mod anchoring_render_tests {
+    use super::*;
+    use crate::core::types::{
+        ClaimedConfidence, CompletionAnchor, CompletionAnchorKind, HarnessExpectation,
+        HarnessExpectationObservation,
+    };
+
+    fn state_with_expectations(expectations: Vec<HarnessExpectation>) -> HarnessState {
+        let mut state = serde_json::from_value::<HarnessState>(serde_json::json!({
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "goal": "add a --verbose flag to the CLI",
+            "history": [],
+            "iteration": 3,
+            "loop": 1,
+            "memory": [],
+            "observations": [],
+            "promotedContext": [],
+            "tasks": [],
+            "telemetry": {},
+            "version": 1
+        }))
+        .unwrap();
+        state.expectations = expectations;
+        state
+    }
+
+    fn expectation(
+        id: &str,
+        subject: &str,
+        expected: &str,
+        observations: Vec<HarnessExpectationObservation>,
+    ) -> HarnessExpectation {
+        HarnessExpectation {
+            id: id.to_string(),
+            subject: subject.to_string(),
+            expected: expected.to_string(),
+            registered_at_iteration: 1,
+            observations,
+        }
+    }
+
+    #[test]
+    fn empty_expectations_render_no_section() {
+        let state = state_with_expectations(Vec::new());
+        assert!(
+            !build_iteration_user_message(&state, &iteration_args()).contains("Pre-registered expectations:")
+        );
+    }
+
+    #[test]
+    fn unobserved_and_latest_observations_render() {
+        let state = state_with_expectations(vec![
+            expectation("e1", "line count", "12", Vec::new()),
+            expectation(
+                "e3",
+                "file count",
+                "7",
+                vec![HarnessExpectationObservation {
+                    at_iteration: 3,
+                    observed: "7".to_string(),
+                    matches: true,
+                    evidence: None,
+                }],
+            ),
+            expectation(
+                "e2",
+                "row count",
+                "40",
+                vec![HarnessExpectationObservation {
+                    at_iteration: 2,
+                    observed: "41".to_string(),
+                    matches: false,
+                    evidence: None,
+                }],
+            ),
+        ]);
+        let message = build_iteration_user_message(&state, &iteration_args());
+        assert!(message.contains("Pre-registered expectations:"));
+        assert!(
+            message.contains(
+                "expectation e1 \"line count\": expected \"12\" — unobserved"
+            )
+        );
+        assert!(
+            message.contains(
+                "expectation e3 \"file count\": expected \"7\" — observed \"7\" (matched at iteration 3)"
+            )
+        );
+        assert!(
+            message.contains(
+                "expectation e2 \"row count\": expected \"40\" — observed \"41\" (mismatched at iteration 2)"
+            )
+        );
+    }
+
+    #[test]
+    fn completion_anchor_renders_when_recorded() {
+        let mut state = state_with_expectations(Vec::new());
+        state.completion_anchor = Some(CompletionAnchor {
+            kind: CompletionAnchorKind::External,
+            note: Some("pre-existing project test".to_string()),
+            claimed_confidence: ClaimedConfidence::High,
+        });
+        let message = build_iteration_user_message(&state, &iteration_args());
+        assert!(
+            message.contains("completion anchored externally (correctness-class check passed)")
+        );
+    }
+
+    #[test]
+    fn no_completion_anchor_renders_nothing() {
+        let state = state_with_expectations(Vec::new());
+        assert!(
+            !build_iteration_user_message(&state, &iteration_args()).contains("completion anchor")
+        );
+    }
+
+    fn iteration_args() -> IterationUserMessageArgs<'static> {
+        IterationUserMessageArgs {
+            current_date: "2026-01-01",
+            current_task: None,
+            loop_info: None,
+            repo_memory_dir: None,
+            repo_memory_index: None,
+            run_budget: None,
+            stall_limit: None,
+            workspace: None,
+        }
+    }
+}
 
 pub const RUN_SUMMARY_SYSTEM_PROMPT: &str = concat!(
     "You are the reporting step at the end of a solid-state harness run.",
@@ -290,6 +424,23 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         sections.push(verification_text);
     }
 
+    // Pre-registered expectations (the registered-before-results contract)
+    // and the latest completion anchor ride along with the verification
+    // story, so a fresh loop sees the registered values before it computes
+    // anything and sees how the last completion was anchored. Both renderings
+    // come from the shared core/state helpers.
+    let expectations_text = crate::core::state::describe_expectations(state);
+    if !expectations_text.is_empty() {
+        sections.push(format!(
+            "Pre-registered expectations:\n{}",
+            expectations_text
+        ));
+    }
+
+    if state.completion_anchor.is_some() {
+        sections.push(crate::core::state::describe_completion_anchor(state));
+    }
+
     if let Some(streak) = &state.verification_streak {
         if streak.consecutive_failures >= 2 {
             sections.push(format!(
@@ -495,6 +646,7 @@ fn run_reason_description(reason: HarnessRunReason) -> &'static str {
         HarnessRunReason::MaxIterations => "the cycle budget ran out before the goal completed",
         HarnessRunReason::Partial => "some tasks were dropped without completing — the goal was only partially accomplished",
         HarnessRunReason::Planned => "plan-only mode stopped after task decomposition — resume the session to execute the plan",
+        HarnessRunReason::Unreconciled => "the goal finished but at least one expectation was left unreconciled — the state is persisted and the recorded anomalies should be reviewed before trusting the results",
     }
 }
 
@@ -508,6 +660,7 @@ fn reason_wire_tag(reason: HarnessRunReason) -> &'static str {
         HarnessRunReason::MaxIterations => "max-iterations",
         HarnessRunReason::Partial => "partial",
         HarnessRunReason::Planned => "planned",
+        HarnessRunReason::Unreconciled => "unreconciled",
     }
 }
 

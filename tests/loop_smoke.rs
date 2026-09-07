@@ -95,7 +95,7 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
             tool_call_response("stale", "finish_task", serde_json::json!({"status":"completed","summary":"earlier check passed"})),
             tool_call_response("restore", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
             tool_call_response("fresh", route, serde_json::json!({"command":assertion})),
-            tool_call_response("f3", "finish_task", serde_json::json!({"status":"completed","summary":"one assertion passed"})),
+            tool_call_response("f3", "finish_task", serde_json::json!({"status":"completed","summary":"one assertion passed","confidence":"high","anchor":"none","anchorNote":"the assertion script is self-authored; no external fixture exists"})),
             text_response("Artifact verified."),
         ]);
         let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -119,7 +119,83 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         assert!(records[2].evidence.as_ref().unwrap().verifies_work());
         assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.contains("not accepted yet — this task edited")).count(), 3);
         assert_eq!(std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(), "correct\n");
+        let anchor = result.state.completion_anchor.as_ref().expect("completion anchor recorded");
+        assert_eq!(anchor.kind, drip::core::types::CompletionAnchorKind::None, "{route}");
+        assert_eq!(anchor.claimed_confidence, drip::core::types::ClaimedConfidence::High, "{route}");
     }
+}
+
+/// The expectation gate end to end: an "external" anchor on a check that
+/// names the edited artifact is downgraded, a mismatched observation refuses
+/// `completed`, and `unreconciled` finishes the run with exit 0, the anomaly
+/// in the payload, and a calibration record beside the state file.
+#[tokio::test]
+async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({
+            "tasks":["produce artifact"],
+            "expectations":[{"subject":"artifact sign","expected":"positive"}]
+        })),
+        text_response("planned"),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+        tool_call_response("v", "VERIFY", serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact.txt fixture"}})),
+        tool_call_response("f1", "finish_task", serde_json::json!({
+            "status":"completed","summary":"done","confidence":"high","anchor":"none","anchorNote":"no external fixture",
+            "observations":[{"subject":"artifact sign","observed":"negative","matches":false}]
+        })),
+        tool_call_response("f2", "finish_task", serde_json::json!({
+            "status":"unreconciled","summary":"done","confidence":"low","anchor":"none","anchorNote":"no external fixture",
+            "observations":[{"subject":"artifact sign","observed":"negative","matches":false}],
+            "anomalies":[{"subject":"artifact sign","expected":"positive","observed":"negative","note":"cannot reconcile"}]
+        })),
+        text_response("Artifact produced; sign unreconciled."),
+    ]);
+    let state_path = dir.path().join("session").join("state.json");
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a measured artifact".into(),
+        max_iterations: Some(6), model: Some("mock".into()), url: Some(url),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(state_path.clone()),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+
+    assert_eq!(result.reason, HarnessRunReason::Unreconciled, "error: {:?}", result.error_message);
+    assert_eq!(result.state.anomalies.len(), 1);
+    assert_eq!(result.state.expectations[0].observations.len(), 1);
+    let anchor = result.state.verifications.as_ref().unwrap()[0].evidence.as_ref().unwrap().anchor.clone().expect("anchor recorded");
+    assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::SelfAuthored, "names the edited artifact");
+    assert!(anchor.downgraded_reason.as_deref().unwrap_or_default().contains("artifact.txt"));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.detail.contains("anchor downgraded to self-authored")));
+    assert!(events.iter().any(|event| event.detail.contains("P1 against the model")));
+
+    let record = drip::cli::run_record::build_run_record(&drip::cli::run_record::BuildRunRecordArgs {
+        ended_at: "2026-01-01T00:00:00.000Z", goal: "produce a measured artifact", goal_id: "g1",
+        max_iterations: Some(6), pending_operator_messages: 0, result: &result,
+    });
+    assert_eq!(record.reason, "unreconciled");
+    assert_eq!(record.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
+    assert_eq!(record.calibration.as_ref().map(|calibration| calibration.claimed_confidence.as_str()), Some("low"));
+    let payload = drip::cli::headless_output::headless_result_payload(drip::cli::headless_output::HeadlessResultArgs {
+        record: &record, result_path: "/r", session_id: "s", session_id_prefix: "s", state_path: "/s", transcript_path: "/t",
+    });
+    assert_eq!(payload.exit_code, 0);
+    assert!(payload.continue_command.is_none());
+
+    let calibration = std::fs::read_to_string(dir.path().join("session").join("calibration.jsonl")).expect("calibration trace written");
+    let lines: Vec<&str> = calibration.lines().collect();
+    assert_eq!(lines.len(), 1, "{calibration}");
+    assert!(lines[0].contains("\"status\":\"unreconciled\"") && lines[0].contains("\"claimedConfidence\":\"low\""), "{calibration}");
+    assert!(lines[0].contains("\"selfAuthored\":1") && lines[0].contains("\"mismatched\":1") && lines[0].contains("\"anomalies\":1"), "{calibration}");
 }
 
 #[tokio::test]

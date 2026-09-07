@@ -107,6 +107,10 @@ pub struct ParsedCliArgs {
     pub inspect: bool,
     /// Optional session id or prefix for --inspect.
     pub inspect_id: Option<String>,
+    /// Append a verifier reward (0..=1) to a session's calibration trace and print the merged records.
+    pub reward: Option<f64>,
+    /// Optional session id or prefix for --reward.
+    pub reward_id: Option<String>,
     /// Replay the persisted outcome of a session's most recent run and exit.
     pub result: bool,
     /// Optional session id or prefix for --result.
@@ -210,6 +214,8 @@ impl Default for ParsedCliArgs {
             full: false,
             inspect: false,
             inspect_id: None,
+            reward: None,
+            reward_id: None,
             result: false,
             result_id: None,
             wait: false,
@@ -649,6 +655,24 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--reward" => {
+                if let Some(raw) = take_required_value(argv, index, "--reward", &mut parsed.errors) {
+                    match raw.parse::<f64>() {
+                        Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => parsed.reward = Some(value),
+                        _ => parsed.errors.push(format!(
+                            "--reward needs a score between 0 and 1, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+
+                    if let Some(reference) = take_session_ref(argv, index) {
+                        parsed.reward_id = Some(reference);
+                        index += 1;
+                    }
+                }
+            }
             "--marketplace-list" => {
                 parsed.marketplace_list = true;
             }
@@ -883,6 +907,18 @@ mod tests {
         assert!(!parse(&["--max-iterations", "0"]).errors.is_empty());
         assert!(!parse(&["--max-iterations"]).errors.is_empty());
         assert_eq!(parse(&["--max-iterations", "7"]).max_iterations, Some(7));
+    }
+
+    #[test]
+    fn parses_reward_score_with_optional_session_ref() {
+        assert_eq!(parse(&["--reward", "0.5"]).reward, Some(0.5));
+        assert_eq!(parse(&["--reward", "0"]).reward, Some(0.0));
+        let with_ref = parse(&["--reward", "1", "1ea4"]);
+        assert_eq!(with_ref.reward, Some(1.0));
+        assert_eq!(with_ref.reward_id.as_deref(), Some("1ea4"));
+        assert!(!parse(&["--reward", "1.5"]).errors.is_empty());
+        assert!(!parse(&["--reward", "abc"]).errors.is_empty());
+        assert!(!parse(&["--reward"]).errors.is_empty());
     }
 
     #[test]

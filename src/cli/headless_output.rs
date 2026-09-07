@@ -57,6 +57,15 @@ pub struct HeadlessResultPayload {
     pub payload_type: String,
     /// Token/latency economics (calls, tokens, per-task attribution, retry waits, wall time); null on pre-0.31 records.
     pub usage: Option<HarnessRunUsage>,
+    /// How the last completion was anchored (external check vs declared none) and the confidence the agent claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_anchor: Option<crate::core::types::CompletionAnchor>,
+    /// Expectations the run could not reconcile (reason "unreconciled", exit 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anomalies: Option<Vec<crate::core::types::HarnessAnomaly>>,
+    /// Run-level calibration record (claimed confidence next to evidence class), for diffing against a verifier's reward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<crate::core::calibration::CalibrationRecord>,
 }
 
 pub fn headless_event_line(event: &HarnessEvent, json: bool) -> Option<String> {
@@ -106,9 +115,16 @@ pub struct HeadlessResultArgs<'a> {
     pub transcript_path: &'a str,
 }
 
+/// Reasons whose work is complete: "unreconciled" finished every task but
+/// left a pre-registered expectation it could not reconcile — a visible
+/// anomaly, not a failure, so it exits 0 like "completed".
+pub fn reason_is_complete(reason: &str) -> bool {
+    reason == "completed" || reason == "unreconciled"
+}
+
 pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPayload {
     let record = args.record;
-    let completed = record.reason == "completed";
+    let completed = reason_is_complete(&record.reason);
     // Resuming with the budget the caller already chose is the best default; a
     // run that never had a cap resumes uncapped too.
     let suggested_max_iterations = record.max_iterations;
@@ -168,6 +184,9 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
         transcript_path: args.transcript_path.to_string(),
         payload_type: "result".to_string(),
         usage: record.usage.clone(),
+        completion_anchor: record.completion_anchor.clone(),
+        anomalies: record.anomalies.clone().filter(|anomalies| !anomalies.is_empty()),
+        calibration: record.calibration.clone(),
     }
 }
 
@@ -193,6 +212,9 @@ mod tests {
             summary: Some("done".to_string()),
             usage: None,
             task_stats: TaskStats::default(),
+            completion_anchor: None,
+            anomalies: None,
+            calibration: None,
         }
     }
 
@@ -263,6 +285,34 @@ mod tests {
         });
         assert_eq!(awaiting.exit_code, 2);
         assert_eq!(awaiting.continue_command.as_deref(), Some("drip --resume abcdefgh"));
+    }
+
+    /// Unreconciled work is complete work with a visible anomaly: exit 0, no
+    /// continuation, and the anomalies ride along in the payload.
+    #[test]
+    fn unreconciled_exits_zero_and_carries_its_anomalies() {
+        let mut unreconciled_record = record("unreconciled", Some(5));
+        unreconciled_record.anomalies = Some(vec![crate::core::types::HarnessAnomaly {
+            subject: "output sign".to_string(),
+            expected: "positive".to_string(),
+            observed: "negative".to_string(),
+            note: "two derivations agree and neither explains the sign".to_string(),
+        }]);
+        let unreconciled = headless_result_payload(HeadlessResultArgs {
+            record: &unreconciled_record,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        });
+        assert_eq!(unreconciled.exit_code, 0);
+        assert!(unreconciled.continue_command.is_none());
+        assert!(unreconciled.continuation.is_none());
+        assert_eq!(unreconciled.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
+        let json = serde_json::to_string(&unreconciled).unwrap();
+        assert!(json.contains("\"reason\":\"unreconciled\""), "{json}");
+        assert!(json.contains("\"anomalies\":[{\"subject\":\"output sign\""), "{json}");
     }
 
     #[test]

@@ -14,10 +14,56 @@ needs no runtime.
 ## Install
 
 ```sh
-cargo install --path .        # puts `drip` and `dripw` on your PATH
+cargo install --path .        # puts `drip`, `dripw`, and `drip-mcp` on your PATH
 # or build in place:
 cargo build --release && ./target/release/drip "goal"
 ```
+
+## MCP server (drip-mcp)
+
+Claude Code normally drives drip through the Bash tool. With Bash disabled,
+`drip-mcp` keeps drip reachable: it is a stdio MCP server that passes each
+call straight through to the `drip` CLI and returns its stdout, stderr, and
+exit code as the tool result.
+
+Register the server in `.mcp.json`:
+
+```json
+{"mcpServers":{"drip":{"command":"drip-mcp"}}}
+```
+
+or with the Claude CLI:
+
+```sh
+claude mcp add --scope user drip -- drip-mcp
+```
+
+To turn Bash off while keeping drip access, add this to Claude Code's
+`settings.json`:
+
+```json
+{"permissions":{"deny":["Bash"]}}
+```
+
+The server exposes one tool, `drip`. Its `args` array is passed to the
+`drip` executable verbatim — no shell in between:
+
+```json
+{"name":"drip","arguments":{"args":["--json","--max-iterations","10","fix the bug"]}}
+{"name":"drip","arguments":{"args":["--detach","long-running goal","--json"]}}
+{"name":"drip","arguments":{"args":["--wait","<sessionId>","--timeout-secs","600"]}}
+```
+
+Long goals should not block the tool call: start with `--detach` (it returns
+`{sessionId, pid, waitCommand}` immediately) and collect with
+`--wait <id> --timeout-secs N` in a follow-up call; the wait exits 124 on
+timeout. Calls also accept `cwd` (working directory) and `timeout_secs`
+(default 600), which kills a runaway `drip` process and reports it as a
+tool error.
+
+`drip-mcp` is a passthrough, not a sandbox: denying `Bash` removes the
+shell tool from the model's reach, but anything `drip` itself is able to
+execute, it still can.
 
 ## Quickstart
 

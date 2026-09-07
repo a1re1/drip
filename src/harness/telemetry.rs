@@ -252,10 +252,35 @@ pub struct RunTelemetryMaintenanceArgs {
 
 /// Goal for a --lite draft run's harden resume: the original goal, prefixed
 /// and truncated so the hardening pass keeps the operator's original intent.
+/// Operator review opt-out phrases are stripped first so the full-rigor
+/// follow-up cannot silently re-disable review.
 pub fn draft_harden_goal(goal: &str) -> String {
     const MAX_GOAL_CHARS: usize = 200;
-    let truncated: String = goal.chars().take(MAX_GOAL_CHARS).collect();
+    let mut cleaned = goal.to_string();
+    for phrase in crate::harness::r#loop::REVIEW_OPT_OUT_PHRASES {
+        while let Some(start) = find_ascii_case_insensitive(&cleaned, phrase) {
+            cleaned.replace_range(start..start + phrase.len(), "");
+        }
+    }
+    while cleaned.contains("  ") {
+        cleaned = cleaned.replace("  ", " ");
+    }
+    let cleaned = cleaned.trim();
+    let truncated: String = cleaned.chars().take(MAX_GOAL_CHARS).collect();
     format!("Harden the draft: {truncated}")
+}
+
+/// Case-insensitive substring search over raw bytes. The phrases handled here
+/// are pure ASCII, so byte-window matching is char-boundary safe; this avoids
+/// slicing offsets derived from `to_lowercase()`, whose length can differ
+/// from the original on non-ASCII text.
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return None;
+    }
+    h.windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
 }
 
 /// Resume command printed for a --lite draft run: full session id, the harden
@@ -279,12 +304,29 @@ fn create_harness_state(goal: &str) -> HarnessState {
 #[cfg(test)]
 mod tests {
 	use super::{
-		canonicalize_tool_input, create_harness_state, record_tool_telemetry,
+		canonicalize_tool_input, create_harness_state, draft_harden_goal, record_tool_telemetry,
 		run_telemetry_maintenance, tool_telemetry_key, RecordToolTelemetryArgs, RunTelemetryMaintenanceArgs,
 		TelemetryMaintenanceResult,
 	};
 	use crate::core::types::{DEFAULT_TELEMETRY_CONFIG, HarnessState, HarnessTelemetryConfig, PromotedContextEntry};
 	use std::collections::HashSet;
+
+	// The harden resume command feeds --new-goal with the draft's original
+	// goal; inherited opt-out phrases would re-disable review for the
+	// full-rigor follow-up, so they must be stripped before prefixing.
+	#[test]
+	fn draft_harden_goal_strips_review_opt_out_phrases() {
+		let goal = "Ship the feature, no reviewer, and do not run verify gates";
+		let g = draft_harden_goal(goal);
+		assert!(g.starts_with("Harden the draft: "), "missing prefix: {g}");
+		assert_eq!(
+			crate::harness::r#loop::detect_review_opt_out(&g),
+			None,
+			"opt-out phrases survived stripping: {g}"
+		);
+		assert!(!g.contains("no reviewer") && !g.contains("do not run verify"));
+		assert!(g.contains("Ship the feature") && g.contains("gates"));
+	}
 
 	// const config = { ...DEFAULT_TELEMETRY_CONFIG, baseTtl: 3, maxTtl: 48, promoteThreshold: 2 };
 	fn config() -> HarnessTelemetryConfig {

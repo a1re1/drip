@@ -1702,7 +1702,11 @@ pub struct HarnessOpContext {
 /// title-only reviewer request) or an explicit reviewer role is attached.
 fn is_reviewer_task_title(title: &str, role: Option<&str>) -> bool {
     let trimmed = title.trim();
-    if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("review") {
+    if trimmed
+        .as_bytes()
+        .get(..6)
+        .map_or(false, |b| b.eq_ignore_ascii_case(b"review"))
+    {
         return true;
     }
     role.is_some_and(|role| role.trim().eq_ignore_ascii_case("reviewer"))
@@ -3782,6 +3786,19 @@ mod review_opt_out_enforcement_tests {
             "ordinary author/planner work stays valid"
         );
         assert!(outcome.state_changed);
+    }
+
+    #[test]
+    fn multi_byte_title_is_accepted_without_panic_under_opt_out() {
+        let mut state = create_harness_state("opt-out goal");
+        // "indexé" is multi-byte: a byte-offset slice of the first 6 bytes
+        // would split the é and panic. The title is not a Review* title, so
+        // the whole batch must be accepted.
+        let raw = r#"{"tasks": [{"title": "indexé items"}]}"#;
+        let outcome = apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+        assert_eq!(state.tasks.len(), 1);
+        assert!(outcome.state_changed);
+        assert!(!outcome.text.contains("operator disabled review"));
     }
 
     #[test]

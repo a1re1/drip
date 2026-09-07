@@ -174,6 +174,14 @@ pub struct ParsedCliArgs {
     pub distill_min_lines: Option<i64>,
     /// --bash command timeout in milliseconds (default 120000).
     pub bash_timeout_ms: Option<i64>,
+    /// Draft mode: single author lane, no reviewer task, no completion anchor
+    /// gate, no run summary; ends with reason "draft" and a continueCommand
+    /// for the full-rigor pass.
+    pub lite: bool,
+    /// Operator review/verify opt-out: skip the verified_by review chain and
+    /// do not fail finish_task closed on a missing/self-authored anchor.
+    /// Usable with any roles preset; implied by --lite.
+    pub no_review: bool,
 }
 
 impl Default for ParsedCliArgs {
@@ -188,6 +196,8 @@ impl Default for ParsedCliArgs {
             profile: None,
             resume: false,
             resume_id: None,
+            lite: false,
+            no_review: false,
             tools_path: "./tools".to_string(),
             version: false,
             prompt: None,
@@ -277,6 +287,10 @@ fn is_session_ref(token: &str) -> bool {
 /// Iteration budget for --praeparare when the operator did not cap the run:
 /// the pass must fit checks, fixes, the merge, and the PR creation.
 pub const PRAEPARARE_DEFAULT_MAX_ITERATIONS: i64 = 15;
+
+/// Iteration budget for --lite when the operator did not cap the run: a
+/// single-author draft pass, far below the default lane.
+pub const LITE_DEFAULT_MAX_ITERATIONS: i64 = 8;
 
 /// The --praeparare canned goal with the optional positional (or --prompt)
 /// goal appended as extra operator context. Pure, so the detached child
@@ -746,6 +760,13 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--review" => {
                 parsed.review = true;
             }
+            "--lite" => {
+                parsed.lite = true;
+                parsed.no_review = true;
+            }
+            "--no-review" => {
+                parsed.no_review = true;
+            }
             "--base" => {
                 if let Some(value) = take_required_value(argv, index, "--base", &mut parsed.errors) {
                     parsed.review_base = Some(value);
@@ -907,6 +928,36 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
         }
         if parsed.max_iterations.is_none() {
             parsed.max_iterations = Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS);
+        }
+    }
+
+    // Draft mode is mutually exclusive with the lanes built on the reviewed
+    // machinery: the holistic diff review, the praeparare planning run, the
+    // dry-run plan, and every explicit roles preset (lite IS a preset).
+    if parsed.lite {
+        for (flag, taken) in [
+            ("--review", parsed.review),
+            ("--praeparare", parsed.praeparare),
+            ("--plan", parsed.plan),
+            ("--roles", parsed.roles_preset_or_path.is_some()),
+        ] {
+            if taken {
+                parsed.errors.push(format!(
+                    "--lite cannot be combined with {flag}: --lite selects its own draft preset; harden a draft with --resume --roles reviewed instead."
+                ));
+            }
+        }
+    }
+
+    // Draft mode resolution: the lite preset (planner + author, no reviewer),
+    // the operator opt-out it implies, and a cheap default iteration budget
+    // that an explicit --max-iterations still overrides. Skipped when a
+    // conflict was detected above so the error path stays clean.
+    if parsed.lite && parsed.errors.is_empty() {
+        parsed.no_review = true;
+        parsed.roles_preset_or_path = Some("lite".to_string());
+        if parsed.max_iterations.is_none() {
+            parsed.max_iterations = Some(LITE_DEFAULT_MAX_ITERATIONS);
         }
     }
 
@@ -1437,5 +1488,85 @@ mod tests {
         ])
         .errors
         .is_empty());
+    }
+
+    // --- --lite draft mode ---
+
+    #[test]
+    fn lite_selects_the_lite_preset_no_review_and_default_iteration_budget() {
+        let parsed = parse(&["--lite", "draft the thing"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(parsed.lite);
+        assert!(parsed.no_review, "--lite must imply the operator opt-out");
+        assert_eq!(parsed.roles_preset_or_path.as_deref(), Some("lite"));
+        assert_eq!(parsed.max_iterations, Some(LITE_DEFAULT_MAX_ITERATIONS));
+        assert_eq!(parsed.goal.as_deref(), Some("draft the thing"));
+    }
+
+    #[test]
+    fn lite_preserves_an_explicit_iteration_budget() {
+        let parsed = parse(&["--lite", "--max-iterations", "20"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert_eq!(parsed.max_iterations, Some(20));
+    }
+
+    #[test]
+    fn no_review_is_usable_with_other_presets() {
+        let parsed = parse(&["--roles", "reviewed", "--no-review"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(parsed.no_review);
+        assert!(!parsed.lite);
+        assert_eq!(parsed.roles_preset_or_path.as_deref(), Some("reviewed"));
+    }
+
+    #[test]
+    fn lite_conflicts_with_review_praeparare_plan_and_roles() {
+        for conflicting in [
+            vec![
+                "--lite",
+                "--review",
+                "--context",
+                "review the draft changes for correctness",
+            ],
+            vec!["--lite", "--praeparare"],
+            vec!["--lite", "--plan"],
+            vec!["--lite", "--roles", "research"],
+        ] {
+            let parsed = parse(&conflicting);
+            assert!(
+                parsed
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("--lite cannot be combined")),
+                "expected a --lite conflict error for {conflicting:?}, got {:?}",
+                parsed.errors
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_unchanged_without_lite_or_no_review() {
+        let parsed = parse(&["do the thing"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(!parsed.lite);
+        assert!(!parsed.no_review);
+        assert_eq!(parsed.roles_preset_or_path, None);
+        assert_eq!(parsed.max_iterations, None);
     }
 }

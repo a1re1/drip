@@ -386,6 +386,22 @@ It never squashes, rebases, amends, or force-pushes, and only ever creates DRAFT
 never ready-for-review ones. It refuses to run on the base branch itself and requires
 `gh auth status` to succeed before making any change.
 
+## Lite mode and review opt-out
+
+`drip --lite` runs a draft pass: a single author lane, no reviewer task, no completion
+anchor gate, and no end-of-run summary. The run ends with reason `draft` (exit code 0)
+and prints a `continueCommand` for the full-rigor pass. `--no-review` skips just the
+verified_by review chain and the finish_task completion-anchor gate for this run; it is
+usable with any `--roles` preset and is implied by `--lite`.
+
+Draft, then harden:
+
+```sh
+drip --lite "draft the parser migration"
+# ends with reason "draft" and prints:
+drip --resume <sessionId> --roles reviewed --skill verify-before-done --new-goal "Harden the draft: draft the parser migration"
+```
+
 ---
 
 ## Built-in role presets

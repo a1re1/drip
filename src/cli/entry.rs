@@ -927,6 +927,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         signal: Some(controller.clone()),
         skills: active_skills.clone(),
         summarize_run: None,
+        lite: args.cli_args.lite,
+        no_review: args.cli_args.no_review || args.cli_args.lite,
         tools: build_tools(),
         tool_services: None,
     })
@@ -1062,6 +1064,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 signal: Some(controller.clone()),
                 skills: active_skills.clone(),
                 summarize_run: None,
+                lite: args.cli_args.lite,
+                no_review: args.cli_args.no_review || args.cli_args.lite,
                 tools: build_tools(),
                 tool_services: None,
             }))
@@ -1907,6 +1911,16 @@ pub async fn main(argv: Vec<String>) -> i32 {
         },
         None => None,
     };
+
+    // A --lite / --roles conflict (or any other strict parse error) must fail
+    // with exit 1 here — before the headless runner, the TUI, or any queue
+    // drain can act on the partially-resolved flags.
+    if !cli_args.errors.is_empty() {
+        for problem in &cli_args.errors {
+            eprintln!("{problem}");
+        }
+        return 1;
+    }
 
     if !cli_args.tui {
         let Some(goal_text) = goal_text.filter(|text| !text.is_empty()) else {

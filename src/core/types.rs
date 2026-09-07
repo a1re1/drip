@@ -449,6 +449,14 @@ pub struct HarnessState {
 	/// Live streak of identical verification failures; cleared by a pass or a changed failure.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verification_streak: Option<HarnessVerificationStreak>,
+	/// Operator disabled the review/verify lane for this run: set explicitly
+	/// by --no-review/--lite or auto-detected from opt-out phrases in the
+	/// goal/operator messages. Sticky: persisted and restored with the state.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub review_opt_out: Option<bool>,
+	/// First matched opt-out phrase; keeps the run-warning one-shot per run.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub opt_out_warning_emitted: Option<String>,
 	/// Values expected from the work, registered before results exist. Immutable
 	/// once written; revisions append observations instead of rewriting these.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -500,6 +508,8 @@ impl Default for HarnessState {
 			workspace_edits: None,
 			verifications: None,
 			verification_streak: None,
+			review_opt_out: None,
+			opt_out_warning_emitted: None,
 			expectations: Vec::new(),
 			anomalies: Vec::new(),
 			completion_anchor: None,
@@ -777,6 +787,10 @@ pub enum HarnessRunReason {
 	Aborted,
 	#[serde(rename = "completed")]
 	Completed,
+	/// Draft mode (--lite): every task finished, but the run is a draft for
+	/// the operator to review and harden rather than a shipped result.
+	#[serde(rename = "draft")]
+	Draft,
 	#[serde(rename = "error")]
 	Error,
 	#[serde(rename = "futile")]

@@ -292,6 +292,54 @@ fn planned_author_role() -> RoleDefinition {
 	}
 }
 
+/// Draft-mode planner: same read-only planning surface as the reviewed
+/// planner, but framed for one cheap pass — no reviewer will follow.
+fn lite_planner_role() -> RoleDefinition {
+    RoleDefinition {
+        model: Some(PRESET_FAST_PROFILE_ID.to_string()),
+        name: "planner".to_string(),
+        prompt: Some(
+            [
+                "You are the draft-mode planner. Decompose the goal into a minimal task list",
+                "that a single author can implement in one cheap pass. No reviewer will run, so",
+                "keep tasks small, concrete, and self-verifying. Read-only tools.",
+            ]
+            .join("\n"),
+        ),
+        r#loop: Some(PartialHarnessLoopConfig {
+            max_tool_rounds_per_cycle: Some(8),
+            max_tool_result_chars: Some(16_000),
+            ..PartialHarnessLoopConfig::default()
+        }),
+        ..RoleDefinition::default()
+    }
+}
+
+/// Draft-mode author: full tool access, no verified_by — nothing reviews this
+/// work until the operator hardens the draft with --resume --roles reviewed.
+fn lite_author_role() -> RoleDefinition {
+    RoleDefinition {
+        model: Some(PRESET_FAST_PROFILE_ID.to_string()),
+        name: "author".to_string(),
+        prompt: Some(
+            [
+                "You are the draft-mode author. Implement the current task directly and cheaply:",
+                "this is a v0 draft the operator will harden later with --roles reviewed. No",
+                "reviewer task will run — verify your own work with the tools you have and",
+                "finish_task when the draft is coherent.",
+            ]
+            .join("\n"),
+        ),
+        r#loop: Some(PartialHarnessLoopConfig {
+            max_tool_rounds_per_cycle: Some(8),
+            max_tool_result_chars: Some(16_000),
+            ..PartialHarnessLoopConfig::default()
+        }),
+        // no tools field = full tool access; no verified_by = no reviewer loop
+        ..RoleDefinition::default()
+    }
+}
+
 fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 	match name {
 		"reviewed" => Some(RoleSetupSource {
@@ -345,6 +393,13 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 			}),
 			roles: vec![architect_role(), planned_author_role()],
 		}),
+		"lite" => Some(RoleSetupSource {
+			bindings: Some(HarnessRoleBindings {
+				planning: Some("planner".to_string()),
+				task: Some("author".to_string()),
+			}),
+			roles: vec![lite_planner_role(), lite_author_role()],
+		}),
 		_ => None,
 	}
 }
@@ -360,7 +415,7 @@ pub fn builtin_role_preset(name: &str) -> Option<RoleSetupSource> {
 
 /// The built-in preset names, for help text and error messages.
 pub fn builtin_role_preset_names() -> Vec<&'static str> {
-	vec!["reviewed", "research", "team", "planned"]
+	vec!["reviewed", "research", "team", "planned", "lite"]
 }
 
 /// Resolves a --roles value to its role setup: a built-in preset name first, then

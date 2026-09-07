@@ -1439,6 +1439,40 @@ pub struct PartialHarnessTelemetryConfig {
 
 /// One operator inbox entry as `collectOperatorMessages` returns it
 /// (`string | { at?: string | null; text: string }`).
+/// Operator phrases that opt a run out of the review/verification lane.
+/// One constant so CLI docs, tests, and harness detection share the exact
+/// list; matched case-insensitively as substrings of the goal or a delivered
+/// operator (--send/--enqueue) message.
+pub const REVIEW_OPT_OUT_PHRASES: [&str; 7] = [
+    "no review task",
+    "do not create a review task",
+    "don't create a review task",
+    "no reviewer",
+    "no verify",
+    "do not run verify",
+    "don't run verify",
+];
+
+/// Case-insensitive detection of the operator opt-out phrases. Returns the
+/// first matched phrase in list order. Ordinary review requests like
+/// "review the design" never match.
+pub fn detect_review_opt_out(text: &str) -> Option<String> {
+    let lowered = text.to_lowercase();
+    REVIEW_OPT_OUT_PHRASES
+        .iter()
+        .find(|phrase| lowered.contains(&phrase.to_lowercase()))
+        .map(|phrase| phrase.to_string())
+}
+
+/// Sticky opt-out decision for a piece of operator text: (opted out, matched
+/// phrase). Explicit --no-review/--lite runs carry no invented match.
+pub fn review_opt_out_from(text: &str) -> (bool, Option<String>) {
+    match detect_review_opt_out(text) {
+        Some(phrase) => (true, Some(phrase)),
+        None => (false, None),
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OperatorInboxEntry {
     pub at: Option<String>,
@@ -1486,6 +1520,13 @@ pub struct SolidStateHarnessOptions {
     pub stall_limit: Option<i64>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
+    /// Draft mode (--lite): single author lane; terminal reason "draft",
+    /// no end-of-run summary, and (with no_review) no completion-anchor gate.
+    pub lite: bool,
+    /// Operator review/verify opt-out (--no-review, --lite, or a detected
+    /// opt-out phrase): the verified_by reviewer chain is skipped and a
+    /// missing/self-authored completion anchor does not block finish_task.
+    pub no_review: bool,
     /// `collectRunFacts`: ground-truth workspace facts (e.g. git status) for the run summary.
     pub collect_run_facts: Option<Box<dyn FnMut() -> Option<String> + Send>>,
     pub initial_inbox_cursor: Option<i64>,
@@ -3108,6 +3149,58 @@ impl HarnessRun {
             fresh_operator_messages.retain(|entry| !entry.text.trim().is_empty());
         }
 
+        // Operator review/verify opt-out (sticky). Explicit --no-review/--lite
+        // flips it without an invented matched phrase; a phrase in the goal or
+        // in any delivered operator message flips it and emits ONE run-warning
+        // naming the first matched phrase. Detection happens here, at the
+        // cycle boundary, before the steering can drive planning or finishes;
+        // state persistence makes the decision visible to every later cycle.
+        if self.state.review_opt_out.is_none() && (self.options.lite || self.options.no_review) {
+            self.state.review_opt_out = Some(true);
+            self.persist();
+        }
+        if self.state.opt_out_warning_emitted.is_none() {
+            let (opt_out, matched) = review_opt_out_from(&self.state.goal);
+            if opt_out {
+                self.state.review_opt_out = Some(true);
+                self.state.opt_out_warning_emitted = matched.clone();
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData {
+                        reason: matched.clone(),
+                        ..Default::default()
+                    }),
+                    detail: format!(
+                        "operator review/verify opt-out detected (matched phrase: {:?}); review chain and completion anchor gate disabled for this run",
+                        matched.unwrap_or_default()
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::RunWarning,
+                });
+                self.persist();
+            }
+        }
+        for entry in &fresh_operator_messages {
+            let (opt_out, matched) = review_opt_out_from(&entry.text);
+            if opt_out {
+                self.state.review_opt_out = Some(true);
+                if self.state.opt_out_warning_emitted.is_none() {
+                    self.state.opt_out_warning_emitted = matched.clone();
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData {
+                            reason: matched.clone(),
+                            ..Default::default()
+                        }),
+                        detail: format!(
+                            "operator message opted the run out of review/verification (matched phrase: {:?})",
+                            matched.unwrap_or_default()
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+            }
+        }
+
         let used = self.state.iteration - self.start_iteration;
         // The transcript shows the run-level budget alongside the loop-local
         // cycle count — followers used to see "cycle 1/3" while the run died
@@ -3812,6 +3905,10 @@ impl HarnessRun {
                             disabled: true,
                         }),
                     ask_user_enabled: self.options.ask_user_enabled,
+                    // Sticky opt-out decided at the cycle boundary (goal
+                    // phrase, operator message, --no-review, --lite); also
+                    // rejects delayed Review*/reviewer task work mid-run.
+                    review_opt_out: self.state.review_opt_out == Some(true),
                 };
                 let outcome = match op {
                     Ok(op) => {
@@ -4566,6 +4663,11 @@ impl HarnessRun {
                 // expectation could not be reconciled: complete work with a
                 // visible anomaly, not a failure and not a caveat.
                 HarnessRunReason::Unreconciled
+            } else if self.options.lite {
+                // Draft mode (--lite): a completed run is a draft — the same
+                // terminal, exit-0 state as "completed", but the result
+                // carries the harden resume command and skips the summary.
+                HarnessRunReason::Draft
             } else {
                 HarnessRunReason::Completed
             }
@@ -4573,7 +4675,10 @@ impl HarnessRun {
             HarnessRunReason::MaxIterations
         };
 
-        if self.options.summarize_run.unwrap_or(true)
+        // Draft runs skip the end-of-run summary model call: the operator
+        // reads the result and hardens it via the continue command.
+        if reason != HarnessRunReason::Draft
+            && self.options.summarize_run.unwrap_or(true)
             && (self.state.iteration > start_iteration || self.run_error.is_some())
         {
             self.generate_run_summary(reason).await;
@@ -4624,6 +4729,7 @@ impl HarnessRun {
             HarnessRunReason::AwaitingInput => "awaiting-input",
             HarnessRunReason::Aborted => "aborted",
             HarnessRunReason::Completed => "completed",
+            HarnessRunReason::Draft => "draft",
             HarnessRunReason::Error => "error",
             HarnessRunReason::Futile => "futile",
             HarnessRunReason::MaxIterations => "max-iterations",
@@ -4641,6 +4747,18 @@ impl HarnessRun {
             iteration: self.state.iteration,
             r#type: HarnessEventType::RunComplete,
         });
+
+        // Draft mode (--lite): hand the operator the exact harden resume
+        // command — same session, reviewed role, verify-before-done skill —
+        // so one paste finishes the draft.
+        if reason == HarnessRunReason::Draft && self.continue_command.is_none() {
+            if let Some(session_id) = self.resume_target() {
+                self.continue_command = Some(crate::harness::telemetry::draft_continue_command(
+                    &session_id,
+                    &self.state.goal,
+                ));
+            }
+        }
         self.persist();
 
         HarnessRunResult {
@@ -5203,5 +5321,92 @@ mod ask_user_survey_tests {
             "injected summary must render the question and the chosen answer, got: {}",
             messages[0].text
         );
+    }
+}
+
+#[cfg(test)]
+mod review_opt_out_tests {
+    use super::*;
+    use crate::core::state::{create_harness_state, start_follow_up_goal};
+
+    #[test]
+    fn detects_every_opt_out_phrase_verbatim_and_mixed_case() {
+        for phrase in REVIEW_OPT_OUT_PHRASES {
+            assert_eq!(detect_review_opt_out(phrase), Some(phrase.to_string()));
+            let shouting = format!("PLEASE {}, THANKS", phrase.to_uppercase());
+            assert_eq!(
+                detect_review_opt_out(&shouting),
+                Some(phrase.to_string()),
+                "phrase must match case-insensitively: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_review_requests_do_not_opt_out() {
+        assert_eq!(detect_review_opt_out("review the design"), None);
+        assert_eq!(
+            detect_review_opt_out("Please review the design doc and run the test suite."),
+            None
+        );
+        assert_eq!(
+            detect_review_opt_out("A reviewer will look at this later."),
+            None
+        );
+        assert_eq!(
+            detect_review_opt_out("The verifier should verify the claims."),
+            None
+        );
+        assert_eq!(detect_review_opt_out(""), None);
+    }
+
+    #[test]
+    fn const_list_order_picks_the_named_phrase() {
+        // Detection scans the phrase list in order (not text position), so the
+        // warning names a deterministic phrase regardless of wording layout.
+        let (opt_out, matched) = review_opt_out_from("no verify. Also: NO REVIEWER please");
+        assert!(opt_out);
+        assert_eq!(matched.as_deref(), Some("no reviewer"));
+        // a text with only one phrase still names that phrase
+        assert_eq!(
+            review_opt_out_from("please, no verify on this one").1,
+            Some("no verify".to_string())
+        );
+    }
+
+    #[test]
+    fn opt_out_state_persists_and_old_states_default_to_none() {
+        let mut state = create_harness_state("g");
+        state.review_opt_out = Some(true);
+        state.opt_out_warning_emitted = Some("no verify".to_string());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"reviewOptOut\":true"));
+        let restored: HarnessState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.review_opt_out, Some(true));
+        assert_eq!(
+            restored.opt_out_warning_emitted.as_deref(),
+            Some("no verify")
+        );
+
+        // a state serialized by an older binary (without the new fields)
+        // restores cleanly with the opt-out unset
+        let legacy = serde_json::to_value(&create_harness_state("old goal")).unwrap();
+        let old: HarnessState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(old.review_opt_out, None);
+        assert_eq!(old.opt_out_warning_emitted, None);
+    }
+
+    #[test]
+    fn defaults_omit_fields_and_follow_up_goal_clears_sticky_opt_out() {
+        let mut state = create_harness_state("g");
+        let clean = serde_json::to_string(&state).unwrap();
+        assert!(!clean.contains("reviewOptOut"));
+        assert!(!clean.contains("optOutWarningEmitted"));
+
+        state.review_opt_out = Some(true);
+        state.opt_out_warning_emitted = Some("no reviewer".to_string());
+        start_follow_up_goal(&mut state, "Harden the draft: full rigor");
+        assert_eq!(state.review_opt_out, None);
+        assert_eq!(state.opt_out_warning_emitted, None);
     }
 }

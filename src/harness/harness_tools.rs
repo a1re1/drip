@@ -1692,6 +1692,20 @@ pub struct HarnessOpContext {
     /// Whether the ask_user tool is enabled for this run (--ask). When false,
     /// an AskUser op registers as a failed tool call with a clear message.
     pub ask_user_enabled: bool,
+    /// Operator review/verify opt-out in force (sticky). When true, no
+    /// verified_by reviewer chain is spawned and Review*/reviewer task work is
+    /// rejected at every ledger boundary.
+    pub review_opt_out: bool,
+}
+
+/// Whether a task title demands reviewer work: it starts with "Review" (a
+/// title-only reviewer request) or an explicit reviewer role is attached.
+fn is_reviewer_task_title(title: &str, role: Option<&str>) -> bool {
+    let trimmed = title.trim();
+    if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("review") {
+        return true;
+    }
+    role.is_some_and(|role| role.trim().eq_ignore_ascii_case("reviewer"))
 }
 
 /// The raw status field as text ("completed", "dropped"), for messages like
@@ -1759,7 +1773,35 @@ pub fn apply_harness_op(
                     direct_response: None,
                 };
             }
-            // harness_tools::HarnessTaskInput -> core_state::HarnessTaskInput
+            // harness_tools::HarnessTaskInput -> core_state::HarnessTaskInput            // Operator review opt-out: reviewer work (title starting with
+            // "Review" in any casing, or an explicit reviewer role) is refused
+            // BEFORE any ledger mutation, so a batch is never partially added.
+            if ctx.review_opt_out {
+                let blocked: Vec<String> = entries
+                    .iter()
+                    .filter(|entry| is_reviewer_task_title(&entry.title, entry.role.as_deref()))
+                    .map(|entry| {
+                        entry
+                            .role
+                            .as_deref()
+                            .map(|role| format!("{} [role: {}]", entry.title.trim(), role))
+                            .unwrap_or_else(|| entry.title.trim().to_string())
+                    })
+                    .collect();
+                if !blocked.is_empty() {
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "No tasks were added: the operator disabled review and verification for this run (--no-review / review opt-out), so reviewer work ({}) cannot be created. Reissue the batch without it; ordinary author/planner tasks are still welcome.",
+                            blocked.join(", ")
+                        ),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+            }
+
             let state_entries = entries
                 .into_iter()
                 .map(|entry| core_state::HarnessTaskInput {
@@ -1945,6 +1987,27 @@ pub fn apply_harness_op(
                     ended_loop: false,
                     direct_response: None,
                 };
+            }
+
+            // Opt-out: an existing or revised title must not become reviewer
+            // work either.
+            if ctx.review_opt_out {
+                let becomes_reviewer =
+                    core_state::get_task_by_id(state, &task_id).is_some_and(|task| {
+                        is_reviewer_task_title(&task.title, task.role.as_deref())
+                            || is_reviewer_task_title(&title, None)
+                    });
+                if becomes_reviewer {
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "Task {task_id} was not revised: the operator disabled review and verification for this run (--no-review / review opt-out), so reviewer work cannot be created or retitled into existence. Ordinary author/planner tasks are unaffected."
+                        ),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
             }
 
             let revised_task = core_state::revise_task(state, &task_id, &title);
@@ -2259,6 +2322,14 @@ pub fn apply_harness_op(
                             direct_response: None,
                         };
                     }
+                    // Review opt-out (--lite / --no-review): the operator
+                    // takes over correctness review personally, so the
+                    // finish no longer fails closed on a missing,
+                    // self-authored, or undeclared anchor. The anchor kind
+                    // is still recorded exactly as computed.
+                    (false, _, _) if ctx.review_opt_out => {
+                        crate::core::types::CompletionAnchorKind::None
+                    }
                     (false, _, _) => {
                         return HarnessOpOutcome {
                             text: "harness: not accepted yet — no correctness-class evidence: every passing check was self-authored or undeclared. Either run a VERIFY with anchor.kind=external (a check you did not author: a pre-existing test, a task-provided fixture, a published constant, an invariant independent of the implementation), or finish with anchor=\"none\" and an anchorNote explaining why no external anchor exists for this claim.".to_string(),
@@ -2374,8 +2445,10 @@ pub fn apply_harness_op(
 
             // Verify gate: completed work by a role with a reviewer does not
             // pass unexamined — a review task under the reviewer role runs
-            // next.
-            if status.finishes_work() {
+            // next. The operator review opt-out completes the task directly:
+            // no verified_by reviewer task is spawned (the gate itself is
+            // untouched for gate-on runs).
+            if status.finishes_work() && !ctx.review_opt_out {
                 if let Some(gate) = ctx.gate.as_ref() {
                     let role_name = finished_role.clone().or_else(|| gate.default_task_role.clone());
                     let verifier = role_name
@@ -3060,6 +3133,30 @@ mod apply_harness_op_tests {
         assert_eq!(state.completion_anchor.as_ref().map(|anchor| anchor.kind.clone()), Some(CompletionAnchorKind::External));
     }
 
+    /// With the operator review opt-out in force (--lite / --no-review),
+    /// the anchoring gate no longer fails closed: a finish with only
+    /// self-authored, undeclared, or absent evidence is accepted, and the
+    /// anchor kind is recorded as None exactly as the anchor="none" path
+    /// would record it.
+    #[test]
+    fn review_opt_out_finish_does_not_fail_closed_on_a_self_authored_anchor() {
+        use crate::core::types::{ClaimedConfidence, CompletionAnchorKind};
+        for anchor_kind in [None, Some("self"), Some("undeclared")] {
+            let (mut state, mut ctx) = anchoring_fixture(anchor_kind);
+            ctx.review_opt_out = true;
+            let accepted = finish(
+                &mut state,
+                &ctx,
+                r#"{"status":"completed","summary":"done","confidence":"medium"}"#,
+            );
+            assert!(accepted.task_finished, "{anchor_kind:?}: {}", accepted.text);
+            let anchor = state.completion_anchor.clone().expect("anchor recorded");
+            assert_eq!(anchor.kind, CompletionAnchorKind::None);
+            assert_eq!(anchor.claimed_confidence, ClaimedConfidence::Medium);
+            assert!(anchor.note.is_none());
+        }
+    }
+
     /// An analysis-only task (no edits, no expectations) makes no claim a
     /// check could anchor, so it finishes without a declaration.
     #[test]
@@ -3592,5 +3689,241 @@ mod apply_harness_op_tests {
         );
         assert!(!outcome.state_changed);
         assert!(!outcome.task_finished);
+    }
+}
+
+#[cfg(test)]
+mod review_opt_out_enforcement_tests {
+    use super::*;
+    use crate::core::state::create_harness_state;
+
+    fn ctx_opted_out() -> HarnessOpContext {
+        HarnessOpContext {
+            review_opt_out: true,
+            ..HarnessOpContext::default()
+        }
+    }
+
+    /// A reviewed-style gate: author carries verified_by=reviewer and the
+    /// reviewer role exists, so the finish gate would normally spawn a chain.
+    fn review_gate_ctx(review_opt_out: bool) -> HarnessOpContext {
+        let mut roles = std::collections::HashMap::new();
+        roles.insert(
+            "author".to_string(),
+            HarnessRoleSpec {
+                verified_by: Some("reviewer".to_string()),
+                blind: false,
+            },
+        );
+        roles.insert(
+            "reviewer".to_string(),
+            HarnessRoleSpec {
+                verified_by: None,
+                blind: false,
+            },
+        );
+        HarnessOpContext {
+            gate: Some(HarnessRoleGate {
+                roles,
+                default_task_role: Some("author".to_string()),
+                max_review_rounds: None,
+            }),
+            review_opt_out,
+            ..HarnessOpContext::default()
+        }
+    }
+
+    fn parse_op(name: &str, raw: &str) -> HarnessOp {
+        parse_harness_op(name, raw).expect("op parses")
+    }
+
+    fn parse_op_with(ctx: &HarnessOpContext, name: &str, raw: &str) -> HarnessOp {
+        parse_harness_op_with_gate(name, raw, ctx.gate.as_ref()).expect("op parses")
+    }
+
+    #[test]
+    fn title_only_review_task_is_rejected_without_partial_batch_mutation() {
+        let mut state = create_harness_state("opt-out goal");
+        let raw = r#"{"tasks": [{"title": "Review task-1"}]}"#;
+        let outcome = apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+        assert_eq!(
+            state.tasks.len(),
+            0,
+            "nothing may be added when the batch contains reviewer work"
+        );
+        assert!(outcome.text.contains("operator disabled review"));
+        assert!(
+            outcome.text.contains("Review task-1"),
+            "names the blocked entry"
+        );
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+    }
+
+    #[test]
+    fn reviewer_role_task_is_rejected_even_with_an_ordinary_title() {
+        let mut state = create_harness_state("opt-out goal");
+        let raw = r#"{"tasks": [{"title": "check the logs", "role": "reviewer"}]}"#;
+        let ctx = review_gate_ctx(true);
+        let outcome = apply_harness_op(&mut state, parse_op_with(&ctx, "plan_tasks", raw), &ctx);
+        assert_eq!(state.tasks.len(), 0);
+        assert!(outcome.text.contains("operator disabled review"));
+        assert!(outcome.text.contains("[role: reviewer]"));
+    }
+
+    #[test]
+    fn ordinary_author_tasks_stay_valid_under_opt_out() {
+        let mut state = create_harness_state("opt-out goal");
+        let raw = r#"{"tasks": [{"title": "Write the parser"}, {"title": "Summarize the findings", "role": "author"}]}"#;
+        let outcome = apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+        assert_eq!(
+            state.tasks.len(),
+            2,
+            "ordinary author/planner work stays valid"
+        );
+        assert!(outcome.state_changed);
+    }
+
+    #[test]
+    fn mixed_batch_is_rejected_whole_under_opt_out() {
+        let mut state = create_harness_state("opt-out goal");
+        let raw =
+            r#"{"tasks": [{"title": "Write the parser"}, {"title": "Review the parser output"}]}"#;
+        let outcome = apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+        assert_eq!(
+            state.tasks.len(),
+            0,
+            "a batch containing reviewer work must not partially mutate"
+        );
+        assert!(outcome.text.contains("Review the parser output"));
+    }
+
+    #[test]
+    fn reviewer_title_match_is_case_insensitive() {
+        let mut state = create_harness_state("case goal");
+        for raw in [
+            r#"{"tasks": [{"title": "REVIEW task-1"}]}"#,
+            r#"{"tasks": [{"title": "review the parser output"}]}"#,
+        ] {
+            let outcome =
+                apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+            assert!(
+                outcome.text.contains("operator disabled review"),
+                "raw={raw}"
+            );
+            assert_eq!(state.tasks.len(), 0);
+        }
+    }
+
+    #[test]
+    fn revised_into_reviewer_work_is_rejected_under_opt_out() {
+        let mut state = create_harness_state("opt-out goal");
+        let added = apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Write the parser"}]}"#,
+            ),
+            &ctx_opted_out(),
+        );
+        assert!(added.state_changed);
+        let outcome = apply_harness_op(
+            &mut state,
+            parse_op(
+                "revise_task",
+                r#"{"taskId": "task-1", "title": "Review task-1"}"#,
+            ),
+            &ctx_opted_out(),
+        );
+        assert!(outcome.text.contains("operator disabled review"));
+        assert_eq!(state.tasks[0].title, "Write the parser", "title unchanged");
+        assert!(!outcome.state_changed);
+    }
+
+    #[test]
+    fn finishing_with_a_verified_by_role_skips_the_review_chain_under_opt_out() {
+        let mut state = create_harness_state("opt-out goal");
+        let added = apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Record the plan notes", "role": "author"}]}"#,
+            ),
+            &review_gate_ctx(true),
+        );
+        assert!(added.state_changed);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let finish = apply_harness_op(
+            &mut state,
+            parse_op(
+                "finish_task",
+                r#"{"status": "completed", "summary": "done", "taskId": "task-1", "anchor": "none", "anchorNote": "task-3 fixture state: no external anchor exists for this fixture finish"}"#,
+            ),
+            &review_gate_ctx(true),
+        );
+        assert!(finish.task_finished, "finish outcome: {}", finish.text);
+        assert_eq!(
+            state.tasks.len(),
+            1,
+            "no verified_by review task may be spawned under opt-out"
+        );
+        assert!(state.tasks.iter().all(|task| task.review_of.is_none()));
+    }
+
+    #[test]
+    fn gate_on_finish_still_spawns_the_verified_by_review_chain() {
+        let mut state = create_harness_state("gate-on goal");
+        let added = apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Record the plan notes", "role": "author"}]}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        assert!(added.state_changed);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let finish = apply_harness_op(
+            &mut state,
+            parse_op(
+                "finish_task",
+                r#"{"status": "completed", "summary": "done", "taskId": "task-1", "anchor": "none", "anchorNote": "task-3 fixture state: no external anchor exists for this fixture finish"}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        assert!(finish.task_finished);
+        assert_eq!(
+            state.tasks.len(),
+            2,
+            "gate-on behavior unchanged: reviewer task spawned"
+        );
+        assert!(
+            state
+                .tasks
+                .iter()
+                .any(|task| task.review_of.as_deref() == Some("task-1")),
+            "verified_by chain intact without opt-out"
+        );
+    }
+
+    #[test]
+    fn opt_out_detected_mid_run_blocks_delayed_reviewer_work() {
+        // The opt-out arrives after planning: the same apply-time ctx flag the
+        // loop rebuilds per call rejects the delayed reviewer request.
+        let mut state = create_harness_state("mid-run goal");
+        let raw = r#"{"tasks": [{"title": "Review task-1"}]}"#;
+        let before = apply_harness_op(
+            &mut state,
+            parse_op("plan_tasks", raw),
+            &HarnessOpContext::default(),
+        );
+        assert!(
+            before.state_changed,
+            "without opt-out the review chain works as before"
+        );
+        let mid_run = apply_harness_op(&mut state, parse_op("plan_tasks", raw), &ctx_opted_out());
+        assert_eq!(state.tasks.len(), 1, "the delayed request adds nothing new");
+        assert!(mid_run.text.contains("operator disabled review"));
+        assert!(!mid_run.state_changed);
     }
 }

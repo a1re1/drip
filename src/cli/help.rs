@@ -199,6 +199,13 @@ OPTIONS
 	--marketplace-update [name]   git pull registered marketplace clones (all, or one by name)
 	--plugin-enable <key>         Enable a plugin or single skill: marketplace/plugin[/skill]
 	--plugin-disable <key>        Disable a plugin or single skill
+	--lite                        Draft mode: single author lane, no reviewer task, no
+	                              completion anchor gate, no run summary; ends with reason
+	                              "draft" and a continueCommand for the full-rigor pass
+	                              (--resume <session> --roles reviewed --skill verify-before-done)
+	--no-review                   Skip the verified_by review chain and the finish_task
+	                              completion-anchor gate for this run; usable with any
+	                              --roles preset (implied by --lite)
 	--praeparare                  Prepare the current branch for a pull request: an agentic
 	                              pre-PR pass — cleanup, checks, commit, base merge, push, and a
 	                              DRAFT PR; refuses on the base branch. Takes no goal; a
@@ -284,6 +291,8 @@ mod tests {
             "--tui",
             "--prompt",
             "--max-iterations",
+            "--lite",
+            "--no-review",
             "--profile",
             "--skill",
             "--roles",

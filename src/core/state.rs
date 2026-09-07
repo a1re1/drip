@@ -48,6 +48,10 @@ pub fn create_harness_state(goal: &str) -> HarnessState {
 		workspace_edits: None,
 		verifications: None,
 		verification_streak: None,
+		expectations: Vec::new(),
+		anomalies: Vec::new(),
+		completion_anchor: None,
+		edited_paths: Vec::new(),
 		pending_questions: None,
 		iteration: 0,
 		last_activation: None,
@@ -86,6 +90,11 @@ pub fn start_follow_up_goal(state: &mut HarnessState, goal: &str) {
  = None;
 	state.mutations_since_verification
  = None;
+	// Same for anchoring state: a new goal starts with no pre-registered
+	// expectations, no terminal anomalies, and no completion anchor.
+	state.expectations = Vec::new();
+	state.anomalies = Vec::new();
+	state.completion_anchor = None;
 	// Steering consumed during the previous goal was steering FOR that goal;
 	// a new goal's text is the operator's latest word.
 	state.operator_messages = None;
@@ -777,7 +786,25 @@ pub fn describe_verification_evidence(evidence: Option<&crate::core::types::Veri
 		.as_deref()
 		.map(|detail| format!(" — {}", detail))
 		.unwrap_or_default();
-	format!("; evidence: {}{}", counts, detail)
+	let anchor_text = match &evidence.anchor {
+		None => "undeclared".to_string(),
+		Some(anchor) => match anchor.kind {
+			crate::core::types::VerificationAnchorKind::External => match anchor.source.as_deref() {
+				Some(source) if !source.is_empty() => format!("external ({})", source),
+				_ => "external".to_string(),
+			},
+			crate::core::types::VerificationAnchorKind::SelfAuthored => {
+				match anchor.downgraded_reason.as_deref() {
+					Some(reason) if !reason.is_empty() => {
+						format!("self-authored (downgraded: {})", reason)
+					}
+					_ => "self-authored".to_string(),
+				}
+			}
+			crate::core::types::VerificationAnchorKind::Undeclared => "undeclared".to_string(),
+		},
+	};
+	format!("; evidence: {}{}; anchor: {}", counts, detail, anchor_text)
 }
 
 /// One verdict vocabulary for every reporting surface, including legacy data.
@@ -803,7 +830,61 @@ pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationS
 		mutations_after: state.mutations_since_verification.unwrap_or(0),
 		ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
 		evidence: verification.evidence.clone(),
+		anchor: verification
+			.evidence
+			.as_ref()
+			.and_then(|evidence| evidence.anchor.clone()),
 	})
+}
+
+/// One-line rendering of the pre-registered expectations for prompts/results.
+/// Empty string when nothing is registered; each line shows the latest
+/// observation or `unobserved`.
+pub fn describe_expectations(state: &HarnessState) -> String {
+	if state.expectations.is_empty() {
+		return String::new();
+	}
+	state
+		.expectations
+		.iter()
+		.map(|expectation| {
+			let latest = expectation.observations.last();
+			let observed_part = match latest {
+				None => "unobserved".to_string(),
+				Some(observation) => format!(
+					"observed \"{}\" ({} at iteration {})",
+					observation.observed,
+					if observation.matches { "matched" } else { "mismatched" },
+					observation.at_iteration
+				),
+			};
+			format!(
+				"expectation {} \"{}\": expected \"{}\" — {}",
+				expectation.id, expectation.subject, expectation.expected, observed_part
+			)
+		})
+		.collect::<Vec<_>>()
+		.join("\n")
+}
+
+/// One-line rendering of how the latest completion was anchored, for
+/// prompts/results. Distinguishes an external anchor from an explicit `none`
+/// declaration and from no record at all.
+pub fn describe_completion_anchor(state: &HarnessState) -> String {
+	match &state.completion_anchor {
+		None => "no completion anchor recorded".to_string(),
+		Some(anchor) => match anchor.kind {
+			crate::core::types::CompletionAnchorKind::External => {
+				"completion anchored externally (correctness-class check passed)".to_string()
+			}
+			crate::core::types::CompletionAnchorKind::None => match anchor.note.as_deref() {
+				Some(note) if !note.is_empty() => {
+					format!("completion anchor: none declared — {}", note)
+				}
+				_ => "completion anchor: none declared".to_string(),
+			},
+		},
+	}
 }
 
 pub fn count_task_stats(tasks: &[HarnessTask]) 
@@ -1625,5 +1706,119 @@ mod tests {
         assert!(answers::read_answer_batches_after(&path, 3).is_empty());
         // missing file reads as empty
         assert!(answers::read_answer_batches(&temp.path().join("missing.jsonl")).is_empty());
+    }
+
+    // State files written before anchoring existed (no expectations,
+    // anomalies, or completionAnchor keys) still load with empty defaults.
+    #[test]
+    fn legacy_state_without_anchor_fields_still_loads() {
+        let mut value = serde_json::to_value(create_harness_state("ship the feature")).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("expectations");
+        obj.remove("anomalies");
+        obj.remove("completionAnchor");
+        let state: HarnessState = serde_json::from_value(value).unwrap();
+        assert!(state.expectations.is_empty());
+        assert!(state.anomalies.is_empty());
+        assert!(state.completion_anchor.is_none());
+    }
+
+    // Evidence anchors render into the one-line evidence descriptor: external
+    // with source, self-authored (with downgrade reason), the legacy
+    // undeclared case, and the unavailable legacy record.
+    #[test]
+    fn verification_evidence_descriptions_cover_each_anchor() {
+        use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        let base = |anchor: Option<VerificationAnchor>| VerificationEvidence {
+            kind: VerificationEvidenceKind::Tests,
+            executed: 4,
+            passed: 4,
+            failed: 0,
+            skipped: None,
+            detail: None,
+            anchor,
+        };
+        let external = describe_verification_evidence(Some(&base(Some(VerificationAnchor {
+            kind: VerificationAnchorKind::External,
+            source: Some("pre-existing project test".into()),
+            downgraded_reason: None,
+        }))));
+        assert!(external.contains("; anchor: external (pre-existing project test)"), "{external}");
+        let self_authored = describe_verification_evidence(Some(&base(Some(VerificationAnchor {
+            kind: VerificationAnchorKind::SelfAuthored,
+            source: None,
+            downgraded_reason: Some("command names edited file src/lib.rs".into()),
+        }))));
+        assert!(
+            self_authored.contains("; anchor: self-authored (downgraded: command names edited file src/lib.rs)"),
+            "{self_authored}"
+        );
+        let undeclared = describe_verification_evidence(Some(&base(None)));
+        assert!(undeclared.contains("; anchor: undeclared"), "{undeclared}");
+        let legacy = describe_verification_evidence(None);
+        assert!(legacy.contains("unavailable"), "{legacy}");
+    }
+
+    // Pre-registered expectations render with their latest observation, or
+    // unobserved when nothing has been recorded yet.
+    #[test]
+    fn describe_expectations_renders_latest_observation_or_unobserved() {
+        use crate::core::types::{HarnessExpectation, HarnessExpectationObservation};
+        let mut state = create_harness_state("ship the feature");
+        assert_eq!(describe_expectations(&state), "");
+        state.expectations.push(HarnessExpectation {
+            id: "e1".into(),
+            subject: "result count".into(),
+            expected: "42".into(),
+            registered_at_iteration: 3,
+            observations: vec![HarnessExpectationObservation {
+                at_iteration: 5,
+                observed: "41".into(),
+                matches: false,
+                evidence: None,
+            }],
+        });
+        state.expectations.push(HarnessExpectation {
+            id: "e2".into(),
+            subject: "output shape".into(),
+            expected: "3 columns".into(),
+            registered_at_iteration: 3,
+            observations: Vec::new(),
+        });
+        let text = describe_expectations(&state);
+        assert!(
+            text.contains("expectation e1 \"result count\": expected \"42\" — observed \"41\" (mismatched at iteration 5)"),
+            "{text}"
+        );
+        assert!(text.contains("expectation e2 \"output shape\": expected \"3 columns\" — unobserved"), "{text}");
+    }
+
+    // Completion anchors render as external, as an explicit none declaration
+    // with its note, or as the no-record case.
+    #[test]
+    fn describe_completion_anchor_covers_external_none_and_missing() {
+        use crate::core::types::{ClaimedConfidence, CompletionAnchor, CompletionAnchorKind};
+        let mut state = create_harness_state("ship the feature");
+        assert_eq!(describe_completion_anchor(&state), "no completion anchor recorded");
+        state.completion_anchor = Some(CompletionAnchor {
+            kind: CompletionAnchorKind::External,
+            note: None,
+            claimed_confidence: ClaimedConfidence::High,
+        });
+        assert_eq!(
+            describe_completion_anchor(&state),
+            "completion anchored externally (correctness-class check passed)"
+        );
+        state.completion_anchor = Some(CompletionAnchor {
+            kind: CompletionAnchorKind::None,
+            note: Some("no check independent of the implementation exists for this claim".into()),
+            claimed_confidence: ClaimedConfidence::Low,
+        });
+        assert!(
+            describe_completion_anchor(&state)
+                .starts_with("completion anchor: none declared — "),
+            "{}",
+            describe_completion_anchor(&state)
+        );
     }
 }

@@ -16,6 +16,7 @@ USAGE
 	drip --state [id]              Print harness state summary for the latest (or given) session
 	drip --result [id]             Replay the persisted outcome of a session's most recent run
 	drip --inspect [id]            Per-goal run analytics (wall time, tool stats, steering)
+	drip --reward <score> [id]     Record a verifier's score against the session's calibration trace
 	drip --wait [id]               Block until the running goal ends, then print its result
 	drip --send [id] "message"     Steer a session: a running goal reads it at its next cycle
 	drip --follow [id]             Stream a session's transcript live (ctrl+c to stop)
@@ -79,6 +80,10 @@ OPTIONS
 	                              run — the same payload the run's final --json line had —
 	                              and exit with that run's exit code (0/2/3). Survives lost
 	                              stdout: every run persists result.json at run-end
+	--reward <score> [id]         Append a verifier reward (0..1) to the session's
+	                              calibration.jsonl and print each finished task's claimed
+	                              confidence and evidence class next to it (--json for the
+	                              merged records)
 	--wait [id]                   Block until the session's running goal ends, then behave
 	                              like --result. No live run answers immediately from the
 	                              last result. A lease that dies without a result reports
@@ -212,6 +217,7 @@ STORAGE
 		state.json                      Harness state store (tasks, memory, telemetry)
 		transcript.jsonl                Append-only timeline; tail -f to follow a run
 		result.json                     Outcome of the most recent run (--result replays it)
+		calibration.jsonl               Per-task claimed confidence + evidence class (--reward scores it)
 		images/                         Attached images
 	~/.drip/projects/<slug>/index.sqlite   Session registry for this project
 	~/.drip/projects/<slug>/memory/        Project memory bank
@@ -243,7 +249,8 @@ AUTOMATION RECIPES
 		drip --wait <id> --json --timeout-secs 600
 
 EXIT CODES
-	0   run completed (or informational command succeeded)
+	0   run completed, or finished unreconciled — every task done but an expectation
+	    left visibly unreconciled (see anomalies) — or informational command succeeded
 	1   usage / setup error
 	2   run ended without completing (max-iterations, blocked, or stopped)
 	3   run failed on an infrastructure error (endpoint unreachable/5xx after

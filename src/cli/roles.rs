@@ -61,6 +61,11 @@ pub struct RoleDefinition {
 	/// Role that must review this role's completed tasks.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verified_by: Option<String>,
+	/// Blind loops start without the previous loop's tool exchanges or the
+	/// author's footprint: the role sees the goal and the artifact, not the
+	/// derivation, so its agreement is independent by construction.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub blind: bool,
 }
 
 /// Port of `RoleSetupSource`.
@@ -197,6 +202,7 @@ fn reviewer_role() -> RoleDefinition {
 	RoleDefinition {
 		model: Some(PRESET_REVIEW_PROFILE_ID.to_string()),
 		name: "reviewer".to_string(),
+		blind: true,
 		tools: Some(read_only_tool_names().into_iter().map(String::from).collect()),
 		prompt: Some(
 			[
@@ -494,6 +500,7 @@ fn normalize_role_definition(
 			.get("tools")
 			.and_then(|v| v.as_array())
 			.map(|_| string_list(input.get("tools")).unwrap_or_default()),
+		blind: input.get("blind").and_then(|v| v.as_bool()).unwrap_or(false),
 		verified_by: input
 			.get("verifiedBy")
 			.and_then(|v| v.as_str())
@@ -762,6 +769,7 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 				.then(|| prompt_sections.join("\n\n")),
 			tool_names,
 			verified_by: definition.verified_by.clone(),
+			blind: definition.blind,
 		});
 	}
 

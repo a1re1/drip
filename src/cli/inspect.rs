@@ -90,6 +90,15 @@ pub struct InspectReport {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub last_run: Option<InspectLastRun>,
 	pub verifications: Vec<InspectVerification>,
+	/// How the last completion was anchored, when a completion recorded one.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub completion_anchor: Option<String>,
+	/// Pre-registered expectations with their latest observation, one line each.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub expectations: Vec<String>,
+	/// Expectations the run finished without reconciling.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	pub anomalies: Vec<crate::core::types::HarnessAnomaly>,
 }
 
 pub struct InspectPaths<'a> {
@@ -239,8 +248,19 @@ pub fn build_inspect_report(paths: &InspectPaths) -> InspectReport {
 
 	let state = load_harness_state(paths.state_path);
 	let record: Option<RunRecord> = load_run_record(paths.result_path);
+	let (completion_anchor, expectations, anomalies) = match state.as_ref() {
+		Some(state) => (
+			state.completion_anchor.as_ref().map(|_| crate::core::state::describe_completion_anchor(state)),
+			crate::core::state::describe_expectations(state).lines().map(String::from).collect(),
+			state.anomalies.clone(),
+		),
+		None => (None, Vec::new(), Vec::new()),
+	};
 
 	InspectReport {
+		completion_anchor,
+		expectations,
+		anomalies,
 		goals: goals.into_values().collect(),
 		last_run: record.map(|record| InspectLastRun {
 			reason: record.reason,
@@ -332,6 +352,28 @@ pub fn format_inspect_report(report: &InspectReport) -> String {
 			));
 		}
 
+		lines.push(String::new());
+	}
+
+	if let Some(anchor) = &report.completion_anchor {
+		lines.push(format!("anchor: {anchor}"));
+	}
+	if !report.expectations.is_empty() {
+		lines.push("expectations:".to_string());
+		for expectation in &report.expectations {
+			lines.push(format!("  {expectation}"));
+		}
+	}
+	if !report.anomalies.is_empty() {
+		lines.push("anomalies (unreconciled):".to_string());
+		for anomaly in &report.anomalies {
+			lines.push(format!(
+				"  {}: expected {}, observed {} — {}",
+				anomaly.subject, anomaly.expected, anomaly.observed, anomaly.note
+			));
+		}
+	}
+	if report.completion_anchor.is_some() || !report.expectations.is_empty() || !report.anomalies.is_empty() {
 		lines.push(String::new());
 	}
 

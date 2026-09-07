@@ -38,3 +38,38 @@ numeric results):
    alternate library — with the assumptions both routes share stated.
    Repeating the same arithmetic or checking hardcoded expected output only
    establishes consistency, not correctness.
+9. Every check is either correctness-class or consistency-class, and one never
+   satisfies the other. A correctness-class check compares the artifact to
+   something you did not author: a pre-existing project test, a task-provided
+   fixture, a published constant, an invariant that must hold regardless of
+   implementation. A consistency-class check compares it to your own
+   derivation. Declare the class on every VERIFY call (`anchor.kind` external
+   or self, with `source`); a check that names a file you edited is
+   self-authored no matter what you declare. Completion needs at least one
+   passing correctness-class check, or finish_task `anchor: "none"` with an
+   `anchorNote` saying why no external anchor exists for this claim — that
+   declaration is recorded and downgrades the completion; hiding it is not an
+   option.
+10. Pre-register the expected shape before computing anything. When the goal
+    produces a measurable output — a sign, a unit, an order of magnitude, a
+    row count, an output shape, a latency bound — state the expectation from
+    the domain, not from your derivation, in `plan_tasks.expectations` before
+    the result exists. Expectations are immutable once written; finishing
+    records an `observations` entry for each one. Ordering is the point: an
+    expectation formed after the number is a rationalization.
+11. A mismatch between an observation and its expectation is a P1 against the
+    model, never a caveat on the value. Either fix the model, or finish with
+    status `unreconciled` and list the mismatch under `anomalies`. That is a
+    legitimate terminal state — complete, internally consistent, cannot
+    reconcile with the domain — and it is cheaper than arguing the anomaly
+    into plausibility. Two derivations that share a wrong assumption agree
+    with each other; agreement is not evidence.
+12. A revision that changes a reported output is a higher-evidence event than
+    one that does not. When a fix moves a value already observed, the new
+    observation must cite `evidence` from outside the fix that the new value
+    is closer to truth; otherwise review is a random walk across plausible
+    models with confidence rising at every step.
+13. State your `confidence` (low, medium, high) honestly on every finish_task.
+    It is recorded next to the evidence class in the session's
+    calibration.jsonl and later diffed against the verifier's reward, so a
+    confident wrong answer costs more than an uncertain one.

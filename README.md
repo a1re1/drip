@@ -187,12 +187,16 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 ```jsonc
 {
   "type": "result",
-  "reason": "completed",          // or "max-iterations" | "blocked" | "stopped" | "error"
+  "reason": "completed",          // or "unreconciled" | "max-iterations" | "blocked" | "stopped" | "error"
   "summary": "...",
   "exitCode": 0,
   "taskStats": { "total": 5, "completed": 5, "blocked": 0 },
   "lastVerification": "cargo test: 24/24 passed",
-  "continueCommand": "drip --resume <id> \"next goal\""
+  "continueCommand": "drip --resume <id> \"next goal\"",
+  // present when the run used the anchoring mechanisms (see "Anchoring, expectations, and anomalies"):
+  "completionAnchor": { "kind": "none", "note": "...", "claimedConfidence": "medium" },
+  "anomalies": [ { "subject": "...", "expected": "...", "observed": "...", "note": "..." } ],
+  "calibration": { "claimedConfidence": "medium", "anchor": "none", "evidenceClass": { "externalAnchors": 0, "selfAuthored": 2, "undeclared": 0, "failed": 0 }, "expectations": { "registered": 1, "matched": 0, "mismatched": 1, "unobserved": 0 }, "outputRevisions": 0, "anomalies": 1 }
 }
 ```
 
@@ -202,7 +206,7 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 
 | Code | Meaning |
 |------|---------|
-| 0    | Run completed (or informational command succeeded) |
+| 0    | Run completed, or finished `unreconciled` (every task done, an expectation left visibly unreconciled) — or an informational command succeeded |
 | 1    | Usage / setup error |
 | 2    | Run ended without completing (max-iterations, blocked, or stopped) |
 | 3    | Infrastructure error (endpoint unreachable / 5xx after retries); state persisted, resume when healthy |
@@ -265,6 +269,59 @@ or comparing to a hardcoded expected file establishes internal consistency only.
 Known defects affecting a reported value or goal requirement must be resolved or
 reported as blocked, even if discovered in the author's own closing notes.
 Ordinary statistical uncertainty or a justified limitation is not itself a defect.
+
+### Anchoring, expectations, and anomalies
+
+Verification evidence says whether the agent did work; it says nothing about
+whether the work is anchored to anything the agent did not author. Two routes
+that share one wrong assumption agree with each other, and 21/21 assertions
+confirm a wrong specification precisely. The harness therefore types evidence
+and closes the exits that let an anomaly be explained away:
+
+- **Correctness vs consistency.** `VERIFY` accepts
+  `anchor: {"kind": "external" | "self", "source": "..."}`. External means the
+  check compares against something the agent did not author — a pre-existing
+  project test, a task-provided fixture, a published constant, an invariant
+  independent of the implementation. Self means the check derives from the
+  agent's own implementation. An `external` claim on a command that names a file
+  the run has edited is downgraded to self-authored (with a run warning): a
+  check the agent wrote is consistency, not correctness. Finishing a task that
+  edited the workspace needs one passing external-anchored check, or
+  `finish_task` `anchor: "none"` plus an `anchorNote` saying why no external
+  anchor exists. The declaration is recorded as `completionAnchor` and
+  downgrades the completion in the result rather than hiding it.
+- **Pre-registered expectations.** `plan_tasks` accepts
+  `expectations: [{subject, expected}]` — the expected sign, unit, order of
+  magnitude, row count, output shape, or latency bound, stated from the domain
+  before any result exists. Expectations are immutable once written: a later
+  call may add subjects or repeat one verbatim, never rewrite one.
+  `finish_task` records `observations: [{subject, observed, matches, evidence?}]`
+  and every registered expectation must be observed before a task can finish.
+- **Output-changing revisions.** An observation whose value differs from an
+  earlier one for the same subject must cite `evidence` from outside the fix
+  that the new value is closer to truth; otherwise it is refused. The history
+  is append-only, so the walk is visible.
+- **`unreconciled`.** A mismatched observation refuses `completed` — it is a
+  P1 against the model, not a caveat on the value — and names the outlet:
+  `finish_task` `status: "unreconciled"` with a non-empty `anomalies` list.
+  The task ends as done, the run's reason is `unreconciled`, the exit code is
+  0, and `anomalies` ride in the result payload. Surfacing an anomaly is
+  cheaper than arguing it into plausibility.
+- **Blind roles.** A role with `blind: true` (the reviewer preset defaults to
+  it; set it on any role in `~/.drip/config.json` or `.drip/roles.json`) starts its loops without the
+  previous loop's tool exchanges and without the author's footprint, emitting a
+  `context-withheld` event instead of `context-refreshed`. The reviewer sees the
+  goal and the artifact, not the derivation, so its agreement is independent by
+  construction rather than by request.
+- **Calibration trace.** `finish_task` requires `confidence: low | medium | high`.
+  Every completed or unreconciled finish appends one line to the session's
+  `calibration.jsonl`: the claimed confidence next to the harness-derived
+  evidence class (external / self-authored / undeclared / failed checks),
+  expectation tallies, output revisions, and anomalies. `drip --reward <score>
+  [id]` appends a verifier's score and prints each record beside it, so "more
+  rigor bought accuracy" and "more rigor bought confidence" stop looking
+  identical on the scoreboard. The result payload carries a run-level
+  `calibration` record too.
 
 ### Pointing REFERENCE at a corpus
 
@@ -338,6 +395,11 @@ from `~/.drip/config.json`, or its provider key is missing from `~/.drip/env.var
 the role falls back to the run's base model and `--roles` prints a warning; when
 the affected role is a verifier, that warning says review independence is no
 longer enforced.
+
+The `reviewer` role is also `blind`: its loops never inherit the author's tool
+exchanges or footprint, so it judges the artifact against the goal and against
+anchors the author did not write. Any role definition (`~/.drip/config.json`
+or `.drip/roles.json`) can set `blind: true`.
 
 Every preset role pins its own model profile, so a preset routes reproducibly
 regardless of the caller's active profile or `--profile`. Reviewer roles pin a

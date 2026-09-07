@@ -76,6 +76,9 @@ pub struct HarnessRoleRuntime {
 	/// Role that must review this role's completed tasks: finish_task(completed) spawns a review task under that role.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verified_by: Option<String>,
+	/// Blind loops never inherit the previous loop's tool exchanges or the author's footprint.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub blind: bool,
 }
 
 /// Which role handles which built-in loop kind. Tasks may override per task via
@@ -196,6 +199,7 @@ mod tests {
 				system_prompt_suffix: None,
 				tool_names: None,
 				verified_by: None,
+				blind: false,
 			}
 		}
 	}

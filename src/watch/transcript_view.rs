@@ -425,7 +425,7 @@ fn event_rows(entry: &TranscriptEventEntry, inner_w: usize) -> Vec<RowCell> {
         }
         HarnessEventType::IterationStart => vec![RowCell::plain(format!("── {} ──", collapse(&entry.detail)), color)],
         HarnessEventType::Inference => vec![inference_row(entry)],
-        HarnessEventType::LoopStart | HarnessEventType::HarnessOp | HarnessEventType::TaskFinished => {
+        HarnessEventType::LoopStart | HarnessEventType::HarnessOp | HarnessEventType::TaskFinished | HarnessEventType::ContextWithheld => {
             vec![RowCell::plain(format!("{}{}", prefix(entry), collapse(&entry.detail)), color)]
         }
         HarnessEventType::ContextExpired | HarnessEventType::ContextPromoted | HarnessEventType::ContextRefreshed => {

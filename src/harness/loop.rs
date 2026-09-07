@@ -642,6 +642,135 @@ pub fn extract_patched_paths(raw_input: &str) -> Vec<String> {
     paths
 }
 
+pub const MAX_EDITED_PATHS: usize = 500;
+
+/// Remember a workspace path the run edited (deduplicated, bounded).
+pub fn record_edited_path(edited_paths: &mut Vec<String>, path: &str) {
+    let normalized = path.trim().trim_start_matches("./").to_string();
+    if normalized.is_empty() || edited_paths.iter().any(|known| known == &normalized) {
+        return;
+    }
+    if edited_paths.len() >= MAX_EDITED_PATHS {
+        return;
+    }
+    edited_paths.push(normalized);
+}
+
+/// The anchor a VERIFY call declared, downgraded to self-authored when the
+/// command names a file this run edited: a check the agent wrote only shows
+/// the artifact agrees with the agent's own derivation.
+pub fn declared_verification_anchor(
+    raw_input: &str,
+    edited_paths: &[String],
+) -> Option<crate::core::types::VerificationAnchor> {
+    use crate::core::types::{VerificationAnchor, VerificationAnchorKind};
+    let input: serde_json::Value = serde_json::from_str(raw_input).ok()?;
+    let anchor = input.get("anchor")?;
+    let source = anchor
+        .get("source")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    let kind = match anchor.get("kind").and_then(|value| value.as_str()) {
+        Some("external") => VerificationAnchorKind::External,
+        Some("self") => VerificationAnchorKind::SelfAuthored,
+        _ => VerificationAnchorKind::Undeclared,
+    };
+    if kind != VerificationAnchorKind::External {
+        return Some(VerificationAnchor { kind, source, downgraded_reason: None });
+    }
+    let command = input.get("command").and_then(|value| value.as_str()).unwrap_or_default();
+    let haystack = format!("{command} {}", source.as_deref().unwrap_or_default());
+    let named = edited_paths.iter().find(|path| command_names_path(&haystack, path));
+    match named {
+        Some(path) => Some(VerificationAnchor {
+            kind: VerificationAnchorKind::SelfAuthored,
+            source,
+            downgraded_reason: Some(format!(
+                "the check names {path}, which this run edited; a check the agent authored is consistency, not correctness"
+            )),
+        }),
+        None => Some(VerificationAnchor { kind, source, downgraded_reason: None }),
+    }
+}
+
+/// Whether a command/source text names an edited path, matched on token
+/// boundaries: the full path, a suffix of a longer path, the file name, or
+/// (for runner forms like `--test test_totals`) a test-shaped stem. Plain
+/// substring matching would downgrade `pytest tests/` for any edited file
+/// under tests/ and miss extension-less runner targets.
+pub fn command_names_path(haystack: &str, path: &str) -> bool {
+    let path = path.trim().trim_start_matches("./");
+    if path.is_empty() {
+        return false;
+    }
+    let file_name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let stem = std::path::Path::new(path).file_stem().and_then(|name| name.to_str()).unwrap_or_default();
+    let test_shaped_stem = stem.len() >= 4 && (stem.contains('_') || stem.contains('-'));
+    haystack
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ';' | '|' | '&' | ',' | '='))
+        .map(|token| token.trim_start_matches("./"))
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            token == path
+                || token.ends_with(&format!("/{path}"))
+                || (!file_name.is_empty() && token == file_name)
+                || (test_shaped_stem && token == stem)
+        })
+}
+
+/// Paths a writing shell command names as its targets: redirect targets
+/// (`> f`, `>> f`, `2> f`), `tee [-a] f`, and the file operands of
+/// `sed -i`/`sed --in-place`. Best-effort — heredoc bodies and other
+/// writers (`cp`, `mv`, `git`) are not resolved to paths.
+pub fn extract_shell_write_targets(command: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let mut push = |token: &str| {
+        let token = token.trim_matches(|c| matches!(c, '"' | '\'' | ';' | ')' | '(')).trim_start_matches("./");
+        if !token.is_empty() && !token.starts_with('-') && !token.starts_with('$') && token != "/dev/null" && !targets.iter().any(|known| known == token) {
+            targets.push(token.to_string());
+        }
+    };
+    for segment in strip_heredoc_bodies(command).split(|c| matches!(c, ';' | '|' | '&' | '\n')) {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        for (index, word) in words.iter().enumerate() {
+            let trimmed = word.trim_start_matches(|c: char| c.is_ascii_digit());
+            if trimmed == ">" || trimmed == ">>" {
+                if let Some(next) = words.get(index + 1) {
+                    push(next);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix(">>").or_else(|| trimmed.strip_prefix('>')) {
+                if !rest.is_empty() {
+                    push(rest);
+                }
+            }
+        }
+        let program = words.first().copied().unwrap_or("");
+        if program == "tee" {
+            for word in words[1..].iter().filter(|word| !word.contains('>') && !word.contains('<')) {
+                push(word);
+            }
+        }
+        if program == "sed" && words.iter().any(|word| *word == "-i" || word.starts_with("-i") || *word == "--in-place") {
+            // Operands after the script: every non-flag word past the first
+            // non-flag word (the script itself).
+            let mut seen_script = false;
+            for word in &words[1..] {
+                if word.starts_with('-') {
+                    continue;
+                }
+                if !seen_script {
+                    seen_script = true;
+                    continue;
+                }
+                push(word);
+            }
+        }
+    }
+    targets
+}
+
 pub const MAX_FOOTPRINT_ENTRIES: usize = 20;
 
 pub fn record_task_footprint(footprint: &mut Option<Vec<String>>, entry: &str) {
@@ -1148,6 +1277,65 @@ mod loop_helpers_tests {
         }
         assert!(footprint.as_ref().unwrap().iter().any(|entry| entry.starts_with("edited ")));
         assert_eq!(footprint.unwrap().len(), MAX_FOOTPRINT_ENTRIES);
+    }
+
+    /// An "external" anchor that names a file this run edited is downgraded
+    /// to self-authored with the reason; other anchors pass through.
+    #[test]
+    fn external_anchor_is_downgraded_when_the_check_names_an_edited_file() {
+        use crate::core::types::VerificationAnchorKind;
+        let mut edited = Vec::new();
+        record_edited_path(&mut edited, "./tests/test_totals.py");
+        record_edited_path(&mut edited, "tests/test_totals.py");
+        record_edited_path(&mut edited, "src/lib.rs");
+        assert_eq!(edited, vec!["tests/test_totals.py".to_string(), "src/lib.rs".to_string()]);
+
+        let downgraded = declared_verification_anchor(
+            r#"{"command":"pytest tests/test_totals.py","anchor":{"kind":"external","source":"project suite"}}"#,
+            &edited,
+        )
+        .expect("anchor declared");
+        assert_eq!(downgraded.kind, VerificationAnchorKind::SelfAuthored);
+        assert!(downgraded.downgraded_reason.as_deref().unwrap_or_default().contains("tests/test_totals.py"));
+        assert_eq!(downgraded.source.as_deref(), Some("project suite"));
+
+        let by_basename = declared_verification_anchor(
+            r#"{"command":"pytest -k totals","anchor":{"kind":"external","source":"test_totals.py fixture"}}"#,
+            &edited,
+        )
+        .expect("anchor declared");
+        assert_eq!(by_basename.kind, VerificationAnchorKind::SelfAuthored);
+
+        // Runner forms name the test by stem; a directory that merely
+        // contains an edited file is not a match.
+        assert!(command_names_path("cargo test --test test_totals", "tests/test_totals.rs"));
+        assert!(command_names_path("pytest ./tests/test_totals.py::test_sum", "tests/test_totals.py") || command_names_path("pytest tests/test_totals.py", "tests/test_totals.py"));
+        assert!(!command_names_path("pytest tests/", "tests/test_totals.py"));
+        assert!(!command_names_path("cargo test --lib", "src/lib.rs"));
+
+        let mut shell_edited = Vec::new();
+        for target in extract_shell_write_targets("cat > tests/test_shell.py <<'EOF'\nassert 1\nEOF\n && sed -i 's/a/b/' src/a.rs src/b.rs; echo ok | tee -a notes.txt >/dev/null; printf x 2>err.log") {
+            record_edited_path(&mut shell_edited, &target);
+        }
+        assert_eq!(shell_edited, vec!["tests/test_shell.py", "src/a.rs", "src/b.rs", "notes.txt", "err.log"].into_iter().map(String::from).collect::<Vec<_>>());
+
+        let external = declared_verification_anchor(
+            r#"{"command":"pytest tests/test_invariants.py","anchor":{"kind":"external","source":"pre-existing suite"}}"#,
+            &edited,
+        )
+        .expect("anchor declared");
+        assert_eq!(external.kind, VerificationAnchorKind::External);
+        assert_eq!(external.downgraded_reason, None);
+
+        let declared_self = declared_verification_anchor(
+            r#"{"command":"python check.py","anchor":{"kind":"self"}}"#,
+            &edited,
+        )
+        .expect("anchor declared");
+        assert_eq!(declared_self.kind, VerificationAnchorKind::SelfAuthored);
+        assert_eq!(declared_self.source, None);
+
+        assert_eq!(declared_verification_anchor(r#"{"command":"cargo test"}"#, &edited), None);
     }
 
     #[test]
@@ -1713,7 +1901,7 @@ impl HarnessRun {
                     .map(|(name, role)| {
                         (
                             name.clone(),
-                            crate::harness::harness_tools::HarnessRoleSpec { verified_by: role.verified_by.clone() },
+                            crate::harness::harness_tools::HarnessRoleSpec { verified_by: role.verified_by.clone(), blind: role.blind },
                         )
                     })
                     .collect(),
@@ -3017,11 +3205,34 @@ impl HarnessRun {
                 },
             );
 
+            let blind_role = scope.role.as_ref().filter(|role| role.blind).map(|role| role.name.clone());
             let carried = match (&self.carryover, &scope.current_task_id) {
                 (Some(carryover), Some(_)) if carryover.r#loop == self.state.r#loop - 1 && !carryover.messages.is_empty() => {
                     Some(carryover.clone())
                 }
                 _ => None,
+            };
+            // A blind role starts from the goal and the artifact only: replaying
+            // the author's exchanges would make two loops share one derivation.
+            let carried = match (carried, blind_role) {
+                (Some(carryover), Some(role_name)) => {
+                    let exchanges = carryover.messages.iter().filter(|message| message.role == ChatRoleTag::Tool).count();
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData {
+                            r#loop: Some(self.state.r#loop),
+                            task_id: scope.current_task_id.clone(),
+                            ..Default::default()
+                        }),
+                        detail: format!(
+                            "blind {role_name}: withheld {exchanges} tool exchange(s) from loop {}; the reviewer sees the goal and the artifact, not the author's derivation",
+                            carryover.r#loop
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::ContextWithheld,
+                    });
+                    None
+                }
+                (carried, _) => carried,
             };
             if let Some(carryover) = carried {
                 let first_carried = scope.transport_messages.len();
@@ -3693,6 +3904,35 @@ impl HarnessRun {
                 });
                 scope.task_finished = scope.task_finished || outcome.task_finished;
                 scope.made_progress = scope.made_progress || outcome.state_changed;
+                // Calibration trace: what the agent claimed next to what the
+                // harness can classify about its evidence, appended per
+                // finished task so a later verifier reward can be diffed
+                // against it.
+                if tool_name == "finish_task" && outcome.task_finished {
+                    let input: serde_json::Value = serde_json::from_str(&raw_input).unwrap_or_default();
+                    let status = input.get("status").and_then(|value| value.as_str()).unwrap_or_default();
+                    if status == "completed" || status == "unreconciled" {
+                        let task_id = input
+                            .get("taskId")
+                            .and_then(|value| value.as_str())
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| scope.current_task_id.clone());
+                        if let (Some(record), Some(session_dir)) = (
+                            crate::core::calibration::derive_calibration(&self.state, task_id.as_deref(), status),
+                            self.options.state_path.as_ref().and_then(|path| path.parent().map(Path::to_path_buf)),
+                        ) {
+                            if let Err(error) = crate::core::calibration::append_calibration(&session_dir, &record) {
+                                self.emit(HarnessEvent {
+                                    data: None,
+                                    detail: format!("calibration record could not be appended to {}: {error}", session_dir.display()),
+                                    iteration: self.state.iteration,
+                                    r#type: HarnessEventType::RunWarning,
+                                });
+                            }
+                        }
+                    }
+                }
                 scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
                 // drip-specific: memory-bank writes (remember/forget) get their
                 // own event, gated on apply_harness_op's state_changed so a
@@ -3752,6 +3992,21 @@ impl HarnessRun {
                 self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
+            // Paths the run has edited decide whether a later "external"
+            // verification anchor is honest: a check that names a file the
+            // agent wrote is consistency with its own work, not correctness.
+            // Fed from the same mutation accounting as above — shell writes
+            // and failed writers count, best-effort on what paths they name.
+            if tool_name == "PATCH" {
+                for patched_path in extract_patched_paths(&raw_input) {
+                    record_edited_path(&mut self.state.edited_paths, &patched_path);
+                }
+            }
+            if shell_write {
+                for target in extract_shell_write_targets(bash_command.as_deref().unwrap_or_default()) {
+                    record_edited_path(&mut self.state.edited_paths, &target);
+                }
+            }
 
             let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
                 .or_else(|| {
@@ -3765,12 +4020,25 @@ impl HarnessRun {
                     !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
                 let evidence = if tool_name == "CHECK" {
                     crate::core::types::VerificationEvidence {
+                        anchor: None,
                         kind: crate::core::types::VerificationEvidenceKind::Typecheck,
                         executed: 0, passed: 0, failed: i64::from(execution.failed), skipped: None,
                         detail: Some("Compiler diagnostics for the requested scope; no tests executed.".into()),
                     }
                 } else {
-                    crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content)
+                    let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
+                    if tool_name == "VERIFY" {
+                        evidence.anchor = declared_verification_anchor(&raw_input, &self.state.edited_paths);
+                        if let Some(reason) = evidence.anchor.as_ref().and_then(|anchor| anchor.downgraded_reason.clone()) {
+                            self.emit(HarnessEvent {
+                                data: None,
+                                detail: format!("verification anchor downgraded to self-authored: {reason}"),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::RunWarning,
+                            });
+                        }
+                    }
+                    evidence
                 };
                 execution.failed |= evidence.failed > 0;
                 let verification_record = HarnessVerificationRecord {
@@ -4321,6 +4589,11 @@ impl HarnessRun {
                     && task.dropped_exhausted == Some(true)
             }) {
                 HarnessRunReason::Partial
+            } else if !self.state.anomalies.is_empty() {
+                // Every task finished, but at least one pre-registered
+                // expectation could not be reconciled: complete work with a
+                // visible anomaly, not a failure and not a caveat.
+                HarnessRunReason::Unreconciled
             } else {
                 HarnessRunReason::Completed
             }
@@ -4384,6 +4657,7 @@ impl HarnessRun {
             HarnessRunReason::MaxIterations => "max-iterations",
             HarnessRunReason::Partial => "partial",
             HarnessRunReason::Planned => "planned",
+            HarnessRunReason::Unreconciled => "unreconciled",
         };
 
         self.emit(HarnessEvent {

@@ -114,6 +114,102 @@ pub struct HarnessObservation {
 	pub ttl: i64,
 }
 
+/// Where a verification check came from. `external` means the check compares
+/// against something the agent did not author — a pre-existing project test, a
+/// task-provided fixture, a published constant, or an invariant independent of
+/// the implementation. `selfAuthored` means the check was derived from the
+/// agent's own implementation and only demonstrates internal consistency.
+/// `undeclared` is the omitted/legacy case: no provenance was declared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationAnchorKind {
+	External,
+	SelfAuthored,
+	Undeclared,
+}
+
+/// Provenance of one verification: the anchor kind plus where the check came
+/// from (`source`) and, when a check that claimed external provenance turned
+/// out to touch files the agent edited this session, why it was downgraded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationAnchor {
+	pub kind: VerificationAnchorKind,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub source: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub downgraded_reason: Option<String>,
+}
+
+/// One recorded answer to a pre-registered expectation: what was observed at
+/// some iteration, whether it matched the expected value, and optional
+/// evidence (from outside the agent's own derivation) backing a revised value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessExpectationObservation {
+	pub at_iteration: u64,
+	pub observed: String,
+	pub matches: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub evidence: Option<String>,
+}
+
+/// A value expected from the work, registered before the result exists.
+/// Expectations are immutable once written: revisions happen by appending
+/// observations (with evidence when the observed value changes), never by
+/// rewriting the expectation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessExpectation {
+	pub id: String,
+	pub subject: String,
+	pub expected: String,
+	pub registered_at_iteration: u64,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub observations: Vec<HarnessExpectationObservation>,
+}
+
+/// A terminal unresolved mismatch: the run finished with at least one
+/// expectation whose observed value did not match what was pre-registered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessAnomaly {
+	pub subject: String,
+	pub expected: String,
+	pub observed: String,
+	pub note: String,
+}
+
+/// The agent's own claimed confidence in a finished task's reported values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClaimedConfidence {
+	Low,
+	Medium,
+	High,
+}
+
+/// How a task's completion is anchored. `external` requires at least one
+/// passed verification whose check the agent did not author; `none` is the
+/// explicit declaration that no external anchor exists, which must carry a
+/// note explaining why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionAnchor {
+	pub kind: CompletionAnchorKind,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub note: Option<String>,
+	pub claimed_confidence: ClaimedConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompletionAnchorKind {
+	External,
+	#[serde(rename = "none")]
+	None,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTelemetryRecord {
@@ -222,6 +318,9 @@ pub struct VerificationSummary {
 	/// it deserialize fine and remain weak.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub evidence: Option<VerificationEvidence>,
+	/// How the latest check is anchored (external / self-authored / undeclared).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub anchor: Option<VerificationAnchor>,
 }
 
 /// What kind of evidence a verification command produced. `build` and
@@ -258,6 +357,9 @@ pub struct VerificationEvidence {
 	/// Why the evidence is weak/unverified, when it is.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub detail: Option<String>,
+	/// Where the check came from. Absent (legacy) means undeclared.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub anchor: Option<VerificationAnchor>,
 }
 
 impl VerificationEvidence {
@@ -343,6 +445,23 @@ pub struct HarnessState {
 	/// Live streak of identical verification failures; cleared by a pass or a changed failure.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verification_streak: Option<HarnessVerificationStreak>,
+	/// Values expected from the work, registered before results exist. Immutable
+	/// once written; revisions append observations instead of rewriting these.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub expectations: Vec<HarnessExpectation>,
+	/// Terminal unresolved mismatches recorded by finishes with status
+	/// `unreconciled`.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub anomalies: Vec<HarnessAnomaly>,
+	/// How the most recent task completion was anchored.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub completion_anchor: Option<CompletionAnchor>,
+	/// Workspace paths the run has edited (PATCH targets), deduplicated. An
+	/// "external" verification anchor that names one of these is downgraded
+	/// to self-authored: a check the agent wrote is consistency, not
+	/// correctness.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub edited_paths: Vec<String>,
 	/// Survey awaiting operator answers (an ask_user timeout or run end while
 	/// the question was open) — resumed runs re-emit it instead of losing it.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +496,10 @@ impl Default for HarnessState {
 			workspace_edits: None,
 			verifications: None,
 			verification_streak: None,
+			expectations: Vec::new(),
+			anomalies: Vec::new(),
+			completion_anchor: None,
+			edited_paths: Vec::new(),
 			pending_questions: None,
 			iteration: 0,
 			last_activation: None,
@@ -464,6 +587,9 @@ pub enum HarnessEventType {
 	ContextPromoted,
 	#[serde(rename = "context-refreshed")]
 	ContextRefreshed,
+	/// A blind role's loop started without the previous loop's tool exchanges.
+	#[serde(rename = "context-withheld")]
+	ContextWithheld,
 	#[serde(rename = "harness-op")]
 	HarnessOp,
 	#[serde(rename = "inference")]
@@ -657,6 +783,8 @@ pub enum HarnessRunReason {
 	Partial,
 	#[serde(rename = "planned")]
 	Planned,
+	#[serde(rename = "unreconciled")]
+	Unreconciled,
 }
 
 /// Per-call token economics attributed to one task (the byTask record value).
@@ -867,5 +995,62 @@ mod tests {
 		assert!(obj["usage"].as_object().unwrap().contains_key("cacheCreationTokens"));
 		let back: HarnessRunResult = serde_json::from_value(json).unwrap();
 		assert_eq!(back, result);
+	}
+
+	// Anchor/expectation/confidence vocabulary: serialized spellings are part
+	// of the persisted state contract.
+	#[test]
+	fn anchor_and_confidence_enums_serialize_with_requested_spellings() {
+		use crate::core::types::{ClaimedConfidence, CompletionAnchorKind, HarnessRunReason, VerificationAnchorKind};
+		assert_eq!(serde_json::to_value(VerificationAnchorKind::External).unwrap(), "external");
+		assert_eq!(serde_json::to_value(VerificationAnchorKind::SelfAuthored).unwrap(), "selfAuthored");
+		assert_eq!(serde_json::to_value(VerificationAnchorKind::Undeclared).unwrap(), "undeclared");
+		assert_eq!(serde_json::to_value(ClaimedConfidence::Low).unwrap(), "low");
+		assert_eq!(serde_json::to_value(ClaimedConfidence::Medium).unwrap(), "medium");
+		assert_eq!(serde_json::to_value(ClaimedConfidence::High).unwrap(), "high");
+		assert_eq!(serde_json::to_value(CompletionAnchorKind::External).unwrap(), "external");
+		assert_eq!(serde_json::to_value(CompletionAnchorKind::None).unwrap(), "none");
+		assert_eq!(serde_json::to_value(HarnessRunReason::Unreconciled).unwrap(), "unreconciled");
+	}
+
+	// Optional anchor fields drop out of the JSON when absent and roundtrip
+	// when present.
+	#[test]
+	fn verification_anchor_roundtrips_and_omits_absent_optionals() {
+		let full = VerificationAnchor {
+			kind: VerificationAnchorKind::SelfAuthored,
+			source: Some("repo test suite".into()),
+			downgraded_reason: Some("command names edited file src/lib.rs".into()),
+		};
+		let json = serde_json::to_value(&full).unwrap();
+		assert_eq!(json["kind"], "selfAuthored");
+		assert_eq!(json["source"], "repo test suite");
+		assert_eq!(json["downgradedReason"], "command names edited file src/lib.rs");
+		assert_eq!(serde_json::from_value::<VerificationAnchor>(json).unwrap(), full);
+
+		let bare = VerificationAnchor {
+			kind: VerificationAnchorKind::External,
+			source: None,
+			downgraded_reason: None,
+		};
+		let bare_json = serde_json::to_value(&bare).unwrap();
+		let bare_obj = bare_json.as_object().unwrap();
+		assert!(!bare_obj.contains_key("source"));
+		assert!(!bare_obj.contains_key("downgradedReason"));
+	}
+
+	// Evidence written before anchors existed (no anchor key) still loads as
+	// the undeclared case.
+	#[test]
+	fn legacy_verification_evidence_without_anchor_deserializes_undeclared() {
+		let legacy = serde_json::json!({
+			"kind": "tests",
+			"executed": 3,
+			"passed": 3,
+			"failed": 0,
+		});
+		let evidence: VerificationEvidence = serde_json::from_value(legacy).unwrap();
+		assert_eq!(evidence.anchor, None);
+		assert!(evidence.verifies_work());
 	}
 }

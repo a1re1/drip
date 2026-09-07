@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use crate::core::types::{HarnessSurveyOption, HarnessSurveyQuestion, QuestionSurvey};
+use crate::core::types::{HarnessState, HarnessSurveyOption, HarnessSurveyQuestion, QuestionSurvey};
 
 /// Default cap on review rounds before a rejected task is blocked.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 2;
@@ -96,6 +96,8 @@ pub const DEFAULT_ASK_USER_TIMEOUT_SECONDS: i64 = 900;
 pub struct HarnessRoleSpec {
     /// verifiedBy: id of the role whose review must confirm this role's work.
     pub verified_by: Option<String>,
+    /// blind: loops under this role do not inherit the author's derivation.
+    pub blind: bool,
 }
 
 /// The role configuration a run enforces.
@@ -115,11 +117,16 @@ pub struct HarnessTaskInput {
     pub depends_on: Vec<String>,
 }
 
-/// The `status` argument of finish_task ("completed" | "blocked").
+/// The `status` argument of finish_task ("completed" | "blocked" |
+/// "unreconciled"). Unreconciled is the legitimate terminal state for work
+/// that is complete and internally consistent but cannot be reconciled with
+/// a pre-registered expectation: the task ends, the anomaly is recorded, and
+/// nothing has to be explained away to finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishTaskStatus {
     Completed,
     Blocked,
+    Unreconciled,
 }
 
 impl FinishTaskStatus {
@@ -127,8 +134,32 @@ impl FinishTaskStatus {
         match self {
             FinishTaskStatus::Completed => "completed",
             FinishTaskStatus::Blocked => "blocked",
+            FinishTaskStatus::Unreconciled => "unreconciled",
         }
     }
+
+    /// Completed and unreconciled both finish the task as done; only the
+    /// anomaly record differs.
+    pub fn finishes_work(self) -> bool {
+        !matches!(self, FinishTaskStatus::Blocked)
+    }
+}
+
+/// One `observations[]` entry of finish_task: the observed value for a
+/// pre-registered expectation subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishObservationInput {
+    pub subject: String,
+    pub observed: String,
+    pub matches: bool,
+    pub evidence: Option<String>,
+}
+
+/// One `expectations[]` entry of plan_tasks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectationInput {
+    pub subject: String,
+    pub expected: String,
 }
 
 /// The `scope` argument of remember/forget ("session" | "repo").
@@ -152,6 +183,8 @@ pub enum HarnessOp {
         /// Roles stripped because they are not in the role gate (reported back
         /// to the model by the handler).
         unknown_roles: Vec<String>,
+        /// Expected values registered before the work produces them.
+        expectations: Vec<ExpectationInput>,
     },
     /// drop_task
     DropTask { task_id: String, reason: String },
@@ -162,6 +195,16 @@ pub enum HarnessOp {
         status: FinishTaskStatus,
         summary: String,
         task_id: Option<String>,
+        /// Self-reported confidence, recorded for calibration against the
+        /// verifier's reward. Required by the schema; None only for legacy
+        /// callers.
+        confidence: Option<crate::core::types::ClaimedConfidence>,
+        /// "external" | "none": how the completion is anchored when no
+        /// external verification passed.
+        anchor: Option<String>,
+        anchor_note: Option<String>,
+        observations: Vec<FinishObservationInput>,
+        anomalies: Vec<crate::core::types::HarnessAnomaly>,
     },
     /// respond
     Respond { text: String },
@@ -193,9 +236,28 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "plan_tasks",
-                "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish.",
+                "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish. When the goal produces a measurable output, register its expected shape in expectations before computing it.",
                 "parameters": {
                     "properties": {
+                        "expectations": {
+                            "description": "Values the work is expected to produce, stated from the domain before any result exists: sign, units, order of magnitude, row count, output shape, latency bound. Immutable once registered; finish_task records observations against them and a mismatch is a defect in the model, not a caveat on the value.",
+                            "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                    "expected": {
+                                        "description": "The expected value or range, with units or shape.",
+                                        "type": "string"
+                                    },
+                                    "subject": {
+                                        "description": "What is being predicted (an output, a count, a measurement).",
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["subject", "expected"],
+                                "type": "object"
+                            },
+                            "type": "array"
+                        },
                         "placement": {
                             "description": "Where to insert the new tasks: \"next\" places them immediately after the current task, before other pending work; \"end\" (default) appends them.",
                             "enum": ["end", "next"],
@@ -279,11 +341,67 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "finish_task",
-                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, or status blocked with a summary of why and what is needed.",
+                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external) or anchor=\"none\" with an anchorNote saying why no external anchor exists.",
                 "parameters": {
                     "properties": {
+                        "anchor": {
+                            "description": "How the completion is anchored. \"external\": a correctness-class check passed (the harness verifies this). \"none\": no external anchor exists for this claim; requires anchorNote and downgrades the completion in the run result.",
+                            "enum": ["external", "none"],
+                            "type": "string"
+                        },
+                        "anchorNote": {
+                            "description": "Why no external anchor exists for this claim (required with anchor=\"none\").",
+                            "type": "string"
+                        },
+                        "anomalies": {
+                            "description": "With status unreconciled: each expectation the result could not be reconciled with.",
+                            "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                    "expected": { "type": "string" },
+                                    "note": {
+                                        "description": "What was tried and why the mismatch stands.",
+                                        "type": "string"
+                                    },
+                                    "observed": { "type": "string" },
+                                    "subject": { "type": "string" }
+                                },
+                                "required": ["subject", "expected", "observed", "note"],
+                                "type": "object"
+                            },
+                            "type": "array"
+                        },
+                        "confidence": {
+                            "description": "Your honest confidence that the finished work is correct, recorded for calibration against later verification.",
+                            "enum": ["low", "medium", "high"],
+                            "type": "string"
+                        },
+                        "observations": {
+                            "description": "Observed values for pre-registered expectations. Every registered expectation must be observed before completion. A revised value for a subject already observed must cite evidence from outside the fix.",
+                            "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                    "evidence": {
+                                        "description": "Evidence outside your own derivation that this value is closer to truth (required when the value changed from an earlier observation).",
+                                        "type": "string"
+                                    },
+                                    "matches": {
+                                        "description": "Whether the observed value satisfies the expectation.",
+                                        "type": "boolean"
+                                    },
+                                    "observed": { "type": "string" },
+                                    "subject": {
+                                        "description": "The registered expectation's subject.",
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["subject", "observed", "matches"],
+                                "type": "object"
+                            },
+                            "type": "array"
+                        },
                         "status": {
-                            "enum": ["blocked", "completed"],
+                            "enum": ["blocked", "completed", "unreconciled"],
                             "type": "string"
                         },
                         "summary": {
@@ -295,7 +413,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                             "type": "string"
                         }
                     },
-                    "required": ["status", "summary"],
+                    "required": ["status", "summary", "confidence"],
                     "type": "object"
                 }
             }
@@ -499,6 +617,139 @@ const BUILD_TASK_VERBS: &[&str] = &[
 
 // Objects that make a build verb prose instead of code: "write summary",
 // "update the plan" — those finish in the reply, not the workspace.
+const UNRECONCILED_NEEDS_ANOMALIES: &str =
+    "status unreconciled requires a non-empty anomalies list naming each expectation that could not be reconciled.";
+
+/// Register pre-declared expectations. Returns the "id subject" labels of
+/// the ones added; an attempt to rewrite an existing subject's expected
+/// value is refused because expectations are immutable once written.
+pub fn register_expectations(
+    state: &mut HarnessState,
+    expectations: &[ExpectationInput],
+) -> Result<Vec<String>, String> {
+    // Validate the whole batch before writing any of it, so a refused call
+    // leaves state exactly as it found it (the outcome reports no change).
+    let mut planned: Vec<crate::core::types::HarnessExpectation> = Vec::new();
+    let mut added = Vec::new();
+    let next_id = |state: &HarnessState, planned: &[crate::core::types::HarnessExpectation]| {
+        let highest = state
+            .expectations
+            .iter()
+            .chain(planned.iter())
+            .filter_map(|expectation| expectation.id.strip_prefix('e').and_then(|n| n.parse::<usize>().ok()))
+            .max()
+            .unwrap_or(0);
+        format!("e{}", highest + 1)
+    };
+    for input in expectations {
+        let existing = state
+            .expectations
+            .iter()
+            .chain(planned.iter())
+            .find(|expectation| expectation.subject.eq_ignore_ascii_case(&input.subject));
+        if let Some(existing) = existing {
+            if existing.expected == input.expected {
+                continue;
+            }
+            return Err(format!(
+                "expectation '{}' is already registered as '{}'; expectations are immutable once written — record an observation instead of rewriting the expectation",
+                existing.subject, existing.expected
+            ));
+        }
+        let id = next_id(state, &planned);
+        added.push(format!("{id} \"{}\" expects \"{}\"", input.subject, input.expected));
+        planned.push(crate::core::types::HarnessExpectation {
+            id,
+            subject: input.subject.clone(),
+            expected: input.expected.clone(),
+            registered_at_iteration: state.iteration.max(0) as u64,
+            observations: Vec::new(),
+        });
+    }
+    state.expectations.extend(planned);
+    Ok(added)
+}
+
+/// True when some verification in this run passed with an anchor the agent
+/// did not author (correctness-class evidence).
+pub fn has_external_anchor(state: &HarnessState) -> bool {
+    state
+        .verifications
+        .iter()
+        .flatten()
+        .any(|record| {
+            !record.failed
+                && record.ran_no_tests != Some(true)
+                && record.evidence.as_ref().is_some_and(|evidence| {
+                    evidence.verifies_work()
+                        && evidence.anchor.as_ref().is_some_and(|anchor| {
+                            anchor.kind == crate::core::types::VerificationAnchorKind::External
+                        })
+                })
+        })
+}
+
+/// Validate and append finish_task observations to their expectations.
+/// Refuses unknown subjects and value revisions that cite no outside
+/// evidence; nothing is written when any observation is refused.
+pub fn record_observations(
+    expectations: &mut Vec<crate::core::types::HarnessExpectation>,
+    iteration: i64,
+    observations: &[FinishObservationInput],
+) -> Result<(), String> {
+    let mut planned: Vec<(usize, crate::core::types::HarnessExpectationObservation)> = Vec::new();
+    for observation in observations {
+        let Some(index) = expectations
+            .iter()
+            .position(|expectation| {
+                expectation.subject.eq_ignore_ascii_case(&observation.subject)
+                    || expectation.id == observation.subject
+            })
+        else {
+            return Err(format!(
+                "observation names '{}', which is not a registered expectation; register it with plan_tasks.expectations first (registered: {})",
+                observation.subject,
+                if expectations.is_empty() {
+                    "none".to_string()
+                } else {
+                    expectations.iter().map(|e| e.subject.clone()).collect::<Vec<_>>().join(", ")
+                }
+            ));
+        };
+        // The previous observation is the last one already recorded OR the
+        // last one planned earlier in this same call: two observations for
+        // one subject in a single finish_task must not slip past the
+        // revision-evidence rule (and cannot erase a mismatch by ordering).
+        let previous = planned
+            .iter()
+            .rev()
+            .find(|(planned_index, _)| *planned_index == index)
+            .map(|(_, planned)| planned)
+            .or_else(|| expectations[index].observations.last());
+        if let Some(previous) = previous {
+            if previous.observed != observation.observed && observation.evidence.is_none() {
+                return Err(format!(
+                    "observation for '{}' changed from '{}' to '{}'; a revision that changes a reported output must cite evidence outside the fix (evidence field) that the new value is closer to truth",
+                    expectations[index].subject, previous.observed, observation.observed
+                ));
+            }
+        }
+        planned.push((
+            index,
+            crate::core::types::HarnessExpectationObservation {
+                at_iteration: iteration.max(0) as u64,
+                observed: observation.observed.clone(),
+                matches: observation.matches,
+                evidence: observation.evidence.clone(),
+            },
+        ));
+    }
+    for (index, observation) in planned {
+        expectations[index].observations.push(observation);
+    }
+    Ok(())
+}
+
 const PROSE_OBJECT_WORDS: &[&str] = &[
     "summary", "summaries", "report", "note", "notes", "answer", "reply", "response", "message",
     "findings", "plan", "user",
@@ -838,10 +1089,26 @@ pub fn parse_harness_op_with_gate(
             } else {
                 "end".to_string()
             };
+            let expectations = input
+                .get("expectations")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let subject = string_or_default(item, "subject", "").trim().to_string();
+                            let expected = string_or_default(item, "expected", "").trim().to_string();
+                            (!subject.is_empty() && !expected.is_empty())
+                                .then_some(ExpectationInput { subject, expected })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(HarnessOp::PlanTasks {
                 entries,
                 placement,
                 unknown_roles,
+                expectations,
             })
         }
         "drop_task" => Ok(HarnessOp::DropTask {
@@ -856,14 +1123,63 @@ pub fn parse_harness_op_with_gate(
             let status = match input.get("status").and_then(|v| v.as_str()) {
                 Some("blocked") => FinishTaskStatus::Blocked,
                 Some("completed") => FinishTaskStatus::Completed,
+                Some("unreconciled") => FinishTaskStatus::Unreconciled,
                 _ => {
-                    return Err("The status field must be exactly \"completed\" or \"blocked\".".to_string());
+                    return Err("The status field must be exactly \"completed\", \"blocked\", or \"unreconciled\".".to_string());
                 }
             };
+            let confidence = match input.get("confidence").and_then(|v| v.as_str()) {
+                None => None,
+                Some("low") => Some(crate::core::types::ClaimedConfidence::Low),
+                Some("medium") => Some(crate::core::types::ClaimedConfidence::Medium),
+                Some("high") => Some(crate::core::types::ClaimedConfidence::High),
+                Some(_) => {
+                    return Err("The confidence field must be exactly \"low\", \"medium\", or \"high\".".to_string());
+                }
+            };
+            let anchor = string_or_none(&input, "anchor");
+            if let Some(anchor) = anchor.as_deref() {
+                if anchor != "external" && anchor != "none" {
+                    return Err("The anchor field must be exactly \"external\" or \"none\".".to_string());
+                }
+            }
+            let mut observations = Vec::new();
+            for item in input.get("observations").and_then(|value| value.as_array()).into_iter().flatten() {
+                let Some(matches) = item.get("matches").and_then(|v| v.as_bool()) else {
+                    return Err("Each observation needs a boolean matches field (true when the observed value satisfies the expectation).".to_string());
+                };
+                observations.push(FinishObservationInput {
+                    subject: string_or_default(item, "subject", "").trim().to_string(),
+                    observed: string_or_default(item, "observed", "").trim().to_string(),
+                    matches,
+                    evidence: string_or_none(item, "evidence").filter(|text| !text.trim().is_empty()),
+                });
+            }
+            let anomalies = input
+                .get("anomalies")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| crate::core::types::HarnessAnomaly {
+                            subject: string_or_default(item, "subject", "").trim().to_string(),
+                            expected: string_or_default(item, "expected", "").trim().to_string(),
+                            observed: string_or_default(item, "observed", "").trim().to_string(),
+                            note: string_or_default(item, "note", "").trim().to_string(),
+                        })
+                        .filter(|anomaly| !anomaly.subject.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(HarnessOp::FinishTask {
                 status,
                 summary: string_or_default(&input, "summary", ""),
                 task_id: string_or_none(&input, "taskId"),
+                confidence,
+                anchor,
+                anchor_note: string_or_none(&input, "anchorNote").filter(|text| !text.trim().is_empty()),
+                observations,
+                anomalies,
             })
         }
         "respond" => Ok(HarnessOp::Respond {
@@ -1405,12 +1721,42 @@ pub fn apply_harness_op(
     ctx: &HarnessOpContext,
 ) -> HarnessOpOutcome {
     match op {
-        HarnessOp::PlanTasks { entries, placement, unknown_roles } => {
+        HarnessOp::PlanTasks { entries, placement, unknown_roles, expectations } => {
             let placement = if placement == "next" {
                 crate::core::state::HarnessTaskPlacement::Next
             } else {
                 crate::core::state::HarnessTaskPlacement::End
             };
+
+            // Expectations are pre-registered and immutable: the whole point
+            // is that they exist before the result does, so a later call may
+            // add new subjects or repeat an identical one, never rewrite one.
+            let registered = match register_expectations(state, &expectations) {
+                Ok(registered) => registered,
+                Err(text) => {
+                    return HarnessOpOutcome {
+                        text,
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+            };
+            let expectation_note = if registered.is_empty() {
+                String::new()
+            } else {
+                format!(" Registered expectation(s): {}.", registered.join("; "))
+            };
+            if entries.is_empty() && !registered.is_empty() {
+                return HarnessOpOutcome {
+                    text: format!("No tasks were added.{expectation_note}"),
+                    state_changed: true,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
             // harness_tools::HarnessTaskInput -> core_state::HarnessTaskInput
             let state_entries = entries
                 .into_iter()
@@ -1460,7 +1806,7 @@ pub fn apply_harness_op(
 
             HarnessOpOutcome {
                 text: format!(
-                    "Added {} task(s){}: {}.{}",
+                    "Added {} task(s){}: {}.{}{}",
                     added.len(),
                     if placement == core_state::HarnessTaskPlacement::Next {
                         " ahead of the pending queue"
@@ -1468,7 +1814,8 @@ pub fn apply_harness_op(
                         ""
                     },
                     list,
-                    unknown_role_note
+                    unknown_role_note,
+                    expectation_note
                 ),
                 state_changed: true,
                 task_finished: false,
@@ -1618,7 +1965,7 @@ pub fn apply_harness_op(
                 direct_response: None,
             }
         }
-        HarnessOp::FinishTask { status, summary, task_id } => {
+        HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies } => {
             use crate::core::types::HarnessTaskStatus;
 
             // Task-terminal calls are refused once the loop has ended (a
@@ -1719,8 +2066,38 @@ pub fn apply_harness_op(
 
                 let review_task =
                     core_state::get_task_by_id(state, &target_id).expect("target task exists").clone();
+                // A reviewer that confirms the work but cannot reconcile an
+                // expectation confirms it with the anomalies on record.
+                let verdict_status = if status == FinishTaskStatus::Unreconciled {
+                    if anomalies.is_empty() {
+                        return HarnessOpOutcome {
+                            text: UNRECONCILED_NEEDS_ANOMALIES.to_string(),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                    // A reviewer's observations count too, so the mismatch it
+                    // found reaches the expectation history and calibration.
+                    let mut staged = state.expectations.clone();
+                    if let Err(text) = record_observations(&mut staged, state.iteration, &observations) {
+                        return HarnessOpOutcome {
+                            text,
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                    state.expectations = staged;
+                    state.anomalies.extend(anomalies.iter().cloned());
+                    FinishTaskStatus::Completed
+                } else {
+                    status
+                };
                 let verdict =
-                    apply_review_verdict(state, &review_task, status, &summary, ctx.gate.as_ref());
+                    apply_review_verdict(state, &review_task, verdict_status, &summary, ctx.gate.as_ref());
                 // The verdict comes from the review task's own loop, so
                 // finishing it ends that loop exactly when the task finished.
                 return HarnessOpOutcome {
@@ -1736,7 +2113,7 @@ pub fn apply_harness_op(
             // plan edit masquerading as progress. Evidence must come from a
             // loop that actually ran the task — resolving a BLOCKED task by
             // id from a replanning loop stays legitimate.
-            if status == FinishTaskStatus::Completed
+            if status.finishes_work()
                 && target_status == HarnessTaskStatus::Pending
                 && target_activations.unwrap_or(0) == 0
             {
@@ -1760,7 +2137,7 @@ pub fn apply_harness_op(
             // run, not the task: small models routinely do the work inside the
             // planning loop (no current task to footprint) and then walk the ledger
             // as formalities — bouncing those cost two extra calls per A/B run.
-            if status == FinishTaskStatus::Completed
+            if status.finishes_work()
                 && is_current_task
                 && !target_edit_nudged.unwrap_or(false)
             {
@@ -1790,7 +2167,7 @@ pub fn apply_harness_op(
             // Verification honesty gate: completing a task that edited the
             // workspace requires fresh, substantive evidence. Repetition and
             // completing by id cannot waive a failed or missing check.
-            if status == FinishTaskStatus::Completed
+            if status.finishes_work()
             {
                 let edited_workspace = target_footprint
                     .iter()
@@ -1841,8 +2218,129 @@ pub fn apply_harness_op(
                 }
             }
 
+            // Anchoring gate: process rigor (did checks run, how many) says
+            // nothing about whether the work is anchored to something the
+            // agent did not author. Finishing work requires either one
+            // passing correctness-class check or an explicit declaration
+            // that no external anchor exists; expectations registered before
+            // the result must be observed, revisions of a reported value
+            // must cite outside evidence, and a mismatch is a defect in the
+            // model that ends as `unreconciled`, never as a caveat.
+            if status.finishes_work() {
+                let external = has_external_anchor(state);
+                // Analysis-only tasks (no edits, no expectations) make no
+                // claim a check could anchor; they record what was declared.
+                let claim_needs_anchor = state.workspace_edits.unwrap_or(0) > 0
+                    || target_footprint.iter().flatten().any(|entry| entry.starts_with("edited "))
+                    || !state.expectations.is_empty();
+                let anchor_kind = match (external, anchor.as_deref(), anchor_note.as_deref()) {
+                    (true, _, _) => crate::core::types::CompletionAnchorKind::External,
+                    (false, Some("none"), Some(note)) if !note.trim().is_empty() => {
+                        crate::core::types::CompletionAnchorKind::None
+                    }
+                    (false, _, _) if !claim_needs_anchor => crate::core::types::CompletionAnchorKind::None,
+                    (false, None, Some(_)) => {
+                        return HarnessOpOutcome {
+                            text: "anchorNote was given without anchor: pass anchor=\"none\" alongside it to declare that no external anchor exists for this claim (or run a VERIFY with anchor.kind=external).".to_string(),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                    (false, Some("none"), _) => {
+                        return HarnessOpOutcome {
+                            text: "anchor=\"none\" requires an anchorNote explaining why no external anchor exists for this claim.".to_string(),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                    (false, _, _) => {
+                        return HarnessOpOutcome {
+                            text: "harness: not accepted yet — no correctness-class evidence: every passing check was self-authored or undeclared. Either run a VERIFY with anchor.kind=external (a check you did not author: a pre-existing test, a task-provided fixture, a published constant, an invariant independent of the implementation), or finish with anchor=\"none\" and an anchorNote explaining why no external anchor exists for this claim.".to_string(),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                };
+
+                if status == FinishTaskStatus::Unreconciled && anomalies.is_empty() {
+                    return HarnessOpOutcome {
+                        text: UNRECONCILED_NEEDS_ANOMALIES.to_string(),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+
+                // Observations are validated against a copy so a refused
+                // call leaves the expectation history untouched.
+                let mut staged = state.expectations.clone();
+                if let Err(text) = record_observations(&mut staged, state.iteration, &observations) {
+                    return HarnessOpOutcome {
+                        text,
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+
+                let unresolved: Vec<String> = staged
+                    .iter()
+                    .filter(|expectation| expectation.observations.is_empty())
+                    .map(|expectation| format!("{} \"{}\"", expectation.id, expectation.subject))
+                    .collect();
+                if !unresolved.is_empty() {
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "harness: not accepted yet — registered expectation(s) have no observation: {}. Record each one in finish_task.observations (observed value, matches true/false) before finishing.",
+                            unresolved.join(", ")
+                        ),
+                        state_changed: false,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+
+                if status == FinishTaskStatus::Completed {
+                    if let Some((expectation, observation)) = staged.iter().find_map(|expectation| {
+                        expectation
+                            .observations
+                            .last()
+                            .filter(|observation| !observation.matches)
+                            .map(|observation| (expectation, observation))
+                    }) {
+                        return HarnessOpOutcome {
+                            text: format!(
+                                "harness: not accepted yet — expectation '{}' mismatched (expected {}, observed {}); this is a P1 against the model, not a caveat on the value. Fix the model, or finish with status=\"unreconciled\" and list it under anomalies.",
+                                expectation.subject, expectation.expected, observation.observed
+                            ),
+                            state_changed: false,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
+                }
+
+                state.expectations = staged;
+                state.anomalies.extend(anomalies.iter().cloned());
+                state.completion_anchor = Some(crate::core::types::CompletionAnchor {
+                    kind: anchor_kind,
+                    note: anchor_note.clone(),
+                    claimed_confidence: confidence.unwrap_or(crate::core::types::ClaimedConfidence::Medium),
+                });
+            }
+
             let core_status = match status {
-                FinishTaskStatus::Completed => HarnessTaskStatus::Completed,
+                FinishTaskStatus::Completed | FinishTaskStatus::Unreconciled => HarnessTaskStatus::Completed,
                 FinishTaskStatus::Blocked => HarnessTaskStatus::Blocked,
             };
             let (finished_id, finished_title, finished_role, finished_status_label) =
@@ -1874,7 +2372,7 @@ pub fn apply_harness_op(
             // Verify gate: completed work by a role with a reviewer does not
             // pass unexamined — a review task under the reviewer role runs
             // next.
-            if status == FinishTaskStatus::Completed {
+            if status.finishes_work() {
                 if let Some(gate) = ctx.gate.as_ref() {
                     let role_name = finished_role.clone().or_else(|| gate.default_task_role.clone());
                     let verifier = role_name
@@ -1911,7 +2409,11 @@ pub fn apply_harness_op(
                             // over the author's recorded footprint so
                             // verification starts from the actual changes,
                             // not a re-derivation of them.
-                            let footprint = target_footprint.unwrap_or_default();
+                            // A blind reviewer sees the goal and the artifact,
+                            // not the derivation: independence bought by
+                            // construction, where a prompt could only ask for it.
+                            let blind = gate.roles.get(&verifier).is_some_and(|spec| spec.blind);
+                            let footprint = if blind { Vec::new() } else { target_footprint.unwrap_or_default() };
                             if !footprint.is_empty() {
                                 if let Some(review_task) =
                                     core_state::get_task_by_id_mut(state, &review_task_id)
@@ -2458,7 +2960,7 @@ mod apply_harness_op_tests {
             }
             let mut state = base.clone();
             state.last_verification = Some(record.clone());
-            let finish = parse_harness_op("finish_task", r#"{"taskId":"task-1","status":"completed","summary":"two assertions passed"}"#).unwrap();
+            let finish = parse_harness_op("finish_task", r#"{"taskId":"task-1","status":"completed","summary":"two assertions passed","confidence":"high","anchor":"none","anchorNote":"no external fixture exists for this artifact"}"#).unwrap();
             assert!(apply_harness_op(&mut state, finish, &ctx).task_finished);
         }
     }
@@ -2479,10 +2981,220 @@ mod apply_harness_op_tests {
             ..HarnessOpContext::default()
         };
 
-        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"fixed during planning"}"#).unwrap();
+        let op = parse_harness_op("finish_task", r#"{"status":"completed","summary":"fixed during planning","confidence":"medium","anchor":"none","anchorNote":"planning-loop fix with no external check"}"#).unwrap();
         let accepted = apply_harness_op(&mut state, op, &ctx);
         assert!(accepted.task_finished);
         assert_eq!(state.tasks[0].edit_nudged, None);
+    }
+
+    /// A worked task with fresh, passing verification and an edited
+    /// workspace: the anchoring gate is the only thing left to satisfy.
+    fn anchoring_fixture(anchor_kind: Option<&str>) -> (HarnessState, HarnessOpContext) {
+        use crate::core::types::{HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind};
+        let mut state = create_harness_state("produce a measured artifact");
+        let plan = parse_harness_op("plan_tasks", r#"{"tasks":["produce artifact"]}"#).unwrap();
+        apply_harness_op(&mut state, plan, &HarnessOpContext::default());
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].activations = Some(1);
+        state.tasks[0].footprint = Some(vec!["edited artifact.txt".into()]);
+        state.workspace_edits = Some(1);
+        let mut evidence = crate::tools::builtin::verify::verification_evidence(
+            "python check.py",
+            "DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}",
+        );
+        evidence.anchor = anchor_kind.map(|kind| VerificationAnchor {
+            kind: match kind {
+                "external" => VerificationAnchorKind::External,
+                "self" => VerificationAnchorKind::SelfAuthored,
+                _ => VerificationAnchorKind::Undeclared,
+            },
+            source: Some("fixture".into()),
+            downgraded_reason: None,
+        });
+        let record = HarnessVerificationRecord {
+            at_iteration: 1, command: "python check.py".into(), failed: false,
+            output_tail: "".into(), ran_no_tests: None, evidence: Some(evidence),
+        };
+        state.last_verification = Some(record.clone());
+        state.verifications = Some(vec![record]);
+        let ctx = HarnessOpContext { current_task_id: Some("task-1".into()), ..Default::default() };
+        (state, ctx)
+    }
+
+    fn finish(state: &mut HarnessState, ctx: &HarnessOpContext, raw: &str) -> HarnessOpOutcome {
+        let op = parse_harness_op("finish_task", raw).expect("finish_task parses");
+        apply_harness_op(state, op, ctx)
+    }
+
+    /// Consistency-class evidence alone cannot complete edited work: the
+    /// finish bounces until an external check passes or anchor=none is
+    /// declared with a reason. The declaration is recorded on state.
+    #[test]
+    fn completion_requires_an_external_anchor_or_an_explicit_none_declaration() {
+        use crate::core::types::{ClaimedConfidence, CompletionAnchorKind};
+        for undeclared in [None, Some("self"), Some("undeclared")] {
+            let (mut state, ctx) = anchoring_fixture(undeclared);
+            for _ in 0..2 {
+                let bounced = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high"}"#);
+                assert!(!bounced.task_finished, "{undeclared:?}: {}", bounced.text);
+                assert!(bounced.text.contains("no correctness-class evidence"), "{}", bounced.text);
+            }
+            let missing_note = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","anchor":"none"}"#);
+            assert!(!missing_note.task_finished);
+            assert!(missing_note.text.contains("anchorNote"));
+            let accepted = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"low","anchor":"none","anchorNote":"no fixture exists for this output"}"#);
+            assert!(accepted.task_finished, "{}", accepted.text);
+            let anchor = state.completion_anchor.clone().expect("anchor recorded");
+            assert_eq!(anchor.kind, CompletionAnchorKind::None);
+            assert_eq!(anchor.claimed_confidence, ClaimedConfidence::Low);
+            assert_eq!(anchor.note.as_deref(), Some("no fixture exists for this output"));
+        }
+
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let accepted = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high"}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+        assert_eq!(state.completion_anchor.as_ref().map(|anchor| anchor.kind.clone()), Some(CompletionAnchorKind::External));
+    }
+
+    /// An analysis-only task (no edits, no expectations) makes no claim a
+    /// check could anchor, so it finishes without a declaration.
+    #[test]
+    fn analysis_only_tasks_do_not_need_an_anchor() {
+        let mut state = create_harness_state("summarize the module");
+        let plan = parse_harness_op("plan_tasks", r#"{"tasks":["write summary"]}"#).unwrap();
+        apply_harness_op(&mut state, plan, &HarnessOpContext::default());
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].activations = Some(1);
+        let ctx = HarnessOpContext { current_task_id: Some("task-1".into()), ..Default::default() };
+        let accepted = finish(&mut state, &ctx, r#"{"status":"completed","summary":"summarized","confidence":"medium"}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+    }
+
+    /// Expectations are written once: a plan_tasks call that rewrites a
+    /// registered subject is refused, an identical repeat is a no-op, and
+    /// new subjects append with stable ids.
+    #[test]
+    fn expectations_are_immutable_once_registered() {
+        let mut state = create_harness_state("measure");
+        let ctx = HarnessOpContext::default();
+        let plan = parse_harness_op("plan_tasks", r#"{"tasks":["measure"],"expectations":[{"subject":"row count","expected":"between 100 and 200"}]}"#).unwrap();
+        let outcome = apply_harness_op(&mut state, plan, &ctx);
+        assert!(outcome.text.contains("Registered expectation(s): e1 \"row count\" expects \"between 100 and 200\""), "{}", outcome.text);
+        assert_eq!(state.expectations.len(), 1);
+
+        let rewrite = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"Row Count","expected":"about 5"}]}"#).unwrap();
+        let refused = apply_harness_op(&mut state, rewrite, &ctx);
+        assert!(!refused.state_changed);
+        assert!(refused.text.contains("immutable once written"), "{}", refused.text);
+        assert_eq!(state.expectations[0].expected, "between 100 and 200");
+
+        let repeat_and_add = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"row count","expected":"between 100 and 200"},{"subject":"sign","expected":"positive"}]}"#).unwrap();
+        let added = apply_harness_op(&mut state, repeat_and_add, &ctx);
+        assert!(added.state_changed);
+        assert_eq!(state.expectations.len(), 2);
+        assert_eq!(state.expectations[1].id, "e2");
+        assert_eq!(state.tasks.len(), 1, "expectation-only calls add no tasks");
+    }
+
+    /// The expectation gate: unobserved expectations bounce; a mismatch
+    /// refuses `completed` and names the outlet; `unreconciled` needs
+    /// anomalies, then finishes the task and records them on state.
+    #[test]
+    fn mismatched_expectations_refuse_completed_and_accept_unreconciled() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"output sign","expected":"positive"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &ctx);
+
+        let unobserved = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high"}"#);
+        assert!(!unobserved.task_finished);
+        assert!(unobserved.text.contains("have no observation: e1 \"output sign\""), "{}", unobserved.text);
+
+        let unknown = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#);
+        assert!(!unknown.task_finished);
+        assert!(unknown.text.contains("not a registered expectation"), "{}", unknown.text);
+        assert!(state.expectations[0].observations.is_empty(), "refused calls record nothing");
+
+        let mismatch = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"output sign","observed":"negative","matches":false}]}"#);
+        assert!(!mismatch.task_finished);
+        assert!(mismatch.text.contains("P1 against the model"), "{}", mismatch.text);
+        assert!(mismatch.text.contains("status=\"unreconciled\""), "{}", mismatch.text);
+
+        let no_anomalies = finish(&mut state, &ctx, r#"{"status":"unreconciled","summary":"done","confidence":"low","observations":[{"subject":"output sign","observed":"negative","matches":false}]}"#);
+        assert!(!no_anomalies.task_finished);
+        assert!(no_anomalies.text.contains("non-empty anomalies"), "{}", no_anomalies.text);
+
+        let accepted = finish(&mut state, &ctx, r#"{"status":"unreconciled","summary":"done","confidence":"low","observations":[{"subject":"output sign","observed":"negative","matches":false}],"anomalies":[{"subject":"output sign","expected":"positive","observed":"negative","note":"two derivations agree and neither explains the sign"}]}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+        assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+        assert_eq!(state.anomalies.len(), 1);
+        assert_eq!(state.anomalies[0].observed, "negative");
+        assert_eq!(state.expectations[0].observations.len(), 1);
+    }
+
+    /// A revision that changes a reported value must cite outside evidence;
+    /// the same value again, or a change with evidence, is accepted.
+    #[test]
+    fn revised_observations_need_outside_evidence() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &ctx);
+        let first = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"medium","observations":[{"subject":"total","observed":"98","matches":true}]}"#);
+        assert!(first.task_finished, "{}", first.text);
+
+        // A review sends it back; the author revises the value.
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let bare = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"total","observed":"104","matches":true}]}"#);
+        assert!(!bare.task_finished);
+        assert!(bare.text.contains("changed from '98' to '104'"), "{}", bare.text);
+        assert!(bare.text.contains("evidence outside the fix"), "{}", bare.text);
+        assert_eq!(state.expectations[0].observations.len(), 1);
+
+        let same = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"e1","observed":"98","matches":true}]}"#);
+        assert!(same.task_finished, "{}", same.text);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let cited = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"total","observed":"104","matches":true,"evidence":"pre-existing fixture totals.csv sums to 104"}]}"#);
+        assert!(cited.task_finished, "{}", cited.text);
+        assert_eq!(state.expectations[0].observations.len(), 3);
+        assert_eq!(state.expectations[0].observations[2].evidence.as_deref(), Some("pre-existing fixture totals.csv sums to 104"));
+    }
+
+    /// Batch validation is atomic: a plan_tasks call that rewrites one subject
+    /// registers none of its expectations, and two observations for one
+    /// subject inside a single finish_task obey the revision rule against
+    /// each other — a mismatch cannot be erased by a later entry in the
+    /// same call.
+    #[test]
+    fn batched_expectations_and_observations_validate_before_writing() {
+        let mut state = create_harness_state("measure");
+        let ctx = HarnessOpContext::default();
+        let seed = parse_harness_op("plan_tasks", r#"{"tasks":["measure"],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, seed, &ctx);
+        let batch = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"rows","expected":"12"},{"subject":"total","expected":"about 5"}]}"#).unwrap();
+        let refused = apply_harness_op(&mut state, batch, &ctx);
+        assert!(!refused.state_changed);
+        assert_eq!(state.expectations.len(), 1, "{}", refused.text);
+        let duplicate_in_call = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"rows","expected":"12"},{"subject":"Rows","expected":"13"}]}"#).unwrap();
+        assert_eq!(state.expectations.len(), 1, "{}", apply_harness_op(&mut state, duplicate_in_call, &ctx).text);
+
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &ctx);
+        let erased = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"total","observed":"5","matches":false},{"subject":"total","observed":"98","matches":true}]}"#);
+        assert!(!erased.task_finished);
+        assert!(erased.text.contains("changed from '5' to '98'"), "{}", erased.text);
+        assert!(state.expectations[0].observations.is_empty());
+    }
+
+    /// finish_task parsing rejects unknown status/confidence/anchor spellings
+    /// and a missing or non-boolean matches instead of silently coercing them.
+    #[test]
+    fn finish_task_parse_rejects_unknown_enum_spellings() {
+        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5","matches":"true"}]}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5"}]}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"done","summary":"x"}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"certain"}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","anchor":"fixture"}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"unreconciled","summary":"x","confidence":"low"}"#).is_ok());
     }
 
     /// recorded on state, and the loop ends.

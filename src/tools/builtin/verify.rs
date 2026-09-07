@@ -50,11 +50,33 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "function": {
-            "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification.",
+            "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared.",
             "name": "VERIFY",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
+                    "anchor": {
+                        "description": "Optional evidence class. kind=external: a check the agent did not author (a pre-existing project test, a task-provided fixture, a published constant, an invariant independent of the implementation); kind=self: a check derived from the agent's own implementation. source names where the check came from.",
+                        "properties": {
+                            "kind": {
+                                "description": "external = a check the agent did not author; self = a check derived from the agent's own implementation.",
+                                "enum": [
+                                    "external",
+                                    "self"
+                                ],
+                                "type": "string"
+                            },
+                            "source": {
+                                "description": "Where the check came from (pre-existing suite, fixture, published constant, or invariant).",
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "kind",
+                            "source"
+                        ],
+                        "type": "object"
+                    },
                     "command": {
                         "description": "The shell command to run.",
                         "type": "string"
@@ -621,6 +643,7 @@ pub fn verification_evidence(command: &str, output: &str) -> crate::core::types:
         kind, executed, passed: if assertions { parsed.passed } else { 0 }, failed: parsed.failed,
         skipped: Some(parsed.skipped),
         detail: (kind == Kind::Unverified).then(|| "No executed checks were established; use a supported runner or emit a DRIP_VERIFY assertion result.".into()),
+        anchor: None,
     }
 }
 

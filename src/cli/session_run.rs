@@ -295,7 +295,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         args.index,
         &args.session.id,
         None,
-        Some(if result.reason == HarnessRunReason::Completed { "completed" } else { "idle" }),
+        Some(if matches!(result.reason, HarnessRunReason::Completed | HarnessRunReason::Unreconciled) { "completed" } else { "idle" }),
     );
 
     let pending_operator_messages = read_inbox_messages(

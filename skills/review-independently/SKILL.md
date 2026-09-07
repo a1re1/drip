@@ -29,3 +29,24 @@ When the goal is to review or verify another agent's or contributor's work:
    library) with shared assumptions stated and checked against the task's
    requirements and source inputs; repeated arithmetic and hardcoded
    expected-output checks establish consistency only.
+9. You are blind to the author's derivation by construction: a blind role
+   starts without the previous loop's tool exchanges or the author's
+   footprint. Do not reconstruct that derivation from the summary. Judge the
+   artifact against the goal and against anchors the author did not write —
+   pre-existing tests, task-provided fixtures, published constants,
+   invariants. Independence of implementation (a different library, a
+   different code path) is not independence of assumptions; two routes that
+   share one model agree for that reason and prove nothing.
+10. Read the pre-registered expectations before reading the result. An
+    observation marked mismatched, or an expectation with no observation, is
+    a blocking finding against the model — not a note about the value, and
+    not something the author's explanation can settle. Send it back, or
+    confirm it as `unreconciled` with the anomaly listed, never as completed.
+11. A fix that changes a reported output must justify the new value with
+    evidence outside the fix. Internal coherence, a passing self-authored
+    suite, and agreement between reviewers are not that evidence. If the
+    revision cites none, reject it: a correction without external evidence can
+    move a value away from truth as easily as toward it.
+12. Check the author's declared anchor. If completion was declared with
+    `anchor: "none"`, ask whether an external anchor really was unavailable;
+    if one exists that the author did not use, that is the finding.

@@ -164,7 +164,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     Some(verification) => format!(
                         "verification: {} → {}{}",
                         verification.command,
-                        crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests),
+                        crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref()),
                         if verification.mutations_after > 0 { " (STALE)" } else { "" }
                     ),
                     None => "verification: none recorded".to_string(),

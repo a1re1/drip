@@ -346,7 +346,7 @@ fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, sessio
         println!(
             "verification: {} ({}{staleness})",
             verification.command,
-            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests)
+            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref())
         );
     }
 

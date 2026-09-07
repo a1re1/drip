@@ -48,7 +48,7 @@
             "type": "number"
           },
           "files": {
-            "description": "Array of file edits to apply as a single atomic transaction. ALL entries are validated before any file is written; if any entry fails, NO files are changed. Each entry mirrors the single-file rules: pass content for a full write, or find + replace for a targeted edit.",
+            "description": "Apply a batch of file edits. All entries are validated and duplicate/aliased destinations rejected before writing; use separate PATCH calls for multiple edits to one file. On an ordinary write failure, rollback is attempted and any restoration failures are reported explicitly. This is not crash-atomic across files. Each entry uses content for a full write or find + replace for a targeted edit.",
             "items": {
               "additionalProperties": false,
               "properties": {
@@ -229,7 +229,7 @@
     "type": "function",
     "function": {
       "name": "VERIFY",
-      "description": "Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.",
+      "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

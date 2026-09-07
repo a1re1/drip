@@ -84,7 +84,8 @@ pub struct HarnessTask {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub summary: Option<String>,
 	pub title: String,
-	/// Set once the finish gate has bounced a completion for missing/stale/failed verification — the next attempt is accepted.
+	/// Records that completion was refused for weak verification. Kept for
+	/// session compatibility; it never exempts later completion attempts.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verify_nudged: Option<bool>,
 	/// The finish gate already bounced this task once for completing a build-shaped task without any workspace edit.
@@ -198,6 +199,10 @@ pub struct HarnessVerificationRecord {
 	/// proves nothing. Absent otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub ran_no_tests: Option<bool>,
+	/// Structured evidence for what the command actually executed. Legacy
+	/// records without it deserialize fine and remain weak/unverified.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub evidence: Option<VerificationEvidence>,
 }
 
 /// The driver-facing view of the latest verification: the record fields plus
@@ -213,6 +218,60 @@ pub struct VerificationSummary {
 	/// Present (true) only when the run passed without executing any test.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub ran_no_tests: Option<bool>,
+	/// Structured evidence (see VerificationEvidence). Legacy summaries without
+	/// it deserialize fine and remain weak.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub evidence: Option<VerificationEvidence>,
+}
+
+/// What kind of evidence a verification command produced. `build` and
+/// `typecheck` are legitimate evidence within their stated scope (the thing
+/// compiles); they never claim tests or custom assertions ran. `unverified`
+/// covers unknown exit-zero scripts, all-skipped/zero-check suites, malformed
+/// custom markers, and legacy records — none of these confer success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationEvidenceKind {
+	Tests,
+	Custom,
+	Build,
+	Typecheck,
+	Unverified,
+}
+
+/// Reported assertion counts from a verification command. These are evidence
+/// of what the command claimed/executed — never a proof of scientific
+/// correctness. Invariants: all counts nonnegative and `executed == passed +
+/// failed` for assertion evidence; a passing assertion verdict requires
+/// `executed > 0`. Build/typecheck evidence carries zero assertion counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationEvidence {
+	pub kind: VerificationEvidenceKind,
+	/// Assertions/tests the command reported executing (0 for build/typecheck).
+	pub executed: i64,
+	pub passed: i64,
+	pub failed: i64,
+	/// Skipped/ignored assertions, when the runner distinguishes them.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub skipped: Option<i64>,
+	/// Why the evidence is weak/unverified, when it is.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub detail: Option<String>,
+}
+
+impl VerificationEvidence {
+	pub fn verifies_work(&self) -> bool {
+		if self.failed != 0 || self.passed < 0 || self.executed < 0 || self.skipped.is_some_and(|count| count < 0) {
+			return false;
+		}
+		match self.kind {
+			VerificationEvidenceKind::Tests | VerificationEvidenceKind::Custom =>
+				self.executed > 0 && self.passed.checked_add(self.failed) == Some(self.executed),
+			VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => self.executed == 0 && self.passed == 0,
+			VerificationEvidenceKind::Unverified => false,
+		}
+	}
 }
 
 /// Task-ledger tally in the vocabulary every payload shares.
@@ -274,7 +333,8 @@ pub struct HarnessState {
 	/// Successful workspace mutations since the last verification ran — when > 0 the lastVerification result is stale.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub mutations_since_verification: Option<i64>,
-	/// Successful workspace mutations over the whole run (never reset) — the edit gate's "did anything change at all" signal.
+	/// Workspace mutations over the whole run (never reset), conservatively
+	/// including failed mutating calls whose side effects are unknown.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub workspace_edits: Option<i64>,
 	/// Bounded timeline (newest last) of the goal's verification runs.

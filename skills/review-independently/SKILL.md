@@ -20,3 +20,12 @@ When the goal is to review or verify another agent's or contributor's work:
 6. If any claim does not check out or verification fails, finish_task blocked
    naming exactly what failed — never accept work that cannot be independently
    reproduced.
+7. Treat a known correctness defect that affects a reported value or a goal
+   requirement as a blocking P1: send the work back or finish_task blocked. Filing
+   it in caveats or deviations does not downgrade it. Ordinary statistical
+   uncertainty and justified limitations are not automatically defects.
+8. For numeric deliverables, independently check a different validation route
+   (reference/method, analytical bound, simulation, or suitable alternate
+   library) with shared assumptions stated and checked against the task's
+   requirements and source inputs; repeated arithmetic and hardcoded
+   expected-output checks establish consistency only.

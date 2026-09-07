@@ -15,6 +15,8 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " Anything you do not write to shared state is forgotten when this task loop ends.",
     " To persist knowledge for future loops, call remember for durable facts, or observe for short-lived findings (a failing check's cause, an in-flight hypothesis) — observations expire after a few loops unless re-observed. To persist progress, call finish_task with a summary when the current task is done, or status blocked plus follow-up context when you cannot finish it; note_task records partial progress on the task without ending the loop.",
     " Never claim a verification (tests, build, typecheck) succeeded unless its passing output is visible in this loop's transcript or warm context. When a verification fails, record the failing detail with observe before moving on.",
+    " Verification counts establish executed checks, not that the chosen specification or formula is correct. For a numeric deliverable, validate the result by a different method/reference or a meaningful analytical bound or simulation, and state shared assumptions. Repeating the same arithmetic or comparing with hardcoded expected output establishes consistency only.",
+    " Known correctness defects or unresolved assumptions that undermine a reported value or goal requirement are blocking P1 findings even in your own caveats/deviations: resolve them or finish_task blocked. Ordinary statistical uncertainty or a justified limitation is not automatically a defect. Do not downgrade a known defect merely because it is documented.",
     " Warm context entries marked failed are calls that did not succeed when last run — do not re-run a call warm context already answers; act on the cached result instead.",
     " A folded transcript entry means that result was already seen this loop — re-run the call only if you truly need the full output again.",
     " Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents.",
@@ -267,7 +269,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             "{} (harness-recorded — trust THIS over memory or summaries): {} → {} (cycle {}{})",
             LAST_VERIFICATION_PREFIX,
             verification.command,
-            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests),
+            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref()),
             verification.at_iteration,
             if mutations_after > 0 {
                 format!("; STALE — {} workspace edit(s) landed after it, re-run before relying on it", mutations_after)
@@ -569,10 +571,11 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
         sections.push(
             [
                 format!(
-                    "last_verification (harness-recorded — cite THIS, not memory): {} → {} (cycle {})",
+                    "last_verification (harness-recorded — cite THIS, not memory): {} → {} (cycle {}){}",
                     last_verification.command,
-                    crate::core::state::describe_verification_outcome(last_verification.failed, last_verification.ran_no_tests),
-                    last_verification.at_iteration
+                    crate::core::state::describe_verification_outcome(last_verification.failed, last_verification.ran_no_tests, last_verification.evidence.as_ref()),
+                    last_verification.at_iteration,
+                    crate::core::state::describe_verification_evidence(last_verification.evidence.as_ref())
                 ),
                 last_verification.output_tail.clone(),
             ]

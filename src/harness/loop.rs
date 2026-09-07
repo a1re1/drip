@@ -654,8 +654,12 @@ pub fn record_task_footprint(footprint: &mut Option<Vec<String>>, entry: &str) {
     list.push(entry.to_string());
 
     if list.len() > MAX_FOOTPRINT_ENTRIES {
+        let had_edits = list.iter().any(|entry| entry.starts_with("edited "));
         let overflow = list.len() - MAX_FOOTPRINT_ENTRIES;
         list.drain(0..overflow);
+        if had_edits && !list.iter().any(|entry| entry.starts_with("edited ")) {
+            list[0] = "edited workspace (earlier in this task)".into();
+        }
     }
 }
 
@@ -802,6 +806,9 @@ pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<
 }
 
 pub fn extract_verification_command_for_goal(tool_name: &str, raw_input: &str, goal: &str) -> Option<String> {
+    if tool_name == "CHECK" {
+        return Some(format!("CHECK {}", raw_input));
+    }
     // BASH_ASYNC is excluded: its "success" is the launch, not the tests — an
     // async test run would record as passed the moment it started.
     if tool_name != "BASH" && tool_name != "VERIFY" {
@@ -1133,6 +1140,17 @@ mod loop_helpers_tests {
     }
 
     #[test]
+    fn verification_history_cannot_evict_the_fact_that_a_task_edited_files() {
+        let mut footprint = None;
+        record_task_footprint(&mut footprint, "edited result.txt");
+        for index in 0..MAX_FOOTPRINT_ENTRIES + 5 {
+            record_task_footprint(&mut footprint, &format!("ran checker {index}"));
+        }
+        assert!(footprint.as_ref().unwrap().iter().any(|entry| entry.starts_with("edited ")));
+        assert_eq!(footprint.unwrap().len(), MAX_FOOTPRINT_ENTRIES);
+    }
+
+    #[test]
     fn record_task_footprint_caps_at_max_entries_and_skips_duplicates() {
         let mut footprint: Option<Vec<String>> = None;
 
@@ -1456,6 +1474,8 @@ pub fn format_thousands(value: usize) -> String {
 
 /// Result of executing one workspace tool.
 pub struct WorkspaceToolExecution {
+    /// False when a hook or role restriction prevented tool dispatch.
+    pub dispatched: bool,
     pub failed: bool,
     pub tool_content: String,
 }
@@ -2247,12 +2267,14 @@ impl HarnessRun {
                 veto.stderr_excerpt.clone()
             };
             return WorkspaceToolExecution {
+                dispatched: false,
                 failed: true,
                 tool_content: format!(
                     "tool call blocked by pre_tool_use hook: {stderr_excerpt}"
                 ),
             };
         }
+        let dispatched = tool.is_some();
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
             history: &[],
@@ -2287,6 +2309,7 @@ impl HarnessRun {
         // on apply_harness_op's state_changed so failures and no-ops stay
         // silent.
         WorkspaceToolExecution {
+            dispatched,
             failed,
             tool_content,
         }
@@ -3706,7 +3729,7 @@ impl HarnessRun {
             let prior_output = prior_record.map(|record| record.last_output);
 
             let execution_started_at_ms = (self.now)().timestamp_millis();
-            let execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
+            let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
 
             // A successful workspace mutation counts as task progress even if
@@ -3718,33 +3741,45 @@ impl HarnessRun {
             // like a PATCH and must count the same way, or the loop registers
             // no progress (stall accounting), the verification staleness
             // counter stays at 0, and the task footprint never says "edited".
-            let shell_write = !execution.failed && bash_command.as_deref().is_some_and(is_writing_shell_command);
-            if shell_write
-                || (!execution.failed
-                    && self
-                        .tool_registry
-                        .get(&tool_name)
-                        .map(|index| self.tools[*index].mutates_workspace)
-                        .unwrap_or(false))
-            {
-                scope.made_progress = true;
+            let shell_write = bash_command.as_deref().is_some_and(is_writing_shell_command);
+            let may_mutate = execution.dispatched && (shell_write || self.tool_registry.get(&tool_name)
+                .is_some_and(|index| self.tools[*index].mutates_workspace));
+            // A failed writer may have changed files before failing. Its old
+            // verification must become stale even if side effects are unknown.
+            if may_mutate {
+                scope.made_progress |= !execution.failed;
                 scope.persisted_this_loop = true;
                 self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
 
-            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal);
+            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
+                .or_else(|| {
+                    (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
+                        .then(|| extract_bash_command(&raw_input)).flatten()
+                });
             if let Some(verification_command) = verification_command.clone() {
                 let truncated_command = truncate_text(&verification_command, 200);
                 let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
                 let ran_no_tests =
                     !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
+                let evidence = if tool_name == "CHECK" {
+                    crate::core::types::VerificationEvidence {
+                        kind: crate::core::types::VerificationEvidenceKind::Typecheck,
+                        executed: 0, passed: 0, failed: i64::from(execution.failed), skipped: None,
+                        detail: Some("Compiler diagnostics for the requested scope; no tests executed.".into()),
+                    }
+                } else {
+                    crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content)
+                };
+                execution.failed |= evidence.failed > 0;
                 let verification_record = HarnessVerificationRecord {
                     at_iteration: self.state.iteration,
                     command: truncated_command.clone(),
                     failed: execution.failed,
                     output_tail: output_tail.clone(),
                     ran_no_tests: ran_no_tests.then_some(true),
+                    evidence: Some(evidence),
                 };
 
                 if ran_no_tests {
@@ -3917,6 +3952,16 @@ impl HarnessRun {
             ));
 
             if let Some(task_id) = scope.current_task_id.clone() {
+                if may_mutate && !execution.failed && tool_name != "PATCH" && !shell_write {
+                    if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
+                        record_task_footprint(&mut task.footprint, &format!("edited via {tool_name}"));
+                    }
+                }
+                if may_mutate && execution.failed {
+                    if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
+                        record_task_footprint(&mut task.footprint, &format!("edited state uncertain: {tool_name} failed; reverify possible side effects"));
+                    }
+                }
                 if !execution.failed && tool_name == "PATCH" {
                     let patched = extract_patched_paths(&raw_input);
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
@@ -3925,7 +3970,7 @@ impl HarnessRun {
                         }
                     }
                 }
-                if shell_write {
+                if shell_write && !execution.failed {
                     let command = bash_command.as_deref().unwrap_or_default();
                     let collapsed = strip_heredoc_bodies(command).split_whitespace().collect::<Vec<_>>().join(" ");
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
@@ -3937,8 +3982,8 @@ impl HarnessRun {
                         "ran {} -> {}",
                         truncate_text(command, 120),
                         match &self.state.last_verification {
-                            Some(record) => core_state::describe_verification_outcome(record.failed, record.ran_no_tests),
-                            None => core_state::describe_verification_outcome(execution.failed, None),
+                            Some(record) => core_state::describe_verification_outcome(record.failed, record.ran_no_tests, record.evidence.as_ref()),
+                            None => core_state::describe_verification_outcome(execution.failed, None, None),
                         }
                     );
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {

@@ -1171,14 +1171,13 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 14] = [
+    let exclusive_modes: [(&str, bool); 13] = [
         ("--answer", cli_args.answer),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
         ("--inspect", cli_args.inspect),
         ("--list", cli_args.list),
         ("--result", cli_args.result),
-        ("--reward", cli_args.reward.is_some()),
         ("--review", cli_args.review),
         ("--send", cli_args.send),
         ("--skills", cli_args.skills),
@@ -1317,61 +1316,6 @@ pub async fn main(argv: Vec<String>) -> i32 {
             );
         }
 
-        return 0;
-    }
-
-    // --reward <score> [session]: append a verifier's score to the session's
-    // calibration trace and print each finished task's claimed confidence
-    // and evidence class next to it.
-    if let Some(reward) = cli_args.reward {
-        if has_goal_like {
-            eprintln!("--reward only scores a session — run the goal separately.");
-            return 1;
-        }
-
-        if !has_any_session_index(&project) {
-            eprintln!("No sessions recorded for {cwd} yet.");
-            return 1;
-        }
-
-        let resolved = resolve_session_ref(&project, cli_args.reward_id.as_deref());
-        let Some(record) = resolved.record else {
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
-            return 1;
-        };
-
-        let paths = session_paths_for(&project, &record);
-        let session_dir = Path::new(&paths.dir);
-        if let Err(error) = crate::core::calibration::append_reward(session_dir, reward) {
-            eprintln!("Could not record the reward for session {}: {error}", short_id(&record.id));
-            return 1;
-        }
-        let trace = crate::core::calibration::read_calibration(session_dir).unwrap_or_default();
-        let merged = crate::core::calibration::merge_rewards(&trace.lines);
-        if trace.dropped_lines > 0 {
-            eprintln!(
-                "warning: {} unreadable line(s) in {} were skipped — the scoreboard below is incomplete.",
-                trace.dropped_lines,
-                crate::core::calibration::calibration_path(session_dir).display()
-            );
-        }
-        if cli_args.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "records": merged,
-                    "droppedLines": trace.dropped_lines,
-                }))
-                .unwrap_or_default()
-            );
-        } else if merged.is_empty() {
-            println!(
-                "reward {reward} recorded for session {}; no finished task has a calibration record yet.",
-                short_id(&record.id)
-            );
-        } else {
-            println!("{}", crate::core::calibration::format_calibration(&merged));
-        }
         return 0;
     }
 

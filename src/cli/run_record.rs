@@ -58,9 +58,6 @@ pub struct RunRecord {
 	/// Expectations the run could not reconcile (reason "unreconciled").
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub anomalies: Option<Vec<crate::core::types::HarnessAnomaly>>,
-	/// Run-level calibration record: claimed confidence next to evidence class.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub calibration: Option<crate::core::calibration::CalibrationRecord>,
 }
 
 pub struct BuildRunRecordArgs<'a> {
@@ -112,7 +109,6 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 		anomalies: Some(args.result.state.anomalies.clone()).filter(|anomalies| !anomalies.is_empty()),
 		// Run-level record: `status` uses the run vocabulary marker, not a
 		// task finish status, so consumers never confuse the two.
-		calibration: crate::core::calibration::derive_calibration(&args.result.state, None, "run"),
 		reason,
 	}
 }
@@ -219,6 +215,7 @@ mod tests {
 			title: title.into(),
 			verify_nudged: None,
 			edit_nudged: None,
+			confidence: None,
 		}
 	}
 
@@ -309,9 +306,8 @@ mod tests {
 		// anchoring fields stay absent from the record (and its JSON).
 		assert_eq!(record.completion_anchor, None);
 		assert_eq!(record.anomalies, None);
-		assert_eq!(record.calibration, None);
 		let json = serde_json::to_string(&record).unwrap();
-		assert!(!json.contains("completionAnchor") && !json.contains("anomalies") && !json.contains("calibration"), "{json}");
+		assert!(!json.contains("completionAnchor") && !json.contains("anomalies"), "{json}");
 	}
 
 	#[test]

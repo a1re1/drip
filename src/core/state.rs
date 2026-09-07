@@ -18,6 +18,7 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::core::types::{
+	ClaimedConfidence,
 	HarnessGoalRecord,
 HarnessMemoryNote, HarnessObservation, HarnessState,
 HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats,
@@ -193,6 +194,7 @@ pub fn add_tasks(
 			title: trimmed_title.to_string(),
 			verify_nudged: None,
 			edit_nudged: None,
+			confidence: None,
 		});
 	}
 
@@ -281,6 +283,7 @@ pub struct HarnessFinishArgs<'a> {
 	pub status: HarnessTaskStatus,
 	pub summary: &'a str,
 	pub task_id: Option<&'a str>,
+	pub confidence: Option<ClaimedConfidence>,
 }
 
 pub fn finish_task<'a>(state: &'a mut HarnessState, args: HarnessFinishArgs<'_>) -> Option<&'a mut HarnessTask> {
@@ -296,6 +299,9 @@ pub fn finish_task<'a>(state: &'a mut HarnessState, args: HarnessFinishArgs<'_>)
 	task.status = args.status;
 	let trimmed = args.summary.trim();
 	task.summary = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+	if args.confidence.is_some() {
+		task.confidence = args.confidence;
+	}
 
 	Some(task)
 }
@@ -1220,7 +1226,7 @@ mod tests {
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "built", task_id: Some("task-1") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "built", task_id: Some("task-1"), confidence: None },
         );
         assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-2"));
 
@@ -1246,7 +1252,7 @@ mod tests {
 
         let finished_task = finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: None },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: None, confidence: None },
         )
         .unwrap();
 
@@ -1256,7 +1262,7 @@ mod tests {
 
         let blocked_task = finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "missing credentials", task_id: Some("task-2") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "missing credentials", task_id: Some("task-2"), confidence: None },
         )
         .unwrap();
 
@@ -1266,9 +1272,63 @@ mod tests {
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "unblocked and done", task_id: Some("task-2") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "unblocked and done", task_id: Some("task-2"), confidence: None },
         );
         assert!(is_goal_complete(&state));
+    }
+
+    // Persists each finish_task confidence self-report on the task record itself.
+    #[test]
+    fn persists_finish_task_confidence_on_the_task_record() {
+        let mut state = create_harness_state("goal");
+
+        add_tasks(&mut state, vec![input("first"), input("second")], HarnessTaskPlacement::End);
+
+        assert_eq!(state.tasks[0].confidence, None);
+        assert_eq!(state.tasks[1].confidence, None);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "shipped it", task_id: Some("task-1"), confidence: Some(crate::core::types::ClaimedConfidence::High) },
+        );
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "waiting on credentials", task_id: Some("task-2"), confidence: Some(crate::core::types::ClaimedConfidence::Low) },
+        );
+
+        assert_eq!(state.tasks[0].confidence, Some(crate::core::types::ClaimedConfidence::High));
+        assert_eq!(state.tasks[1].confidence, Some(crate::core::types::ClaimedConfidence::Low));
+    }
+
+    // Older state files whose tasks carry no confidence field still load; a newer
+    // finalization then persists the self-report on the task record.
+    #[test]
+    fn loads_older_state_json_without_task_confidence_and_persists_new_confidence() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("state.json");
+
+        let mut state = create_harness_state("legacy goal");
+        add_tasks(&mut state, vec![input("first")], HarnessTaskPlacement::End);
+        save_harness_state(&state_path, &state).unwrap();
+
+        // Simulate an older state.json written before per-task confidence existed.
+        let mut raw: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        for task in raw.get_mut("tasks").and_then(Value::as_array_mut).unwrap() {
+            task.as_object_mut().unwrap().remove("confidence");
+        }
+        fs::write(&state_path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        let mut loaded_state = load_harness_state(&state_path).unwrap().unwrap();
+        assert_eq!(loaded_state.tasks[0].confidence, None);
+
+        finish_task(
+            &mut loaded_state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: None, confidence: Some(crate::core::types::ClaimedConfidence::Medium) },
+        );
+        save_harness_state(&state_path, &loaded_state).unwrap();
+
+        let reloaded_state = load_harness_state(&state_path).unwrap().unwrap();
+        assert_eq!(reloaded_state.tasks[0].confidence, Some(crate::core::types::ClaimedConfidence::Medium));
     }
 
     // Inserts placement-next tasks after the current task, or at the front of the pending queue.
@@ -1313,7 +1373,7 @@ mod tests {
         assert!(drop_task(&mut state, "task-2", "again").is_none());
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
         );
         assert!(drop_task(&mut state, "task-1", "too late").is_none());
     }
@@ -1342,7 +1402,7 @@ mod tests {
         add_tasks(&mut state, vec![input("real work"), input("stale work")], HarnessTaskPlacement::End);
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
         );
         assert!(!is_goal_complete(&state));
 
@@ -1443,7 +1503,7 @@ mod tests {
         add_tasks(&mut state, vec![input("only task")], HarnessTaskPlacement::End);
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
         );
         add_memory_note(&mut state, "a durable fact");
         state.iteration = 4;
@@ -1499,11 +1559,11 @@ mod tests {
         assert!(has_unfinished_tasks(&state));
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "", task_id: Some("task-1") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "", task_id: Some("task-1"), confidence: None },
         );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "stuck", task_id: Some("task-2") },
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "stuck", task_id: Some("task-2"), confidence: None },
         );
         // Blocked still counts as unfinished so a same-goal re-run resumes instead of archiving.
         assert!(has_unfinished_tasks(&state));

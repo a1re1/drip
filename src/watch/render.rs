@@ -27,12 +27,6 @@ pub type FocusPane = u8;
 /// the session selection out from under the shells being inspected.
 pub type SessionFocus = u8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    Worktree,
-    Repo,
-}
-
 #[derive(Debug, Clone)]
 pub struct WatchViewModel {
     /// Epoch ms — the only clock render_frame may read.
@@ -60,11 +54,6 @@ pub struct WatchViewModel {
     /// Files discovered behind the selected shell's fd 1/2 — tells the empty
     /// states "no tailable fds" and "tailing, nothing yet" apart.
     pub shell_log_files: Vec<String>,
-    /// Whether Recent is scoped to the current worktree or shows every
-    /// worktree of the repo. Defaults to worktree when the cwd sits in one.
-    pub scope: Scope,
-    /// Pane-title suffix for Recent: the worktree name, or "all worktrees".
-    pub scope_label: String,
 }
 
 // ── Time helpers (pure; exported for tests) ──────────────────────────────────
@@ -511,7 +500,7 @@ fn running_title(vm: &WatchViewModel) -> String {
 }
 
 fn recent_title(vm: &WatchViewModel) -> String {
-    format!("[2] Recent ({}) · {}", vm.recent.len(), vm.scope_label)
+    format!("[2] Recent ({})", vm.recent.len())
 }
 
 fn shells_title(vm: &WatchViewModel) -> String {
@@ -542,7 +531,7 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · j/k move · [/] h/l scroll log · w scope · q quit";
+const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · j/k move · [/] h/l scroll log · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -686,8 +675,6 @@ mod tests {
             sel_shell: 0,
             shell_log_lines: vec![],
             shell_log_files: vec![],
-            scope: Scope::Repo,
-            scope_label: "all worktrees".into(),
         }
     }
 

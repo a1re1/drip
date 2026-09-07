@@ -1397,7 +1397,7 @@ impl TuiApp {
             ),
             OverlayKind::Sessions => (
                 "resume a session",
-                list_all_sessions(&self.bootstrap.project, Some(15), false)
+                list_all_sessions(&self.bootstrap.project, Some(15))
                     .into_iter()
                     .map(|record| PickerItem {
                         detail: Some(record.last_goal.clone().unwrap_or_else(|| "(no goal yet)".to_string())),
@@ -1771,7 +1771,7 @@ impl TuiApp {
                 }
             }
             "sessions" => {
-                let records = list_all_sessions(&self.bootstrap.project, Some(15), false);
+                let records = list_all_sessions(&self.bootstrap.project, Some(15));
                 let text = if records.is_empty() {
                     "no sessions recorded for this directory yet.".to_string()
                 } else {

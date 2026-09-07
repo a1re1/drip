@@ -24,11 +24,9 @@ Keys:
   j / k         Move selection down / up
   ↑ / ↓         Move selection up / down
   [ / ]         Scroll transcript back / forward  (also h / l, ← / →)
-  w             Toggle Recent between this worktree and all worktrees of the repo
   q / Ctrl+C    Quit
 
-Recent is scoped to sessions started under the current worktree by default,
-while Running always shows every worktree.
+dripw shows sessions started in the current directory or any directory beneath it.
 
 Focusing a shell (3) turns the bottom pane into process details (pid, ppid,
 command, children) plus a live tail of its stdout/stderr when they point at
@@ -71,6 +69,7 @@ fn main() {
         let _ = std::io::stdout().flush();
     }
 
-    // App owns the session-index lifecycle (lazy open + close on exit).
-    run_watch_app(project);
+    // The app re-lists every project home under the drip home on each refresh
+    // and keeps only sessions started in cwd or a directory beneath it.
+    run_watch_app(project, cwd);
 }

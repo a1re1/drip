@@ -1,7 +1,7 @@
-// The pure data side of dripw: session classification and scoping, paging,
-// transcript windowing, and the incremental transcript tail.
+// The pure data side of dripw: session classification, directory filtering,
+// paging, transcript windowing, and the incremental transcript tail.
 
-use std::path::{Path, MAIN_SEPARATOR};
+use std::path::{Path, PathBuf};
 
 use crate::cli::follow::{parse_transcript_line, read_appended_jsonl_lines};
 use crate::cli::transcript::{read_transcript, TranscriptEntry};
@@ -41,61 +41,48 @@ pub fn classify_sessions(records: &[SessionRecord], is_running: &dyn Fn(&Session
 }
 
 // ---------------------------------------------------------------------------
-// scope_sessions
+// directory filter
 // ---------------------------------------------------------------------------
 
-pub struct ScopeOptions<'a> {
-    pub worktree_root: &'a str,
-    pub linked_worktree_roots: &'a [String],
-}
-
-fn resolved(path: &str) -> String {
-    resolve(path).to_string_lossy().into_owned()
-}
-
-// Restrict the Recent list to sessions started inside the worktree being
-// watched. Two subtleties the path check has to get right. First, containment
-// is segment-based: worktree `…/abc` must not swallow `…/abc123`, which a bare
-// string prefix would. Second, the exclusion of other linked roots only fires
-// for roots nested INSIDE the watched worktree — the main checkout keeps its
-// linked worktrees under `.worktrees/`, so its root always contains the
-// worktree's own sessions and excluding on it would empty the worktree view,
-// while ignoring it entirely would let a repo-scoped view re-absorb every
-// worktree's sessions. Net effect: the innermost listed root owns a cwd.
-// Pure on purpose: like classify_sessions, it stays testable without a tree.
-pub fn scope_sessions(records: &[SessionRecord], opts: ScopeOptions<'_>) -> Vec<SessionRecord> {
-    let root = resolved(opts.worktree_root);
-
-    let is_inside = |dir: &str, base: &str| -> bool {
-        let d = resolved(dir);
-
-        d == base || d.starts_with(&format!("{base}{MAIN_SEPARATOR}"))
-    };
-
-    // Linked worktrees sitting under the watched worktree keep their own
-    // sessions; roots elsewhere (the main checkout, sibling worktrees) cannot
-    // claim anything that lives under `root` anyway.
-    let nested_roots: Vec<String> =
-        opts.linked_worktree_roots.iter().map(|r| resolved(r)).filter(|r| r != &root && is_inside(r, &root)).collect();
-
-    let mut kept: Vec<SessionRecord> = Vec::new();
-
-    for record in records {
-        let cwd = resolved(&record.cwd);
-
-        // Started outside this worktree entirely — not ours.
-        if !is_inside(&cwd, &root) {
-            continue;
-        }
-        // But a worktree nested inside us owns its own sessions.
-        if nested_roots.iter().any(|r| is_inside(&cwd, r)) {
-            continue;
-        }
-
-        kept.push(record.clone());
+// Canonicalize a directory path when it exists on disk; otherwise fall back to
+// resolve(), which makes the path absolute and normalizes separators and
+// `.`/`..` segments. Session cwds and the monitor's launch directory are
+// handled identically so symlink aliases and spelling differences cannot
+// split one directory into two.
+pub fn canonical_dir(path: &str) -> PathBuf {
+    let resolved_path = resolve(path);
+    match std::fs::canonicalize(&resolved_path) {
+        Ok(canonical) => canonical,
+        Err(_) => resolved_path,
     }
+}
 
-    kept
+// The one visibility rule: keep a session iff its recorded cwd equals the
+// watched directory or lives anywhere beneath it. The prefix test is
+// path-component based — a watched dir `/a/b` must not claim a sibling like
+// `/a/bc` — which Path::starts_with guarantees by comparing whole components
+// instead of characters. Both sides are canonicalized first, so symlink
+// aliases and trailing slashes cannot defeat the comparison. A session with
+// an empty/unresolvable cwd is dropped rather than silently adopted into the
+// watched directory. Pure on purpose: like classify_sessions, it stays
+// testable without a real session tree.
+pub fn sessions_under_dir(records: &[SessionRecord], dir: &str) -> Vec<SessionRecord> {
+    if dir.trim().is_empty() {
+        return Vec::new();
+    }
+    let root = canonical_dir(dir);
+
+    records
+        .iter()
+        .filter(|record| {
+            if record.cwd.trim().is_empty() {
+                return false;
+            }
+            let cwd = canonical_dir(&record.cwd);
+            cwd.starts_with(&root)
+        })
+        .cloned()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -256,18 +243,113 @@ mod tests {
     }
 
     #[test]
-    fn scope_uses_segment_containment_and_innermost_root() {
+    fn dir_filter_keeps_equal_and_child_dirs_only() {
         let records = vec![
-            record("own", "/repo/abc/src", "t"),
-            record("root", "/repo/abc", "t"),
+            record("equal", "/repo/abc", "t"),
+            record("child", "/repo/abc/src", "t"),
+            record("deep", "/repo/abc/src/deep/x", "t"),
             record("sibling", "/repo/abc123", "t"),
-            record("nested", "/repo/abc/.worktrees/x/src", "t"),
-            record("elsewhere", "/other", "t"),
+            record("prefix_prefix", "/repo/abc/srcx", "t"),
+            record("parent", "/repo", "t"),
+            record("other", "/other", "t"),
+            record("empty_cwd", "", "t"),
         ];
-        let linked = vec!["/repo".to_string(), "/repo/abc/.worktrees/x".to_string()];
-        let kept = scope_sessions(&records, ScopeOptions { worktree_root: "/repo/abc", linked_worktree_roots: &linked });
+        let kept = sessions_under_dir(&records, "/repo/abc");
 
-        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["own", "root"]);
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["equal", "child", "deep", "prefix_prefix"]);
+    }
+
+    #[test]
+    fn dir_filter_component_prefix_not_string_prefix() {
+        // The watched dir must not claim a sibling whose name merely extends
+        // its own last component as a string.
+        let records = vec![record("bc", "/a/bc", "t"), record("b2", "/a/b2/c", "t")];
+
+        assert!(sessions_under_dir(&records, "/a/b").is_empty());
+        assert_eq!(sessions_under_dir(&records, "/a/bc").iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["bc"]);
+    }
+
+    #[test]
+    fn dir_filter_trailing_slashes_and_dot_segments_equivalent() {
+        let records = vec![record("a", "/repo/abc/", "t"), record("b", "/repo/abc/./src", "t"), record("c", "/repo/abc/../abc", "t")];
+
+        let kept = sessions_under_dir(&records, "/repo/abc///");
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn dir_filter_existing_dirs_canonicalize_and_missing_dirs_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        let real_str = real.to_string_lossy().into_owned();
+
+        // Existing directory: a `.`/`..` spelling of it canonicalizes equal.
+        let records = vec![record("in", &format!("{real_str}/sub"), "t")];
+        let spelled = format!("{}/./", dir.path().join(".").to_string_lossy());
+        assert_eq!(sessions_under_dir(&records, &spelled).len(), 1);
+
+        // Missing directory (never created): falls back to the resolved path
+        // and still does component-prefix containment.
+        let missing = format!("{}/missing", dir.path().to_string_lossy());
+        let records = vec![record("under", &format!("{missing}/x"), "t"), record("outside", "/elsewhere", "t")];
+        let kept = sessions_under_dir(&records, &missing);
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["under"]);
+    }
+
+    #[test]
+    fn dir_filter_symlink_aliases_agree_on_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            // Alias on the launch-dir side.
+            let records = vec![record("in", &real.to_string_lossy(), "t"), record("out", "/elsewhere", "t")];
+            let kept = sessions_under_dir(&records, &link.to_string_lossy());
+            assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["in"]);
+
+            // Alias on the record side.
+            let records = vec![record("in", &link.to_string_lossy(), "t"), record("out", "/elsewhere", "t")];
+            let kept = sessions_under_dir(&records, &real.to_string_lossy());
+            assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["in"]);
+        }
+    }
+
+    #[test]
+    fn dir_filter_parent_sees_nested_checkout_child_excludes_parent() {
+        // One physical tree: outer/…/inner, plus a sibling. A monitor in the
+        // parent sees the nested checkout's sessions; a monitor in the nested
+        // checkout sees neither the parent's nor the sibling's.
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("outer");
+        let inner = outer.join("dep/inner");
+        let sibling = outer.join("sib");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (outer_str, inner_str, sibling_str) = (
+            outer.to_string_lossy().into_owned(),
+            inner.to_string_lossy().into_owned(),
+            sibling.to_string_lossy().into_owned(),
+        );
+
+        let records = vec![record("inner", &inner_str, "t"), record("sibling", &sibling_str, "t"), record("elsewhere", "/elsewhere", "t")];
+
+        let from_outer = sessions_under_dir(&records, &outer_str);
+        assert_eq!(from_outer.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["inner", "sibling"]);
+
+        let from_inner = sessions_under_dir(&records, &inner_str);
+        assert_eq!(from_inner.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["inner"]);
+    }
+
+    #[test]
+    fn dir_filter_empty_launch_dir_keeps_nothing() {
+        let records = vec![record("a", "/repo/abc", "t")];
+        assert!(sessions_under_dir(&records, "").is_empty());
     }
 
     #[test]

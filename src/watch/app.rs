@@ -12,16 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use crate::core::home::{list_linked_worktree_roots, DripProject};
+use crate::core::home::DripProject;
 use crate::core::lease::{check_lease, LeaseStatus};
-use crate::core::sessions::{
-    has_any_worktree_session_index, list_all_sessions, open_session_index, session_paths_for, SessionIndex,
-    SessionRecord,
-};
+use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRecord};
 use crate::watch::ansi::term;
-use crate::watch::data::{classify_sessions, scope_sessions, trim_transcript, ScopeOptions, TranscriptTail};
+use crate::watch::data::{classify_sessions, sessions_under_dir, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
-use crate::watch::render::{diff_lines, render_frame, Scope, WatchViewModel};
+use crate::watch::render::{diff_lines, render_frame, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
@@ -65,15 +62,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         sel_shell: 0,
         shell_log_lines: Vec::new(),
         shell_log_files: Vec::new(),
-        // Repo scope is the neutral default; the constructor narrows it to the
-        // current worktree when the cwd sits inside one.
-        scope: Scope::Repo,
-        scope_label: "all worktrees".to_string(),
     }
-}
-
-fn basename(path: &str) -> String {
-    Path::new(path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
 }
 
 // ── terminal plumbing ────────────────────────────────────────────────────────
@@ -105,7 +94,8 @@ fn same_list(a: &[String], b: &[String]) -> bool {
 
 pub struct WatchApp {
     project: DripProject,
-    index: Option<SessionIndex>,
+    /// Directory dripw was launched from; the only visibility rule there is.
+    watch_dir: String,
     vm: WatchViewModel,
     running: bool,
     tail: Option<TranscriptTail>,
@@ -126,18 +116,13 @@ pub struct WatchApp {
 }
 
 impl WatchApp {
-    pub fn new(project: DripProject) -> Self {
+    pub fn new(project: DripProject, watch_dir: String) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut vm = empty_vm(now_ms());
-
-        if let Some(worktree_root) = &project.worktree_root {
-            vm.scope = Scope::Worktree;
-            vm.scope_label = basename(worktree_root);
-        }
+        let vm = empty_vm(now_ms());
 
         Self {
             project,
-            index: None,
+            watch_dir,
             vm,
             running: false,
             tail: None,
@@ -179,8 +164,6 @@ impl WatchApp {
         self.setup_resize();
         self.setup_signals();
 
-        // Try the index immediately; if missing, refresh_sessions re-checks every 2s.
-        self.try_open_index();
         self.refresh_sessions();
         self.draw();
 
@@ -220,7 +203,6 @@ impl WatchApp {
         raw.restore();
         write_out(&format!("{}{}", term::SHOW_CURSOR, term::MAIN_SCREEN));
 
-        self.index = None;
         std::process::exit(0);
     }
 
@@ -231,20 +213,6 @@ impl WatchApp {
         self.stopping = true;
         self.running = false;
         self.tail = None;
-    }
-
-    // ── index lifecycle ──────────────────────────────────────────────────────
-
-    fn try_open_index(&mut self) {
-        if self.index.is_some() {
-            return;
-        }
-        if !Path::new(&self.project.index_db_path).exists() {
-            return;
-        }
-        // The opener panics on a broken file, so the guard is a catch_unwind.
-        let path = self.project.index_db_path.clone();
-        self.index = std::panic::catch_unwind(move || open_session_index(&path)).ok();
     }
 
     // ── polling ──────────────────────────────────────────────────────────────
@@ -358,29 +326,21 @@ impl WatchApp {
     }
 
     fn refresh_sessions(&mut self) {
-        self.try_open_index();
         self.vm.now = now_ms();
 
-        // A worktree that never ran drip has no index of its own, but its siblings
-        // may: Running/Recent union every worktree home of the repo, so only a repo
-        // with no index anywhere is empty.
-        if self.index.is_none() && !has_any_worktree_session_index(&self.project) {
-            self.vm.running = Vec::new();
-            self.vm.recent = Vec::new();
-            self.vm.started_at_ms = HashMap::new();
-            self.vm.shells = Vec::new();
-            self.pid_by_id = HashMap::new();
-            self.clamp_selections();
-            return;
-        }
-
-        // A listing panic (an index wiped mid-run) must not kill the tick:
-        // drop the index and re-open next tick, showing empty lists meanwhile.
-        let project = self.project.clone();
-        let records: Vec<SessionRecord> = match std::panic::catch_unwind(move || list_all_sessions(&project, Some(200), true)) {
+        // Every project registry under the drip home is a source; the launch
+        // directory decides visibility (equal dir or any directory beneath it).
+        // The filter runs before leases/classification so Running and Recent see
+        // exactly the same sessions, with no row cap ahead of the filter.
+        // A listing panic (a home wiped mid-run) must not kill the tick: show
+        // empty lists and retry next tick.
+        let home_root = self.project.home_root.clone();
+        let watch_dir = self.watch_dir.clone();
+        let records: Vec<SessionRecord> = match std::panic::catch_unwind(move || {
+            sessions_under_dir(&list_all_home_sessions(Path::new(&home_root)), &watch_dir)
+        }) {
             Ok(records) => records,
             Err(_) => {
-                self.index = None;
                 self.vm.running = Vec::new();
                 self.vm.recent = Vec::new();
                 self.vm.started_at_ms = HashMap::new();
@@ -415,18 +375,6 @@ impl WatchApp {
         self.vm.running = classified.running.clone();
         self.vm.recent = classified.recent.clone();
         self.vm.started_at_ms = started_at_ms;
-
-        // In worktree scope the Recent list narrows to sessions started under the
-        // checkout being watched; Running is never filtered, so a live run in
-        // another worktree still shows. The linked roots are re-listed every tick
-        // (one readdir) rather than cached — worktrees come and go.
-        if self.vm.scope == Scope::Worktree {
-            if let (Some(repo_root), Some(worktree_root)) = (&self.project.repo_root, &self.project.worktree_root) {
-                let linked = list_linked_worktree_roots(repo_root);
-                self.vm.recent =
-                    scope_sessions(&self.vm.recent, ScopeOptions { worktree_root, linked_worktree_roots: &linked });
-            }
-        }
 
         // Opening with nothing running would focus an empty Running panel; start on
         // Recent instead so the bottom pane shows something immediately. Once only.
@@ -591,21 +539,6 @@ impl WatchApp {
         if key == "]" || key == "l" || key == "\x1b[C" {
             self.scroll_transcript(PAGE);
             self.draw();
-            return;
-        }
-
-        // Toggle Recent between this worktree and every worktree of the repo.
-        // The selection resets (the list is about to change) and the refresh is
-        // immediate so the toggle reads as instant rather than next tick.
-        if key == "w" && self.project.worktree_root.is_some() {
-            self.vm.scope = if self.vm.scope == Scope::Worktree { Scope::Repo } else { Scope::Worktree };
-            self.vm.scope_label = match (&self.vm.scope, &self.project.worktree_root) {
-                (Scope::Worktree, Some(root)) => basename(root),
-                _ => "all worktrees".to_string(),
-            };
-            self.vm.sel_recent = 0;
-            self.refresh_sessions();
-            self.draw();
         }
     }
 
@@ -685,7 +618,7 @@ impl WatchApp {
 }
 
 /// Entry point used by bin/dripw — blocks until the user quits.
-pub fn run_watch_app(project: DripProject) {
-    let mut app = WatchApp::new(project);
+pub fn run_watch_app(project: DripProject, watch_dir: String) {
+    let mut app = WatchApp::new(project, watch_dir);
     app.start();
 }

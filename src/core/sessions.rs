@@ -340,30 +340,42 @@ pub fn find_session_by_id_prefix(index: &SessionIndex, id_prefix: &str) -> Optio
 // ---------------------------------------------------------------------------
 
 pub fn list_sessions(index: &SessionIndex, limit: Option<i64>) -> Vec<SessionRecord> {
-    let limit = limit.unwrap_or(50);
-    let mut stmt = index
-        .conn
-        .prepare(
-            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
-             FROM sessions ORDER BY updated_at DESC LIMIT ?1",
-        )
-        .expect("prepare list_sessions");
+    let mut stmt = match limit {
+        // The LIMIT value is bound below via params_from_iter(limit); the arm
+        // only selects the prepared statement shape.
+        Some(_cap) => index
+            .conn
+            .prepare(
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                 FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+            )
+            .expect("prepare list_sessions"),
+        None => index
+            .conn
+            .prepare(
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                 FROM sessions ORDER BY updated_at DESC",
+            )
+            .expect("prepare list_sessions"),
+    };
 
-    stmt.query_map(rusqlite::params![limit], |row| {
-        Ok(row_to_record(
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-            row.get(7)?,
-        ))
-    })
-    .expect("list_sessions query")
-    .map(|r| r.expect("row"))
-    .collect()
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(limit), |row| {
+            Ok(row_to_record(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
+        .expect("list_sessions query")
+        .map(|r| r.expect("row"))
+        .collect();
+    rows
 }
 
 pub fn latest_session(index: &SessionIndex) -> Option<SessionRecord> {
@@ -560,37 +572,54 @@ pub fn session_paths(project: &ProjectPaths, session_id: &str, sessions_dir_over
 }
 
 // ---------------------------------------------------------------------------
-// Multi-registry helpers (sibling_worktree_homes, open_project_indexes,
-// stamp, list_all_sessions, latest_any_session, resolve_any_session_ref,
-// has_any_session_index, has_any_worktree_session_index)
+// Multi-registry helpers (enumerate_project_registries, open_project_indexes,
+// open_home_registries, stamp, list_all_sessions, list_all_home_sessions,
+// latest_any_session, resolve_any_session_ref, has_any_session_index)
 // ---------------------------------------------------------------------------
 
 use crate::core::home::DripProject;
 
-fn sibling_worktree_homes(project: &DripProject) -> Vec<String> {
-    let Some(repo_root) = project.repo_root.as_deref() else {
+/// One project registry under <drip home>/projects/: the index.sqlite path and
+/// the sessions tree that project's records resolve against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRegistry {
+    pub index_db_path: String,
+    pub sessions_dir: String,
+}
+
+/// Every project registry under `<drip home>/projects/`, sorted by path.
+///
+/// Pure enumeration from an explicit home path: no git or environment lookups,
+/// and nothing is created. Entries that are not directories or that carry no
+/// index.sqlite are skipped; an absent projects directory yields an empty list.
+pub fn enumerate_project_registries(drip_home: &Path) -> Vec<ProjectRegistry> {
+    let Ok(entries) = fs::read_dir(drip_home.join("projects")) else {
         return Vec::new();
     };
 
-    let mut homes: Vec<String> = Vec::new();
-    let mut roots = vec![repo_root.to_string()];
-    roots.extend(crate::core::home::list_linked_worktree_roots(repo_root));
+    let mut registries: Vec<ProjectRegistry> = Vec::new();
 
-    for root in roots {
-        let slug = crate::core::home::project_slug(&root);
+    for entry in entries.flatten() {
+        let project_dir = entry.path();
 
-        if slug == project.slug {
+        if !project_dir.is_dir() {
             continue;
         }
 
-        let home = PathBuf::from(&project.home_root).join("projects").join(&slug);
+        let index_db_path = project_dir.join("index.sqlite");
 
-        if home.join("index.sqlite").exists() {
-            homes.push(home.to_string_lossy().into_owned());
+        if !index_db_path.is_file() {
+            continue;
         }
+
+        registries.push(ProjectRegistry {
+            index_db_path: index_db_path.to_string_lossy().into_owned(),
+            sessions_dir: project_dir.join("sessions").to_string_lossy().into_owned(),
+        });
     }
 
-    homes
+    registries.sort_by(|a, b| a.index_db_path.cmp(&b.index_db_path));
+    registries
 }
 
 pub struct OpenedProjectIndex {
@@ -598,13 +627,11 @@ pub struct OpenedProjectIndex {
     pub sessions_dir: String,
 }
 
-/// Every registry to read for this project, newest tree first.
-///
-/// With all_worktrees, the project's own index is followed by every sibling
-/// worktree home of the same repo (local wins ties), each entry stamped with
-/// its own sessions_dir so session_paths resolves the record into the home the
-/// session actually lives in. Without it, the read stays worktree-local.
-pub fn open_project_indexes(project: &DripProject, all_worktrees: bool) -> Vec<OpenedProjectIndex> {
+/// Every registry to read for this project, newest tree first: the project's
+/// own index followed by its legacy pre-move index, each entry stamped with its
+/// own sessions_dir so session_paths resolves the record into the tree the
+/// session actually lives in.
+pub fn open_project_indexes(project: &DripProject) -> Vec<OpenedProjectIndex> {
     let mut entries: Vec<OpenedProjectIndex> = Vec::new();
 
     if Path::new(&project.index_db_path).exists() {
@@ -612,16 +639,6 @@ pub fn open_project_indexes(project: &DripProject, all_worktrees: bool) -> Vec<O
             index: open_session_index(&project.index_db_path),
             sessions_dir: project.sessions_dir.clone(),
         });
-    }
-
-    if all_worktrees {
-        for home in sibling_worktree_homes(project) {
-            let home = PathBuf::from(home);
-            entries.push(OpenedProjectIndex {
-                index: open_session_index(&home.join("index.sqlite").to_string_lossy()),
-                sessions_dir: home.join("sessions").to_string_lossy().into_owned(),
-            });
-        }
     }
 
     if let (Some(legacy_index), Some(legacy_sessions_dir)) =
@@ -636,6 +653,22 @@ pub fn open_project_indexes(project: &DripProject, all_worktrees: bool) -> Vec<O
     entries
 }
 
+/// Open every registry under the drip home, skipping any whose index fails to
+/// open, so one malformed registry never hides the valid ones.
+pub fn open_home_registries(drip_home: &Path) -> Vec<OpenedProjectIndex> {
+    enumerate_project_registries(drip_home)
+        .into_iter()
+        .filter_map(|registry| {
+            let index = std::panic::catch_unwind(|| open_session_index(&registry.index_db_path)).ok()?;
+
+            Some(OpenedProjectIndex {
+                index,
+                sessions_dir: registry.sessions_dir,
+            })
+        })
+        .collect()
+}
+
 fn stamp(mut record: SessionRecord, sessions_dir: &str, project: &DripProject) -> SessionRecord {
     // Only a legacy record needs the marker; leaving it off for the project's own
     // tree keeps records comparable to what the single-index path produces.
@@ -646,11 +679,11 @@ fn stamp(mut record: SessionRecord, sessions_dir: &str, project: &DripProject) -
     record
 }
 
-/// Union of every registry, newest first — for --list and --continue. With
-/// all_worktrees the union spans every sibling worktree home of the same repo.
-pub fn list_all_sessions(project: &DripProject, limit: Option<i64>, all_worktrees: bool) -> Vec<SessionRecord> {
+/// Union of this project's registries, newest first — for --list and
+/// --continue. Reads stay local to the project's own home.
+pub fn list_all_sessions(project: &DripProject, limit: Option<i64>) -> Vec<SessionRecord> {
     let limit = limit.unwrap_or(50);
-    let opened = open_project_indexes(project, all_worktrees);
+    let opened = open_project_indexes(project);
     let mut merged: Vec<SessionRecord> = opened
         .iter()
         .flat_map(|entry| {
@@ -674,7 +707,7 @@ pub fn list_all_sessions(project: &DripProject, limit: Option<i64>, all_worktree
 }
 
 pub fn latest_any_session(project: &DripProject) -> Option<SessionRecord> {
-    list_all_sessions(project, Some(1), false).into_iter().next()
+    list_all_sessions(project, Some(1)).into_iter().next()
 }
 
 /// Resolves a session ref across every registry.
@@ -687,7 +720,7 @@ pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -
         return latest_any_session(project);
     };
 
-    let opened = open_project_indexes(project, false);
+    let opened = open_project_indexes(project);
 
     for entry in &opened {
         if let Some(exact) = get_session(&entry.index, reference) {
@@ -746,9 +779,189 @@ pub fn has_any_session_index(project: &DripProject) -> bool {
             .unwrap_or(false)
 }
 
-/// The repo-wide form of that gate: true when this worktree OR any sibling
-/// worktree of the same repo has an index, so dripw does not read a repo as
-/// empty just because every run so far happened in a worktree.
-pub fn has_any_worktree_session_index(project: &DripProject) -> bool {
-    has_any_session_index(project) || !sibling_worktree_homes(project).is_empty()
+/// Union of every project registry under the drip home, newest first, each
+/// record stamped with its originating sessions_dir (these records come from
+/// other projects' trees, so the override is always needed to resolve leases
+/// and transcripts). Duplicates by id keep the newest updated_at. No limit is
+/// applied here: callers filter by cwd before truncating.
+pub fn list_all_home_sessions(drip_home: &Path) -> Vec<SessionRecord> {
+    let opened = open_home_registries(drip_home);
+    let mut merged: Vec<SessionRecord> = opened
+        .iter()
+        .flat_map(|entry| {
+            // A registry can open fine but panic while extracting rows (e.g. a
+            // schema drift); skip that registry like open_home_registries skips
+            // one that fails to open, so it never blanks the valid ones.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list_sessions(&entry.index, None)))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|record| SessionRecord {
+                    sessions_dir: Some(entry.sessions_dir.clone()),
+                    ..record
+                })
+        })
+        .collect();
+
+    // b.updatedAt.localeCompare(a.updatedAt): ISO stamps compare as plain
+    // strings; a stable sort keeps registry order for equal stamps.
+    merged.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    // The same project can be reachable under two registry dirs (slug renames);
+    // dedupe by id, keeping the newest occurrence.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    merged.retain(|record| seen.insert(record.id.clone()));
+
+    for entry in opened {
+        entry.index.close();
+    }
+
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-sessions-test-{}-{}",
+            tag,
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&dir).expect("create temp home");
+        dir
+    }
+
+    /// Writes a minimal index with one session recorded at `cwd`.
+    fn seed_project(home: &Path, slug: &str, id: &str, cwd: &str, updated_at: &str) {
+        let project_dir = home.join("projects").join(slug);
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let index = open_session_index(&project_dir.join("index.sqlite").to_string_lossy());
+        index
+            .conn
+            .execute(
+                "INSERT INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal)
+                 VALUES (?1, ?1, ?2, ?3, ?3, 'active', 0, NULL)",
+                rusqlite::params![id, cwd, updated_at],
+            )
+            .expect("insert session");
+        index.close();
+    }
+
+    fn cleanup(home: &Path) {
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn enumeration_lists_two_projects_with_origin_correct_records() {
+        let home = temp_home("two-projects");
+        seed_project(&home, "alpha", "aaaa", "/repo/a", "2026-01-01T00:00:00Z");
+        seed_project(&home, "beta", "bbbb", "/repo/b", "2026-01-02T00:00:00Z");
+
+        let records = list_all_home_sessions(&home);
+        assert_eq!(records.len(), 2);
+        // Newest first.
+        assert_eq!(records[0].id, "bbbb");
+        assert_eq!(records[1].id, "aaaa");
+        // Each record resolves against the sessions tree it was written to.
+        assert_eq!(
+            records[0].sessions_dir.as_deref(),
+            Some(home.join("projects").join("beta").join("sessions").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            records[1].sessions_dir.as_deref(),
+            Some(home.join("projects").join("alpha").join("sessions").to_string_lossy().as_ref())
+        );
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn enumeration_skips_non_directories_and_indexless_projects() {
+        let home = temp_home("skips");
+        seed_project(&home, "real", "cccc", "/repo/c", "2026-01-01T00:00:00Z");
+        fs::write(home.join("projects").join("not-a-dir"), "file").expect("write file");
+        fs::create_dir_all(home.join("projects").join("no-index")).expect("create dir");
+
+        let registries = enumerate_project_registries(&home);
+        assert_eq!(registries.len(), 1);
+        assert!(registries[0].index_db_path.ends_with("real/index.sqlite"));
+        assert_eq!(list_all_home_sessions(&home).len(), 1);
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn absent_projects_dir_is_safe_and_creates_nothing() {
+        let home = temp_home("absent");
+        assert!(enumerate_project_registries(&home).is_empty());
+        assert!(list_all_home_sessions(&home).is_empty());
+        assert!(!home.join("projects").exists(), "no registry may be created");
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn malformed_registry_does_not_hide_valid_ones() {
+        let home = temp_home("malformed");
+        seed_project(&home, "good", "dddd", "/repo/d", "2026-01-01T00:00:00Z");
+        let bad = home.join("projects").join("bad");
+        fs::create_dir_all(&bad).expect("create bad dir");
+        fs::write(bad.join("index.sqlite"), "this is not sqlite").expect("write bad index");
+
+        let records = list_all_home_sessions(&home);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "dddd");
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn query_panicking_registry_does_not_hide_valid_sessions() {
+        let home = temp_home("query-panic");
+        seed_project(&home, "good", "eeee", "/repo/e", "2026-01-02T00:00:00Z");
+
+        // A registry that OPENS fine but whose sessions table has the wrong
+        // column set: open_session_index's CREATE TABLE IF NOT EXISTS leaves
+        // the existing table alone. The table keeps cwd/updated_at so
+        // open_session_index's CREATE INDEX still succeeds (the defect must
+        // not surface at open time), but drops every other column the
+        // list_sessions SELECT needs, so the panic only happens when
+        // list_sessions prepares its query.
+        let bad_dir = home.join("projects").join("bad");
+        fs::create_dir_all(&bad_dir).expect("create bad project dir");
+        let bad_db = bad_dir.join("index.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&bad_db).expect("open raw fixture connection");
+            conn.execute_batch(
+                "CREATE TABLE sessions (cwd TEXT NOT NULL, updated_at TEXT NOT NULL, unrelated TEXT NOT NULL);",
+            )
+            .expect("create wrong-schema sessions table");
+            conn.close().expect("close raw fixture connection");
+        }
+
+        // Preconditions: the malformed registry is enumerated, opens, and only
+        // fails at query time — not at open time.
+        assert_eq!(enumerate_project_registries(&home).len(), 2);
+        let bad_index = open_session_index(&bad_db.to_string_lossy());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            list_sessions(&bad_index, None)
+        }))
+        .is_err();
+        assert!(panicked, "fixture must open successfully but panic inside list_sessions");
+        bad_index.close();
+
+        let records = list_all_home_sessions(&home);
+        assert_eq!(records.len(), 1, "the valid registry's session must survive");
+        assert_eq!(records[0].id, "eeee");
+        assert_eq!(records[0].cwd, "/repo/e");
+        assert_eq!(
+            records[0].sessions_dir.as_deref(),
+            Some(home.join("projects").join("good").join("sessions").to_string_lossy().as_ref())
+        );
+
+        cleanup(&home);
+    }
 }

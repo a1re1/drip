@@ -164,6 +164,16 @@ pub struct ParsedCliArgs {
     pub review_synthesis: Option<ReviewSynthesis>,
     /// Model profile for the per-file review children (default "glm-5-3-flash").
     pub review_file_profile: Option<String>,
+    /// Shell command for --bash: run it and print a context-guided distillation
+    /// of its output instead of the raw stream (protects the caller's context).
+    pub bash: Option<String>,
+    /// Model profile used to distill --bash output (default "glm-5-3-flash").
+    pub bash_distill_profile: Option<String>,
+    /// --bash bypass threshold: output with fewer than this many lines (and
+    /// under the byte cap) is returned verbatim with no model call.
+    pub distill_min_lines: Option<i64>,
+    /// --bash command timeout in milliseconds (default 120000).
+    pub bash_timeout_ms: Option<i64>,
 }
 
 impl Default for ParsedCliArgs {
@@ -242,6 +252,10 @@ impl Default for ParsedCliArgs {
             review_synth_profile: None,
             review_synthesis: None,
             review_file_profile: None,
+            bash: None,
+            bash_distill_profile: None,
+            distill_min_lines: None,
+            bash_timeout_ms: None,
         }
     }
 }
@@ -784,6 +798,51 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--bash" => {
+                if let Some(value) = take_required_value(argv, index, "--bash", &mut parsed.errors)
+                {
+                    parsed.bash = Some(value);
+                    index += 1;
+                }
+            }
+            "--distill-profile" => {
+                if let Some(value) =
+                    take_required_value(argv, index, "--distill-profile", &mut parsed.errors)
+                {
+                    parsed.bash_distill_profile = Some(value);
+                    index += 1;
+                }
+            }
+            "--distill-min-lines" => {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--distill-min-lines", &mut parsed.errors)
+                {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.distill_min_lines = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--distill-min-lines needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
+            "--timeout-ms" => {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--timeout-ms", &mut parsed.errors)
+                {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.bash_timeout_ms = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--timeout-ms needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
             other if other.starts_with('-') && other != "-" => {
                 parsed.errors.push(format!(
                     "Unknown flag \"{}\". Run drip --help for the full reference.",
@@ -863,6 +922,23 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
         if short {
             parsed.errors.push(
                 "--review needs --context \"<what this change is trying to achieve>\" so the review can judge whether the change accomplishes its goal (at least 20 characters)."
+                    .to_string(),
+            );
+        }
+    }
+
+    // A bash distillation without a usable statement of intent cannot know
+    // what counts as success or what to report back, so a short or missing
+    // --context is fatal to the mode (mirrors the --review rule above).
+    if parsed.bash.is_some() {
+        let short = match &parsed.review_context {
+            None => true,
+            Some(context) => context.trim().chars().count() < 20,
+        };
+
+        if short {
+            parsed.errors.push(
+                "--bash needs --context \"<what you expect from this command: what counts as success, what counts as failure, and what information you want back>\" (at least 20 characters)."
                     .to_string(),
             );
         }
@@ -1298,5 +1374,68 @@ mod tests {
                 parsed.errors
             );
         }
+    }
+
+    // --- --bash distillation flags ---
+
+    // --bash parses its command value; --distill-profile / --distill-min-lines
+    // / --timeout-ms are Option overrides — the defaults live in
+    // cli::bash_distill (DEFAULT_BASH_DISTILL_PROFILE etc.), not the parser.
+    #[test]
+    fn parses_bash_flags_with_defaults_and_explicit_overrides() {
+        let plain = parse(&[
+            "--bash",
+            "cargo test",
+            "--context",
+            "report which tests failed and why",
+        ]);
+        assert_eq!(plain.bash.as_deref(), Some("cargo test"));
+        assert!(plain.errors.is_empty());
+        assert!(plain.bash_distill_profile.is_none());
+        assert!(plain.distill_min_lines.is_none());
+        assert!(plain.bash_timeout_ms.is_none());
+
+        let tuned = parse(&[
+            "--bash",
+            "make check",
+            "--context",
+            "report which tests failed and why",
+            "--distill-profile",
+            "glm-5-3-flash",
+            "--distill-min-lines",
+            "10",
+            "--timeout-ms",
+            "5000",
+        ]);
+        assert!(tuned.errors.is_empty());
+        assert_eq!(tuned.bash.as_deref(), Some("make check"));
+        assert_eq!(tuned.bash_distill_profile.as_deref(), Some("glm-5-3-flash"));
+        assert_eq!(tuned.distill_min_lines, Some(10));
+        assert_eq!(tuned.bash_timeout_ms, Some(5000));
+
+        assert!(!parse(&["--distill-min-lines", "0"]).errors.is_empty());
+        assert!(!parse(&["--timeout-ms", "abc"]).errors.is_empty());
+        assert!(!parse(&["--distill-profile"]).errors.is_empty());
+    }
+
+    // The --bash context rule mirrors --review: missing, empty, or under-20
+    // characters is a fatal parse error carrying the exact guidance message.
+    #[test]
+    fn bash_requires_a_meaningful_context_with_the_exact_message() {
+        let expected = "--bash needs --context \"<what you expect from this command: what counts as success, what counts as failure, and what information you want back>\" (at least 20 characters).".to_string();
+
+        assert_eq!(parse(&["--bash", "ls"]).errors, vec![expected.clone()]);
+        assert_eq!(
+            parse(&["--bash", "ls", "--context", "too short"]).errors,
+            vec![expected.clone()]
+        );
+        assert!(parse(&[
+            "--bash",
+            "ls",
+            "--context",
+            "report the failing test names with their assertion messages"
+        ])
+        .errors
+        .is_empty());
     }
 }

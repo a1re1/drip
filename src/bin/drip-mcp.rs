@@ -38,7 +38,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 const DRIP_TOOL_DESCRIPTION: &str = "Run the `drip` CLI with the given argv (no shell) and return its stdout, \
 stderr, and exit code. For long goals, start the run with `--detach`, then poll it with \
-`--wait --timeout-secs N` instead of blocking on a single call.";
+`--wait --timeout-secs N` instead of blocking on a single call. To run a shell command and get \
+back a context-guided distillation of its output instead of the raw stream, use \
+[\"--bash\", \"<cmd>\", \"--context\", \"<what you expect / what success and failure look like / what to report>\"].";
 
 // ---------------------------------------------------------------------------
 // Entry point

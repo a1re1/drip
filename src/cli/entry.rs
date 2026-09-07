@@ -1188,8 +1188,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 14] = [
+    let exclusive_modes: [(&str, bool); 15] = [
         ("--answer", cli_args.answer),
+        ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
         ("--inspect", cli_args.inspect),
@@ -1550,6 +1551,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     if cli_args.review {
         return run_review(&cli_args, &config, &home, &project, &cwd);
+    }
+
+    if cli_args.bash.is_some() {
+        return crate::cli::bash_distill::run_bash_distill(&cli_args, &config, &home, &cwd);
     }
 
     // The goal comes from the positional argument or --prompt (equivalent for the

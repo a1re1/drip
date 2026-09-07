@@ -19,6 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::cli::args::{praeparare_goal_with_context, PRAEPARARE_DEFAULT_MAX_ITERATIONS};
 use crate::cli::commands::{get_slash_command_suggestions, parse_slash_command, SlashCommandSpec, SLASH_COMMANDS};
 use crate::cli::file_suggestions::{get_workspace_file_suggestions, WorkspaceFileSource, DEFAULT_FILE_SUGGESTION_LIMIT};
 use crate::cli::images::{
@@ -130,6 +131,7 @@ fn help_text() -> String {
             "",
             "composer:",
             "  /<skill-name> — enable a discovered skill for this session (idempotent; /skill <name> toggles)",
+            "  /praeparare — pre-PR pass: clean up, commit, merge the base branch, push, open a DRAFT PR",
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
@@ -1094,6 +1096,15 @@ impl TuiApp {
             return;
         }
 
+        self.submit_goal_text(submitted);
+    }
+
+    /// Shared tail of the ordinary typed-input path: prompt history,
+    /// attachment images, and the run_goal handoff. Slash commands dispatch
+    /// above and never reach it, so accepted prompts are recorded exactly
+    /// once; /praeparare calls it directly with the shared canned goal so its
+    /// run looks identical to a typed goal.
+    fn submit_goal_text(&mut self, submitted: String) {
         // Only a goal that actually reaches run_goal enters history: UI-only
         // command and skill submissions returned above, and blank prompts were
         // rejected at the top, so each accepted prompt is recorded exactly
@@ -1697,7 +1708,16 @@ impl TuiApp {
             return;
         };
 
-        match load_skill_content(&skill, None) {
+        // Built-in skills ship embedded in the binary (their path is the
+        // "<builtin>/..." pseudo-path, with no file on disk), so they must load
+        // through the skills loader, which understands that pseudo-path; the
+        // roles loader reads project/user/marketplace skills from real files.
+        let loaded = if skill.path.starts_with("<builtin>") {
+            crate::cli::skills::load_skill_content(&skill, None)
+        } else {
+            load_skill_content(&skill, None).map_err(|error| error.to_string())
+        };
+        match loaded {
             Ok(loaded) => {
                 self.active_skills.push(loaded);
                 self.push_cell(
@@ -1914,6 +1934,25 @@ impl TuiApp {
                         self.bootstrap.home.config_path
                     )),
                 }
+            }
+            "praeparare" => {
+                // The TUI face of `drip --praeparare`: activate the praeparare
+                // skill for the session (built-in pack, or a same-named
+                // discovered skill — the same mechanism as --skill) AND submit
+                // the shared canned goal through the ordinary run path.
+                // Activation alone would leave the run unstarted.
+                self.enable_skill_if_discovered("praeparare");
+                // Non-empty args are extra operator context, appended through
+                // the SAME helper the CLI face uses — never silently dropped
+                // (empty/whitespace args keep the bare canned goal).
+                let goal = praeparare_goal_with_context(Some(args));
+                // No goal-local budget plumbing exists (submit_goal_text
+                // carries only text), so mirror the CLI default session-wide:
+                // only a still-unset budget becomes 15; an explicit value wins.
+                if self.bootstrap.max_iterations.is_none() {
+                    self.bootstrap.max_iterations = Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS);
+                }
+                self.submit_goal_text(goal);
             }
             "env" => self.env_command(args),
             // Not a built-in: a bare token matching a discovered skill (e.g.
@@ -3750,6 +3789,7 @@ mod rename_tests {
 #[cfg(test)]
 mod skill_activation_tests {
     use super::*;
+    use crate::cli::skills::PRAEPARARE_GOAL;
     use std::sync::mpsc;
 
     /// A TuiApp wired against throwaway directories: `cwd` holds project
@@ -3861,6 +3901,119 @@ mod skill_activation_tests {
             "repeat activation must not duplicate, disable, or reload the skill"
         );
         assert_eq!(fixture.app.active_skills[0].name, "navis");
+    }
+
+    /// Helper for the praeparare tests: prove the canned goal actually entered
+    /// the user-turn path by inspecting the transcript goal cell (mirrors the
+    /// non_skill_slash_text_still_falls_through_to_the_goal_run precedent).
+    fn assert_praeparare_goal_entered_the_run_path(app: &TuiApp) {
+        assert!(
+            app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == PRAEPARARE_GOAL)
+            ),
+            "the shared canned goal must reach run_goal via the ordinary user-turn path"
+        );
+    }
+
+    #[test]
+    fn praeparare_slash_command_activates_skill_and_runs_canned_goal() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.text = "/praeparare".to_string();
+        fixture.app.submit();
+        assert_eq!(
+            fixture.app.active_skills.len(),
+            1,
+            "/praeparare must activate the praeparare skill for the session"
+        );
+        assert_eq!(fixture.app.active_skills[0].name, "praeparare");
+        assert!(
+            fixture.app.text.is_empty(),
+            "submit must clear the composer: the goal reaches the run path, not the editor"
+        );
+        assert_praeparare_goal_entered_the_run_path(&fixture.app);
+    }
+
+    #[test]
+    fn praeparare_project_skill_cannot_reduce_the_command_to_activation_only() {
+        // A project skill named praeparare shadows the built-in pack, but
+        // "/praeparare" must still submit the shared canned goal — not degrade
+        // to the plain "/<skill>" activation-only path.
+        let mut fixture = make_app_with_skills(&["praeparare"]);
+        fixture.app.text = "/praeparare".to_string();
+        fixture.app.submit();
+        assert_eq!(fixture.app.active_skills.len(), 1);
+        assert_eq!(fixture.app.active_skills[0].name, "praeparare");
+        assert!(
+            fixture.app.text.is_empty(),
+            "submit must clear the composer: the goal reaches the run path, not the editor"
+        );
+        assert_praeparare_goal_entered_the_run_path(&fixture.app);
+    }
+
+    #[test]
+    fn praeparare_args_become_operator_context_via_the_shared_cli_helper() {
+        // Distinct constructed context (not the shipped fixture strings):
+        // nonempty args must extend the goal through the SAME helper the CLI
+        // uses, not be dropped.
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture
+            .app
+            .dispatch_command("praeparare", "the notes in NOTES.md are intentional");
+        let expected = crate::cli::args::praeparare_goal_with_context(Some(
+            "the notes in NOTES.md are intentional",
+        ));
+        assert_ne!(
+            expected, PRAEPARARE_GOAL,
+            "the constructed context must actually extend the canned goal"
+        );
+        assert!(
+            fixture
+                .app
+                .cells
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == expected)),
+            "nonempty /praeparare args must reach the run path as operator context"
+        );
+    }
+
+    #[test]
+    fn praeparare_blank_args_leave_the_canned_goal_unchanged() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.dispatch_command("praeparare", "   ");
+        assert_praeparare_goal_entered_the_run_path(&fixture.app);
+        assert!(
+            !fixture
+                .app
+                .cells
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Goal(goal)
+                    if goal.text.contains("Operator context"))),
+            "whitespace-only args must not append an operator-context block"
+        );
+    }
+
+    #[test]
+    fn praeparare_unset_budget_defaults_to_fifteen() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        assert_eq!(fixture.app.bootstrap.max_iterations, None);
+        fixture.app.dispatch_command("praeparare", "");
+        assert_eq!(
+            fixture.app.bootstrap.max_iterations,
+            Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS),
+            "an unset budget must default to the shared 15-iteration constant"
+        );
+    }
+
+    #[test]
+    fn praeparare_preserves_an_explicit_budget() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.bootstrap.max_iterations = Some(7);
+        fixture.app.dispatch_command("praeparare", "");
+        assert_eq!(
+            fixture.app.bootstrap.max_iterations,
+            Some(7),
+            "an explicitly chosen budget must not be overridden by the default"
+        );
     }
 
     #[test]

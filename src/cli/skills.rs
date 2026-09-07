@@ -17,6 +17,7 @@ const BUILTIN_HOOKS_SETUP: &str =
     include_str!("../../skills/hooks-setup/SKILL.md");
 const BUILTIN_MIGRATION_DISCIPLINE: &str =
     include_str!("../../skills/migration-discipline/SKILL.md");
+const BUILTIN_PRAEPARARE: &str = include_str!("../../skills/praeparare/SKILL.md");
 const BUILTIN_REFACTOR_SAFELY: &str =
     include_str!("../../skills/refactor-safely/SKILL.md");
 const BUILTIN_REVIEW_INDEPENDENTLY: &str =
@@ -33,12 +34,19 @@ fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
         ("debug-root-cause", BUILTIN_DEBUG_ROOT_CAUSE),
         ("hooks-setup", BUILTIN_HOOKS_SETUP),
         ("migration-discipline", BUILTIN_MIGRATION_DISCIPLINE),
+        ("praeparare", BUILTIN_PRAEPARARE),
         ("refactor-safely", BUILTIN_REFACTOR_SAFELY),
         ("review-independently", BUILTIN_REVIEW_INDEPENDENTLY),
         ("tdd", BUILTIN_TDD),
         ("verify-before-done", BUILTIN_VERIFY_BEFORE_DONE),
     ]
 }
+
+/// Canned goal for the praeparare mode — shared by the `--praeparare` CLI flag
+/// and the `/praeparare` TUI slash command so both run the identical pass. A
+/// positional goal supplied alongside the flag is appended to this as extra
+/// operator context.
+pub const PRAEPARARE_GOAL: &str = "Prepare the current branch for a pull request: run the project's formatter, linter, and tests and fix failures; remove stray debug or scratch changes; commit everything with a descriptive message; merge the base branch; push with -u; open a DRAFT PR (or push to the existing one) with Goal/Changes/Testing sections; report the PR URL and what was and was not verified.";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -1260,6 +1268,79 @@ mod tests {
             .iter()
             .all(|s| s.source != SkillSource::Project && s.source != SkillSource::User
                 || s.source == SkillSource::Builtin));
+    }
+
+    #[test]
+    fn discover_skills_builtin_pack_includes_praeparare() {
+        // "the praeparare skill ships in the built-in pack"
+        let tmp = make_temp_dir();
+        let cwd = tmp.path().join("project");
+        let home_skills = tmp.path().join("home_skills");
+        fs::create_dir_all(&home_skills).unwrap();
+
+        let skills = discover_skills(&cwd, &home_skills, None, None);
+        let praeparare: Vec<_> = skills.iter().filter(|s| s.name == "praeparare").collect();
+        assert_eq!(praeparare.len(), 1);
+        assert_eq!(praeparare[0].source, SkillSource::Builtin);
+    }
+
+    #[test]
+    fn discover_skills_project_praeparare_shadows_the_builtin() {
+        // "a project skill named praeparare shadows the built-in pack entry"
+        let tmp = make_temp_dir();
+        let cwd = tmp.path().join("project");
+        let home_skills = tmp.path().join("home_skills");
+        let proj_skills = cwd.join(".drip").join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        fs::create_dir_all(&proj_skills).unwrap();
+        write_file(
+            &proj_skills,
+            "praeparare.md",
+            "---\nname: praeparare\ndescription: Project praeparare\n---\n\nProject version.",
+        );
+
+        let skills = discover_skills(&cwd, &home_skills, None, None);
+        let praeparare: Vec<_> = skills.iter().filter(|s| s.name == "praeparare").collect();
+        assert_eq!(praeparare.len(), 1);
+        assert_eq!(praeparare[0].source, SkillSource::Project);
+    }
+
+    #[test]
+    fn builtin_skill_entries_stay_sorted_with_praeparare_in_place() {
+        // "the built-in pack stays in filesystem-sort order"
+        let names: Vec<&str> = builtin_skill_entries()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+
+        let migration = names
+            .iter()
+            .position(|n| *n == "migration-discipline")
+            .unwrap();
+        let praeparare = names.iter().position(|n| *n == "praeparare").unwrap();
+        let refactor = names.iter().position(|n| *n == "refactor-safely").unwrap();
+        assert!(migration < praeparare && praeparare < refactor);
+    }
+
+    #[test]
+    fn praeparare_goal_constant_carries_the_canned_text() {
+        // "PRAEPARARE_GOAL is the canned goal shared by the CLI flag and TUI command"
+        assert!(PRAEPARARE_GOAL.starts_with("Prepare the current branch for a pull request:"));
+        for phrase in [
+            "formatter, linter, and tests and fix failures",
+            "remove stray debug or scratch changes",
+            "commit everything with a descriptive message",
+            "merge the base branch",
+            "push with -u",
+            "DRAFT PR (or push to the existing one)",
+            "Goal/Changes/Testing",
+            "report the PR URL and what was and was not verified",
+        ] {
+            assert!(PRAEPARARE_GOAL.contains(phrase), "missing: {phrase}");
+        }
     }
 
     #[test]

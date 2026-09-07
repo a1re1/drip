@@ -366,6 +366,29 @@ In the TUI (`--tui --ask`), the survey opens as a picker overlay — arrow keys 
 an option per question, `Other…` drops into free-text entry — and the answers feed the
 same channel.
 
+## praeparare (pre-PR prep)
+
+`drip --praeparare ["extra operator context"]` — or `/praeparare` in the TUI — runs an
+agentic pre-PR pass on the current branch: it detects the project's formatter, linter,
+and test commands, runs them, and fixes failures; removes stray debug or scratch
+changes; commits everything with a descriptive message; merges the base branch; pushes
+with `-u`; and opens a DRAFT PR (or pushes to the existing one) whose body carries
+**Goal**, **Changes**, and **Testing** sections. The optional argument is extra operator
+context appended to the shared canned goal; in the TUI, `/praeparare <context>` runs it
+through the same helper, so both faces append it identically.
+
+```bash
+drip --praeparare "the scratch notes in NOTES.md are intentional, leave them"
+```
+
+The pass gets a default budget of 15 iterations unless `--max-iterations` is given.
+The TUI command has no per-goal flag, so it applies that same default to the whole
+session — and only when no budget is already set; an explicitly chosen budget always
+wins.
+It never squashes, rebases, amends, or force-pushes, and only ever creates DRAFT PRs —
+never ready-for-review ones. It refuses to run on the base branch itself and requires
+`gh auth status` to succeed before making any change.
+
 ---
 
 ## Built-in role presets

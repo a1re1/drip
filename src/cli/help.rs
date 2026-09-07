@@ -188,7 +188,8 @@ OPTIONS
 	                              a built-in pack ships with drip
 	                              (verify-before-done, tdd, commit-discipline,
 	                              debug-root-cause, refactor-safely,
-	                              review-independently, migration-discipline),
+	                              review-independently, migration-discipline,
+	                              praeparare),
 	                              shadowable by name
 	--tools <path>                Tools directory (default ./tools, falls back to built-in)
 	--home <path>                 Override the global home (default ~/.drip or $DRIP_HOME)
@@ -203,6 +204,10 @@ OPTIONS
 	--marketplace-update [name]   git pull registered marketplace clones (all, or one by name)
 	--plugin-enable <key>         Enable a plugin or single skill: marketplace/plugin[/skill]
 	--plugin-disable <key>        Disable a plugin or single skill
+	--praeparare                  Prepare the current branch for a pull request: an agentic
+	                              pre-PR pass — cleanup, checks, commit, base merge, push, and a
+	                              DRAFT PR; refuses on the base branch. Takes no goal; a
+	                              positional goal is appended as extra operator context.
 	--version                     Print the drip CLI version (with --json: {"version":"<version>"})
 	--help, -h                    Show this text
 
@@ -298,6 +303,7 @@ mod tests {
             "--reference-root",
             "--enqueue",
             "--plan",
+            "--praeparare",
             "--detach",
             "--undo-last",
             "--tools",

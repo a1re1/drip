@@ -993,6 +993,20 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     .to_string(),
             );
         }
+    } else {
+        // These only take effect in --bash mode; a strict parser must not
+        // accept a flag in a mode where it does nothing.
+        for (flag, given) in [
+            ("--distill-profile", parsed.bash_distill_profile.is_some()),
+            ("--distill-min-lines", parsed.distill_min_lines.is_some()),
+            ("--timeout-ms", parsed.bash_timeout_ms.is_some()),
+        ] {
+            if given {
+                parsed
+                    .errors
+                    .push(format!("{flag} only applies with --bash \"<command>\"."));
+            }
+        }
     }
 
     parsed
@@ -1467,6 +1481,23 @@ mod tests {
         assert!(!parse(&["--distill-min-lines", "0"]).errors.is_empty());
         assert!(!parse(&["--timeout-ms", "abc"]).errors.is_empty());
         assert!(!parse(&["--distill-profile"]).errors.is_empty());
+        // Valid values are still rejected outside --bash: the flags would
+        // otherwise parse everywhere and take effect nowhere.
+        for argv in [
+            vec!["--wait", "--timeout-ms", "5000", "goal"],
+            vec!["--review", "--context", "a twenty character context", "--distill-min-lines", "5"],
+            vec!["--distill-profile", "glm-5-3-flash", "goal"],
+        ] {
+            let parsed = parse(&argv);
+            assert!(
+                parsed
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("only applies with --bash")),
+                "{argv:?}: {:?}",
+                parsed.errors
+            );
+        }
     }
 
     // The --bash context rule mirrors --review: missing, empty, or under-20

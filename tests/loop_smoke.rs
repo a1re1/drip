@@ -128,7 +128,7 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
 /// The expectation gate end to end: an "external" anchor on a check that
 /// names the edited artifact is downgraded, a mismatched observation refuses
 /// `completed`, and `unreconciled` finishes the run with exit 0, the anomaly
-/// in the payload, and a calibration record beside the state file.
+/// in the payload, and the claimed confidence persisted on the task.
 #[tokio::test]
 async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,18 +184,19 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
     });
     assert_eq!(record.reason, "unreconciled");
     assert_eq!(record.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
-    assert_eq!(record.calibration.as_ref().map(|calibration| calibration.claimed_confidence.as_str()), Some("low"));
+    let finished = result.state.tasks.iter().find(|task| task.id == "task-1").expect("finished task in state");
+    assert_eq!(finished.status, drip::core::types::HarnessTaskStatus::Completed);
+    assert_eq!(finished.confidence, Some(drip::core::types::ClaimedConfidence::Low));
     let payload = drip::cli::headless_output::headless_result_payload(drip::cli::headless_output::HeadlessResultArgs {
         record: &record, result_path: "/r", session_id: "s", session_id_prefix: "s", state_path: "/s", transcript_path: "/t",
     });
     assert_eq!(payload.exit_code, 0);
     assert!(payload.continue_command.is_none());
 
-    let calibration = std::fs::read_to_string(dir.path().join("session").join("calibration.jsonl")).expect("calibration trace written");
-    let lines: Vec<&str> = calibration.lines().collect();
-    assert_eq!(lines.len(), 1, "{calibration}");
-    assert!(lines[0].contains("\"status\":\"unreconciled\"") && lines[0].contains("\"claimedConfidence\":\"low\""), "{calibration}");
-    assert!(lines[0].contains("\"selfAuthored\":1") && lines[0].contains("\"mismatched\":1") && lines[0].contains("\"anomalies\":1"), "{calibration}");
+    let state_value = serde_json::to_value(&result.state).expect("state serializes");
+    let tasks_json = state_value["tasks"].as_array().expect("tasks array in serialized state");
+    let f2 = tasks_json.iter().find(|task| task["id"] == "task-1").expect("finished task serialized");
+    assert_eq!(f2["confidence"], serde_json::json!("low"), "{state_value}");
 }
 
 #[tokio::test]

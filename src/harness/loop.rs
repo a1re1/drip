@@ -3904,35 +3904,6 @@ impl HarnessRun {
                 });
                 scope.task_finished = scope.task_finished || outcome.task_finished;
                 scope.made_progress = scope.made_progress || outcome.state_changed;
-                // Calibration trace: what the agent claimed next to what the
-                // harness can classify about its evidence, appended per
-                // finished task so a later verifier reward can be diffed
-                // against it.
-                if tool_name == "finish_task" && outcome.task_finished {
-                    let input: serde_json::Value = serde_json::from_str(&raw_input).unwrap_or_default();
-                    let status = input.get("status").and_then(|value| value.as_str()).unwrap_or_default();
-                    if status == "completed" || status == "unreconciled" {
-                        let task_id = input
-                            .get("taskId")
-                            .and_then(|value| value.as_str())
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| scope.current_task_id.clone());
-                        if let (Some(record), Some(session_dir)) = (
-                            crate::core::calibration::derive_calibration(&self.state, task_id.as_deref(), status),
-                            self.options.state_path.as_ref().and_then(|path| path.parent().map(Path::to_path_buf)),
-                        ) {
-                            if let Err(error) = crate::core::calibration::append_calibration(&session_dir, &record) {
-                                self.emit(HarnessEvent {
-                                    data: None,
-                                    detail: format!("calibration record could not be appended to {}: {error}", session_dir.display()),
-                                    iteration: self.state.iteration,
-                                    r#type: HarnessEventType::RunWarning,
-                                });
-                            }
-                        }
-                    }
-                }
                 scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
                 // drip-specific: memory-bank writes (remember/forget) get their
                 // own event, gated on apply_harness_op's state_changed so a
@@ -4410,6 +4381,7 @@ impl HarnessRun {
                             status: crate::core::types::HarnessTaskStatus::Blocked,
                             summary: &summary,
                             task_id: Some(&task_id),
+                            confidence: None,
                         },
                     );
                     self.emit(crate::core::types::HarnessEvent {

@@ -84,6 +84,10 @@ pub struct HarnessTask {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub summary: Option<String>,
 	pub title: String,
+	/// The finished task's `confidence` self-report (low|medium|high), as
+	/// supplied on the accepted finish_task call.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub confidence: Option<ClaimedConfidence>,
 	/// Records that completion was refused for weak verification. Kept for
 	/// session compatibility; it never exempts later completion attempts.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -881,6 +885,7 @@ mod tests {
 			title: "Port types".into(),
 			verify_nudged: None,
 			edit_nudged: None,
+			confidence: None,
 		};
 		let json = serde_json::to_value(&task).unwrap();
 		let obj = json.as_object().unwrap();

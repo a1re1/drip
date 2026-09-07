@@ -70,6 +70,5 @@ numeric results):
     is closer to truth; otherwise review is a random walk across plausible
     models with confidence rising at every step.
 13. State your `confidence` (low, medium, high) honestly on every finish_task.
-    It is recorded next to the evidence class in the session's
-    calibration.jsonl and later diffed against the verifier's reward, so a
+    It is persisted as a plain self-report on the finished task, so a
     confident wrong answer costs more than an uncertain one.

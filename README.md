@@ -195,8 +195,7 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
   "continueCommand": "drip --resume <id> \"next goal\"",
   // present when the run used the anchoring mechanisms (see "Anchoring, expectations, and anomalies"):
   "completionAnchor": { "kind": "none", "note": "...", "claimedConfidence": "medium" },
-  "anomalies": [ { "subject": "...", "expected": "...", "observed": "...", "note": "..." } ],
-  "calibration": { "claimedConfidence": "medium", "anchor": "none", "evidenceClass": { "externalAnchors": 0, "selfAuthored": 2, "undeclared": 0, "failed": 0 }, "expectations": { "registered": 1, "matched": 0, "mismatched": 1, "unobserved": 0 }, "outputRevisions": 0, "anomalies": 1 }
+  "anomalies": [ { "subject": "...", "expected": "...", "observed": "...", "note": "..." } ]
 }
 ```
 
@@ -313,15 +312,9 @@ and closes the exits that let an anomaly be explained away:
   `context-withheld` event instead of `context-refreshed`. The reviewer sees the
   goal and the artifact, not the derivation, so its agreement is independent by
   construction rather than by request.
-- **Calibration trace.** `finish_task` requires `confidence: low | medium | high`.
-  Every completed or unreconciled finish appends one line to the session's
-  `calibration.jsonl`: the claimed confidence next to the harness-derived
-  evidence class (external / self-authored / undeclared / failed checks),
-  expectation tallies, output revisions, and anomalies. `drip --reward <score>
-  [id]` appends a verifier's score and prints each record beside it, so "more
-  rigor bought accuracy" and "more rigor bought confidence" stop looking
-  identical on the scoreboard. The result payload carries a run-level
-  `calibration` record too.
+- **Confidence self-report.** `finish_task` requires `confidence: low | medium | high`,
+  persisted on the finished task record in state.json as the agent's own
+  self-report, so a confident wrong answer costs more than an uncertain one.
 
 ### Pointing REFERENCE at a corpus
 

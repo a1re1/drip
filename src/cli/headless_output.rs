@@ -63,9 +63,6 @@ pub struct HeadlessResultPayload {
     /// Expectations the run could not reconcile (reason "unreconciled", exit 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anomalies: Option<Vec<crate::core::types::HarnessAnomaly>>,
-    /// Run-level calibration record (claimed confidence next to evidence class), for diffing against a verifier's reward.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calibration: Option<crate::core::calibration::CalibrationRecord>,
 }
 
 pub fn headless_event_line(event: &HarnessEvent, json: bool) -> Option<String> {
@@ -186,7 +183,6 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
         usage: record.usage.clone(),
         completion_anchor: record.completion_anchor.clone(),
         anomalies: record.anomalies.clone().filter(|anomalies| !anomalies.is_empty()),
-        calibration: record.calibration.clone(),
     }
 }
 
@@ -214,7 +210,6 @@ mod tests {
             task_stats: TaskStats::default(),
             completion_anchor: None,
             anomalies: None,
-            calibration: None,
         }
     }
 

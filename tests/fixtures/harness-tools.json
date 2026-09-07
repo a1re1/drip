@@ -170,7 +170,7 @@
             "type": "array"
           },
           "confidence": {
-            "description": "Your honest confidence that the finished work is correct, recorded for calibration against later verification.",
+            "description": "Your honest confidence that the finished work is correct, persisted on the task as a self-report.",
             "enum": [
               "low",
               "medium",

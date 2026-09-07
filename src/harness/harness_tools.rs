@@ -195,9 +195,8 @@ pub enum HarnessOp {
         status: FinishTaskStatus,
         summary: String,
         task_id: Option<String>,
-        /// Self-reported confidence, recorded for calibration against the
-        /// verifier's reward. Required by the schema; None only for legacy
-        /// callers.
+        /// Self-reported confidence, persisted on the task as a plain
+        /// self-report. Required by the schema; None only for legacy callers.
         confidence: Option<crate::core::types::ClaimedConfidence>,
         /// "external" | "none": how the completion is anchored when no
         /// external verification passed.
@@ -372,7 +371,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                             "type": "array"
                         },
                         "confidence": {
-                            "description": "Your honest confidence that the finished work is correct, recorded for calibration against later verification.",
+                            "description": "Your honest confidence that the finished work is correct, persisted on the task as a self-report.",
                             "enum": ["low", "medium", "high"],
                             "type": "string"
                         },
@@ -948,6 +947,7 @@ pub fn apply_review_verdict(
                 status: HarnessTaskStatus::Completed,
                 summary,
                 task_id: Some(&review_task.id),
+                confidence: None,
             },
         );
 
@@ -975,6 +975,7 @@ pub fn apply_review_verdict(
             status: HarnessTaskStatus::Completed,
             summary: &format!("Rejected {}: {summary}", review_task.review_of.as_deref().unwrap_or_default()),
             task_id: Some(&review_task.id),
+            confidence: None,
         },
     );
 
@@ -1021,6 +1022,7 @@ pub fn apply_review_verdict(
                     review_task.id, new_round, max_review_rounds
                 ),
                 task_id: Some(&original_id),
+                confidence: None,
             },
         );
 
@@ -2079,7 +2081,7 @@ pub fn apply_harness_op(
                         };
                     }
                     // A reviewer's observations count too, so the mismatch it
-                    // found reaches the expectation history and calibration.
+                    // found reaches the expectation history and the task record.
                     let mut staged = state.expectations.clone();
                     if let Err(text) = record_observations(&mut staged, state.iteration, &observations) {
                         return HarnessOpOutcome {
@@ -2350,6 +2352,7 @@ pub fn apply_harness_op(
                         status: core_status,
                         summary: &summary,
                         task_id: Some(&target_id),
+                        confidence,
                     },
                 ) {
                     Some(finished_task) => (
@@ -2519,6 +2522,7 @@ pub fn apply_harness_op(
                     status: crate::core::types::HarnessTaskStatus::Completed,
                     summary: &crate::harness::telemetry::truncate_text(&text, 400),
                     task_id: Some(&answer_task.id),
+                    confidence: None,
                 },
             );
             state.direct_response = Some(crate::core::types::HarnessDirectResponse {

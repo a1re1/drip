@@ -4,7 +4,8 @@ version = "0.103.0"
 edition = "2021"
 description = "drip — a headless-first coding agent harness"
 
-# Binaries: `drip` (port of src/cli/main.tsx) and `dripw` (port of src/cli/watch/*).
+# Binaries: `drip` (port of src/cli/main.tsx), `dripw` (port of src/cli/watch/*),
+# and `drip-mcp` (stdio MCP passthrough to the `drip` CLI; no TS counterpart).
 [[bin]]
 name = "drip"
 path = "src/main.rs"
@@ -12,6 +13,10 @@ path = "src/main.rs"
 [[bin]]
 name = "dripw"
 path = "src/bin/dripw.rs"
+
+[[bin]]
+name = "drip-mcp"
+path = "src/bin/drip-mcp.rs"
 
 # Dependency allowlist: serde, serde_json, anyhow, thiserror, uuid, chrono,
 # rusqlite (bundled), tokio, reqwest (rustls), regex, dirs, shell-words,

@@ -1,6 +1,8 @@
 // Hand-written CLI parser (no clap). Usage errors are collected into
 // `errors` — the caller prints them to stderr and exits 1.
 
+use crate::cli::skills::PRAEPARARE_GOAL;
+
 /// --synthesis: run the holistic review pass always, never, or (default) only
 /// when a per-file unit reported something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +149,9 @@ pub struct ParsedCliArgs {
     pub older_than: Option<i64>,
     /// Review the working-tree diff file-by-file and print a holistic report (read-only).
     pub review: bool,
+    /// Prepare the current branch for a DRAFT PR: an ordinary goal session with
+    /// the praeparare skill activated and the shared canned goal (cli::skills).
+    pub praeparare: bool,
     /// Diff base ref for --review (defaults to the repo's default branch).
     pub review_base: Option<String>,
     /// Intended outcome of the change, required by --review so findings can be judged against the goal.
@@ -230,6 +235,7 @@ impl Default for ParsedCliArgs {
             gc: false,
             older_than: None,
             review: false,
+            praeparare: false,
             review_base: None,
             review_context: None,
             review_concurrency: None,
@@ -252,6 +258,27 @@ fn is_session_ref(token: &str) -> bool {
     }
     let rest: Vec<char> = chars.collect();
     rest.len() >= 3 && rest.len() <= 35 && rest.iter().all(|&c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Iteration budget for --praeparare when the operator did not cap the run:
+/// the pass must fit checks, fixes, the merge, and the PR creation.
+pub const PRAEPARARE_DEFAULT_MAX_ITERATIONS: i64 = 15;
+
+/// The --praeparare canned goal with the optional positional (or --prompt)
+/// goal appended as extra operator context. Pure, so the detached child
+/// re-parsing the same argv produces byte-identical text (no double-append).
+pub fn praeparare_goal_with_context(operator_context: Option<&str>) -> String {
+    match operator_context
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(context) => format!(
+            "{PRAEPARARE_GOAL}
+
+Operator context: {context}"
+        ),
+        None => PRAEPARARE_GOAL.to_string(),
+    }
 }
 
 fn take_session_ref(argv: &[String], index: usize) -> Option<String> {
@@ -516,6 +543,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     }
                 }
             }
+            "--praeparare" => {
+                parsed.praeparare = true;
+            }
             "--no-repo-memory" => {
                 parsed.no_repo_memory = true;
             }
@@ -779,6 +809,48 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
         }
     };
 
+    // --praeparare is a mode, not a goal: fold the canned goal (shared with the
+    // TUI command via cli::skills::PRAEPARARE_GOAL) plus any positional or
+    // --prompt text into one goal string, select the praeparare skill, and
+    // default the iteration budget. The prefix guard keeps a detached child
+    // (which re-parses the same argv) from appending the canned goal twice.
+    if parsed.praeparare {
+        // A positional goal and --prompt text are both just "extra operator
+        // context" under this mode, but supplying both stays the ordinary
+        // ambiguity error — report it here so the run dies before any session
+        // starts instead of one side silently winning.
+        if parsed.prompt.is_some() && parsed.goal.is_some() {
+            parsed.errors.push(
+                "Provide the extra operator context either as a positional argument or via --prompt, not both."
+                    .to_string(),
+            );
+        } else {
+            // The detached child re-parses the same argv: once the goal
+            // already starts with the canned text, this must be a no-op (no
+            // double append, no second skill entry, no budget reset).
+            let already_normalized = parsed
+                .goal
+                .as_deref()
+                .map(|text| text.trim_start().starts_with(PRAEPARARE_GOAL))
+                .unwrap_or(false);
+            if !already_normalized {
+                // Whichever supplied the extra operator context -- the
+                // positional goal or --prompt text (never both: that pair
+                // errored above) -- is appended to the canned goal.
+                let context = parsed.prompt.clone().or_else(|| parsed.goal.clone());
+                let normalized = praeparare_goal_with_context(context.as_deref());
+                parsed.prompt = None; // consumed: it became the goal text
+                parsed.goal = Some(normalized);
+            }
+        }
+        if !parsed.skill_names.iter().any(|name| name == "praeparare") {
+            parsed.skill_names.push("praeparare".to_string());
+        }
+        if parsed.max_iterations.is_none() {
+            parsed.max_iterations = Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS);
+        }
+    }
+
     // A review without a usable statement of intent cannot judge whether the
     // change accomplishes its goal — that is the failure mode --review exists
     // to design out — so a short or missing --context is fatal to the mode.
@@ -875,6 +947,135 @@ mod tests {
             "{:?}",
             missing_value.errors
         );
+    }
+
+    #[test]
+    fn praeparare_flag_sets_the_mode_canned_goal_skill_and_default_budget() {
+        let parsed = parse(&["--praeparare"]);
+
+        assert!(parsed.praeparare);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.goal.as_deref(), Some(PRAEPARARE_GOAL));
+        assert!(parsed.skill_names.iter().any(|name| name == "praeparare"));
+        assert_eq!(
+            parsed.max_iterations,
+            Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS)
+        );
+        // A mode: no help/version intent leaks in, no --tui implied.
+        assert!(!parsed.tui);
+        assert!(!parsed.review);
+    }
+
+    #[test]
+    fn praeparare_appends_positional_text_as_operator_context() {
+        let parsed = parse(&["--praeparare", "also drop the dead TODO file"]);
+
+        assert!(parsed.praeparare);
+        let goal = parsed.goal.expect("normalized goal");
+        assert!(
+            goal.starts_with(PRAEPARARE_GOAL),
+            "goal must start with the canned text"
+        );
+        assert!(goal.ends_with("Operator context: also drop the dead TODO file"));
+        // Byte-identical to the pure helper the entry/TUI layers share.
+        assert_eq!(
+            goal,
+            praeparare_goal_with_context(Some("also drop the dead TODO file"))
+        );
+    }
+
+    #[test]
+    fn praeparare_composes_with_json_budget_profile_skill_and_detach() {
+        let parsed = parse(&[
+            "--praeparare",
+            "--json",
+            "--max-iterations",
+            "3",
+            "--profile",
+            "fast",
+            "--skill",
+            "tdd",
+            "--detach",
+        ]);
+
+        assert!(parsed.praeparare);
+        assert!(parsed.json);
+        assert_eq!(
+            parsed.max_iterations,
+            Some(3),
+            "explicit budget wins over the 15 default"
+        );
+        assert_eq!(parsed.profile.as_deref(), Some("fast"));
+        let skills: Vec<&str> = parsed.skill_names.iter().map(String::as_str).collect();
+        assert_eq!(
+            skills,
+            vec!["tdd", "praeparare"],
+            "praeparare joins the --skill list, deduplicated"
+        );
+        assert!(parsed.detach);
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn praeparare_does_not_re_append_an_already_normalized_goal() {
+        // A wrapper passing the canned goal straight through (as a detached
+        // child re-running the same argv effectively does) must not grow a
+        // second copy of the text, a second skill entry, or a budget reset.
+        let parsed = parse(&["--praeparare", PRAEPARARE_GOAL]);
+
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.goal.as_deref(), Some(PRAEPARARE_GOAL));
+        assert_eq!(
+            parsed.max_iterations,
+            Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS)
+        );
+        assert_eq!(
+            parsed
+                .skill_names
+                .iter()
+                .filter(|name| *name == "praeparare")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn praeparare_rejects_positional_and_prompt_context_together() {
+        // The ordinary goal/--prompt ambiguity error survives under the mode.
+        let parsed = parse(&["--praeparare", "--prompt", "ctx", "positional"]);
+
+        assert!(parsed.praeparare);
+        assert!(parsed
+            .errors
+            .iter()
+            .any(|problem| problem.contains("not both")));
+    }
+
+    #[test]
+    fn praeparare_takes_prompt_text_as_operator_context() {
+        let parsed = parse(&["--praeparare", "--prompt", "drop the scratch notes"]);
+
+        assert!(parsed.praeparare);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(
+            parsed.goal.as_deref(),
+            Some(praeparare_goal_with_context(Some("drop the scratch notes")).as_str())
+        );
+        assert_eq!(parsed.prompt, None, "--prompt is consumed into the goal");
+        assert_eq!(
+            parsed.max_iterations,
+            Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS)
+        );
+    }
+
+    #[test]
+    fn ordinary_goal_parsing_is_unchanged_by_praeparare_wiring() {
+        let parsed = parse(&["ship the thing", "--max-iterations", "4"]);
+
+        assert!(!parsed.praeparare);
+        assert_eq!(parsed.goal.as_deref(), Some("ship the thing"));
+        assert!(parsed.skill_names.is_empty());
+        assert_eq!(parsed.max_iterations, Some(4));
     }
 
     #[test]

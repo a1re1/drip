@@ -86,6 +86,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "env",
     },
     SlashCommandSpec {
+        args: Some("[context]"),
+        description: "Run the pre-PR pass: cleanup, checks, commit, merge, push, draft PR.",
+        name: "praeparare",
+    },
+    SlashCommandSpec {
         args: Some("[name]"),
         description: "Rename this session from its transcript, or give your own name.",
         name: "rename",

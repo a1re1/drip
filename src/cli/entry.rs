@@ -22,7 +22,6 @@ use crate::cli::delegate_tool::{build_delegate_tool, DelegateToolWiring};
 use crate::cli::follow::{format_transcript_entry_line, parse_transcript_line, read_appended_jsonl_lines};
 use crate::cli::gc::{collect_gc_plan, execute_gc_plan, reap_orphan_tmux_sessions, sweep_async_job_logs};
 use crate::cli::headless_output::{headless_event_line, headless_result_payload, HeadlessResultArgs};
-use crate::cli::help::HELP;
 use crate::cli::inspect::{build_inspect_report, format_inspect_report, InspectPaths};
 use crate::cli::marketplaces::{
     add_marketplace, discover_all_skills, is_marketplace_key_enabled, list_enabled_marketplace_roles,
@@ -85,6 +84,22 @@ fn resolve_tools_path(requested: &str) -> String {
 /// JS truthiness for an optional string flag: `--prompt ""` counts as absent.
 fn non_empty(value: &Option<String>) -> bool {
     value.as_deref().is_some_and(|text| !text.is_empty())
+}
+
+// `--praeparare` is the one mode that permits a goal-like payload: the
+// positional (or --prompt) becomes extra operator context appended to the
+// canned goal. --tui has its own interactive /praeparare command, so the two
+// faces must not combine — entry.rs rejects the flag pair before any mode
+// dispatch instead of letting one side silently win.
+const PRAEPARARE_TUI_CONFLICT: &str =
+    "--praeparare and --tui are separate modes: the TUI has its own /praeparare command.";
+
+fn praeparare_tui_conflict_message(cli_args: &ParsedCliArgs) -> Option<&'static str> {
+    if cli_args.praeparare && cli_args.tui {
+        Some(PRAEPARARE_TUI_CONFLICT)
+    } else {
+        None
+    }
 }
 
 /// `Number.prototype.toFixed(2)`: an exact half rounds up, where Rust's `{:.2}`
@@ -895,6 +910,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         hooks: args.config.hooks.clone(),
         index: args.index,
         inference: inference.clone(),
+        // parse_cli_args already applies the --praeparare default budget.
         max_iterations: args.cli_args.max_iterations,
         mentions: Some(resolved.mentions.clone()),
         new_goal: args.cli_args.new_goal,
@@ -1029,6 +1045,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 hooks: args.config.hooks.clone(),
                 index: args.index,
                 inference: inference.clone(),
+                // The --praeparare default budget was applied at parse time.
                 max_iterations: queued.max_iterations.or(args.cli_args.max_iterations),
                 mentions: Some(queued_mentions.mentions.clone()),
                 new_goal: false,
@@ -1084,7 +1101,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
     if cli_args.help {
         // The template ends with one newline and println! appends another,
         // so stdout ends "\n\n".
-        println!("{HELP}");
+        println!("{}", crate::cli::help::HELP);
         return 0;
     }
 
@@ -1171,7 +1188,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 13] = [
+    let exclusive_modes: [(&str, bool); 14] = [
         ("--answer", cli_args.answer),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
@@ -1181,6 +1198,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--review", cli_args.review),
         ("--send", cli_args.send),
         ("--skills", cli_args.skills),
+        ("--praeparare", cli_args.praeparare),
         ("--state", cli_args.state),
         ("--stop", cli_args.stop),
         ("--undo-last", cli_args.undo_last),
@@ -1196,8 +1214,19 @@ pub async fn main(argv: Vec<String>) -> i32 {
     }
 
     // --send and --answer carry their payload in the goal positional.
-    if active_modes.len() == 1 && has_goal_like && !matches!(active_modes[0], "--send" | "--answer") {
-        eprintln!("{} cannot be combined with a goal or --tui — run them separately.", active_modes[0]);
+    if active_modes.len() == 1
+        && has_goal_like
+        && !matches!(active_modes[0], "--send" | "--answer" | "--praeparare")
+    {
+        eprintln!(
+            "{} cannot be combined with a goal or --tui — run them separately.",
+            active_modes[0]
+        );
+        return 1;
+    }
+
+    if let Some(message) = praeparare_tui_conflict_message(&cli_args) {
+        eprintln!("{message}");
         return 1;
     }
 
@@ -2150,7 +2179,41 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
 
 #[cfg(test)]
 mod tests {
-    use super::{answers_from_payload, non_empty, to_fixed_2};
+    use super::{answers_from_payload, non_empty, praeparare_tui_conflict_message, to_fixed_2};
+    use crate::cli::args::parse_cli_args;
+
+    fn parse_entry(argv: &[&str]) -> crate::cli::args::ParsedCliArgs {
+        let owned: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();
+        parse_cli_args(&owned)
+    }
+
+    // --praeparare and --tui are separate modes; the TUI face has its own
+    // /praeparare command. This exercises the production guard main runs
+    // before any mode dispatch.
+    #[test]
+    fn praeparare_with_tui_is_rejected_in_either_order() {
+        let message = praeparare_tui_conflict_message(&parse_entry(&["--praeparare", "--tui"]))
+            .expect("--praeparare then --tui must conflict");
+        assert!(message.contains("--praeparare") && message.contains("--tui"));
+
+        let message = praeparare_tui_conflict_message(&parse_entry(&["--tui", "--praeparare"]))
+            .expect("--tui then --praeparare must conflict");
+        assert!(message.contains("--praeparare") && message.contains("--tui"));
+    }
+
+    #[test]
+    fn lone_tui_and_lone_praeparare_pass_the_conflict_guard() {
+        // A normal --tui run is the default interactive face and must keep working.
+        assert_eq!(
+            praeparare_tui_conflict_message(&parse_entry(&["--tui"])),
+            None
+        );
+        // Normal parsed praeparare (positional = operator context) must keep working.
+        assert_eq!(
+            praeparare_tui_conflict_message(&parse_entry(&["--praeparare", "notes"])),
+            None
+        );
+    }
 
     #[test]
     fn non_empty_follows_js_truthiness() {

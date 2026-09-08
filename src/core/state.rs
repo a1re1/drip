@@ -63,6 +63,8 @@ pub fn create_harness_state(goal: &str) -> HarnessState {
 		run_summary: None,
 		tasks: Vec::new(),
 		telemetry: IndexMap::new(),
+		review_opt_out: None,
+		opt_out_warning_emitted: None,
 		version: 1,
 	}
 }
@@ -99,6 +101,10 @@ pub fn start_follow_up_goal(state: &mut HarnessState, goal: &str) {
 	// Steering consumed during the previous goal was steering FOR that goal;
 	// a new goal's text is the operator's latest word.
 	state.operator_messages = None;
+	// Draft/opt-out state is steering-shaped: a new goal starts clean and the
+	// current invocation's flags/goal reapply it (full-rigor hardening resume).
+	state.review_opt_out = None;
+	state.opt_out_warning_emitted = None;
 	// An unanswered survey asked FOR the previous goal must not re-block the
 	// new one (same leak class as the debt-audit list above).
 	state.pending_questions = None;

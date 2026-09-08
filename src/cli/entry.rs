@@ -930,6 +930,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         signal: Some(controller.clone()),
         skills: active_skills.clone(),
         summarize_run: None,
+        lite: args.cli_args.lite,
+        no_review: args.cli_args.no_review || args.cli_args.lite,
         tools: build_tools(),
         tool_services: None,
     })
@@ -1068,6 +1070,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 signal: Some(controller.clone()),
                 skills: active_skills.clone(),
                 summarize_run: None,
+                lite: args.cli_args.lite,
+                no_review: args.cli_args.no_review || args.cli_args.lite,
                 tools: build_tools(),
                 tool_services: None,
             }))
@@ -1194,8 +1198,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 14] = [
+    let exclusive_modes: [(&str, bool); 15] = [
         ("--answer", cli_args.answer),
+        ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
         ("--inspect", cli_args.inspect),
@@ -1558,6 +1563,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
         return run_review(&cli_args, &config, &home, &project, &cwd);
     }
 
+    if cli_args.bash.is_some() {
+        return crate::cli::bash_distill::run_bash_distill(&cli_args, &config, &home, &cwd);
+    }
+
     // The goal comes from the positional argument or --prompt (equivalent for the
     // headless runner; --prompt exists so scripted callers avoid shell-quoting a
     // positional). Supplying both is ambiguous, so it errors instead of one
@@ -1908,6 +1917,16 @@ pub async fn main(argv: Vec<String>) -> i32 {
         },
         None => None,
     };
+
+    // A --lite / --roles conflict (or any other strict parse error) must fail
+    // with exit 1 here — before the headless runner, the TUI, or any queue
+    // drain can act on the partially-resolved flags.
+    if !cli_args.errors.is_empty() {
+        for problem in &cli_args.errors {
+            eprintln!("{problem}");
+        }
+        return 1;
+    }
 
     if !cli_args.tui {
         let Some(goal_text) = goal_text.filter(|text| !text.is_empty()) else {

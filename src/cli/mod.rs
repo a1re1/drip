@@ -1,5 +1,6 @@
 // Children mirror the module tree in drip/PLAN.md.
 pub mod args;
+pub mod bash_distill;
 pub mod commands;
 pub mod delegate_tool;
 pub mod entry;

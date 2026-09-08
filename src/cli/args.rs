@@ -164,6 +164,24 @@ pub struct ParsedCliArgs {
     pub review_synthesis: Option<ReviewSynthesis>,
     /// Model profile for the per-file review children (default "glm-5-3-flash").
     pub review_file_profile: Option<String>,
+    /// Shell command for --bash: run it and print a context-guided distillation
+    /// of its output instead of the raw stream (protects the caller's context).
+    pub bash: Option<String>,
+    /// Model profile used to distill --bash output (default "glm-5-3-flash").
+    pub bash_distill_profile: Option<String>,
+    /// --bash bypass threshold: output with fewer than this many lines (and
+    /// under the byte cap) is returned verbatim with no model call.
+    pub distill_min_lines: Option<i64>,
+    /// --bash command timeout in milliseconds (default 120000).
+    pub bash_timeout_ms: Option<i64>,
+    /// Draft mode: single author lane, no reviewer task, no completion anchor
+    /// gate, no run summary; ends with reason "draft" and a continueCommand
+    /// for the full-rigor pass.
+    pub lite: bool,
+    /// Operator review/verify opt-out: skip the verified_by review chain and
+    /// do not fail finish_task closed on a missing/self-authored anchor.
+    /// Usable with any roles preset; implied by --lite.
+    pub no_review: bool,
 }
 
 impl Default for ParsedCliArgs {
@@ -178,6 +196,8 @@ impl Default for ParsedCliArgs {
             profile: None,
             resume: false,
             resume_id: None,
+            lite: false,
+            no_review: false,
             tools_path: "./tools".to_string(),
             version: false,
             prompt: None,
@@ -242,6 +262,10 @@ impl Default for ParsedCliArgs {
             review_synth_profile: None,
             review_synthesis: None,
             review_file_profile: None,
+            bash: None,
+            bash_distill_profile: None,
+            distill_min_lines: None,
+            bash_timeout_ms: None,
         }
     }
 }
@@ -263,6 +287,10 @@ fn is_session_ref(token: &str) -> bool {
 /// Iteration budget for --praeparare when the operator did not cap the run:
 /// the pass must fit checks, fixes, the merge, and the PR creation.
 pub const PRAEPARARE_DEFAULT_MAX_ITERATIONS: i64 = 15;
+
+/// Iteration budget for --lite when the operator did not cap the run: a
+/// single-author draft pass, far below the default lane.
+pub const LITE_DEFAULT_MAX_ITERATIONS: i64 = 8;
 
 /// The --praeparare canned goal with the optional positional (or --prompt)
 /// goal appended as extra operator context. Pure, so the detached child
@@ -732,6 +760,13 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--review" => {
                 parsed.review = true;
             }
+            "--lite" => {
+                parsed.lite = true;
+                parsed.no_review = true;
+            }
+            "--no-review" => {
+                parsed.no_review = true;
+            }
             "--base" => {
                 if let Some(value) = take_required_value(argv, index, "--base", &mut parsed.errors) {
                     parsed.review_base = Some(value);
@@ -781,6 +816,51 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--file-profile" => {
                 if let Some(value) = take_required_value(argv, index, "--file-profile", &mut parsed.errors) {
                     parsed.review_file_profile = Some(value);
+                    index += 1;
+                }
+            }
+            "--bash" => {
+                if let Some(value) = take_required_value(argv, index, "--bash", &mut parsed.errors)
+                {
+                    parsed.bash = Some(value);
+                    index += 1;
+                }
+            }
+            "--distill-profile" => {
+                if let Some(value) =
+                    take_required_value(argv, index, "--distill-profile", &mut parsed.errors)
+                {
+                    parsed.bash_distill_profile = Some(value);
+                    index += 1;
+                }
+            }
+            "--distill-min-lines" => {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--distill-min-lines", &mut parsed.errors)
+                {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.distill_min_lines = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--distill-min-lines needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
+            "--timeout-ms" => {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--timeout-ms", &mut parsed.errors)
+                {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.bash_timeout_ms = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--timeout-ms needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
                     index += 1;
                 }
             }
@@ -851,6 +931,36 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
         }
     }
 
+    // Draft mode is mutually exclusive with the lanes built on the reviewed
+    // machinery: the holistic diff review, the praeparare planning run, the
+    // dry-run plan, and every explicit roles preset (lite IS a preset).
+    if parsed.lite {
+        for (flag, taken) in [
+            ("--review", parsed.review),
+            ("--praeparare", parsed.praeparare),
+            ("--plan", parsed.plan),
+            ("--roles", parsed.roles_preset_or_path.is_some()),
+        ] {
+            if taken {
+                parsed.errors.push(format!(
+                    "--lite cannot be combined with {flag}: --lite selects its own draft preset; harden a draft with --resume --roles reviewed instead."
+                ));
+            }
+        }
+    }
+
+    // Draft mode resolution: the lite preset (planner + author, no reviewer),
+    // the operator opt-out it implies, and a cheap default iteration budget
+    // that an explicit --max-iterations still overrides. Skipped when a
+    // conflict was detected above so the error path stays clean.
+    if parsed.lite && parsed.errors.is_empty() {
+        parsed.no_review = true;
+        parsed.roles_preset_or_path = Some("lite".to_string());
+        if parsed.max_iterations.is_none() {
+            parsed.max_iterations = Some(LITE_DEFAULT_MAX_ITERATIONS);
+        }
+    }
+
     // A review without a usable statement of intent cannot judge whether the
     // change accomplishes its goal — that is the failure mode --review exists
     // to design out — so a short or missing --context is fatal to the mode.
@@ -865,6 +975,37 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 "--review needs --context \"<what this change is trying to achieve>\" so the review can judge whether the change accomplishes its goal (at least 20 characters)."
                     .to_string(),
             );
+        }
+    }
+
+    // A bash distillation without a usable statement of intent cannot know
+    // what counts as success or what to report back, so a short or missing
+    // --context is fatal to the mode (mirrors the --review rule above).
+    if parsed.bash.is_some() {
+        let short = match &parsed.review_context {
+            None => true,
+            Some(context) => context.trim().chars().count() < 20,
+        };
+
+        if short {
+            parsed.errors.push(
+                "--bash needs --context \"<what you expect from this command: what counts as success, what counts as failure, and what information you want back>\" (at least 20 characters)."
+                    .to_string(),
+            );
+        }
+    } else {
+        // These only take effect in --bash mode; a strict parser must not
+        // accept a flag in a mode where it does nothing.
+        for (flag, given) in [
+            ("--distill-profile", parsed.bash_distill_profile.is_some()),
+            ("--distill-min-lines", parsed.distill_min_lines.is_some()),
+            ("--timeout-ms", parsed.bash_timeout_ms.is_some()),
+        ] {
+            if given {
+                parsed
+                    .errors
+                    .push(format!("{flag} only applies with --bash \"<command>\"."));
+            }
         }
     }
 
@@ -1298,5 +1439,165 @@ mod tests {
                 parsed.errors
             );
         }
+    }
+
+    // --- --bash distillation flags ---
+
+    // --bash parses its command value; --distill-profile / --distill-min-lines
+    // / --timeout-ms are Option overrides — the defaults live in
+    // cli::bash_distill (DEFAULT_BASH_DISTILL_PROFILE etc.), not the parser.
+    #[test]
+    fn parses_bash_flags_with_defaults_and_explicit_overrides() {
+        let plain = parse(&[
+            "--bash",
+            "cargo test",
+            "--context",
+            "report which tests failed and why",
+        ]);
+        assert_eq!(plain.bash.as_deref(), Some("cargo test"));
+        assert!(plain.errors.is_empty());
+        assert!(plain.bash_distill_profile.is_none());
+        assert!(plain.distill_min_lines.is_none());
+        assert!(plain.bash_timeout_ms.is_none());
+
+        let tuned = parse(&[
+            "--bash",
+            "make check",
+            "--context",
+            "report which tests failed and why",
+            "--distill-profile",
+            "glm-5-3-flash",
+            "--distill-min-lines",
+            "10",
+            "--timeout-ms",
+            "5000",
+        ]);
+        assert!(tuned.errors.is_empty());
+        assert_eq!(tuned.bash.as_deref(), Some("make check"));
+        assert_eq!(tuned.bash_distill_profile.as_deref(), Some("glm-5-3-flash"));
+        assert_eq!(tuned.distill_min_lines, Some(10));
+        assert_eq!(tuned.bash_timeout_ms, Some(5000));
+
+        assert!(!parse(&["--distill-min-lines", "0"]).errors.is_empty());
+        assert!(!parse(&["--timeout-ms", "abc"]).errors.is_empty());
+        assert!(!parse(&["--distill-profile"]).errors.is_empty());
+        // Valid values are still rejected outside --bash: the flags would
+        // otherwise parse everywhere and take effect nowhere.
+        for argv in [
+            vec!["--wait", "--timeout-ms", "5000", "goal"],
+            vec!["--review", "--context", "a twenty character context", "--distill-min-lines", "5"],
+            vec!["--distill-profile", "glm-5-3-flash", "goal"],
+        ] {
+            let parsed = parse(&argv);
+            assert!(
+                parsed
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("only applies with --bash")),
+                "{argv:?}: {:?}",
+                parsed.errors
+            );
+        }
+    }
+
+    // The --bash context rule mirrors --review: missing, empty, or under-20
+    // characters is a fatal parse error carrying the exact guidance message.
+    #[test]
+    fn bash_requires_a_meaningful_context_with_the_exact_message() {
+        let expected = "--bash needs --context \"<what you expect from this command: what counts as success, what counts as failure, and what information you want back>\" (at least 20 characters).".to_string();
+
+        assert_eq!(parse(&["--bash", "ls"]).errors, vec![expected.clone()]);
+        assert_eq!(
+            parse(&["--bash", "ls", "--context", "too short"]).errors,
+            vec![expected.clone()]
+        );
+        assert!(parse(&[
+            "--bash",
+            "ls",
+            "--context",
+            "report the failing test names with their assertion messages"
+        ])
+        .errors
+        .is_empty());
+    }
+
+    // --- --lite draft mode ---
+
+    #[test]
+    fn lite_selects_the_lite_preset_no_review_and_default_iteration_budget() {
+        let parsed = parse(&["--lite", "draft the thing"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(parsed.lite);
+        assert!(parsed.no_review, "--lite must imply the operator opt-out");
+        assert_eq!(parsed.roles_preset_or_path.as_deref(), Some("lite"));
+        assert_eq!(parsed.max_iterations, Some(LITE_DEFAULT_MAX_ITERATIONS));
+        assert_eq!(parsed.goal.as_deref(), Some("draft the thing"));
+    }
+
+    #[test]
+    fn lite_preserves_an_explicit_iteration_budget() {
+        let parsed = parse(&["--lite", "--max-iterations", "20"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert_eq!(parsed.max_iterations, Some(20));
+    }
+
+    #[test]
+    fn no_review_is_usable_with_other_presets() {
+        let parsed = parse(&["--roles", "reviewed", "--no-review"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(parsed.no_review);
+        assert!(!parsed.lite);
+        assert_eq!(parsed.roles_preset_or_path.as_deref(), Some("reviewed"));
+    }
+
+    #[test]
+    fn lite_conflicts_with_review_praeparare_plan_and_roles() {
+        for conflicting in [
+            vec![
+                "--lite",
+                "--review",
+                "--context",
+                "review the draft changes for correctness",
+            ],
+            vec!["--lite", "--praeparare"],
+            vec!["--lite", "--plan"],
+            vec!["--lite", "--roles", "research"],
+        ] {
+            let parsed = parse(&conflicting);
+            assert!(
+                parsed
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("--lite cannot be combined")),
+                "expected a --lite conflict error for {conflicting:?}, got {:?}",
+                parsed.errors
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_unchanged_without_lite_or_no_review() {
+        let parsed = parse(&["do the thing"]);
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            parsed.errors
+        );
+        assert!(!parsed.lite);
+        assert!(!parsed.no_review);
+        assert_eq!(parsed.roles_preset_or_path, None);
+        assert_eq!(parsed.max_iterations, None);
     }
 }

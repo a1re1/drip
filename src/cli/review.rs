@@ -741,6 +741,8 @@ impl ReviewContext<'_> {
             // The child's own final text is the report; a run summary would
             // be a second model's paraphrase of it.
             summarize_run: Some(false),
+            lite: false,
+            no_review: false,
             tools: self.review_tools(),
             tool_services: None,
         });

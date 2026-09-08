@@ -100,6 +100,11 @@ pub struct SessionGoalArgs<'a> {
     pub signal: Option<AbortSignal>,
     pub skills: Vec<LoadedCliSkill>,
     pub summarize_run: Option<bool>,
+    /// Draft mode (--lite): terminal reason "draft" and no run summary.
+    pub lite: bool,
+    /// Operator review/verify opt-out (implied by lite): no reviewer chain,
+    /// no completion-anchor gate.
+    pub no_review: bool,
     pub tools: Vec<ChatToolDefinition>,
     pub tool_services: Option<ChatToolRuntimeServices>,
 }
@@ -275,6 +280,8 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         skills: args.skills,
         state_path: paths.state_path.clone().into(),
         summarize_run: args.summarize_run,
+        lite: args.lite,
+        no_review: args.no_review || args.lite,
         tools: args.tools,
         tool_services: args.tool_services.clone(),
     })

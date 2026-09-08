@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::cli::run_record::RunRecord;
 use crate::core::types::{HarnessEvent, HarnessEventType, HarnessLeakedJob, HarnessRunUsage, TaskStats, VerificationSummary};
+use crate::harness::telemetry::draft_harden_goal;
 
 // The headless run's stdout is a contract for orchestrating agents: with
 // --json every line is one JSON object — a stream of {type:"event"} lines
@@ -140,9 +141,11 @@ pub struct HeadlessResultArgs<'a> {
 
 /// Reasons whose work is complete: "unreconciled" finished every task but
 /// left a pre-registered expectation it could not reconcile — a visible
-/// anomaly, not a failure, so it exits 0 like "completed".
+/// anomaly, not a failure, so it exits 0 like "completed". "draft" is a
+/// --lite run's finished draft: exit 0 too, but it keeps its harden continue
+/// command (see headless_result_payload).
 pub fn reason_is_complete(reason: &str) -> bool {
-    reason == "completed" || reason == "unreconciled"
+    reason == "completed" || reason == "unreconciled" || reason == "draft"
 }
 
 pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPayload {
@@ -151,7 +154,8 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
     // Resuming with the budget the caller already chose is the best default; a
     // run that never had a cap resumes uncapped too.
     let suggested_max_iterations = record.max_iterations;
-    let continue_command = if completed {
+    let draft = record.reason == "draft";
+    let continue_command = if completed && !draft {
         None
     } else if let Some(command) = record.continue_command.clone() {
         // The run itself proposed a continuation (e.g. awaiting-input's
@@ -171,11 +175,17 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
     };
 
     HeadlessResultPayload {
-        continuation: if completed {
+        continuation: if completed && !draft {
             None
         } else {
             Some(HeadlessContinuation {
-                goal: record.goal.clone(),
+                // Draft runs hand the operator the harden goal, not the
+                // original one — the resume command above already carries it.
+                goal: if draft {
+                    draft_harden_goal(&record.goal)
+                } else {
+                    record.goal.clone()
+                },
                 resume_id_prefix: args.session_id_prefix.to_string(),
                 session_id: args.session_id.to_string(),
                 suggested_max_iterations,
@@ -254,6 +264,41 @@ mod tests {
     #[test]
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn draft_run_exits_zero_and_prints_the_harden_continue_command() {
+        let mut draft = record("draft", Some(5));
+        draft.continue_command = Some(crate::harness::telemetry::draft_continue_command(
+            "abcdefgh-1234",
+            &draft.goal,
+        ));
+        let payload = headless_result_payload(HeadlessResultArgs {
+            record: &draft,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        });
+        assert_eq!(payload.exit_code, 0);
+        assert_eq!(
+            payload.continue_command.as_deref(),
+            Some(
+                "drip --resume abcdefgh-1234 --roles reviewed --skill verify-before-done --new-goal 'Harden the draft: do it'"
+            )
+        );
+        let continuation = payload.continuation.expect("draft keeps a continuation");
+        assert_eq!(continuation.goal, "Harden the draft: do it");
+        assert_eq!(continuation.session_id, "abcdefgh-1234");
+    }
+
+    #[test]
+    fn draft_harden_goal_truncates_to_two_hundred_chars() {
+        let long = "x".repeat(250);
+        let harden = draft_harden_goal(&long);
+        assert!(harden.starts_with("Harden the draft: "));
+        assert_eq!(harden.chars().count(), 18 + 200);
     }
 
     #[test]

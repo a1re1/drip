@@ -229,13 +229,25 @@
     "type": "function",
     "function": {
       "name": "VERIFY",
-      "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared.",
+      "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared. Every VERIFY call is recorded as a verification record and the result text reports its stable record ref (\"verification record: v<n>\"); cite that ref as evidence when revising an observed expectation value.",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "anchor": {
-            "description": "Optional evidence class. kind=external: a check the agent did not author (a pre-existing project test, a task-provided fixture, a published constant, an invariant independent of the implementation); kind=self: a check derived from the agent's own implementation. source names where the check came from.",
+            "description": "Optional evidence class. kind=external: a check the agent did not author (a pre-existing project test, a task-provided fixture, a published constant, an invariant independent of the implementation); kind=self: a check derived from the agent's own implementation. source names where the check came from. coverage declares what the check covers: reportedClaim = the check could directly support the run's reported claim; inputOrComponent = the check only exercises inputs or components and can never directly support a reported claim. An external anchor without declared coverage is recorded but ineligible for claim-level completion. expectationSubject binds this external evidence to one registered expectation id (e.g. \"e2\") so a later revision of that expectation's observed value may cite this record.",
             "properties": {
+              "coverage": {
+                "description": "What the check covers. reportedClaim = directly supports the reported claim; inputOrComponent = only inputs/components (recorded, never claim evidence). Undeclared coverage on an external anchor is recorded but ineligible for claim-level completion.",
+                "enum": [
+                  "reportedClaim",
+                  "inputOrComponent"
+                ],
+                "type": "string"
+              },
+              "expectationSubject": {
+                "description": "With kind=external: the registered expectation id (e.g. \"e2\") this evidence is bound to, so a later revision of that expectation's observed value may cite this record.",
+                "type": "string"
+              },
               "kind": {
                 "description": "external = a check the agent did not author; self = a check derived from the agent's own implementation.",
                 "enum": [

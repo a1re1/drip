@@ -241,6 +241,7 @@ mod tests {
 			output_tail: "2 pass".into(),
 			ran_no_tests: None,
             evidence: None,
+            id: None,
 		});
 
 		build_run_record(&BuildRunRecordArgs {

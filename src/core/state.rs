@@ -1184,6 +1184,7 @@ mod tests {
             output_tail: "1 fail".to_string(),
             ran_no_tests: None,
             evidence: None,
+            id: None,
         });
         state.verifications = Some(vec![state.last_verification.clone().unwrap()]);
         state.verification_streak = Some(HarnessVerificationStreak {
@@ -1802,12 +1803,16 @@ mod tests {
             kind: VerificationAnchorKind::External,
             source: Some("pre-existing project test".into()),
             downgraded_reason: None,
+            coverage: Some(crate::core::types::CoverageGranularity::ReportedClaim),
+            expectation_subject: None,
         }))));
         assert!(external.contains("; anchor: external (pre-existing project test)"), "{external}");
         let self_authored = describe_verification_evidence(Some(&base(Some(VerificationAnchor {
             kind: VerificationAnchorKind::SelfAuthored,
             source: None,
             downgraded_reason: Some("command names edited file src/lib.rs".into()),
+            coverage: Some(crate::core::types::CoverageGranularity::InputOrComponent),
+            expectation_subject: None,
         }))));
         assert!(
             self_authored.contains("; anchor: self-authored (downgraded: command names edited file src/lib.rs)"),
@@ -1836,6 +1841,7 @@ mod tests {
                 observed: "41".into(),
                 matches: false,
                 evidence: None,
+                observed_after_records: Some(0),
             }],
         });
         state.expectations.push(HarnessExpectation {
@@ -1863,7 +1869,7 @@ mod tests {
         state.completion_anchor = Some(CompletionAnchor {
             kind: CompletionAnchorKind::External,
             note: None,
-            claimed_confidence: ClaimedConfidence::High,
+            claimed_confidence: Some(ClaimedConfidence::High),
         });
         assert_eq!(
             describe_completion_anchor(&state),
@@ -1872,7 +1878,7 @@ mod tests {
         state.completion_anchor = Some(CompletionAnchor {
             kind: CompletionAnchorKind::None,
             note: Some("no check independent of the implementation exists for this claim".into()),
-            claimed_confidence: ClaimedConfidence::Low,
+            claimed_confidence: Some(ClaimedConfidence::Low),
         });
         assert!(
             describe_completion_anchor(&state)

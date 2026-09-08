@@ -93,6 +93,7 @@ mod anchoring_render_tests {
                     observed: "7".to_string(),
                     matches: true,
                     evidence: None,
+                    observed_after_records: Some(0),
                 }],
             ),
             expectation(
@@ -104,6 +105,7 @@ mod anchoring_render_tests {
                     observed: "41".to_string(),
                     matches: false,
                     evidence: None,
+                    observed_after_records: Some(0),
                 }],
             ),
         ]);
@@ -132,7 +134,7 @@ mod anchoring_render_tests {
         state.completion_anchor = Some(CompletionAnchor {
             kind: CompletionAnchorKind::External,
             note: Some("pre-existing project test".to_string()),
-            claimed_confidence: ClaimedConfidence::High,
+            claimed_confidence: Some(ClaimedConfidence::High),
         });
         let message = build_iteration_user_message(&state, &iteration_args());
         assert!(

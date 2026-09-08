@@ -132,6 +132,18 @@ pub enum VerificationAnchorKind {
 	Undeclared,
 }
 
+/// What a verification's evidence covers, as declared by the producer: does
+/// the check assert the reported claim itself, or only the inputs and
+/// components behind it? The harness enforces declared coverage and record
+/// references only - it cannot and does not prove the semantic truth of a
+/// declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CoverageGranularity {
+    ReportedClaim,
+	InputOrComponent,
+}
+
 /// Provenance of one verification: the anchor kind plus where the check came
 /// from (`source`) and, when a check that claimed external provenance turned
 /// out to touch files the agent edited this session, why it was downgraded.
@@ -143,6 +155,16 @@ pub struct VerificationAnchor {
 	pub source: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub downgraded_reason: Option<String>,
+	/// Declared evidence coverage. Absent = producer declared nothing (legacy
+	/// records stay claim-eligible); an explicit inputOrComponent declaration
+	/// never supports a reported claim.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub coverage: Option<CoverageGranularity>,
+	/// The expectation (id or subject) this verification's evidence is bound
+	/// to, when declared. The harness enforces the record reference, not the
+	/// semantic truth of the binding.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub expectation_subject: Option<String>,
 }
 
 /// One recorded answer to a pre-registered expectation: what was observed at
@@ -156,6 +178,17 @@ pub struct HarnessExpectationObservation {
 	pub matches: bool,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub evidence: Option<String>,
+	/// How many verification records already existed when this observation
+	/// was recorded — the observation-time watermark. Freshness of later
+	/// evidence is judged against records minted after this point, so a
+	/// record created in the same iteration but before the observation
+	/// cannot qualify as new support for revising it. Legacy observations
+	/// deserialize with 0.
+	/// None for legacy observations whose watermark was never recorded (the
+	/// freshness gate then allows only strictly later iterations); Some(0)
+	/// means the observation is known to have had no records available.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub observed_after_records: Option<u64>,
 }
 
 /// A value expected from the work, registered before the result exists.
@@ -203,7 +236,8 @@ pub struct CompletionAnchor {
 	pub kind: CompletionAnchorKind,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub note: Option<String>,
-	pub claimed_confidence: ClaimedConfidence,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub claimed_confidence: Option<ClaimedConfidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,6 +337,13 @@ pub struct HarnessVerificationRecord {
 	/// records without it deserialize fine and remain weak/unverified.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub evidence: Option<VerificationEvidence>,
+	/// Stable, goal-unique identity for this record (e.g. "v7"), assigned when
+	/// the record is pushed. Expectation revisions cite this id — never command
+	/// text, which is not an identity: re-running the same command produces a
+	/// new record with a new id. Legacy records deserialize without it and
+	/// carry no citable identity.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub id: Option<String>,
 }
 
 /// The driver-facing view of the latest verification: the record fields plus
@@ -1026,22 +1067,30 @@ mod tests {
 			kind: VerificationAnchorKind::SelfAuthored,
 			source: Some("repo test suite".into()),
 			downgraded_reason: Some("command names edited file src/lib.rs".into()),
+			coverage: Some(CoverageGranularity::ReportedClaim),
+			expectation_subject: Some("e1".into()),
 		};
 		let json = serde_json::to_value(&full).unwrap();
 		assert_eq!(json["kind"], "selfAuthored");
 		assert_eq!(json["source"], "repo test suite");
 		assert_eq!(json["downgradedReason"], "command names edited file src/lib.rs");
+		assert_eq!(json["coverage"], "reportedClaim");
+		assert_eq!(json["expectationSubject"], "e1");
 		assert_eq!(serde_json::from_value::<VerificationAnchor>(json).unwrap(), full);
 
 		let bare = VerificationAnchor {
 			kind: VerificationAnchorKind::External,
 			source: None,
 			downgraded_reason: None,
+			coverage: None,
+			expectation_subject: None,
 		};
 		let bare_json = serde_json::to_value(&bare).unwrap();
 		let bare_obj = bare_json.as_object().unwrap();
 		assert!(!bare_obj.contains_key("source"));
 		assert!(!bare_obj.contains_key("downgradedReason"));
+		assert!(!bare_obj.contains_key("coverage"));
+		assert!(!bare_obj.contains_key("expectationSubject"));
 	}
 
 	// Evidence written before anchors existed (no anchor key) still loads as

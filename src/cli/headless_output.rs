@@ -103,6 +103,32 @@ pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// One plain-text line surfacing the completion's self-reported confidence
+/// and its basis (how the completion was anchored). This is a report, never a
+/// gate: it does not affect acceptance, scoring, or the exit code. `None` when
+/// no completion anchor was recorded (pre-anchor records, or the run never
+/// finished a task) — callers simply skip the line, keeping the absent case
+/// visibly distinct from any claimed value.
+pub fn confidence_basis_line(
+    anchor: &Option<crate::core::types::CompletionAnchor>,
+) -> Option<String> {
+    let anchor = anchor.as_ref()?;
+    let kind = match anchor.kind {
+        crate::core::types::CompletionAnchorKind::External => "external verification",
+        crate::core::types::CompletionAnchorKind::None => "no external anchor declared",
+    };
+    // A missing confidence stays unreported — absence must not read as Medium.
+    match (&anchor.note, anchor.claimed_confidence) {
+        (Some(note), Some(confidence)) => Some(format!(
+            "confidence: {:?} (basis: {kind} — {note})",
+            confidence
+        )),
+        (None, Some(confidence)) => Some(format!("confidence: {:?} (basis: {kind})", confidence)),
+        (Some(note), None) => Some(format!("basis: {kind} — {note}")),
+        (None, None) => Some(format!("basis: {kind}")),
+    }
+}
+
 pub struct HeadlessResultArgs<'a> {
     pub record: &'a RunRecord,
     pub result_path: &'a str,
@@ -155,6 +181,7 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
                 suggested_max_iterations,
             })
         },
+        anomalies: record.anomalies.clone().filter(|items| !items.is_empty()),
         last_verification: record.last_verification.clone(),
         pending_operator_messages: record.pending_operator_messages,
         task_stats: record.task_stats,
@@ -182,7 +209,6 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
         payload_type: "result".to_string(),
         usage: record.usage.clone(),
         completion_anchor: record.completion_anchor.clone(),
-        anomalies: record.anomalies.clone().filter(|anomalies| !anomalies.is_empty()),
     }
 }
 
@@ -284,6 +310,87 @@ mod tests {
 
     /// Unreconciled work is complete work with a visible anomaly: exit 0, no
     /// continuation, and the anomalies ride along in the payload.
+    /// The confidence self-report surfaces as one text line and rides in the
+    /// JSON payload — and it never changes the outcome. Absent anchor = no
+    /// line, no JSON field.
+    #[test]
+    fn confidence_and_basis_report_without_gating() {
+        let mut anchored = record("completed", Some(5));
+        anchored.completion_anchor = Some(crate::core::types::CompletionAnchor {
+            kind: crate::core::types::CompletionAnchorKind::External,
+            note: Some("pre-existing project test suite".to_string()),
+            claimed_confidence: Some(crate::core::types::ClaimedConfidence::High),
+        });
+        assert_eq!(
+            confidence_basis_line(&anchored.completion_anchor).as_deref(),
+            Some("confidence: High (basis: external verification — pre-existing project test suite)")
+        );
+
+        let declared_none = crate::core::types::CompletionAnchor {
+            kind: crate::core::types::CompletionAnchorKind::None,
+            note: Some("analysis-only task; nothing was claimed about code".to_string()),
+            claimed_confidence: Some(crate::core::types::ClaimedConfidence::Low),
+        };
+        assert_eq!(
+            confidence_basis_line(&Some(declared_none)).as_deref(),
+            Some("confidence: Low (basis: no external anchor declared — analysis-only task; nothing was claimed about code)")
+        );
+
+        // Missing confidence stays unreported: the line reports only the
+        // basis, and the JSON payload omits claimedConfidence entirely.
+        let absent_confidence = crate::core::types::CompletionAnchor {
+            kind: crate::core::types::CompletionAnchorKind::External,
+            note: Some("pre-existing project test suite".to_string()),
+            claimed_confidence: None,
+        };
+        assert_eq!(
+            confidence_basis_line(&Some(absent_confidence)).as_deref(),
+            Some("basis: external verification — pre-existing project test suite")
+        );
+        let mut omitted = record("completed", Some(5));
+        omitted.completion_anchor = Some(crate::core::types::CompletionAnchor {
+            kind: crate::core::types::CompletionAnchorKind::External,
+            note: None,
+            claimed_confidence: None,
+        });
+        let shown = headless_result_payload(HeadlessResultArgs {
+            record: &omitted,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        });
+        assert_eq!(shown.exit_code, 0, "absent confidence must not change the exit code");
+        let json = serde_json::to_string(&shown).unwrap();
+        assert!(!json.contains("claimedConfidence"), "{json}");
+
+        // Absent is distinguished: no line, and the JSON payload omits the field.
+        assert_eq!(confidence_basis_line(&None), None);
+        let bare = payload("completed", Some(5));
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("completionAnchor"), "{json}");
+
+        let mut present = record("completed", Some(5));
+        present.completion_anchor = Some(crate::core::types::CompletionAnchor {
+            kind: crate::core::types::CompletionAnchorKind::External,
+            note: None,
+            claimed_confidence: Some(crate::core::types::ClaimedConfidence::Medium),
+        });
+        let shown = headless_result_payload(HeadlessResultArgs {
+            record: &present,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        });
+        assert_eq!(shown.exit_code, 0, "confidence report must not change the exit code");
+        let json = serde_json::to_string(&shown).unwrap();
+        assert!(json.contains("\"claimedConfidence\":\"medium\""), "{json}");
+        assert!(json.contains("\"kind\":\"external\""), "{json}");
+    }
+
     #[test]
     fn unreconciled_exits_zero_and_carries_its_anomalies() {
         let mut unreconciled_record = record("unreconciled", Some(5));

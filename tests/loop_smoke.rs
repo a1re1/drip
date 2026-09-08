@@ -121,7 +121,7 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         assert_eq!(std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(), "correct\n");
         let anchor = result.state.completion_anchor.as_ref().expect("completion anchor recorded");
         assert_eq!(anchor.kind, drip::core::types::CompletionAnchorKind::None, "{route}");
-        assert_eq!(anchor.claimed_confidence, drip::core::types::ClaimedConfidence::High, "{route}");
+        assert_eq!(anchor.claimed_confidence, Some(drip::core::types::ClaimedConfidence::High), "{route}");
     }
 }
 
@@ -170,7 +170,8 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
 
     assert_eq!(result.reason, HarnessRunReason::Unreconciled, "error: {:?}", result.error_message);
     assert_eq!(result.state.anomalies.len(), 1);
-    assert_eq!(result.state.expectations[0].observations.len(), 1);
+    // Both valid measurements persist, including the refused clean finish.
+    assert_eq!(result.state.expectations[0].observations.len(), 2);
     let anchor = result.state.verifications.as_ref().unwrap()[0].evidence.as_ref().unwrap().anchor.clone().expect("anchor recorded");
     assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::SelfAuthored, "names the edited artifact");
     assert!(anchor.downgraded_reason.as_deref().unwrap_or_default().contains("artifact.txt"));

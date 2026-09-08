@@ -564,6 +564,25 @@ fn verification_pattern_matches(command: &str) -> bool {
     false
 }
 
+/// Stable, goal-unique verification record identity ("v<n>"): the next number
+/// after the highest id already present, so replaying identical command text
+/// still yields a new, distinct record id. Cycle-agnostic by construction.
+pub fn next_verification_record_id(records: &Option<Vec<crate::core::types::HarnessVerificationRecord>>) -> String {
+    let highest = records
+        .iter()
+        .flatten()
+        .filter_map(|record| {
+            record
+                .id
+                .as_deref()
+                .and_then(|id| id.strip_prefix('v'))
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    format!("v{}", highest + 1)
+}
+
 /// One-shot corrective push for narration-only replies (exported for tests).
 pub const TRUNCATION_NUDGE_MESSAGE: &str = "harness: that reply was cut off at the provider's output-token limit before any tool call, so nothing was done. Reply again with far less text: one sentence at most, then the tool call. If you are writing a large file, split it into two or three PATCH calls of a few hundred lines each.";
 pub const NARRATION_NUDGE_MESSAGE: &str = "harness: that reply was narration, not work — it was recorded as a task note. Act through tool calls now (BASH/READ/PATCH/...), or call finish_task if the task is genuinely done; a second text-only reply ends this loop.";
@@ -677,8 +696,33 @@ pub fn declared_verification_anchor(
         Some("self") => VerificationAnchorKind::SelfAuthored,
         _ => VerificationAnchorKind::Undeclared,
     };
+    // Declared coverage: does the producer say this check covers the reported
+    // claim itself, or only inputs/components? The harness enforces declared
+    // coverage and record references only, not the semantic truth of the
+    // declaration. Absent stays undeclared (legacy records).
+    let coverage = match anchor.get("coverage").and_then(|value| value.as_str()) {
+        Some("reportedClaim") => Some(crate::core::types::CoverageGranularity::ReportedClaim),
+        Some("inputOrComponent") => Some(crate::core::types::CoverageGranularity::InputOrComponent),
+        _ => None,
+    };
+    // Optional binding of this verification's evidence to a registered
+    // expectation (id or subject). The harness enforces the record reference
+    // exists, not the model's semantic claim about what its check covers.
+    let expectation_subject = anchor
+        .get("expectationSubject")
+        .or_else(|| anchor.get("expectation_subject"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     if kind != VerificationAnchorKind::External {
-        return Some(VerificationAnchor { kind, source, downgraded_reason: None });
+        return Some(VerificationAnchor {
+            kind,
+            source,
+            downgraded_reason: None,
+            coverage,
+            expectation_subject: expectation_subject.clone(),
+        });
     }
     let command = input.get("command").and_then(|value| value.as_str()).unwrap_or_default();
     let haystack = format!("{command} {}", source.as_deref().unwrap_or_default());
@@ -690,8 +734,16 @@ pub fn declared_verification_anchor(
             downgraded_reason: Some(format!(
                 "the check names {path}, which this run edited; a check the agent authored is consistency, not correctness"
             )),
+            coverage,
+            expectation_subject,
         }),
-        None => Some(VerificationAnchor { kind, source, downgraded_reason: None }),
+        None => Some(VerificationAnchor {
+            kind,
+            source,
+            downgraded_reason: None,
+            coverage,
+            expectation_subject,
+        }),
     }
 }
 
@@ -989,6 +1041,42 @@ pub fn extract_response_text(content: &Value) -> String {
 mod loop_helpers_tests {
     use super::*;
     use crate::harness::transport::TransportRequestMessage;
+
+    // Record identity: replaying the same command still allocates a new,
+    // distinct record id, so citing "the same record" is detectable by id.
+    #[test]
+    fn next_verification_record_id_is_goal_unique_across_identical_replays() {
+        use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
+        let record = |id: Option<String>| HarnessVerificationRecord {
+            at_iteration: 1,
+            command: "cargo test".to_string(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 1,
+                passed: 1,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: None,
+            }),
+            id,
+        };
+        let mut records = Some(vec![record(Some("v3".to_string())), record(None)]);
+        assert_eq!(next_verification_record_id(&records), "v4");
+        let v4 = next_verification_record_id(&records).to_string();
+        records.as_mut().unwrap().push(record(Some(v4)));
+        assert_eq!(next_verification_record_id(&records), "v5");
+        // Legacy record with no id does not disturb numbering: the next id
+        // still follows the highest explicit id (v4), not the record count.
+        records.as_mut().unwrap().push(record(None));
+        assert_eq!(next_verification_record_id(&records), "v5");
+        // Empty timeline starts at v1.
+        assert_eq!(next_verification_record_id(&None), "v1");
+        assert_eq!(next_verification_record_id(&Some(vec![])), "v1");
+    }
 
     fn tool_message(name: &str, content: &str) -> TransportRequestMessage {
         TransportRequestMessage {
@@ -1334,8 +1422,43 @@ mod loop_helpers_tests {
         .expect("anchor declared");
         assert_eq!(declared_self.kind, VerificationAnchorKind::SelfAuthored);
         assert_eq!(declared_self.source, None);
+        // Declared fields the raw anchor omits stay absent; a self-authored
+        // declaration is recorded as-is, never downgraded.
+        assert_eq!(declared_self.coverage, None);
+        assert_eq!(declared_self.expectation_subject, None);
 
-        assert_eq!(declared_verification_anchor(r#"{"command":"cargo test"}"#, &edited), None);
+        // No anchor object at all: the parser records an absent anchor
+        // (None) rather than fabricating a default.
+        assert!(declared_verification_anchor(r#"{"command":"cargo test"}"#, &edited).is_none());
+
+    }
+
+    // Declared coverage and the expectation binding ride inside the anchor
+    // object (no schema change) and must parse into the recorded anchor.
+    #[test]
+    fn anchor_coverage_and_expectation_binding_are_parsed() {
+        use crate::core::types::CoverageGranularity;
+        let edited: Vec<String> = Vec::new();
+        let component = declared_verification_anchor(
+            r#"{"command":"cargo build","anchor":{"kind":"external","source":"toolchain","coverage":"inputOrComponent"}}"#,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(component.coverage, Some(CoverageGranularity::InputOrComponent));
+        let bound = declared_verification_anchor(
+            r#"{"command":"cargo test","anchor":{"kind":"external","source":"suite","coverage":"reportedClaim","expectationSubject":"e2"}}"#,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(bound.coverage, Some(CoverageGranularity::ReportedClaim));
+        assert_eq!(bound.expectation_subject.as_deref(), Some("e2"));
+        let bare = declared_verification_anchor(
+            r#"{"command":"cargo test","anchor":{"kind":"external","source":"suite"}}"#,
+            &edited,
+        )
+        .unwrap();
+        assert_eq!(bare.coverage, None);
+        assert_eq!(bare.expectation_subject, None);
     }
 
     #[test]
@@ -4019,6 +4142,7 @@ impl HarnessRun {
                     output_tail: output_tail.clone(),
                     ran_no_tests: ran_no_tests.then_some(true),
                     evidence: Some(evidence),
+                    id: Some(next_verification_record_id(&self.state.verifications)),
                 };
 
                 if ran_no_tests {
@@ -4032,6 +4156,18 @@ impl HarnessRun {
                     });
                 }
 
+                // The record ref is how the model cites this evidence later
+                // (finish_task evidence on a value revision), so it must be
+                // visible in the tool result itself, not only in state.
+                let record_ref = verification_record.id.clone();
+                if tool_name == "VERIFY" {
+                    if let Some(record_id) = record_ref.as_deref() {
+                        execution.tool_content = format!(
+                            "{}\nverification record: {record_id}",
+                            execution.tool_content
+                        );
+                    }
+                }
                 self.state.last_verification = Some(verification_record.clone());
                 self.state.verifications = {
                     let mut timeline = self.state.verifications.clone().unwrap_or_default();

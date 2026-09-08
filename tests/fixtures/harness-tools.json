@@ -184,7 +184,7 @@
               "additionalProperties": false,
               "properties": {
                 "evidence": {
-                  "description": "Evidence outside your own derivation that this value is closer to truth (required when the value changed from an earlier observation).",
+                  "description": "A verification record reference (v<n>) minted by a VERIFY with anchor kind=external, coverage=reportedClaim, and expectationSubject bound to this expectation. Required when the value changed from an earlier observation; evidence already recorded before the prior observation does not qualify.",
                   "type": "string"
                 },
                 "matches": {

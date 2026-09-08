@@ -12,6 +12,8 @@ USAGE
 	drip --gc [--older-than <days>] Collect-and-compact idle sessions older than N days (default 14)
 	drip --review --context "..."  Fan-out code review of the diff: changed files bundled into review
 	                              units reviewed in parallel on a fast model, then one synthesis pass
+	drip --bash "<cmd>" --context "..."  Run a shell command and print a short distillation of its
+	                              output guided by --context, instead of the raw stream
 	drip --list                    List sessions recorded for this directory
 	drip --state [id]              Print harness state summary for the latest (or given) session
 	drip --result [id]             Replay the persisted outcome of a session's most recent run
@@ -54,6 +56,22 @@ OPTIONS
 	--context <text>              REQUIRED by --review (min 20 chars): what the change is trying to
 	                              achieve. Every reviewer judges the diff against this intent, so a
 	                              change that is technically clean but misses its goal is a finding.
+	                              Also REQUIRED by --bash: what you expect from the command, what
+	                              counts as success or failure, and what to report back.
+	--bash <command>              Run <command> via the shell for a calling agent and print a
+	                              context-guided distillation of its output instead of the raw
+	                              stream (stdout); a one-line header goes to stderr. Output under
+	                              --distill-min-lines lines and 3 KB is printed verbatim; larger
+	                              output is distilled by one tool-free model call. If distillation
+	                              fails, a head+tail excerpt is printed instead (fail-open). Exits
+	                              with the command's own exit code (124 on timeout, 128+n when a
+	                              signal killed it, e.g. 139 for SIGSEGV). With --json: one object
+	                              with exitCode, timedOut, signal, distilled, line/byte counts,
+	                              truncated/bypassed flags, model, usage, and timings.
+	--distill-profile <id>        Model profile for --bash distillation (default glm-5-3-flash)
+	--distill-min-lines <n>       --bash bypass threshold: output with fewer than n lines and under
+	                              3 KB is returned verbatim with no model call (default 30)
+	--timeout-ms <n>              Timeout for the --bash command in milliseconds (default 120000)
 	--base <ref>                  Diff base for --review (default: the repo's default branch).
 	                              Compared as <base>...HEAD, i.e. from the merge base
 	--concurrency <n>             Max review units reviewed at once (positive integer,
@@ -263,6 +281,8 @@ EXIT CODES
 		retries) or --wait saw the run die without a result — state is
 		persisted; resume the same goal when healthy
 	124 --wait gave up after --timeout-secs (the run keeps going)
+	--bash exits with the wrapped command's own code instead (124 on timeout, 128+n
+	    when a signal killed it); its stderr header says which case applies
 "#;
 
 #[cfg(test)]
@@ -336,6 +356,10 @@ mod tests {
             "--synth-profile",
             "--no-repo-memory",
             "--dry-run",
+            "--bash",
+            "--distill-profile",
+            "--distill-min-lines",
+            "--timeout-ms",
         ];
 
         for flag in flags {
@@ -352,7 +376,7 @@ mod tests {
     fn help_text_is_printable_verbatim() {
         // The template ends with exactly one newline; println! appends the
         // second, so stdout ends in "\n\n".
-        assert!(HELP.ends_with("the run keeps going)\n"));
+        assert!(HELP.ends_with("says which case applies\n"));
         assert!(!HELP.ends_with("\n\n"));
         assert!(HELP.starts_with('\t'));
     }

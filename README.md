@@ -211,6 +211,10 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 | 3    | Infrastructure error (endpoint unreachable / 5xx after retries); state persisted, resume when healthy |
 | 124  | `--wait` gave up after `--timeout-secs` (run keeps going) |
 
+`--bash` is the exception: it exits with the wrapped command's own code (124 on
+timeout, `128+n` when a signal killed it), and its stderr header says which case
+applies.
+
 ---
 
 ## Tool pack (9 tools)
@@ -563,6 +567,51 @@ P0/P1 findings remain and 4 when some do, so a fix loop can branch on it.
 `--file-profile` / `--synth-profile` re-point the two lanes (both default to
 `glm-5-3-flash` via OpenRouter; `--synth-profile kimi-k3` is the stronger
 synthesizer).
+
+---
+
+## Bash distillation (`--bash`)
+
+`drip --bash` runs a shell command on behalf of a calling agent (Claude Code,
+Codex, or any MCP client) and returns a short, context-guided distillation of
+the output instead of the raw stream, so a `cargo test` or `grep -r` with
+hundreds of lines of output costs the agent a few lines of context instead of
+all of them. `--context` is required: it tells the distiller what the agent
+expects, what counts as success or failure, and which facts to report back.
+
+```sh
+drip --bash "cargo test 2>&1" \
+  --context "Expect all tests to pass. Report the pass/fail counts and, for any failure, the test name, file:line, and the assertion message verbatim."
+drip --bash "grep -rn TODO src" --context "..." --json
+```
+
+- Output under `--distill-min-lines` lines (default 30) **and** under 3 KB is
+  printed verbatim with no model call — tiny outputs cost more to distill than
+  to read.
+- Larger output goes through one tool-free call on `--distill-profile`
+  (default `glm-5-3-flash`, cheap and fast). Output over 150 KB is trimmed to
+  its head and tail around an omission marker before the call. The reply
+  leads with a success/failure verdict, then the facts `--context` asked for
+  (error messages, paths, and line numbers quoted exactly), then anything
+  unexpected.
+- If the model call fails or times out, the command still returns: a head+tail
+  excerpt of the raw output is printed after a `(distillation failed: ...)`
+  note (fail-open).
+- A one-line header goes to stderr (`bash: exit 1 · 4s · 312 lines / 18204
+  bytes → distilled on glm-5-3-flash (z-ai/glm-5.3-flash)`); the distilled
+  text goes to stdout. With `--json`, stdout is one object: `command`, `cwd`,
+  `exitCode`, `timedOut`, `signal` (only when a signal killed the command),
+  `durationMs`, `totalLines`, `totalBytes`, `truncated`, `bypassed`,
+  `distilled`, `profile`, `model`, `distillErrored`, `usage` (only when a
+  model call ran), `distillMs`.
+- The exit code is the wrapped command's own, so an agent's existing pass/fail
+  handling keeps working; distillation failures never change it. A timeout
+  exits 124 and the header says `exit timeout`; a signal death exits `128+n`
+  like the shell (139 for SIGSEGV, 137 for SIGKILL) and the header says
+  `exit killed by SIGSEGV`. `--timeout-ms` caps the command (default 120000).
+
+Through `drip-mcp`, pass `["--bash", "<cmd>", "--context", "..."]` as the
+tool's `args`.
 
 ---
 

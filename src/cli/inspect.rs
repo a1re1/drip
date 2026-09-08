@@ -568,6 +568,7 @@ mod tests {
 				output_tail: "1 fail".into(),
 				ran_no_tests: None,
                 evidence: None,
+                id: None,
 			},
 			HarnessVerificationRecord {
 				at_iteration: 4,
@@ -576,6 +577,7 @@ mod tests {
 				output_tail: "5 pass".into(),
 				ran_no_tests: None,
                 evidence: None,
+                id: None,
 			},
 		]);
 		std::fs::write(

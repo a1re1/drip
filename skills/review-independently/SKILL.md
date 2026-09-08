@@ -50,3 +50,17 @@ When the goal is to review or verify another agent's or contributor's work:
 12. Check the author's declared anchor. If completion was declared with
     `anchor: "none"`, ask whether an external anchor really was unavailable;
     if one exists that the author did not use, that is the finding.
+13. Input provenance is not output coverage: evidence that a check ran on
+    inputs or components (anchor coverage `inputOrComponent`) never supports
+    the reported claim itself, no matter how thorough the ingredient checks.
+14. Corroboration is not an external discriminator: other reviewers agreeing,
+    or independently re-deriving the same value, is consensus — not fresh
+    external evidence. It cannot justify changing a previously observed value.
+15. Unsupported models remain alternatives: when a proposed revision lacks
+    eligible support, keep the prior accepted value AND record the proposed
+    value as an explicit support-gap anomaly. Do not silently adopt or refute
+    an unsupported candidate.
+16. Declared coverage is not semantic proof: the harness checks declared
+    provenance and record references only, never whether the model's
+    declarations are true. A well-formed citation is not correctness — judge
+    declared claims against evidence you did not author.

@@ -365,6 +365,9 @@ fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, sessio
         );
     }
 
+    let _ = crate::cli::headless_output::confidence_basis_line(&payload.completion_anchor)
+        .map(|line| println!("{line}"));
+
     if let Some(usage) = &payload.usage {
         let waits = if usage.rate_limit_wait_seconds > 0.0 {
             format!(", {}s in retry waits", usage.rate_limit_wait_seconds.round() as i64)
@@ -990,6 +993,9 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 String::new()
             }
         );
+
+        let _ = crate::cli::headless_output::confidence_basis_line(&payload.completion_anchor)
+            .map(|line| println!("{line}"));
 
         if let Some(summary) = &finished_result.state.run_summary {
             println!();

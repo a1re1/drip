@@ -381,7 +381,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                                 "additionalProperties": false,
                                 "properties": {
                                     "evidence": {
-                                        "description": "Evidence outside your own derivation that this value is closer to truth (required when the value changed from an earlier observation).",
+                                        "description": "A verification record reference (v<n>) minted by a VERIFY with anchor kind=external, coverage=reportedClaim, and expectationSubject bound to this expectation. Required when the value changed from an earlier observation; evidence already recorded before the prior observation does not qualify.",
                                         "type": "string"
                                     },
                                     "matches": {
@@ -669,34 +669,216 @@ pub fn register_expectations(
     Ok(added)
 }
 
-/// True when some verification in this run passed with an anchor the agent
-/// did not author (correctness-class evidence).
+/// True when this run's verification records anchor the completed claim with
+/// evidence the agent did not author (correctness-class evidence). With no
+/// registered expectations, one goal-level reported-claim external check
+/// covers the whole claim; with expectations registered, EACH one must be
+/// covered by a passing external reported-claim check bound to it via the
+/// record's expectation_subject — a single unrelated external check does not
+/// anchor expectations it never covered.
 pub fn has_external_anchor(state: &HarnessState) -> bool {
-    state
-        .verifications
-        .iter()
-        .flatten()
-        .any(|record| {
-            !record.failed
-                && record.ran_no_tests != Some(true)
-                && record.evidence.as_ref().is_some_and(|evidence| {
-                    evidence.verifies_work()
-                        && evidence.anchor.as_ref().is_some_and(|anchor| {
-                            anchor.kind == crate::core::types::VerificationAnchorKind::External
-                        })
-                })
+    let eligible = |record: &crate::core::types::HarnessVerificationRecord| {
+        !record.failed
+            && record.ran_no_tests != Some(true)
+            && record.evidence.as_ref().is_some_and(|evidence| {
+                evidence.verifies_work()
+                    && evidence.anchor.as_ref().is_some_and(|anchor| {
+                        anchor.kind == crate::core::types::VerificationAnchorKind::External
+                            && anchor.coverage == Some(crate::core::types::CoverageGranularity::ReportedClaim)
+                    })
+            })
+    };
+    let binds = |record: &crate::core::types::HarnessVerificationRecord,
+                 expectation: &crate::core::types::HarnessExpectation| {
+        record
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.anchor.as_ref())
+            .and_then(|anchor| anchor.expectation_subject.as_deref())
+            .is_some_and(|bound| {
+                bound == expectation.id.as_str() || bound.eq_ignore_ascii_case(&expectation.subject)
+            })
+    };
+    if state.expectations.is_empty() {
+        state.verifications.iter().flatten().any(&eligible)
+    } else {
+        state.expectations.iter().all(|expectation| {
+            state
+                .verifications
+                .iter()
+                .flatten()
+                .any(|record| eligible(record) && binds(record, expectation))
         })
+    }
+}
+
+/// Whether an observation's evidence names a verification record that is
+/// eligible claim-level support for revising a previously observed value: a
+/// passing external check declared to cover the reported claim, bound to this
+/// expectation, and ordered after the prior observation. Ordered after means a
+/// later iteration, or the same iteration with a strictly later record ref —
+/// so replaying the same evidence never re-qualifies, while a new
+/// discriminating record from an existing external source can. When the
+/// prior observation cited no resolvable record, freshness is judged
+/// against that observation's watermark (records that already existed when
+/// it was recorded are never fresh). Identity is content, not the record
+/// ref: the cited record's recorded source, declared coverage, expectation
+/// binding, and output content must differ from every other recorded
+/// verification — re-running an unchanged check is an exact replay of
+/// already-available evidence however fresh its v<n> id or different the
+/// proposed value, while a genuinely changed observation from the same
+/// source (or a different source) qualifies. The harness
+/// enforces these declared fields and the record reference only, not the
+/// semantic truth of the model's declarations about what its check covers.
+fn revision_evidence_is_eligible(
+    records: &[crate::core::types::HarnessVerificationRecord],
+    expectation_id: &str,
+    expectation_subject: &str,
+    evidence: &str,
+    prior_iteration: u64,
+    prior_evidence: Option<&str>,
+    prior_observed_after_records: Option<u64>,
+) -> bool {
+    fn record_order(record: &crate::core::types::HarnessVerificationRecord) -> Option<(u64, u64)> {
+        let id = record.id.as_deref()?.strip_prefix('v')?.parse::<u64>().ok()?;
+        Some((record.at_iteration.max(0) as u64, id))
+    }
+    let evidence = evidence.trim();
+    let prior_order = prior_evidence.map(str::trim).and_then(|prior| {
+        records.iter().find(|record| record.id.as_deref() == Some(prior)).and_then(record_order)
+    });
+    // A record qualifies as fresh support for the revision only if it was
+    // minted AFTER the observation it revises: strictly later than the
+    // actual observation-time watermark recorded on that observation (the
+    // count of verification records that already existed when it was
+    // recorded), and, when the prior observation cited a resolvable record,
+    // later than that citation too. Judging only against the cited record
+    // would let a v2 recorded BEFORE the observation qualify off a v1
+    // citation. A None watermark is a legacy observation whose record
+    // history is unknown: the existing records cannot be ruled out as
+    // pre-existing, so only a strictly later iteration can qualify. A
+    // Some(0) watermark is known-empty: any resolvable record was minted
+    // after the observation.
+    let fresh = |record: &crate::core::types::HarnessVerificationRecord| {
+        let Some((iteration, id)) = record_order(record) else {
+            // Records without a stable ref cannot prove they are new evidence.
+            return false;
+        };
+        match prior_observed_after_records {
+            None => iteration > prior_iteration,
+            Some(watermark) => {
+                let after_watermark = match watermark {
+                    0 => true,
+                    _ => match watermark
+                        .checked_sub(1)
+                        .and_then(|index| records.get(index as usize))
+                        .and_then(record_order)
+                    {
+                        Some(boundary) => (iteration, id) > boundary,
+                        // Records existed but none carry a resolvable v<n>
+                        // ref (legacy records): they cannot be ruled out as
+                        // pre-existing, so only a strictly later iteration
+                        // qualifies.
+                        None => iteration > prior_iteration,
+                    },
+                };
+                after_watermark
+                    && match prior_order {
+                        None => true,
+                        Some((prior_at, prior_id)) => {
+                            iteration > prior_at || (iteration == prior_at && id > prior_id)
+                        }
+                    }
+            }
+        }
+    };
+    records.iter().any(|record| {
+        !record.failed
+            && record.ran_no_tests != Some(true)
+            && fresh(record)
+            && record.id.as_deref() == Some(evidence)
+            && record.evidence.as_ref().is_some_and(|record_evidence| {
+                record_evidence.verifies_work()
+                    && record_evidence.anchor.as_ref().is_some_and(|anchor| {
+                        anchor.kind == crate::core::types::VerificationAnchorKind::External
+                            && anchor.coverage == Some(crate::core::types::CoverageGranularity::ReportedClaim)
+                            && anchor.expectation_subject.as_deref().is_some_and(|bound| {
+                                bound == expectation_id
+                                    || bound.eq_ignore_ascii_case(expectation_subject)
+                            })
+                    })
+            })
+            // Exact replay: a record whose recorded source, declared
+            // coverage, expectation binding, and output content are all
+            // already present in another recorded verification is evidence
+            // that was already available, not new support — even with a
+            // fresh v<n> id. Genuinely changed recorded output (or a
+            // different recorded source) makes it a new observation.
+            && !records.iter().any(|other| {
+                !std::ptr::eq(other, record)
+                    && other.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                        .and_then(|anchor| anchor.source.as_deref())
+                        == record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                            .and_then(|anchor| anchor.source.as_deref())
+                    && other.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                        .and_then(|anchor| anchor.coverage)
+                        == record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                            .and_then(|anchor| anchor.coverage)
+                    && other.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                        .and_then(|anchor| anchor.expectation_subject.as_deref())
+                        == record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref())
+                            .and_then(|anchor| anchor.expectation_subject.as_deref())
+                    && other.output_tail == record.output_tail
+            })
+    })
+}
+/// against, plus the support-gap anomalies already persisted (for
+/// deduplication). A plain data input: eligibility depends only on this.
+pub struct RevisionSupport<'a> {
+    pub records: &'a [crate::core::types::HarnessVerificationRecord],
+    pub anomalies: &'a [crate::core::types::HarnessAnomaly],
+}
+
+/// What validating a finish_task's observations produced: support gaps to
+/// persist (deduplicated by subject, expected, and observed) and the gap keys
+/// this same call resolved with fresh eligible evidence.
+pub struct ObservationGaps {
+    pub persisted: Vec<crate::core::types::HarnessAnomaly>,
+    pub resolved: Vec<(String, String, String)>,
 }
 
 /// Validate and append finish_task observations to their expectations.
-/// Refuses unknown subjects and value revisions that cite no outside
-/// evidence; nothing is written when any observation is refused.
+/// Unknown subjects are refused and nothing is written. A value revision
+/// without eligible claim-level support is ALSO not written (the prior
+/// observation stands) but is returned as a structured support-gap anomaly:
+/// the gap persists, deduplicated, so clean completion stays blocked until
+/// fresh eligible evidence resolves it or the run ends explicitly
+/// unreconciled. Prior-value resubmission is not a revision and raises no gap.
 pub fn record_observations(
     expectations: &mut Vec<crate::core::types::HarnessExpectation>,
     iteration: i64,
     observations: &[FinishObservationInput],
-) -> Result<(), String> {
+    record_support: &RevisionSupport<'_>,
+) -> Result<ObservationGaps, String> {
+    record_observations_with_watermark(expectations, iteration, 0, observations, record_support)
+}
+
+/// Same gate as record_observations, with the observation-time watermark:
+/// the number of verification records that already existed when these
+/// observations are being recorded. Revision freshness is judged against the
+/// actual observation-time watermark recorded on the prior observation, so a
+/// record created in the same iteration but before the observation is
+/// rejected while one created after it (or in a later iteration) is accepted.
+pub fn record_observations_with_watermark(
+    expectations: &mut Vec<crate::core::types::HarnessExpectation>,
+    iteration: i64,
+    observation_watermark: u64,
+    observations: &[FinishObservationInput],
+    record_support: &RevisionSupport<'_>,
+) -> Result<ObservationGaps, String> {
     let mut planned: Vec<(usize, crate::core::types::HarnessExpectationObservation)> = Vec::new();
+    let mut gaps: Vec<crate::core::types::HarnessAnomaly> = Vec::new();
+    let mut resolved: Vec<(String, String, String)> = Vec::new();
     for observation in observations {
         let Some(index) = expectations
             .iter()
@@ -726,10 +908,57 @@ pub fn record_observations(
             .map(|(_, planned)| planned)
             .or_else(|| expectations[index].observations.last());
         if let Some(previous) = previous {
-            if previous.observed != observation.observed && observation.evidence.is_none() {
-                return Err(format!(
-                    "observation for '{}' changed from '{}' to '{}'; a revision that changes a reported output must cite evidence outside the fix (evidence field) that the new value is closer to truth",
-                    expectations[index].subject, previous.observed, observation.observed
+            if previous.observed != observation.observed {
+                if !revision_evidence_is_eligible(
+                    record_support.records,
+                    &expectations[index].id,
+                    &expectations[index].subject,
+                    observation.evidence.as_deref().unwrap_or_default(),
+                    previous.at_iteration,
+                    previous.evidence.as_deref(),
+                    previous.observed_after_records,
+                ) {
+                    // Unsupported replacement of a reported value — no
+                    // evidence cited, or cited evidence that is not eligible
+                    // claim-level support: refuse the revision (the prior
+                    // observation stands) and surface the support gap as a
+                    // structured, deduplicated anomaly.
+                    let key = (
+                        expectations[index].subject.clone(),
+                        expectations[index].expected.clone(),
+                        observation.observed.clone(),
+                    );
+                    let duplicate = gaps
+                        .iter()
+                        .chain(record_support.anomalies.iter())
+                        .any(|gap| {
+                                (gap.subject.as_str(), gap.expected.as_str(), gap.observed.as_str())
+                                == (key.0.as_str(), key.1.as_str(), key.2.as_str())
+                        });
+                    if !duplicate {
+                        gaps.push(crate::core::types::HarnessAnomaly {
+                            subject: key.0.clone(),
+                            expected: key.1.clone(),
+                            observed: key.2.clone(),
+                            note: if observation.evidence.is_none() {
+                                format!(
+                                    "support gap: attempted revision from '{}' to '{}' cited no evidence — a revision that changes a reported output requires fresh external verification covering the reported claim, bound to this expectation, recorded after the prior observation (iteration {})",
+                                    previous.observed, observation.observed, previous.at_iteration
+                                )
+                            } else {
+                                format!(
+                                    "support gap: attempted revision from '{}' to '{}' is unsupported — no fresh external verification covering the reported claim, bound to this expectation, was recorded after the prior observation (iteration {})",
+                                    previous.observed, observation.observed, previous.at_iteration
+                                )
+                            },
+                        });
+                    }
+                    continue;
+                }
+                resolved.push((
+                    expectations[index].subject.clone(),
+                    expectations[index].expected.clone(),
+                    observation.observed.clone(),
                 ));
             }
         }
@@ -740,13 +969,14 @@ pub fn record_observations(
                 observed: observation.observed.clone(),
                 matches: observation.matches,
                 evidence: observation.evidence.clone(),
+                observed_after_records: Some(observation_watermark),
             },
         ));
     }
     for (index, observation) in planned {
         expectations[index].observations.push(observation);
     }
-    Ok(())
+    Ok(ObservationGaps { persisted: gaps, resolved })
 }
 
 const PROSE_OBJECT_WORDS: &[&str] = &[
@@ -2034,8 +2264,8 @@ pub fn apply_harness_op(
                 direct_response: None,
             }
         }
-        HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies } => {
-            use crate::core::types::HarnessTaskStatus;
+            HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies } => {
+        use crate::core::types::HarnessTaskStatus;
 
             // Task-terminal calls are refused once the loop has ended (a
             // previous call in the same response finished the task).
@@ -2117,11 +2347,7 @@ pub fn apply_harness_op(
             let is_drive_by = current_task_id.is_some() && !is_current_task;
             let ends_loop = is_current_task || current_task_id.is_none();
 
-            // A review verdict is only meaningful from the review task's own
-            // loop — otherwise the worker whose output is under review can
-            // confirm itself by naming the review task's id.
-            if has_review_of {
-                if is_drive_by {
+                if has_review_of && is_drive_by {
                     return HarnessOpOutcome {
                         text: format!(
                             "Task {target_id} is a review task — its verdict must come from its own loop, not from another task's loop."
@@ -2133,24 +2359,29 @@ pub fn apply_harness_op(
                     };
                 }
 
-                let review_task =
-                    core_state::get_task_by_id(state, &target_id).expect("target task exists").clone();
-                // A reviewer that confirms the work but cannot reconcile an
-                // expectation confirms it with the anomalies on record.
-                let verdict_status = if status == FinishTaskStatus::Unreconciled {
-                    if anomalies.is_empty() {
-                        return HarnessOpOutcome {
-                            text: UNRECONCILED_NEEDS_ANOMALIES.to_string(),
-                            state_changed: false,
-                            task_finished: false,
-                            ended_loop: false,
-                            direct_response: None,
-                        };
-                    }
-                    // A reviewer's observations count too, so the mismatch it
-                    // found reaches the expectation history and the task record.
-                    let mut staged = state.expectations.clone();
-                    if let Err(text) = record_observations(&mut staged, state.iteration, &observations) {
+
+            // Observations are staged and recorded before any refusal gate:
+            // an unsupported revision must persist its deduplicated support
+            // gap even when this call is refused for an unrelated reason
+            // (no anchor, failed verification), and a refusal from that
+            // point on must still report state_changed. The batch is
+            // validated against a copy, so malformed batches are atomic.
+            // Valid observations survive a later completion refusal.
+            let mut mutated = false;
+            let staged = if status.finishes_work() {
+                let mut staged = state.expectations.clone();
+                let gaps = match record_observations_with_watermark(
+                    &mut staged,
+                    state.iteration,
+                    state.verifications.as_ref().map_or(0u64, |records| records.len() as u64),
+                    &observations,
+                    &RevisionSupport {
+                        records: state.verifications.as_deref().unwrap_or_default(),
+                        anomalies: &state.anomalies,
+                    },
+                ) {
+                    Ok(gaps) => gaps,
+                    Err(text) => {
                         return HarnessOpOutcome {
                             text,
                             state_changed: false,
@@ -2159,7 +2390,54 @@ pub fn apply_harness_op(
                             direct_response: None,
                         };
                     }
-                    state.expectations = staged;
+                };
+
+                // The persist/resolve below already mutated state.anomalies,
+                // so a refusal from here on must still report state_changed.
+                mutated = staged != state.expectations || !gaps.persisted.is_empty() || !gaps.resolved.is_empty();
+                state.expectations = staged.clone();
+                // Persist this call's deduplicated support gaps, then drop
+                // any gap this call's fresh eligible evidence resolves.
+                for gap in gaps.persisted {
+                    state.anomalies.push(gap);
+                }
+                for (subject, expected, observed) in gaps.resolved {
+                    state.anomalies.retain(|gap| {
+                            (gap.subject.as_str(), gap.expected.as_str(), gap.observed.as_str())
+                            != (subject.as_str(), expected.as_str(), observed.as_str())
+                    });
+                }
+                Some(staged)
+            } else {
+                None
+            };
+
+            // A review verdict is only meaningful from the review task's own
+            // loop — otherwise the worker whose output is under review can
+            // confirm itself by naming the review task's id.
+            if has_review_of {
+                if status == FinishTaskStatus::Completed && !state.anomalies.is_empty() {
+                    return HarnessOpOutcome {
+                        text: "harness: not accepted yet — unresolved support-gap anomalies prevent a clean review verdict; resolve them or explicitly finish unreconciled with the anomalies.".into(),
+                        state_changed: mutated,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+                    let review_task = core_state::get_task_by_id(state, &target_id).expect("target task exists").clone();
+                // A reviewer that confirms the work but cannot reconcile an
+                // expectation confirms it with the anomalies on record.
+                let verdict_status = if status == FinishTaskStatus::Unreconciled {
+                    if anomalies.is_empty() {
+                        return HarnessOpOutcome {
+                            text: UNRECONCILED_NEEDS_ANOMALIES.to_string(),
+                            state_changed: mutated,
+                            task_finished: false,
+                            ended_loop: false,
+                            direct_response: None,
+                        };
+                    }
                     state.anomalies.extend(anomalies.iter().cloned());
                     FinishTaskStatus::Completed
                 } else {
@@ -2171,7 +2449,7 @@ pub fn apply_harness_op(
                 // finishing it ends that loop exactly when the task finished.
                 return HarnessOpOutcome {
                     text: verdict.result_text,
-                    state_changed: verdict.state_changed,
+                    state_changed: verdict.state_changed || mutated,
                     task_finished: verdict.task_finished,
                     ended_loop: verdict.task_finished,
                     direct_response: None,
@@ -2190,7 +2468,7 @@ pub fn apply_harness_op(
                     text: format!(
                         "Task {target_id} is pending and has never been worked by a loop — it cannot be marked completed from here. Let its own loop do the work, or drop_task it with a reason if it is no longer needed."
                     ),
-                    state_changed: false,
+                    state_changed: mutated,
                     task_finished: false,
                     ended_loop: false,
                     direct_response: None,
@@ -2300,18 +2578,17 @@ pub fn apply_harness_op(
                 // Analysis-only tasks (no edits, no expectations) make no
                 // claim a check could anchor; they record what was declared.
                 let claim_needs_anchor = state.workspace_edits.unwrap_or(0) > 0
-                    || target_footprint.iter().flatten().any(|entry| entry.starts_with("edited "))
-                    || !state.expectations.is_empty();
+                    || !state.expectations.is_empty()
+                    || target_footprint.iter().flatten().any(|entry| entry.starts_with("edited "));
                 let anchor_kind = match (external, anchor.as_deref(), anchor_note.as_deref()) {
                     (true, _, _) => crate::core::types::CompletionAnchorKind::External,
                     (false, Some("none"), Some(note)) if !note.trim().is_empty() => {
                         crate::core::types::CompletionAnchorKind::None
                     }
-                    (false, _, _) if !claim_needs_anchor => crate::core::types::CompletionAnchorKind::None,
                     (false, None, Some(_)) => {
                         return HarnessOpOutcome {
                             text: "anchorNote was given without anchor: pass anchor=\"none\" alongside it to declare that no external anchor exists for this claim (or run a VERIFY with anchor.kind=external).".to_string(),
-                            state_changed: false,
+                            state_changed: mutated,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -2320,7 +2597,7 @@ pub fn apply_harness_op(
                     (false, Some("none"), _) => {
                         return HarnessOpOutcome {
                             text: "anchor=\"none\" requires an anchorNote explaining why no external anchor exists for this claim.".to_string(),
-                            state_changed: false,
+                            state_changed: mutated,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -2331,13 +2608,13 @@ pub fn apply_harness_op(
                     // finish no longer fails closed on a missing,
                     // self-authored, or undeclared anchor. The anchor kind
                     // is still recorded exactly as computed.
-                    (false, _, _) if ctx.review_opt_out => {
+                    (false, _, _) if !claim_needs_anchor || ctx.review_opt_out => {
                         crate::core::types::CompletionAnchorKind::None
                     }
                     (false, _, _) => {
                         return HarnessOpOutcome {
                             text: "harness: not accepted yet — no correctness-class evidence: every passing check was self-authored or undeclared. Either run a VERIFY with anchor.kind=external (a check you did not author: a pre-existing test, a task-provided fixture, a published constant, an invariant independent of the implementation), or finish with anchor=\"none\" and an anchorNote explaining why no external anchor exists for this claim.".to_string(),
-                            state_changed: false,
+                            state_changed: mutated,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -2348,26 +2625,15 @@ pub fn apply_harness_op(
                 if status == FinishTaskStatus::Unreconciled && anomalies.is_empty() {
                     return HarnessOpOutcome {
                         text: UNRECONCILED_NEEDS_ANOMALIES.to_string(),
-                        state_changed: false,
+                        state_changed: mutated,
                         task_finished: false,
                         ended_loop: false,
                         direct_response: None,
                     };
                 }
 
-                // Observations are validated against a copy so a refused
-                // call leaves the expectation history untouched.
-                let mut staged = state.expectations.clone();
-                if let Err(text) = record_observations(&mut staged, state.iteration, &observations) {
-                    return HarnessOpOutcome {
-                        text,
-                        state_changed: false,
-                        task_finished: false,
-                        ended_loop: false,
-                        direct_response: None,
-                    };
-                }
-
+                let staged = staged
+                    .expect("finish path stages observations before its gates");
                 let unresolved: Vec<String> = staged
                     .iter()
                     .filter(|expectation| expectation.observations.is_empty())
@@ -2379,7 +2645,7 @@ pub fn apply_harness_op(
                             "harness: not accepted yet — registered expectation(s) have no observation: {}. Record each one in finish_task.observations (observed value, matches true/false) before finishing.",
                             unresolved.join(", ")
                         ),
-                        state_changed: false,
+                        state_changed: mutated,
                         task_finished: false,
                         ended_loop: false,
                         direct_response: None,
@@ -2399,7 +2665,7 @@ pub fn apply_harness_op(
                                 "harness: not accepted yet — expectation '{}' mismatched (expected {}, observed {}); this is a P1 against the model, not a caveat on the value. Fix the model, or finish with status=\"unreconciled\" and list it under anomalies.",
                                 expectation.subject, expectation.expected, observation.observed
                             ),
-                            state_changed: false,
+                            state_changed: mutated,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -2407,12 +2673,38 @@ pub fn apply_harness_op(
                     }
                 }
 
+
+                // Clean completion is blocked while any support gap remains:
+                // a prior-value resubmission or high claimed confidence cannot
+                // erase it. Only fresh eligible claim-level evidence (which
+                // resolves the gap above) or an explicit unreconciled finish
+                // moves past this.
+                if status == FinishTaskStatus::Completed && !state.anomalies.is_empty() {
+                    let gaps_text = state
+                        .anomalies
+                        .iter()
+                        .map(|gap| gap.note.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return HarnessOpOutcome {
+                        text: format!(
+                            "harness: not accepted yet — {} support-gap anomaly(ies) on record: {}. Resolve each with fresh eligible claim-level evidence (VERIFY anchor kind=external, coverage=reportedClaim, expectationSubject), or finish with status=\"unreconciled\" listing them.",
+                            state.anomalies.len(),
+                            gaps_text
+                        ),
+                        state_changed: mutated,
+                        task_finished: false,
+                        ended_loop: false,
+                        direct_response: None,
+                    };
+                }
+
                 state.expectations = staged;
                 state.anomalies.extend(anomalies.iter().cloned());
                 state.completion_anchor = Some(crate::core::types::CompletionAnchor {
                     kind: anchor_kind,
                     note: anchor_note.clone(),
-                    claimed_confidence: confidence.unwrap_or(crate::core::types::ClaimedConfidence::Medium),
+                    claimed_confidence: confidence,
                 });
             }
 
@@ -2439,7 +2731,7 @@ pub fn apply_harness_op(
                     None => {
                         return HarnessOpOutcome {
                             text: format!("Task {target_id} could not be finished."),
-                            state_changed: false,
+                            state_changed: mutated,
                             task_finished: false,
                             ended_loop: false,
                             direct_response: None,
@@ -3015,6 +3307,7 @@ mod apply_harness_op_tests {
             at_iteration: 1, command: "python check.py".into(), failed: false,
             output_tail: "".into(), ran_no_tests: None,
             evidence: Some(crate::tools::builtin::verify::verification_evidence("python check.py", "DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}")),
+            id: None,
         };
         for current in [None, Some("task-1".into())] {
             let ctx = HarnessOpContext { current_task_id: current, ..Default::default() };
@@ -3091,10 +3384,13 @@ mod apply_harness_op_tests {
             },
             source: Some("fixture".into()),
             downgraded_reason: None,
+            coverage: Some(crate::core::types::CoverageGranularity::ReportedClaim),
+            expectation_subject: Some("e1".into()),
         });
         let record = HarnessVerificationRecord {
             at_iteration: 1, command: "python check.py".into(), failed: false,
             output_tail: "".into(), ran_no_tests: None, evidence: Some(evidence),
+            id: None,
         };
         state.last_verification = Some(record.clone());
         state.verifications = Some(vec![record]);
@@ -3127,8 +3423,7 @@ mod apply_harness_op_tests {
             assert!(accepted.task_finished, "{}", accepted.text);
             let anchor = state.completion_anchor.clone().expect("anchor recorded");
             assert_eq!(anchor.kind, CompletionAnchorKind::None);
-            assert_eq!(anchor.claimed_confidence, ClaimedConfidence::Low);
-            assert_eq!(anchor.note.as_deref(), Some("no fixture exists for this output"));
+            assert_eq!(anchor.claimed_confidence, Some(ClaimedConfidence::Low));
         }
 
         let (mut state, ctx) = anchoring_fixture(Some("external"));
@@ -3156,7 +3451,7 @@ mod apply_harness_op_tests {
             assert!(accepted.task_finished, "{anchor_kind:?}: {}", accepted.text);
             let anchor = state.completion_anchor.clone().expect("anchor recorded");
             assert_eq!(anchor.kind, CompletionAnchorKind::None);
-            assert_eq!(anchor.claimed_confidence, ClaimedConfidence::Medium);
+            assert_eq!(anchor.claimed_confidence, Some(ClaimedConfidence::Medium));
             assert!(anchor.note.is_none());
         }
     }
@@ -3173,6 +3468,147 @@ mod apply_harness_op_tests {
         let ctx = HarnessOpContext { current_task_id: Some("task-1".into()), ..Default::default() };
         let accepted = finish(&mut state, &ctx, r#"{"status":"completed","summary":"summarized","confidence":"medium"}"#);
         assert!(accepted.task_finished, "{}", accepted.text);
+    }
+
+    /// Target-only footprint edits still require explicit anchoring: a
+    /// finish whose task footprint records an "edited " entry must not
+    /// complete as anchor kind None without declaring it, even when
+    /// workspace_edits is 0 and no expectations are registered; the same
+    /// finish without such a footprint needs no anchor at all.
+    /// Target-only footprint edits still require explicit anchoring: a
+    /// finish whose task footprint records an "edited " entry must not
+    /// complete as anchor kind None without declaring it, even when
+    /// workspace_edits is 0 and no expectations are registered; the same
+    /// finish without such a footprint needs no anchor at all.
+    #[test]
+    fn footprint_edits_require_an_anchor_even_without_workspace_edits() {
+        use crate::core::types::HarnessVerificationRecord;
+        let setup = |footprint: Option<Vec<String>>| {
+            let mut state = create_harness_state("summarize the survey");
+            let plan = parse_harness_op("plan_tasks", r#"{"tasks":["summarize the survey"]}"#).unwrap();
+            apply_harness_op(&mut state, plan, &HarnessOpContext::default());
+            state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+            state.tasks[0].activations = Some(1);
+            state.tasks[0].edit_nudged = Some(true);
+            state.tasks[0].footprint = footprint;
+            state.last_verification = Some(HarnessVerificationRecord {
+                at_iteration: 1, command: "python check.py".into(), failed: false,
+                output_tail: "".into(), ran_no_tests: None,
+                evidence: Some(crate::tools::builtin::verify::verification_evidence("python check.py", "DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}")),
+                id: None,
+            });
+            state
+        };
+        let ctx = HarnessOpContext { current_task_id: Some("task-1".into()), ..Default::default() };
+        let payload = r#"{"status":"completed","summary":"done"}"#;
+
+        let mut edited = setup(Some(vec!["edited artifact.txt".into()]));
+        let refused = finish(&mut edited, &ctx, payload);
+        assert!(!refused.task_finished, "{}", refused.text);
+        assert!(refused.text.contains("no correctness-class evidence"), "{}", refused.text);
+
+        let mut declared = setup(Some(vec!["edited artifact.txt".into()]));
+        let accepted = finish(
+            &mut declared,
+            &ctx,
+            r#"{"status":"completed","summary":"done","anchor":"none","anchorNote":"no external fixture exists for this artifact"}"#,
+        );
+        assert!(accepted.task_finished, "{}", accepted.text);
+
+        let mut untouched = setup(None);
+        let free = finish(&mut untouched, &ctx, payload);
+        assert!(free.task_finished, "{}", free.text);
+    }
+
+    /// Per-expectation coverage: with several registered expectations, a
+    /// goal-level external check (or one bound to only some of them) does not
+    /// anchor completion — EACH expectation needs a passing external
+    /// reported-claim check bound to it. Covering every expectation passes.
+    #[test]
+    fn external_anchor_must_cover_each_registered_expectation() {
+        use crate::core::types::{
+            CoverageGranularity, HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind,
+        };
+        let mut state = create_harness_state("measure two outputs");
+        let plan = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":["measure"],"expectations":[{"subject":"total","expected":"about 100"},{"subject":"sign","expected":"positive"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, plan, &HarnessOpContext::default());
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].activations = Some(1);
+        state.tasks[0].footprint = Some(vec!["edited artifact.txt".into()]);
+        state.workspace_edits = Some(1);
+        let ctx = HarnessOpContext { current_task_id: Some("task-1".into()), ..Default::default() };
+        let anchored_record = |id: &str, bound: Option<&str>| {
+            let mut evidence = crate::tools::builtin::verify::verification_evidence(
+                "python check.py",
+                "DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}",
+            );
+            evidence.anchor = Some(VerificationAnchor {
+                kind: VerificationAnchorKind::External,
+                source: Some("published table".into()),
+                downgraded_reason: None,
+                coverage: Some(CoverageGranularity::ReportedClaim),
+                expectation_subject: bound.map(str::to_string),
+            });
+            HarnessVerificationRecord {
+                at_iteration: 1,
+                command: "python check.py".into(),
+                failed: false,
+                output_tail: "".into(),
+                ran_no_tests: None,
+                evidence: Some(evidence),
+                id: Some(id.to_string()),
+            }
+        };
+        let finish_both = r#"{"status":"completed","summary":"done","observations":[{"subject":"total","observed":"100","matches":true},{"subject":"sign","observed":"positive","matches":true}]}"#;
+
+        // A goal-level external check bound to no expectation covers neither
+        // expectation, so the anchoring gate refuses `completed` even though
+        // both observations were supplied.
+        let goal_only = anchored_record("v1", None);
+        state.last_verification = Some(goal_only.clone());
+        state.verifications = Some(vec![goal_only]);
+        let bounced = finish(&mut state, &ctx, finish_both);
+        assert!(!bounced.task_finished, "{}", bounced.text);
+        assert!(bounced.text.contains("no correctness-class evidence"), "{}", bounced.text);
+
+        // One bound check covers only its own expectation: "total" is covered,
+        // "sign" is not, and the check still refuses.
+        let e1_record = anchored_record("v2", Some("e1"));
+        state.last_verification = Some(e1_record.clone());
+        state.verifications = Some(vec![e1_record]);
+        let still_bounced = finish(&mut state, &ctx, finish_both);
+        assert!(!still_bounced.task_finished, "{}", still_bounced.text);
+        assert!(still_bounced.text.contains("no correctness-class evidence"), "{}", still_bounced.text);
+
+        // A second bound record covers the remaining expectation; every
+        // expectation is then covered and `completed` is accepted as
+        // externally anchored.
+        state.verifications = Some(vec![anchored_record("v2", Some("e1")), anchored_record("v3", Some("sign"))]);
+        state.last_verification = state.verifications.clone().and_then(|mut records| records.pop());
+        let covered = finish(&mut state, &ctx, finish_both);
+        assert!(covered.task_finished, "{}", covered.text);
+        assert_eq!(
+            state.completion_anchor.as_ref().map(|anchor| anchor.kind.clone()),
+            Some(crate::core::types::CompletionAnchorKind::External)
+        );
+    }
+
+    /// No expectations registered: one goal-level reported-claim external
+    /// check anchors completion for the whole claim, with no
+    /// per-expectation binding required.
+    #[test]
+    fn goal_level_external_anchor_covers_completion_without_expectations() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let accepted = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"medium"}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+        assert_eq!(
+            state.completion_anchor.as_ref().map(|anchor| anchor.kind.clone()),
+            Some(crate::core::types::CompletionAnchorKind::External)
+        );
     }
 
     /// Expectations are written once: a plan_tasks call that rewrites a
@@ -3233,34 +3669,352 @@ mod apply_harness_op_tests {
         assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
         assert_eq!(state.anomalies.len(), 1);
         assert_eq!(state.anomalies[0].observed, "negative");
-        assert_eq!(state.expectations[0].observations.len(), 1);
+        assert_eq!(state.expectations[0].observations.len(), 3); // Valid observations persist even on completion refusal.
     }
 
-    /// A revision that changes a reported value must cite outside evidence;
-    /// the same value again, or a change with evidence, is accepted.
+    /// A revision that changes a reported value must cite fresh, eligible
+    /// claim-level evidence bound to the expectation: a record minted before
+    /// the revised observation never qualifies (even when it outranks the
+    /// cited record), a bare change is refused as a deduplicated support gap
+    /// (the prior observation stands), genuinely newer evidence accepts the
+    /// revision and resolves the gap, and replaying a record cannot
+    /// re-qualify.
     #[test]
     fn revised_observations_need_outside_evidence() {
-        let (mut state, ctx) = anchoring_fixture(Some("external"));
-        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
-        apply_harness_op(&mut state, register, &ctx);
-        let first = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"medium","observations":[{"subject":"total","observed":"98","matches":true}]}"#);
-        assert!(first.task_finished, "{}", first.text);
+        use crate::core::types::{
+            CoverageGranularity, HarnessVerificationRecord, VerificationAnchor,
+            VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind,
+        };
+        let mut state = create_harness_state("measure");
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let record_at = |iteration: i64, id: &str, output: &str| HarnessVerificationRecord {
+            at_iteration: iteration,
+            command: "cargo test upstream".into(),
+            failed: false,
+            output_tail: output.into(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 2,
+                passed: 2,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: VerificationAnchorKind::External,
+                    source: Some("upstream fixture".into()),
+                    downgraded_reason: None,
+                    coverage: Some(CoverageGranularity::ReportedClaim),
+                    expectation_subject: Some("e1".into()),
+                }),
+            }),
+            id: Some(id.into()),
+        };
+        let mut records = vec![record_at(2, "v1", "2 passed"), record_at(5, "v2", "3 passed")];
+        let mut expectations = state.expectations.clone();
+        let support = RevisionSupport { records: &records, anomalies: &[] };
 
-        // A review sends it back; the author revises the value.
-        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
-        let bare = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"total","observed":"104","matches":true}]}"#);
-        assert!(!bare.task_finished);
-        assert!(bare.text.contains("changed from '98' to '104'"), "{}", bare.text);
-        assert!(bare.text.contains("evidence outside the fix"), "{}", bare.text);
-        assert_eq!(state.expectations[0].observations.len(), 1);
+        // The prior observation cites v1 and was recorded when v1 and v2 both
+        // already existed (watermark 2): v2 must not qualify as fresh relative
+        // to this observation, whatever the citation ordering says.
+        let prior = record_observations_with_watermark(
+            &mut expectations,
+            1,
+            records.len() as u64,
+            &[FinishObservationInput {
+                subject: "total".into(),
+                observed: "98".into(),
+                matches: true,
+                evidence: Some("v1".into()),
+            }],
+            &support,
+        )
+        .expect("prior observation records");
+        assert!(prior.persisted.is_empty() && prior.resolved.is_empty());
+        assert_eq!(expectations[0].observations.len(), 1);
+        assert_eq!(
+            expectations[0].observations[0].observed_after_records,
+            Some(2),
+            "the watermark records how many verification records already existed"
+        );
 
-        let same = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"e1","observed":"98","matches":true}]}"#);
-        assert!(same.task_finished, "{}", same.text);
-        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
-        let cited = finish(&mut state, &ctx, r#"{"status":"completed","summary":"fixed","confidence":"high","observations":[{"subject":"total","observed":"104","matches":true,"evidence":"pre-existing fixture totals.csv sums to 104"}]}"#);
-        assert!(cited.task_finished, "{}", cited.text);
-        assert_eq!(state.expectations[0].observations.len(), 3);
-        assert_eq!(state.expectations[0].observations[2].evidence.as_deref(), Some("pre-existing fixture totals.csv sums to 104"));
+        // A revision citing v2 — newer than the cited v1 but minted BEFORE
+        // the revision's own observation watermark — must not qualify by
+        // outranking the citation alone. Its recorded output differs from
+        // v1's, so only the watermark rule refuses it.
+        let stale_v2 = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "104".into(),
+            matches: false,
+            evidence: Some("v2".into()),
+        }];
+        let stale = record_observations_with_watermark(&mut expectations, 2, records.len() as u64, stale_v2, &support)
+            .expect("gap surfaces for a record minted before the observation");
+        assert_eq!(expectations[0].observations.len(), 1, "a record minted before the observation is not fresh support");
+        assert_eq!(stale.persisted.len(), 1);
+        assert!(stale.persisted[0].note.contains("support gap"), "{}", stale.persisted[0].note);
+        assert!(stale.persisted[0].note.contains("is unsupported"), "{}", stale.persisted[0].note);
+
+        // A bare revision is refused as a support gap; the recorded value stands.
+        let bare = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "105".into(),
+            matches: false,
+            evidence: None,
+        }];
+        let refused = record_observations_with_watermark(&mut expectations, 3, records.len() as u64, bare, &support).expect("gap surfaces");
+        assert_eq!(expectations[0].observations.len(), 1, "an unsupported revision must not rewrite the recorded value");
+        assert_eq!(refused.persisted.len(), 1);
+        assert!(refused.persisted[0].note.contains("support gap"), "{}", refused.persisted[0].note);
+        assert!(refused.persisted[0].note.contains("cited no evidence"), "{}", refused.persisted[0].note);
+        assert_eq!(
+            (
+                refused.persisted[0].subject.as_str(),
+                refused.persisted[0].expected.as_str(),
+                refused.persisted[0].observed.as_str()
+            ),
+            ("total", "about 100", "105")
+        );
+
+        // v3 is minted for the next observation: genuinely new evidence.
+        records.push(record_at(6, "v3", "5 passed"));
+        // The identical unsupported revision again: deduplicated, no new gap.
+        let support_with_gap = RevisionSupport { records: &records, anomalies: &refused.persisted };
+        let repeat = record_observations_with_watermark(&mut expectations, 3, 1, bare, &support_with_gap)
+            .expect("repeat surfaces no new gap");
+        assert!(repeat.persisted.is_empty(), "identical unsupported revision must not duplicate the gap");
+        assert_eq!(expectations[0].observations.len(), 1);
+
+        // Citing genuinely newer evidence (v3, minted after the observation)
+        // accepts the revision and resolves the bare-support gap.
+        let revision = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "105".into(),
+            matches: false,
+            evidence: Some("v3".into()),
+        }];
+        let cited = record_observations_with_watermark(
+            &mut expectations,
+            3,
+            records.len() as u64,
+            revision,
+            &support_with_gap,
+        )
+        .expect("eligible citation accepted");
+        assert!(cited.persisted.is_empty());
+        assert_eq!(
+            cited.resolved,
+            vec![("total".to_string(), "about 100".to_string(), "105".to_string())]
+        );
+        assert_eq!(expectations[0].observations.len(), 2);
+        assert_eq!(expectations[0].observations[1].evidence.as_deref(), Some("v3"));
+        assert_eq!(expectations[0].observations[1].observed_after_records, Some(3));
+
+        // Replaying the same record for another change cannot re-qualify: the
+        // evidence is no longer fresh relative to the observation it supported.
+        let replay = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "106".into(),
+            matches: false,
+            evidence: Some("v1".into()),
+        }];
+        let replayed = record_observations_with_watermark(&mut expectations, 4, records.len() as u64, replay, &support_with_gap)
+            .expect("replay surfaces a gap");
+        assert_eq!(expectations[0].observations.len(), 2, "replayed evidence must not drive another revision");
+        assert_eq!(replayed.persisted.len(), 1);
+        assert!(replayed.persisted[0].note.contains("is unsupported"), "{}", replayed.persisted[0].note);
+        assert_eq!(expectations[0].observations[1].observed, "105", "the prior accepted revision stands");
+    }
+    /// Exact replay resistance: re-running an unchanged check mints a fresh
+    /// v<n> id, but the recorded source, declared coverage, expectation
+    /// binding, and output content are identical to evidence that was already
+    /// available — that cannot support another revision, whatever value is
+    /// proposed. A genuinely changed recorded output from the same source is
+    /// new evidence and qualifies.
+    #[test]
+    fn exact_replay_of_recorded_evidence_is_not_fresh_support() {
+        use crate::core::types::{
+            CoverageGranularity, HarnessVerificationRecord, VerificationAnchor,
+            VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind,
+        };
+        let record_at = |iteration: i64, id: &str, output: &str| HarnessVerificationRecord {
+            at_iteration: iteration,
+            command: "cargo test upstream".into(),
+            failed: false,
+            output_tail: output.into(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 2,
+                passed: 2,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: VerificationAnchorKind::External,
+                    source: Some("upstream fixture".into()),
+                    downgraded_reason: None,
+                    coverage: Some(CoverageGranularity::ReportedClaim),
+                    expectation_subject: Some("e1".into()),
+                }),
+            }),
+            id: Some(id.into()),
+        };
+        let mut state = create_harness_state("measure");
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        // v1 is the previously available recorded evidence; v2 is its exact
+        // replay (same recorded content, fresh id, later iteration); v3 is a
+        // genuinely changed observation from the same source.
+        let records = vec![
+            record_at(2, "v1", "2 passed"),
+            record_at(5, "v2", "2 passed"),
+            record_at(6, "v3", "5 passed"),
+        ];
+        let mut expectations = state.expectations.clone();
+        let support = RevisionSupport { records: &records, anomalies: &[] };
+        let prior = record_observations_with_watermark(
+            &mut expectations,
+            1,
+            0,
+            &[FinishObservationInput {
+                subject: "total".into(),
+                observed: "98".into(),
+                matches: true,
+                evidence: None,
+            }],
+            &support,
+        )
+        .expect("prior observation records");
+        assert!(prior.persisted.is_empty() && prior.resolved.is_empty());
+
+        // Citing the exact replay (v2) is refused even though it is fresh by
+        // iteration and proposes a new value: its recorded content matches
+        // already-available evidence, so it proves nothing new.
+        let replay = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "104".into(),
+            matches: false,
+            evidence: Some("v2".into()),
+        }];
+        let refused = record_observations_with_watermark(&mut expectations, 3, 1, replay, &support)
+            .expect("gap surfaces for an exact replay");
+        assert_eq!(expectations[0].observations.len(), 1, "replayed evidence must not drive a revision");
+        assert_eq!(refused.persisted.len(), 1);
+        assert!(refused.persisted[0].note.contains("support gap"), "{}", refused.persisted[0].note);
+        assert!(refused.persisted[0].note.contains("is unsupported"), "{}", refused.persisted[0].note);
+
+        // The same citation again persists no duplicate gap.
+        let support_with_gap = RevisionSupport { records: &records, anomalies: &refused.persisted };
+        let repeat = record_observations_with_watermark(&mut expectations, 3, 1, replay, &support_with_gap)
+            .expect("repeat surfaces no new gap");
+        assert!(repeat.persisted.is_empty(), "identical replay must not duplicate the gap");
+
+        // A genuinely changed recorded output from the same source qualifies.
+        let changed = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "110".into(),
+            matches: false,
+            evidence: Some("v3".into()),
+        }];
+        let accepted = record_observations_with_watermark(&mut expectations, 4, 2, changed, &support)
+            .expect("changed observation from the same source accepted");
+        assert!(accepted.persisted.is_empty(), "new evidence must not persist a gap");
+        assert_eq!(expectations[0].observations.len(), 2);
+        assert_eq!(expectations[0].observations[1].observed, "110");
+        assert_eq!(expectations[0].observations[1].evidence.as_deref(), Some("v3"));
+    }
+    /// Component/input-level external evidence does not qualify for a value
+    /// revision even when it is bound to the expectation: only reportedClaim
+    /// coverage counts as claim-level support for revising a reported output.
+    #[test]
+    fn component_coverage_external_evidence_does_not_qualify_for_revisions() {
+        use crate::core::types::{
+            CoverageGranularity, HarnessVerificationRecord, VerificationAnchor,
+            VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind,
+        };
+        let record_at = |coverage: CoverageGranularity, id: &str| HarnessVerificationRecord {
+            at_iteration: 2,
+            command: "cargo test upstream".into(),
+            failed: false,
+            output_tail: "2 passed".into(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 2,
+                passed: 2,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: VerificationAnchorKind::External,
+                    source: Some("upstream fixture".into()),
+                    downgraded_reason: None,
+                    coverage: Some(coverage),
+                    expectation_subject: Some("e1".into()),
+                }),
+            }),
+            id: Some(id.into()),
+        };
+        let mut state = create_harness_state("measure");
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let mut expectations = state.expectations.clone();
+        let records = vec![record_at(CoverageGranularity::InputOrComponent, "v1")];
+        let support = RevisionSupport { records: &records, anomalies: &[] };
+        let prior = record_observations_with_watermark(
+            &mut expectations,
+            1,
+            0,
+            &[FinishObservationInput {
+                subject: "total".into(),
+                observed: "98".into(),
+                matches: true,
+                evidence: None,
+            }],
+            &support,
+        )
+        .expect("prior observation records");
+        assert!(prior.persisted.is_empty() && prior.resolved.is_empty());
+
+        let revision = &[FinishObservationInput {
+            subject: "total".into(),
+            observed: "104".into(),
+            matches: false,
+            evidence: Some("v1".into()),
+        }];
+        let refused = record_observations(&mut expectations, 3, revision, &support)
+            .expect("component-level support gap surfaces");
+        assert_eq!(
+            expectations[0].observations.len(),
+            1,
+            "component-level external evidence must not drive the revision"
+        );
+        assert_eq!(refused.persisted.len(), 1);
+        assert!(refused.persisted[0].note.contains("is unsupported"), "{}", refused.persisted[0].note);
+
+        // Positive twin: the identical external record at reportedClaim
+        // coverage is exactly the eligible support, and the gap resolves.
+        let claims = vec![record_at(CoverageGranularity::ReportedClaim, "v1")];
+        let claim_support = RevisionSupport { records: &claims, anomalies: &refused.persisted };
+        let accepted = record_observations(&mut expectations, 3, revision, &claim_support)
+            .expect("claim-level citation accepted");
+        assert!(accepted.persisted.is_empty());
+        assert_eq!(expectations[0].observations.len(), 2);
+        assert_eq!(expectations[0].observations[1].observed, "104");
     }
 
     /// Batch validation is atomic: a plan_tasks call that rewrites one subject
@@ -3282,12 +4036,42 @@ mod apply_harness_op_tests {
         assert_eq!(state.expectations.len(), 1, "{}", apply_harness_op(&mut state, duplicate_in_call, &ctx).text);
 
         let (mut state, ctx) = anchoring_fixture(Some("external"));
-        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
         apply_harness_op(&mut state, register, &ctx);
-        let erased = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"total","observed":"5","matches":false},{"subject":"total","observed":"98","matches":true}]}"#);
-        assert!(!erased.task_finished);
-        assert!(erased.text.contains("changed from '5' to '98'"), "{}", erased.text);
-        assert!(state.expectations[0].observations.is_empty());
+        // A mismatched observation plus a later value-changing entry in the
+        // same call: the revision rule applies against the earlier entry, so
+        // the unsupported later value cannot erase the mismatch - it surfaces
+        // a support gap while only the earlier observation is written.
+        let mut staged = state.expectations.clone();
+        let batched = record_observations_with_watermark(
+            &mut staged,
+            state.iteration,
+            0,
+            &[
+                FinishObservationInput {
+                    subject: "total".into(),
+                    observed: "5".into(),
+                    matches: false,
+                    evidence: None,
+                },
+                FinishObservationInput {
+                    subject: "total".into(),
+                    observed: "98".into(),
+                    matches: true,
+                    evidence: None,
+                },
+            ],
+            &RevisionSupport { records: &[], anomalies: &[] },
+        )
+        .expect("batched observations validate");
+        assert_eq!(batched.persisted.len(), 1);
+        assert!(batched.persisted[0].note.contains("from '5' to '98'"), "{}", batched.persisted[0].note);
+        assert_eq!(staged[0].observations.len(), 1, "the unsupported in-call revision is not written");
+        assert_eq!(staged[0].observations[0].observed, "5");
     }
 
     /// finish_task parsing rejects unknown status/confidence/anchor spellings
@@ -3694,6 +4478,345 @@ mod apply_harness_op_tests {
         assert!(!outcome.state_changed);
         assert!(!outcome.task_finished);
     }
+
+    mod finish_path_tests {
+    use super::*;
+
+    use crate::core::state::{
+        load_harness_state, save_harness_state,
+    };
+    use crate::core::types::{
+        CoverageGranularity, HarnessVerificationRecord, VerificationAnchor,
+        VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind,
+    };
+
+    /// A review task's own loop: its recorded observations go through the
+    /// same eligibility gate as the main path (an unsupported revision
+    /// persists a deduplicated support gap and is reported as a state
+    /// change), and the verdict itself never touches or bypasses the gaps —
+    /// confirming the work completes the review while the gap stays on
+    /// state.
+    #[test]
+    fn reviewer_verdict_does_not_bypass_unresolved_support_gaps() {
+        let (mut state, mut ctx) = anchoring_fixture(Some("external"));
+        ctx.current_task_id = Some("review-1".into());
+        let mut review_task = state.tasks[0].clone();
+        review_task.id = "review-1".into();
+        review_task.review_of = Some("task-1".into());
+        state.tasks.push(review_task);
+
+        // Register the expectation the worker's value contradicts, then
+        // refuse the unsupported revision from the reviewer's loop: the gap
+        // persists on state, deduplicated, and the refusal reports that it
+        // mutated state.
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let expectation_id = state.expectations[0].id.clone();
+        state.expectations[0].observations.push(crate::core::types::HarnessExpectationObservation {
+            at_iteration: state.iteration.max(0) as u64, observed: "98".into(), matches: true, evidence: None,
+            observed_after_records: Some(state.verifications.as_ref().map_or(0, |r| r.len() as u64)),
+        });
+        let unsupported = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"review-1","status":"completed","summary":"the value disagrees","confidence":"low","observations":[{"subject":"total","observed":"104","matches":false}],"anomalies":[{"subject":"total","expected":"about 100","observed":"104","note":"reviewer could not reconcile the total"}]}"#,
+        );
+        assert!(!unsupported.task_finished, "{}", unsupported.text);
+        assert!(unsupported.state_changed, "the persisted support gap is a state change: {}", unsupported.text);
+        assert_eq!(state.anomalies.len(), 1, "only the deduplicated support gap is persisted on clean refusal: {:?}", state.anomalies);
+        let gap = state
+            .anomalies
+            .iter()
+            .find(|gap| gap.note.contains("support gap"))
+            .expect("the unsupported revision persists a support gap");
+        assert_eq!((gap.subject.as_str(), gap.observed.as_str()), ("total", "104"));
+
+        // The identical unsupported revision again: no duplicate gap.
+        let repeat = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"review-1","status":"completed","summary":"still disagrees","confidence":"low","observations":[{"subject":"total","observed":"104","matches":false}],"anomalies":[{"subject":"total","expected":"about 100","observed":"104","note":"reviewer still could not reconcile"}]}"#,
+        );
+        assert!(!repeat.task_finished, "{}", repeat.text);
+        assert_eq!(
+            state
+                .anomalies
+                .iter()
+                .filter(|gap| gap.note.contains("support gap"))
+                .count(),
+            1,
+            "the same unsupported revision must not duplicate the gap: {:?}",
+            state.anomalies
+        );
+
+        // The reviewer's verdict confirms the work but cannot clear or
+        // bypass the unresolved support gap.
+        let verdict = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"review-1","status":"completed","summary":"review confirms the work","confidence":"high"}"#,
+        );
+        assert!(!verdict.task_finished, "{}", verdict.text);
+        assert!(
+            state.anomalies.iter().any(|gap| gap.note.contains("support gap")),
+            "a refused clean review verdict must not clear the unresolved gap: {:?}",
+            state.anomalies
+        );
+
+        // Eligible fresh evidence recorded by the reviewer's own verification
+        // resolves the gap: the revision is accepted and the gap drops.
+        let eligible = HarnessVerificationRecord {
+            at_iteration: 2,
+            command: "cargo test upstream".into(),
+            failed: false,
+            output_tail: "3 passed, total 104".into(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 3,
+                passed: 3,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: VerificationAnchorKind::External,
+                    source: Some("upstream fixture rerun".into()),
+                    downgraded_reason: None,
+                    coverage: Some(CoverageGranularity::ReportedClaim),
+                    expectation_subject: Some(expectation_id.clone()),
+                }),
+            }),
+            id: Some("v2".into()),
+        };
+        let existing = state.verifications.get_or_insert_with(Vec::new);
+        existing.push(eligible);
+        let resolved = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"review-1","status":"unreconciled","summary":"the rerun reconciles the total","confidence":"medium","observations":[{"subject":"total","observed":"104","matches":false,"evidence":"v2"}],"anomalies":[{"subject":"total","expected":"about 100","observed":"104","note":"the upstream rerun confirms 104"}]}"#,
+        );
+        assert!(resolved.task_finished, "{}", resolved.text);
+        assert!(
+            !state.anomalies.iter().any(|gap| gap.note.contains("support gap")),
+            "eligible fresh evidence resolves the support gap: {:?}",
+            state.anomalies
+        );
+    }
+
+    /// The main finish path: an unsupported revision persists its deduplicated
+    /// support gap and reports state_changed=true on the refusal; unknown
+    /// subjects and malformed batches are atomic (nothing mutated,
+    /// state_changed=false); the completed refusal itself never mutates.
+    #[test]
+    fn gap_refusals_persist_dedupe_and_stay_atomic_on_the_main_finish_path() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op(
+            "plan_tasks",
+            r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#,
+        )
+        .unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let expectation_id = state.expectations[0].id.clone();
+        state.expectations[0].observations.push(crate::core::types::HarnessExpectationObservation {
+            at_iteration: state.iteration.max(0) as u64, observed: "98".into(), matches: true, evidence: None,
+            observed_after_records: Some(state.verifications.as_ref().map_or(0, |r| r.len() as u64)),
+        });
+
+        // Unsupported refusal: the refusal persists the gap and reports the
+        // mutation.
+        let refused = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high","observations":[{"subject":"total","observed":"104","matches":false}]}"#,
+        );
+        assert!(!refused.task_finished, "{}", refused.text);
+        assert!(refused.state_changed, "the persisted gap mutates state: {}", refused.text);
+        assert_eq!(state.anomalies.len(), 1, "{:?}", state.anomalies);
+        assert!(state.anomalies[0].note.contains("support gap"), "{}", state.anomalies[0].note);
+        assert_eq!(
+            (state.anomalies[0].subject.as_str(), state.anomalies[0].observed.as_str()),
+            ("total", "104")
+        );
+
+        // The identical unsupported revision: deduplicated, and no gap was
+        // added so the refusal honestly reports state_changed=false.
+        let repeat = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high","observations":[{"subject":"total","observed":"104","matches":false}]}"#,
+        );
+        assert!(!repeat.task_finished, "{}", repeat.text);
+        assert!(!repeat.state_changed, "a fully deduplicated refusal changes nothing: {}", repeat.text);
+        assert_eq!(state.anomalies.len(), 1, "{:?}", state.anomalies);
+
+        // Unknown subject: atomic refusal, nothing mutated, no gap written.
+        let unknown = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#,
+        );
+        assert!(!unknown.task_finished, "{}", unknown.text);
+        assert!(!unknown.state_changed, "{}", unknown.text);
+        assert!(unknown.text.contains("not a registered expectation"), "{}", unknown.text);
+        assert_eq!(state.anomalies.len(), 1, "{:?}", state.anomalies);
+
+        // Malformed finish input: refused at parse time, nothing mutated.
+        let malformed_raw = r#"{"taskId":"task-1","status":"sideways","summary":"done","confidence":"high"}"#;
+        assert!(parse_harness_op("finish_task", malformed_raw).is_err(), "production must refuse an invalid status at parse time");
+        let observations_before = state.expectations[0].observations.len();
+        // A parseable but semantically invalid payload (unreconciled with no
+        // anomalies) is refused on the finish path itself, still without
+        // mutating anything.
+        let malformed = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"unreconciled","summary":"done","confidence":"high"}"#);
+        assert!(!malformed.task_finished, "{}", malformed.text);
+        assert_eq!(state.anomalies.len(), 1, "refused finish calls must not touch gaps: {:?}", state.anomalies);
+        assert_eq!(state.expectations[0].observations.len(), observations_before, "refused finish calls must not commit staged observations");
+        assert!(!malformed.state_changed, "{}", malformed.text);
+        assert_eq!(state.anomalies.len(), 1, "{:?}", state.anomalies);
+
+        // A retry of the prior accepted value is not a revision and raises no
+        // gap; but the unresolved gap still refuses clean completion.
+        let prior_value = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high","observations":[{"subject":"total","observed":"98","matches":true}]}"#,
+        );
+        assert!(!prior_value.task_finished, "{}", prior_value.text);
+        assert_eq!(state.anomalies.len(), 1, "retrying the accepted value must not touch gaps: {:?}", state.anomalies);
+
+        // Eligible fresh evidence resolves the gap and completion is accepted.
+        let eligible = HarnessVerificationRecord {
+            at_iteration: 2,
+            command: "cargo test upstream".into(),
+            failed: false,
+            output_tail: "3 passed, total 104".into(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 3,
+                passed: 3,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: VerificationAnchorKind::External,
+                    source: Some("upstream fixture rerun".into()),
+                    downgraded_reason: None,
+                    coverage: Some(CoverageGranularity::ReportedClaim),
+                    expectation_subject: Some(expectation_id.clone()),
+                }),
+            }),
+            id: Some("v2".into()),
+        };
+        state.verifications.get_or_insert_with(Vec::new).push(eligible);
+        state.last_verification = state.verifications.clone().and_then(|mut records| records.pop());
+        let resolved = finish(
+            &mut state,
+            &ctx,
+            r#"{"taskId":"task-1","status":"completed","summary":"done with reconciled totals","confidence":"medium","observations":[{"subject":"total","observed":"104","matches":false,"evidence":"v2"}]}"#,
+        );
+        assert!(!resolved.task_finished, "a supported mismatch still cannot complete cleanly: {}", resolved.text);
+        assert!(resolved.text.contains("mismatched"), "{}", resolved.text);
+        assert!(!state.anomalies.iter().any(|gap| gap.note.contains("support gap")));
+        let honest = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"unreconciled","summary":"supported mismatch","anomalies":[{"subject":"total","expected":"about 100","observed":"104","note":"fresh external evidence confirms a mismatch"}]}"#);
+        assert!(honest.task_finished, "{}", honest.text);
+        assert!(resolved.state_changed, "{}", resolved.text);
+        assert!(
+            !state.anomalies.iter().any(|gap| gap.note.contains("support gap")),
+            "the resolved gap is dropped: {:?}",
+            state.anomalies
+        );
+        assert_eq!(state.anomalies.len(), 1, "the declared unreconciled anomaly persists: {:?}", state.anomalies);
+    }
+
+    /// Persisted support gaps survive a save/load round trip, and a replayed
+    /// verification record — fresh v<n> id, later iteration, different
+    /// proposed value, but the same recorded source, coverage, binding, and
+    /// output content as an already-recorded verification — is still an exact
+    /// replay: the production finish path refuses it and keeps the gap.
+    #[test]
+    fn persisted_gaps_survive_save_reload_and_replayed_records_stay_ineligible() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        state.verifications.as_mut().unwrap()[0].id = Some("v1".into());
+        state.expectations[0].observations.push(crate::core::types::HarnessExpectationObservation {
+            at_iteration: state.iteration.max(0) as u64, observed: "98".into(), matches: true, evidence: None,
+            observed_after_records: Some(1),
+        });
+        let unsupported = r#"{"taskId":"task-1","status":"completed","summary":"done","observations":[{"subject":"total","observed":"104","matches":false}]}"#;
+        let first = finish(&mut state, &ctx, unsupported);
+        assert!(!first.task_finished && first.state_changed, "{}", first.text);
+        assert_eq!(state.anomalies.len(), 1);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("harness-state.json");
+        save_harness_state(&path, &state).unwrap();
+        let mut state = load_harness_state(&path).unwrap().unwrap();
+        assert_eq!(state.anomalies.len(), 1);
+        let mut replay = state.verifications.as_ref().unwrap()[0].clone();
+        replay.id = Some("v2".into()); replay.at_iteration = 2;
+        state.verifications.as_mut().unwrap().push(replay.clone());
+        state.last_verification = Some(replay.clone());
+        let refused = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"completed","summary":"rerun","observations":[{"subject":"total","observed":"104","matches":false,"evidence":"v2"}]}"#);
+        assert!(!refused.task_finished && !refused.state_changed, "{}", refused.text);
+        assert_eq!(state.anomalies.len(), 1);
+        assert_eq!(state.expectations[0].observations.len(), 1);
+        let mut fresh = replay; fresh.id = Some("v3".into()); fresh.at_iteration = 3;
+        fresh.output_tail = "new external report confirms total 104".into();
+        state.verifications.as_mut().unwrap().push(fresh.clone());
+        state.last_verification = Some(fresh);
+        let honest = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"unreconciled","summary":"supported mismatch","observations":[{"subject":"total","observed":"104","matches":false,"evidence":"v3"}],"anomalies":[{"subject":"total","expected":"about 100","observed":"104","note":"fresh external report confirms mismatch"}]}"#);
+        assert!(honest.task_finished, "{}", honest.text);
+        assert!(!state.anomalies.iter().any(|gap| gap.note.contains("support gap")));
+        assert_eq!(state.expectations[0].observations.len(), 2);
+        assert_eq!(state.expectations[0].observations[1].observed, "104");
+    }
+
+    #[test]
+    fn support_gap_persists_before_missing_anchor_refusal() {
+        let (mut state, ctx) = anchoring_fixture(Some("self"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        state.expectations[0].observations.push(crate::core::types::HarnessExpectationObservation {
+            at_iteration: state.iteration.max(0) as u64, observed: "98".into(), matches: true, evidence: None,
+            observed_after_records: Some(1),
+        });
+        let outcome = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"completed","summary":"done","observations":[{"subject":"total","observed":"104","matches":false}]}"#);
+        assert!(!outcome.task_finished && outcome.state_changed, "{}", outcome.text);
+        assert!(outcome.text.contains("no correctness-class evidence"), "{}", outcome.text);
+        assert_eq!(state.anomalies.len(), 1);
+        assert_eq!(state.expectations[0].observations[0].observed, "98");
+    }
+
+    #[test]
+    fn absent_confidence_finishes_unreported() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let accepted = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"completed","summary":"done"}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+        let target = core_state::get_task_by_id(&state, "task-1").expect("finished task exists");
+        assert_eq!(target.confidence, None, "absent confidence stays unreported");
+        assert_eq!(
+            state.completion_anchor.as_ref().and_then(|anchor| anchor.claimed_confidence),
+            None,
+            "the completion anchor carries no fabricated confidence"
+        );
+
+        // A supplied confidence round-trips unchanged.
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let accepted = finish(&mut state, &ctx, r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high"}"#);
+        assert!(accepted.task_finished, "{}", accepted.text);
+        let target = core_state::get_task_by_id(&state, "task-1").expect("finished task exists");
+        assert_eq!(target.confidence, Some(crate::core::types::ClaimedConfidence::High));
+        assert_eq!(
+            state.completion_anchor.as_ref().and_then(|anchor| anchor.claimed_confidence),
+            Some(crate::core::types::ClaimedConfidence::High)
+        );
+    }
+}
 }
 
 #[cfg(test)]

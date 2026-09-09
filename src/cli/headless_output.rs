@@ -163,12 +163,16 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
         Some(command)
     } else {
         Some(format!(
-            "drip --resume {} --prompt {}{} --json",
+            "drip --resume {} --prompt {}{}{} --json",
             args.session_id_prefix,
             shell_quote(&record.goal),
             // A cap of 0 prints nothing, same as no cap at all.
             match suggested_max_iterations {
                 Some(cap) if cap != 0 => format!(" --max-iterations {cap}"),
+                _ => String::new(),
+            },
+            match record.max_loops {
+                Some(cap) if cap != 0 => format!(" --max-loops {cap}"),
                 _ => String::new(),
             }
         ))
@@ -238,6 +242,7 @@ mod tests {
             last_verification: None,
             loops: 2,
             max_iterations,
+            max_loops: None,
             pending_operator_messages: 0,
             reason: reason.to_string(),
             stop_latency_ms: None,
@@ -253,6 +258,37 @@ mod tests {
         let record = record(reason, max_iterations);
         headless_result_payload(HeadlessResultArgs {
             record: &record,
+            result_path: "/r",
+            session_id: "abcdefgh-1234",
+            session_id_prefix: "abcdefgh",
+            state_path: "/s",
+            transcript_path: "/t",
+        })
+    }
+
+    #[test]
+    fn max_loops_and_blocked_on_input_resume_with_their_caps_and_exit_two() {
+        let mut capped = record("max-loops", Some(5));
+        capped.max_loops = Some(20);
+        let payload = payload_for(&capped);
+        assert_eq!(payload.exit_code, 2);
+        assert_eq!(
+            payload.continue_command.as_deref(),
+            Some("drip --resume abcdefgh --prompt 'do it' --max-iterations 5 --max-loops 20 --json")
+        );
+
+        // blocked-on-input carries the run's own continue command (the
+        // prompt is the reply) and exits 2 like every incomplete run.
+        let mut blocked = record("blocked-on-input", None);
+        blocked.continue_command = Some("drip --resume abcdefgh --prompt \"<the input>\"".to_string());
+        let blocked_payload = payload_for(&blocked);
+        assert_eq!(blocked_payload.exit_code, 2);
+        assert_eq!(blocked_payload.continue_command.as_deref(), Some("drip --resume abcdefgh --prompt \"<the input>\""));
+    }
+
+    fn payload_for(record: &RunRecord) -> HeadlessResultPayload {
+        headless_result_payload(HeadlessResultArgs {
+            record,
             result_path: "/r",
             session_id: "abcdefgh-1234",
             session_id_prefix: "abcdefgh",

@@ -1620,6 +1620,10 @@ pub struct SolidStateHarnessOptions {
     pub initial_state: Option<HarnessState>,
     pub r#loop: Option<crate::harness::roles::PartialHarnessLoopConfig>,
     pub max_iterations: Option<i64>,
+    /// Cap on task loops for this run. Each loop is at least one model call
+    /// (a replanning loop is exactly one planner call), so this bounds the
+    /// expensive event directly where --max-iterations bounds cycles.
+    pub max_loops: Option<i64>,
     pub plan_only: bool,
     pub max_review_rounds: Option<i64>,
     pub max_task_reopens: Option<i64>,
@@ -1698,6 +1702,8 @@ pub struct HarnessRun {
     pub cwd: String,
     /// `Number.POSITIVE_INFINITY` when unset → `i64::MAX`.
     pub max_iterations: i64,
+    /// `i64::MAX` when unset.
+    pub max_loops: i64,
     pub loop_config: HarnessLoopConfig,
     pub stall_limit: i64,
     pub max_task_reopens: i64,
@@ -1720,6 +1726,11 @@ pub struct HarnessRun {
     pub idle_loops: i64,
     pub escalations_without_progress: i64,
     pub run_futile: bool,
+    /// Nothing workable remains and a task is blocked on operator input.
+    pub blocked_on_input: bool,
+    /// The last replanning loop left the ledger unworkable: the next one runs
+    /// under the planning role instead of the (cheaper) replanning role.
+    pub replan_escalated: bool,
     pub ask_user_awaiting: bool,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
@@ -1969,6 +1980,7 @@ impl HarnessRun {
                 .unwrap_or_else(|_| ".".to_string())
         });
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
+        let max_loops = options.max_loops.unwrap_or(i64::MAX);
 
         // DEFAULT_LOOP_CONFIG overlaid with options.loop; maxToolRoundsPerCycle
         // falls back to maxToolRoundsPerIteration when the loop block does not
@@ -2170,6 +2182,7 @@ impl HarnessRun {
             model,
             cwd,
             max_iterations,
+            max_loops,
             loop_config,
             stall_limit,
             max_task_reopens,
@@ -2190,6 +2203,8 @@ impl HarnessRun {
             idle_loops: 0,
             escalations_without_progress: 0,
             run_futile: false,
+            blocked_on_input: false,
+            replan_escalated: false,
             ask_user_awaiting: false,
             answers_path: run_answers_path,
             continue_command: None,
@@ -2770,13 +2785,40 @@ impl HarnessRun {
         if self.ask_user_awaiting {
             return Some(self.awaiting_input_result());
         }
-        while self.state.iteration - self.start_iteration < self.max_iterations {
+        // A resume prompt is the answer an operator-blocked task was waiting
+        // for: those tasks go back to pending before the first loop.
+        let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
+        if !reopened.is_empty() {
+            self.emit(HarnessEvent {
+                data: None,
+                detail: format!(
+                    "reopened {} task(s) blocked on operator input — the resume prompt is their answer",
+                    reopened.len()
+                ),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::StallRecovery,
+            });
+            self.persist();
+        }
+        while self.state.iteration - self.start_iteration < self.max_iterations
+            && self.state.r#loop - self.start_loop < self.max_loops
+        {
             if self.signal_aborted() {
                 self.aborted = true;
                 break;
             }
 
             if core_state::is_goal_complete(&self.state) {
+                break;
+            }
+
+            // Blocked on input the run cannot obtain: with nothing else
+            // workable there is no loop worth spending — end here with the
+            // work so far intact instead of replanning around the gap.
+            if core_state::get_current_task(&self.state).is_none()
+                && !core_state::operator_blocked_tasks(&self.state).is_empty()
+            {
+                self.blocked_on_input = true;
                 break;
             }
 
@@ -2933,11 +2975,19 @@ impl HarnessRun {
             .and_then(|id| {
                 self.state.tasks.iter().find(|task| task.id == id)
             });
-        let role = crate::harness::roles::resolve_loop_role(
-            &self.role_map,
-            current_task,
-            self.options.role_bindings.as_ref(),
-        );
+        let role = match current_task {
+            Some(_) => crate::harness::roles::resolve_loop_role(
+                &self.role_map,
+                current_task,
+                self.options.role_bindings.as_ref(),
+            ),
+            None => crate::harness::roles::resolve_planning_role(
+                &self.role_map,
+                self.options.role_bindings.as_ref(),
+                !self.state.tasks.is_empty(),
+                self.replan_escalated,
+            ),
+        };
         // filterToolsForRole.
         let loop_tool_indexes: Vec<usize> = match role
             .as_ref()
@@ -4635,11 +4685,21 @@ impl HarnessRun {
 
             self.idle_loops = 0;
             self.escalations_without_progress = 0;
-        } else if scope.made_progress {
-            // A planning loop with no current task (e.g. the model called
-            // plan_tasks) counts as progress.
+        } else if core_state::get_current_task(&self.state).is_some()
+            || core_state::is_goal_complete(&self.state)
+        {
+            // A planning loop counts as progress only when it left the ledger
+            // workable (plan_tasks added a task, or a blocked task was
+            // resolved by id). Notes, observations, and re-blocking a task
+            // used to count too, so a run could replan around a dead end
+            // forever without the idle counter ever firing.
             self.idle_loops = 0;
+            self.replan_escalated = false;
         } else {
+            // The replanning role got its try and the ledger is no more
+            // workable than before: the next replanning loop escalates to the
+            // planning role.
+            self.replan_escalated = true;
             // No task to work and nothing changed. The run never gives up on
             // the goal: after stallLimit idle loops, force blocked tasks back
             // to pending so the model returns to concrete work instead of
@@ -4783,6 +4843,10 @@ impl HarnessRun {
             HarnessRunReason::AwaitingInput
         } else if self.plan_stopped {
             HarnessRunReason::Planned
+        } else if self.blocked_on_input {
+            // Waiting on the operator outranks futile: the resume command that
+            // carries their reply is the way forward, not a fresh goal.
+            HarnessRunReason::BlockedOnInput
         } else if self.run_futile {
             HarnessRunReason::Futile
         } else if core_state::is_goal_complete(&self.state) {
@@ -4807,6 +4871,10 @@ impl HarnessRun {
             } else {
                 HarnessRunReason::Completed
             }
+        } else if self.state.r#loop - self.start_loop >= self.max_loops {
+            // An explicit --max-loops wins over --max-iterations when both run
+            // out on the same loop: it is the cap the operator chose to set.
+            HarnessRunReason::MaxLoops
         } else {
             HarnessRunReason::MaxIterations
         };
@@ -4869,6 +4937,8 @@ impl HarnessRun {
             HarnessRunReason::Error => "error",
             HarnessRunReason::Futile => "futile",
             HarnessRunReason::MaxIterations => "max-iterations",
+            HarnessRunReason::MaxLoops => "max-loops",
+            HarnessRunReason::BlockedOnInput => "blocked-on-input",
             HarnessRunReason::Partial => "partial",
             HarnessRunReason::Planned => "planned",
             HarnessRunReason::Unreconciled => "unreconciled",
@@ -4887,6 +4957,15 @@ impl HarnessRun {
         // Draft mode (--lite): hand the operator the exact harden resume
         // command — same session, reviewed role, verify-before-done skill —
         // so one paste finishes the draft.
+        // Blocked on operator input: the resume prompt IS the answer, so the
+        // continue command names where it goes.
+        if reason == HarnessRunReason::BlockedOnInput && self.continue_command.is_none() {
+            if let Some(session_id) = self.resume_target() {
+                self.continue_command = Some(format!(
+                    "drip --resume {session_id} --prompt \"<the input the blocked task asks for>\""
+                ));
+            }
+        }
         if reason == HarnessRunReason::Draft && self.continue_command.is_none() {
             if let Some(session_id) = self.resume_target() {
                 self.continue_command = Some(crate::harness::telemetry::draft_continue_command(

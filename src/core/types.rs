@@ -95,6 +95,21 @@ pub struct HarnessTask {
 	/// The finish gate already bounced this task once for completing a build-shaped task without any workspace edit.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub edit_nudged: Option<bool>,
+	/// What a blocked task is waiting on when no amount of replanning can
+	/// supply it. Set by finish_task(blocked, blockedOn); such tasks are never
+	/// auto-reopened, and once nothing else is workable the run ends with
+	/// reason "blocked-on-input" instead of replanning around the gap.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub blocked_on: Option<HarnessTaskBlocker>,
+}
+
+/// Who must act before a blocked task can move again. "operator": material
+/// or information only the operator can supply (original data, credentials,
+/// a decision) — the run has no way to obtain it by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessTaskBlocker {
+	Operator,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -838,6 +853,14 @@ pub enum HarnessRunReason {
 	Futile,
 	#[serde(rename = "max-iterations")]
 	MaxIterations,
+	/// The --max-loops task-loop cap was reached before the goal completed.
+	#[serde(rename = "max-loops")]
+	MaxLoops,
+	/// Nothing workable remains and at least one task is blocked on input only
+	/// the operator can supply: the run stops here instead of replanning
+	/// around the gap. Resume with the missing input as the prompt.
+	#[serde(rename = "blocked-on-input")]
+	BlockedOnInput,
 	#[serde(rename = "partial")]
 	Partial,
 	#[serde(rename = "planned")]
@@ -941,6 +964,7 @@ mod tests {
 			verify_nudged: None,
 			edit_nudged: None,
 			confidence: None,
+			blocked_on: None,
 		};
 		let json = serde_json::to_value(&task).unwrap();
 		let obj = json.as_object().unwrap();
@@ -950,6 +974,7 @@ mod tests {
 		assert_eq!(obj["activations"], 2);
 		// None options must be dropped, not null.
 		assert!(!obj.contains_key("footprint"));
+		assert!(!obj.contains_key("blockedOn"));
 		assert!(!obj.contains_key("summary"));
 		// Round-trip.
 		let back: HarnessTask = serde_json::from_value(json).unwrap();
@@ -962,6 +987,13 @@ mod tests {
 		assert_eq!(
 			serde_json::to_value(HarnessRunReason::MaxIterations).unwrap(),
 			"max-iterations"
+		);
+		assert_eq!(serde_json::to_value(HarnessRunReason::MaxLoops).unwrap(), "max-loops");
+		assert_eq!(serde_json::to_value(HarnessRunReason::BlockedOnInput).unwrap(), "blocked-on-input");
+		assert_eq!(serde_json::to_value(HarnessTaskBlocker::Operator).unwrap(), "operator");
+		assert_eq!(
+			serde_json::from_value::<HarnessTaskBlocker>(serde_json::json!("operator")).unwrap(),
+			HarnessTaskBlocker::Operator
 		);
 		assert_eq!(
 			serde_json::to_value(HarnessEventType::IterationStart).unwrap(),

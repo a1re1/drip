@@ -88,6 +88,13 @@ pub struct HarnessRoleRuntime {
 pub struct HarnessRoleBindings {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub planning: Option<String>,
+	/// Role for replanning loops (the ledger already has tasks but none is
+	/// workable). Unset: the planning role. When set, a replanning loop that
+	/// leaves the ledger no more workable than it found it escalates the next
+	/// replanning loop to the planning role — the cheap replanner gets one
+	/// try, the expensive planner only when the cheap one gets nowhere.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub replanning: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub task: Option<String>,
 }
@@ -129,6 +136,26 @@ pub fn resolve_loop_role(
 	let role_name = match current_task {
 		Some(task) => task.role.clone().or_else(|| bindings.and_then(|b| b.task.clone())),
 		None => bindings.and_then(|b| b.planning.clone()),
+	};
+
+	role_name.and_then(|name| role_map.get(&name).cloned())
+}
+
+/// The role for a loop with no current task. A fresh ledger (or one with no
+/// replanning binding, or one whose cheap replanner just failed to make the
+/// ledger workable — `escalate`) plans under the planning role; otherwise the
+/// replanning role takes the loop.
+pub fn resolve_planning_role(
+	role_map: &IndexMap<String, HarnessRoleRuntime>,
+	bindings: Option<&HarnessRoleBindings>,
+	replanning: bool,
+	escalate: bool,
+) -> Option<HarnessRoleRuntime> {
+	let bindings = bindings?;
+	let role_name = if replanning && !escalate {
+		bindings.replanning.clone().or_else(|| bindings.planning.clone())
+	} else {
+		bindings.planning.clone()
 	};
 
 	role_name.and_then(|name| role_map.get(&name).cloned())
@@ -243,12 +270,40 @@ mod tests {
 	}
 
 	#[test]
+	fn planning_role_resolution_uses_the_replanning_binding_until_escalated() {
+		let planner = role("planner");
+		let replanner = role("replanner");
+		let map = build_role_map(Some(&[planner.clone(), replanner.clone()]));
+		let with_replanner = HarnessRoleBindings {
+			planning: Some("planner".to_string()),
+			replanning: Some("replanner".to_string()),
+			task: None,
+		};
+		let planner_only = HarnessRoleBindings {
+			planning: Some("planner".to_string()),
+			replanning: None,
+			task: None,
+		};
+		let name = |r: Option<HarnessRoleRuntime>| r.map(|r| r.name);
+
+		// Fresh ledger: always the planner.
+		assert_eq!(name(resolve_planning_role(&map, Some(&with_replanner), false, false)), Some("planner".into()));
+		// Replanning: the cheap role first, the planner once escalated.
+		assert_eq!(name(resolve_planning_role(&map, Some(&with_replanner), true, false)), Some("replanner".into()));
+		assert_eq!(name(resolve_planning_role(&map, Some(&with_replanner), true, true)), Some("planner".into()));
+		// No replanning binding: today's behaviour, escalated or not.
+		assert_eq!(name(resolve_planning_role(&map, Some(&planner_only), true, false)), Some("planner".into()));
+		assert_eq!(name(resolve_planning_role(&map, None, true, false)), None);
+	}
+
+	#[test]
 	fn resolve_loop_role_prefers_task_assignment_then_bindings() {
 		let reviewer = role("reviewer");
 		let planner = role("planner");
 		let map = build_role_map(Some(&[reviewer.clone(), planner.clone()]));
 		let bindings = HarnessRoleBindings {
 			planning: Some("planner".to_string()),
+			replanning: None,
 			task: Some("reviewer".to_string()),
 		};
 

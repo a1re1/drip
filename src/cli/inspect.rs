@@ -591,6 +591,7 @@ mod tests {
 			goal: "build the thing",
 			goal_id: "g1",
 			max_iterations: None,
+			max_loops: None,
 			pending_operator_messages: 0,
 			result: &HarnessRunResult {
 				continue_command: None,

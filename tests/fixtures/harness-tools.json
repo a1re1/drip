@@ -169,6 +169,13 @@
             },
             "type": "array"
           },
+          "blockedOn": {
+            "description": "With status blocked: set to \"operator\" when the task needs material or information only the operator can supply (original data, credentials, a decision) and no amount of retrying or replanning can obtain it. The task is not reopened; once nothing else is workable the run ends blocked-on-input with the work so far intact, and the operator's resume prompt is delivered as the answer. Say exactly what is needed in the summary.",
+            "enum": [
+              "operator"
+            ],
+            "type": "string"
+          },
           "confidence": {
             "description": "Your honest confidence that the finished work is correct, persisted on the task as a self-report.",
             "enum": [

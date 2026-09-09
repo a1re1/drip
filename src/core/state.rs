@@ -201,6 +201,7 @@ pub fn add_tasks(
 			verify_nudged: None,
 			edit_nudged: None,
 			confidence: None,
+			blocked_on: None,
 		});
 	}
 
@@ -303,6 +304,9 @@ pub fn finish_task<'a>(state: &'a mut HarnessState, args: HarnessFinishArgs<'_>)
 
 	task.finished_at_iteration = Some(iteration);
 	task.status = args.status;
+	// A blocker belongs to one specific block: any finish (including a harness
+	// auto-block) clears it, and finish_task(blockedOn) sets it afresh after.
+	task.blocked_on = None;
 	let trimmed = args.summary.trim();
 	task.summary = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
 	if args.confidence.is_some() {
@@ -381,6 +385,13 @@ pub fn reopen_blocked_tasks(
 			continue;
 		}
 
+		// A task blocked on operator input cannot be unblocked by trying again:
+		// it waits for the operator (run_loops ends the run blocked-on-input
+		// once nothing else is workable), not for a retry.
+		if task.blocked_on.is_some() {
+			continue;
+		}
+
 		// A task that has already burned its reopen budget stays blocked: reopening
 		// it again would replay the same stall loop instead of forcing an escalation.
 		if let Some(max_reopens) = max_reopens {
@@ -407,7 +418,7 @@ pub fn drop_exhausted_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask
 	let mut dropped: Vec<HarnessTask> = Vec::new();
 
 	for task in state.tasks.iter_mut() {
-		if task.status != HarnessTaskStatus::Blocked {
+		if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_some() {
 			continue;
 		}
 
@@ -423,6 +434,53 @@ pub fn drop_exhausted_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask
 	}
 
 	dropped
+}
+
+/// Tasks blocked on input only the operator can supply (finish_task with
+/// blockedOn). While one exists and nothing else is workable, the run has
+/// nothing left to do on its own.
+pub fn operator_blocked_tasks(state: &HarnessState) -> Vec<&HarnessTask> {
+	state
+		.tasks
+		.iter()
+		.filter(|task| task.status == HarnessTaskStatus::Blocked && task.blocked_on.is_some())
+		.collect()
+}
+
+/// A resumed run's operator prompt is the input an operator-blocked task was
+/// waiting for: tasks blocked at or before the iteration that message arrived
+/// in (a resume prompt lands in the iteration the block happened) go back to
+/// pending with the reply on their notes. Tasks blocked after the latest message (or
+/// with no message at all) stay blocked — resuming with the same goal and no
+/// reply ends the run blocked-on-input again rather than replaying the block.
+pub fn reopen_operator_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask> {
+	let Some(reply) = state
+		.operator_messages
+		.as_ref()
+		.and_then(|messages| messages.last())
+		.cloned()
+	else {
+		return Vec::new();
+	};
+	let mut reopened: Vec<HarnessTask> = Vec::new();
+
+	for task in state.tasks.iter_mut() {
+		if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_none() {
+			continue;
+		}
+		if task.finished_at_iteration.unwrap_or(0) > reply.received_at_iteration {
+			continue;
+		}
+
+		task.blocked_on = None;
+		task.status = HarnessTaskStatus::Pending;
+		task.stall_count = 0;
+		task.finished_at_iteration = None;
+		append_task_note(task, &format!("Operator input received: {}", reply.text));
+		reopened.push(task.clone());
+	}
+
+	reopened
 }
 
 pub fn append_task_note(task: &mut HarnessTask, note: &str) {
@@ -1115,8 +1173,8 @@ pub mod answers {
 mod tests {
     use super::*;
     use crate::core::types::{
-        HarnessActivationDigest, HarnessRunReason, HarnessRunSummaryNote, HarnessVerificationRecord,
-        HarnessVerificationStreak,
+        HarnessActivationDigest, HarnessOperatorMessage, HarnessRunReason, HarnessRunSummaryNote,
+        HarnessTaskBlocker, HarnessVerificationRecord, HarnessVerificationStreak,
     };
     use serde_json::{json, Value};
     use std::fs;
@@ -1124,6 +1182,73 @@ mod tests {
 
     fn input(title: &str) -> HarnessTaskInput {
         HarnessTaskInput::from(title)
+    }
+
+    fn blocked_state(blocked_on: Option<HarnessTaskBlocker>) -> HarnessState {
+        let mut state = HarnessState::default();
+        state.iteration = 5;
+        add_tasks(&mut state, vec![input("stuck task")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "need the originals",
+                task_id: None,
+                confidence: None,
+            },
+        );
+        state.tasks[0].blocked_on = blocked_on;
+        state
+    }
+
+    #[test]
+    fn stall_recovery_never_reopens_or_drops_a_task_blocked_on_the_operator() {
+        let mut state = blocked_state(Some(HarnessTaskBlocker::Operator));
+
+        state.tasks[0].reopen_count = Some(2);
+        assert!(reopen_blocked_tasks(&mut state, "retry", Some(2)).is_empty());
+        assert!(drop_exhausted_blocked_tasks(&mut state).is_empty());
+        // A plain re-block (or a harness auto-block) clears the blocker.
+        let mut reblocked = blocked_state(Some(HarnessTaskBlocker::Operator));
+        finish_task(
+            &mut reblocked,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "stalled", task_id: Some("task-1"), confidence: None },
+        );
+        assert_eq!(reblocked.tasks[0].blocked_on, None);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+        assert_eq!(operator_blocked_tasks(&state).len(), 1);
+
+        let mut plain = blocked_state(None);
+        assert_eq!(reopen_blocked_tasks(&mut plain, "retry", Some(2)).len(), 1);
+        assert!(operator_blocked_tasks(&plain).is_empty());
+    }
+
+    #[test]
+    fn an_operator_reply_after_the_block_reopens_the_task_with_the_reply_noted() {
+        let mut state = blocked_state(Some(HarnessTaskBlocker::Operator));
+        assert!(reopen_operator_blocked_tasks(&mut state).is_empty(), "no reply yet");
+
+        // A message older than the block is not an answer to it.
+        state.operator_messages = Some(vec![HarnessOperatorMessage {
+            id: "m1".into(),
+            received_at_iteration: 2,
+            text: "keep going".into(),
+        }]);
+        assert!(reopen_operator_blocked_tasks(&mut state).is_empty());
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+
+        state.operator_messages = Some(vec![HarnessOperatorMessage {
+            id: "resume-5".into(),
+            received_at_iteration: 5,
+            text: "originals are in /backup".into(),
+        }]);
+        let reopened = reopen_operator_blocked_tasks(&mut state);
+        assert_eq!(reopened.len(), 1);
+        let task = &state.tasks[0];
+        assert_eq!(task.status, HarnessTaskStatus::Pending);
+        assert_eq!(task.blocked_on, None);
+        assert_eq!(task.finished_at_iteration, None);
+        assert_eq!(task.notes.last().map(String::as_str), Some("Operator input received: originals are in /backup"));
     }
 
     fn input_with_deps(title: &str, depends_on: &[&str]) -> HarnessTaskInput {

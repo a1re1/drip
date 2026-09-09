@@ -181,7 +181,7 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
 
     let record = drip::cli::run_record::build_run_record(&drip::cli::run_record::BuildRunRecordArgs {
         ended_at: "2026-01-01T00:00:00.000Z", goal: "produce a measured artifact", goal_id: "g1",
-        max_iterations: Some(6), pending_operator_messages: 0, result: &result,
+        max_iterations: Some(6), max_loops: None, pending_operator_messages: 0, result: &result,
     });
     assert_eq!(record.reason, "unreconciled");
     assert_eq!(record.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
@@ -273,4 +273,219 @@ async fn plan_finish_summary_completes_the_run() {
         "inference", "run-summary", "run-complete",
     ];
     assert_eq!(kinds, expected, "event kinds");
+}
+
+fn role(name: &str) -> drip::harness::roles::HarnessRoleRuntime {
+    drip::harness::roles::HarnessRoleRuntime {
+        description: None,
+        r#loop: None,
+        name: name.to_string(),
+        route: None,
+        system_prompt_suffix: None,
+        tool_names: None,
+        verified_by: None,
+        blind: false,
+    }
+}
+
+/// --max-loops bounds task loops directly: two loops of a two-task plan end
+/// the run as max-loops (not max-iterations, which is unset) with the
+/// remaining task still pending.
+#[tokio::test]
+async fn max_loops_ends_the_run_after_that_many_task_loops() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["first", "second"]})),
+        text_response("planned"),
+        tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
+        text_response("Loop budget spent."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "do two things".to_string(),
+        max_loops: Some(2),
+        model: Some("mock".to_string()),
+        state_path: Some(temp.join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(temp.clone()),
+            jobs_root: Some(temp.join("jobs")),
+        })),
+        url: Some(url),
+        ..Default::default()
+    })
+    .await
+    .expect("run starts");
+    server.join().unwrap();
+
+    assert_eq!(result.reason, HarnessRunReason::MaxLoops, "{:?}", result.error_message);
+    assert_eq!(result.r#loops, 2);
+    assert_eq!(result.state.tasks[1].status, HarnessTaskStatus::Pending);
+    assert_eq!(result.usage.calls, 4, "no third loop was started");
+}
+
+/// A task blocked on operator input is a terminal state: with nothing else
+/// workable the run ends blocked-on-input instead of replanning around the
+/// gap, resuming without a reply ends the same way at zero cost, and resuming
+/// with a reply reopens the task with the reply on its notes.
+#[tokio::test]
+async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+    let state_path = temp.join("state.json");
+    let services = || {
+        create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(temp.clone()),
+            jobs_root: Some(temp.join("jobs")),
+        })
+    };
+    let events: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["restore the chunks"]})),
+        text_response("planned"),
+        tool_call_response("b", "finish_task", serde_json::json!({
+            "status": "blocked", "blockedOn": "operator", "confidence": "low",
+            "summary": "need the original copies of chunks 3 and 7"
+        })),
+        text_response("Blocked on the operator."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "restore the data".to_string(),
+        model: Some("mock".to_string()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(state_path.clone()),
+        tool_services: Some(services()),
+        url: Some(url.clone()),
+        ..Default::default()
+    })
+    .await
+    .expect("run starts");
+    server.join().unwrap();
+
+    assert_eq!(result.reason, HarnessRunReason::BlockedOnInput, "{:?}", result.error_message);
+    assert_eq!(result.r#loops, 2, "no replanning loop ran after the block");
+    let task = &result.state.tasks[0];
+    assert_eq!(task.status, HarnessTaskStatus::Blocked);
+    assert_eq!(task.blocked_on, Some(drip::core::types::HarnessTaskBlocker::Operator));
+    assert!(events.lock().unwrap().iter().any(|event| event.detail.contains("Blocked on operator input")));
+
+    // Resume with the same goal and no reply: nothing to do, no model call.
+    let (url_idle, server_idle) = spawn_scripted_server(vec![]);
+    let idle = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "restore the data".to_string(),
+        initial_state: Some(result.state.clone()),
+        model: Some("mock".to_string()),
+        state_path: Some(state_path.clone()),
+        tool_services: Some(services()),
+        url: Some(url_idle),
+        ..Default::default()
+    })
+    .await
+    .expect("idle resume starts");
+    server_idle.join().unwrap();
+    assert_eq!(idle.reason, HarnessRunReason::BlockedOnInput);
+    assert_eq!(idle.r#loops, 0);
+    assert_eq!(idle.usage.calls, 0);
+
+    // Resume with a reply (what prepare_state_for_goal records for a new
+    // prompt against an unfinished ledger): the task reopens and completes.
+    let mut answered = result.state.clone();
+    answered.operator_messages = Some(vec![drip::core::types::HarnessOperatorMessage {
+        id: format!("resume-{}", answered.iteration),
+        received_at_iteration: answered.iteration,
+        text: "the originals are in /backup/chunks".to_string(),
+    }]);
+    let (url_reply, server_reply) = spawn_scripted_server(vec![
+        tool_call_response("f", "finish_task", serde_json::json!({
+            "status": "completed", "confidence": "high", "anchor": "none",
+            "anchorNote": "restored from the operator's backup; no external fixture exists",
+            "summary": "restored from /backup/chunks"
+        })),
+        text_response("Restored."),
+    ]);
+    let resumed = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "restore the data".to_string(),
+        initial_state: Some(answered),
+        model: Some("mock".to_string()),
+        state_path: Some(state_path),
+        tool_services: Some(services()),
+        url: Some(url_reply),
+        ..Default::default()
+    })
+    .await
+    .expect("reply resume starts");
+    server_reply.join().unwrap();
+    assert_eq!(resumed.reason, HarnessRunReason::Completed, "{:?}", resumed.error_message);
+    let task = &resumed.state.tasks[0];
+    assert_eq!(task.status, HarnessTaskStatus::Completed);
+    assert_eq!(task.blocked_on, None);
+    assert!(task.notes.iter().any(|note| note.contains("Operator input received: the originals are in /backup/chunks")), "{:?}", task.notes);
+}
+
+/// Replanning runs under the replanning binding; a replanning loop that
+/// leaves the ledger unworkable (notes only) escalates the next one to the
+/// planning role, and one that resolves the ledger completes the run.
+#[tokio::test]
+async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+    let events: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let (url, server) = spawn_scripted_server(vec![
+        // Loop 1 (planning → planner).
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["fix the thing"]})),
+        text_response("planned"),
+        // Loop 2 (task-1 → author) blocks.
+        tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
+        // Loop 3 (replanning → replanner) only takes notes: no workable ledger.
+        tool_call_response("o", "observe", serde_json::json!({"note": "still thinking"})),
+        text_response("nothing to add"),
+        // Loop 4 (replanning → planner, escalated) resolves the block by id.
+        tool_call_response("f", "finish_task", serde_json::json!({
+            "taskId": "task-1", "status": "completed", "confidence": "high", "anchor": "none",
+            "anchorNote": "the earlier block was spurious; no external fixture exists", "summary": "already done"
+        })),
+        text_response("Done."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "fix the thing".to_string(),
+        model: Some("mock".to_string()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        role_bindings: Some(drip::harness::roles::HarnessRoleBindings {
+            planning: Some("planner".to_string()),
+            replanning: Some("replanner".to_string()),
+            task: Some("author".to_string()),
+        }),
+        roles: Some(vec![role("planner"), role("replanner"), role("author")]),
+        state_path: Some(temp.join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(temp.clone()),
+            jobs_root: Some(temp.join("jobs")),
+        })),
+        url: Some(url),
+        ..Default::default()
+    })
+    .await
+    .expect("run starts");
+    server.join().unwrap();
+
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let loop_starts: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.r#type == drip::core::types::HarnessEventType::LoopStart)
+        .map(|event| event.detail.clone())
+        .collect();
+    assert_eq!(loop_starts.len(), 4, "{loop_starts:?}");
+    assert!(loop_starts[0].starts_with("loop 1 [role: planner] — planning"), "{}", loop_starts[0]);
+    assert!(loop_starts[1].starts_with("loop 2 [role: author] — task-1"), "{}", loop_starts[1]);
+    assert!(loop_starts[2].starts_with("loop 3 [role: replanner] — replanning"), "{}", loop_starts[2]);
+    assert!(loop_starts[3].starts_with("loop 4 [role: planner] — replanning"), "{}", loop_starts[3]);
 }

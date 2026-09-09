@@ -78,6 +78,7 @@ pub struct SessionGoalArgs<'a> {
     pub index: &'a SessionIndex,
     pub inference: ResolvedInferenceConfig,
     pub max_iterations: Option<i64>,
+    pub max_loops: Option<i64>,
     /// `@name` mentions extracted from the goal, recorded on the transcript goal entry.
     pub mentions: Option<Vec<String>>,
     /// Archive an unfinished ledger and replan instead of continuing it.
@@ -264,6 +265,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         inference: args.inference.clone(),
         lease_path: Some(paths.lease_path.clone().into()),
         max_iterations: args.max_iterations,
+        max_loops: args.max_loops,
         new_goal: args.new_goal,
         on_event,
         repo_memory: Some(RepoMemoryConfig {
@@ -315,6 +317,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         goal: &args.goal,
         goal_id: &goal_id,
         max_iterations: args.max_iterations,
+        max_loops: args.max_loops,
         pending_operator_messages,
         result: &result,
     });

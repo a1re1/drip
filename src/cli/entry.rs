@@ -915,6 +915,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         inference: inference.clone(),
         // parse_cli_args already applies the --praeparare default budget.
         max_iterations: args.cli_args.max_iterations,
+        max_loops: args.cli_args.max_loops,
         mentions: Some(resolved.mentions.clone()),
         new_goal: args.cli_args.new_goal,
         no_repo_memory: args.cli_args.no_repo_memory,
@@ -1055,6 +1056,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 inference: inference.clone(),
                 // The --praeparare default budget was applied at parse time.
                 max_iterations: queued.max_iterations.or(args.cli_args.max_iterations),
+                max_loops: args.cli_args.max_loops,
                 mentions: Some(queued_mentions.mentions.clone()),
                 new_goal: false,
                 no_repo_memory: args.cli_args.no_repo_memory,
@@ -2054,6 +2056,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             home: home.clone(),
             initial_goal: goal_text.filter(|text| !text.is_empty()),
             max_iterations: cli_args.max_iterations,
+            max_loops: cli_args.max_loops,
             no_repo_memory: cli_args.no_repo_memory,
             project: project.clone(),
             roles_flag,

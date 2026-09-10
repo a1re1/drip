@@ -247,6 +247,70 @@ fn load_roles_from_file_reads_bindings_block_alongside_roles() {
 }
 
 #[test]
+fn load_roles_from_file_reads_the_replanning_binding() {
+    let root = make_temp_root("drip-roles-file-");
+    let roles_path = root.join("roles.json");
+    fs::write(
+        &roles_path,
+        r#"{"bindings":{"planning":"architect","replanning":"scout","task":"author"},"roles":[{"name":"architect"},{"name":"scout"},{"name":"author"}]}"#,
+    )
+    .unwrap();
+
+    let loaded = load_roles_from_file(roles_path.to_str().unwrap()).unwrap();
+    let bindings = loaded.bindings.as_ref().unwrap();
+    assert_eq!(bindings.replanning.as_deref(), Some("scout"));
+
+    // A replanning binding to an unknown role is dropped with an issue, and
+    // the other bindings survive.
+    let mut config = default_config();
+    config.settings.insert(
+        ROLE_PROFILES_SETTING_ID.to_string(),
+        r#"[{"name":"architect"},{"name":"author"}]"#.to_string(),
+    );
+    config.settings.insert(
+        ROLE_BINDINGS_SETTING_ID.to_string(),
+        r#"{"planning":"architect","replanning":"ghost","task":"author"}"#.to_string(),
+    );
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+    });
+    let bindings = setup.bindings.as_ref().unwrap();
+    assert_eq!(bindings.planning.as_deref(), Some("architect"));
+    assert_eq!(bindings.replanning, None);
+    assert_eq!(bindings.task.as_deref(), Some("author"));
+    assert!(setup.issues.iter().any(|issue| issue.contains("replanning is bound to unknown role \"ghost\"")), "{:?}", setup.issues);
+
+    // A valid config-level replanning binding survives the merge.
+    config.settings.insert(
+        ROLE_PROFILES_SETTING_ID.to_string(),
+        r#"[{"name":"architect"},{"name":"scout"},{"name":"author"}]"#.to_string(),
+    );
+    config.settings.insert(
+        ROLE_BINDINGS_SETTING_ID.to_string(),
+        r#"{"planning":"architect","replanning":"scout","task":"author"}"#.to_string(),
+    );
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+    });
+    assert_eq!(setup.bindings.as_ref().unwrap().replanning.as_deref(), Some("scout"));
+    assert!(setup.issues.is_empty(), "{:?}", setup.issues);
+}
+
+#[test]
 fn load_roles_from_file_returns_no_bindings_for_file_omitting_the_block() {
     let root = make_temp_root("drip-roles-file-");
     let roles_path = root.join("roles.json");
@@ -385,6 +449,7 @@ fn resolve_role_setup_bindings_precedence_extra_bindings_over_config() {
         extra_roles: None,
         extra_bindings: Some(HarnessRoleBindings {
             planning: Some("architect".to_string()),
+            replanning: None,
             task: None,
         }),
         marketplace_roles: None,
@@ -621,6 +686,7 @@ fn resolve_role_setup_extra_bindings_override_config_bindings() {
         extra_roles: None,
         extra_bindings: Some(HarnessRoleBindings {
             planning: Some("architect".to_string()),
+            replanning: None,
             task: None,
         }),
         marketplace_roles: None,

@@ -76,6 +76,11 @@ drip "refactor auth module" \
   --max-iterations 12 \
   --skill verify-before-done
 
+# Cap task loops instead of cycles: every loop is at least one model call and a
+# replanning loop is exactly one planner call, so this bounds planner spend
+# directly (an unfinished run resumes with the same cap)
+drip "repair the corrupted shards" --max-loops 30
+
 # In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
 # skills appear above the input line; up/down selects, tab completes, and
 # enter enables the skill for that session. Typing a full skill name as a
@@ -187,7 +192,7 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 ```jsonc
 {
   "type": "result",
-  "reason": "completed",          // or "unreconciled" | "max-iterations" | "blocked" | "stopped" | "error"
+  "reason": "completed",          // or "unreconciled" | "max-iterations" | "max-loops" | "blocked-on-input" | "blocked" | "stopped" | "error"
   "summary": "...",
   "exitCode": 0,
   "taskStats": { "total": 5, "completed": 5, "blocked": 0 },
@@ -207,7 +212,7 @@ When `--json` is passed, drip emits NDJSON.  The **final line** is always:
 |------|---------|
 | 0    | Run completed, or finished `unreconciled` (every task done, an expectation left visibly unreconciled) — or an informational command succeeded |
 | 1    | Usage / setup error |
-| 2    | Run ended without completing (max-iterations, blocked, or stopped) |
+| 2    | Run ended without completing (max-iterations, max-loops, blocked-on-input, blocked, or stopped) |
 | 3    | Infrastructure error (endpoint unreachable / 5xx after retries); state persisted, resume when healthy |
 | 124  | `--wait` gave up after `--timeout-secs` (run keeps going) |
 
@@ -362,6 +367,14 @@ drip --answer "just do whatever is least invasive"   # plain text = free-text an
 In the TUI (`--tui --ask`), the survey opens as a picker overlay — arrow keys choose
 an option per question, `Other…` drops into free-text entry — and the answers feed the
 same channel.
+
+A task that needs material only the operator can supply (original data,
+credentials, a decision) is finished with `finish_task {status: "blocked",
+blockedOn: "operator"}`. Such a task is never auto-reopened, and once nothing
+else is workable the run ends with reason `blocked-on-input` (exit 2) instead
+of replanning around the gap — the finished work stays intact. Resume the
+session with the missing input as the prompt: it lands on the task's notes and
+the task goes back to pending.
 
 ## praeparare (pre-PR prep)
 
@@ -890,7 +903,11 @@ covers a similar lifecycle with different payload conventions.
 Structured settings inside `~/.drip/config.json` are stored as real nested
 JSON — `runtime.role_profiles`, `runtime.model_profiles`,
 `runtime.system_prompt_profiles`, and `credentials.stored_api_keys` as JSON
-arrays, and `runtime.role_bindings` as a JSON object:
+arrays, and `runtime.role_bindings` as a JSON object mapping role names to
+their loop bindings (`task`, `planning`, and optionally `replanning` — the role
+for loops that replan an existing ledger; a replanning loop that leaves nothing
+workable escalates the next one to the `planning` role, so a cheap replanner
+gets the first try and the expensive planner only runs when it gets nowhere):
 
 ```json
 {

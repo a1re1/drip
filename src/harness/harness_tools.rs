@@ -204,6 +204,10 @@ pub enum HarnessOp {
         anchor_note: Option<String>,
         observations: Vec<FinishObservationInput>,
         anomalies: Vec<crate::core::types::HarnessAnomaly>,
+        /// With status blocked: what the task waits on that no retry can
+        /// supply ("operator"). Ends the run blocked-on-input once nothing
+        /// else is workable.
+        blocked_on: Option<crate::core::types::HarnessTaskBlocker>,
     },
     /// respond
     Respond { text: String },
@@ -369,6 +373,11 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                                 "type": "object"
                             },
                             "type": "array"
+                        },
+                        "blockedOn": {
+                            "description": "With status blocked: set to \"operator\" when the task needs material or information only the operator can supply (original data, credentials, a decision) and no amount of retrying or replanning can obtain it. The task is not reopened; once nothing else is workable the run ends blocked-on-input with the work so far intact, and the operator's resume prompt is delivered as the answer. Say exactly what is needed in the summary.",
+                            "enum": ["operator"],
+                            "type": "string"
                         },
                         "confidence": {
                             "description": "Your honest confidence that the finished work is correct, persisted on the task as a self-report.",
@@ -1375,6 +1384,16 @@ pub fn parse_harness_op_with_gate(
                     return Err("The anchor field must be exactly \"external\" or \"none\".".to_string());
                 }
             }
+            let blocked_on = match input.get("blockedOn").and_then(|v| v.as_str()).map(str::trim) {
+                None | Some("") => None,
+                Some("operator") => Some(crate::core::types::HarnessTaskBlocker::Operator),
+                Some(_) => {
+                    return Err("The blockedOn field must be exactly \"operator\".".to_string());
+                }
+            };
+            if blocked_on.is_some() && status != FinishTaskStatus::Blocked {
+                return Err("blockedOn only applies with status \"blocked\".".to_string());
+            }
             let mut observations = Vec::new();
             for item in input.get("observations").and_then(|value| value.as_array()).into_iter().flatten() {
                 let Some(matches) = item.get("matches").and_then(|v| v.as_bool()) else {
@@ -1412,6 +1431,7 @@ pub fn parse_harness_op_with_gate(
                 anchor_note: string_or_none(&input, "anchorNote").filter(|text| !text.trim().is_empty()),
                 observations,
                 anomalies,
+                blocked_on,
             })
         }
         "respond" => Ok(HarnessOp::Respond {
@@ -2264,7 +2284,7 @@ pub fn apply_harness_op(
                 direct_response: None,
             }
         }
-            HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies } => {
+            HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies, blocked_on } => {
         use crate::core::types::HarnessTaskStatus;
 
             // Task-terminal calls are refused once the loop has ended (a
@@ -2722,12 +2742,21 @@ pub fn apply_harness_op(
                         confidence,
                     },
                 ) {
-                    Some(finished_task) => (
-                        finished_task.id.clone(),
-                        finished_task.title.clone(),
-                        finished_task.role.clone(),
-                        harness_task_status_label(&finished_task.status),
-                    ),
+                    Some(finished_task) => {
+                        // A blocker is a property of this block, not of the
+                        // task: a completion or a plain block clears it.
+                        finished_task.blocked_on = if core_status == HarnessTaskStatus::Blocked {
+                            blocked_on
+                        } else {
+                            None
+                        };
+                        (
+                            finished_task.id.clone(),
+                            finished_task.title.clone(),
+                            finished_task.role.clone(),
+                            harness_task_status_label(&finished_task.status),
+                        )
+                    }
                     None => {
                         return HarnessOpOutcome {
                             text: format!("Task {target_id} could not be finished."),
@@ -2819,7 +2848,12 @@ pub fn apply_harness_op(
             // planning loop) ends this loop.
             HarnessOpOutcome {
                 text: format!(
-                    "Task {finished_id} marked {finished_status_label}.{}",
+                    "Task {finished_id} marked {finished_status_label}.{}{}",
+                    if blocked_on.is_some() && core_status == HarnessTaskStatus::Blocked {
+                        " Blocked on operator input: it will not be reopened, and the run ends blocked-on-input once nothing else is workable."
+                    } else {
+                        ""
+                    },
                     if is_drive_by { " (The current task's loop continues.)" } else { "" }
                 ),
                 state_changed: true,

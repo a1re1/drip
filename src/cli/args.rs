@@ -35,6 +35,8 @@ pub struct ParsedCliArgs {
     pub home: Option<String>,
     pub list: bool,
     pub max_iterations: Option<i64>,
+    /// --max-loops: cap on task loops (each is at least one model call).
+    pub max_loops: Option<i64>,
     pub profile: Option<String>,
     pub resume: bool,
     pub resume_id: Option<String>,
@@ -193,6 +195,7 @@ impl Default for ParsedCliArgs {
             home: None,
             list: false,
             max_iterations: None,
+            max_loops: None,
             profile: None,
             resume: false,
             resume_id: None,
@@ -707,6 +710,19 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--max-loops" => {
+                if let Some(raw) = take_required_value(argv, index, "--max-loops", &mut parsed.errors) {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.max_loops = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--max-loops needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
             "--marketplace-list" => {
                 parsed.marketplace_list = true;
             }
@@ -1207,6 +1223,18 @@ mod tests {
             parsed.max_iterations,
             Some(PRAEPARARE_DEFAULT_MAX_ITERATIONS)
         );
+    }
+
+    #[test]
+    fn max_loops_parses_a_positive_integer_and_rejects_the_rest() {
+        assert_eq!(parse(&["do it", "--max-loops", "12"]).max_loops, Some(12));
+        assert_eq!(parse(&["do it"]).max_loops, None);
+        assert_eq!(
+            parse(&["--max-loops", "0"]).errors,
+            vec!["--max-loops needs a positive integer, got \"0\".".to_string()]
+        );
+        assert!(!parse(&["--max-loops", "abc"]).errors.is_empty());
+        assert!(!parse(&["--max-loops"]).errors.is_empty());
     }
 
     #[test]

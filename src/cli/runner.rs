@@ -39,6 +39,7 @@ pub struct CliGoalRunArgs {
     /// Liveness lease file: written at run start, heartbeated per event, cleared at run end.
     pub lease_path: Option<PathBuf>,
     pub max_iterations: Option<i64>,
+    pub max_loops: Option<i64>,
     pub on_event: EmitFn,
     /// Archive an unfinished ledger and replan instead of continuing it.
     pub new_goal: bool,
@@ -385,6 +386,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         headers: args.inference.headers.clone(),
         initial_state: state,
         max_iterations: args.max_iterations,
+        max_loops: args.max_loops,
         request_timeout_ms: args.request_timeout_ms,
         model: Some(args.inference.model.clone()),
         on_event: Some(emit),

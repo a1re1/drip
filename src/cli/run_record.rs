@@ -41,6 +41,9 @@ pub struct RunRecord {
 	/// The --max-iterations cap the run was given, when one was set.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub max_iterations: Option<i64>,
+	/// The --max-loops cap the run was given, when one was set.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub max_loops: Option<i64>,
 	/// Operator messages that arrived too late for this run.
 	pub pending_operator_messages: i64,
 	pub reason: String,
@@ -65,6 +68,7 @@ pub struct BuildRunRecordArgs<'a> {
 	pub goal: &'a str,
 	pub goal_id: &'a str,
 	pub max_iterations: Option<i64>,
+	pub max_loops: Option<i64>,
 	pub pending_operator_messages: i64,
 	pub result: &'a HarnessRunResult,
 }
@@ -94,6 +98,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 		last_verification: derive_verification_summary(&args.result.state),
 		loops: args.result.loops,
 		max_iterations: args.max_iterations,
+		max_loops: args.max_loops,
 		pending_operator_messages: args.pending_operator_messages,
 		stop_latency_ms: args.result.stop_latency_ms,
 		summary: args
@@ -216,6 +221,7 @@ mod tests {
 			verify_nudged: None,
 			edit_nudged: None,
 			confidence: None,
+			blocked_on: None,
 		}
 	}
 
@@ -249,6 +255,7 @@ mod tests {
 			goal: "build the thing",
 			goal_id: "g-1",
 			max_iterations: Some(10),
+			max_loops: None,
 			pending_operator_messages: 1,
 			result: &HarnessRunResult {
 				continue_command: None,

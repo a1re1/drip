@@ -127,6 +127,8 @@ OPTIONS
 	--tui, --interactive          Launch the Ink TUI (errors without a terminal)
 	--prompt "goal text"          Goal as a flag instead of a positional (for scripts)
 	--max-iterations N            Cap harness cycles for this run
+	--max-loops N                 Cap task loops for this run (each loop is at least one model
+	                              call; a replanning loop is exactly one planner call)
 	--no-repo-memory              Disable the repo memory bank (~/.drip/projects/<slug>/memory) for this run:
 	                              no index injection, repo-scoped remember/forget refused
 	--profile <id>                Model profile for this invocation — applies to both the
@@ -276,7 +278,7 @@ EXIT CODES
 	0   run completed, or finished unreconciled — every task done but an expectation
 	    left visibly unreconciled (see anomalies) — or informational command succeeded
 	1   usage / setup error
-	2   run ended without completing (max-iterations, blocked, or stopped)
+	2   run ended without completing (max-iterations, max-loops, blocked-on-input, or stopped)
 	3   run failed on an infrastructure error (endpoint unreachable/5xx after
 		retries) or --wait saw the run die without a result — state is
 		persisted; resume the same goal when healthy
@@ -311,6 +313,7 @@ mod tests {
             "--tui",
             "--prompt",
             "--max-iterations",
+            "--max-loops",
             "--lite",
             "--no-review",
             "--profile",

@@ -540,14 +540,14 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
                 current_task.review_of.as_deref().unwrap()
             )
         } else {
-            "instruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked.".to_string()
+            "instruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked. If what is missing can only come from the operator (original data, credentials, a decision), block with blockedOn: \"operator\" and say exactly what is needed — do not keep searching for it.".to_string()
         });
         sections.push(task_sections.join("\n"));
     } else if state.tasks.is_empty() {
         sections.push("instruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.".to_string());
     } else if state.tasks.iter().any(|task| task.status == crate::core::types::HarnessTaskStatus::Blocked) {
         sections.push(
-            "instruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned.".to_string(),
+            "instruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned. If a task waits on something only the operator can supply, re-block it with blockedOn: \"operator\" stating what is needed and stop — the run ends awaiting that input with the finished work intact; do not plan more search or workaround tasks for it.".to_string(),
         );
     } else {
         sections.push("instruction: Every task was dropped without completing any work. Call plan_tasks with tasks that actually accomplish the goal.".to_string());
@@ -647,6 +647,8 @@ fn run_reason_description(reason: HarnessRunReason) -> &'static str {
         HarnessRunReason::Error => "the run failed on an infrastructure or endpoint error — the state is persisted and the goal can be resumed",
         HarnessRunReason::Futile => "the run kept stalling with no completed work between recovery escalations — the approach or the goal itself needs to change before resuming",
         HarnessRunReason::MaxIterations => "the cycle budget ran out before the goal completed",
+        HarnessRunReason::MaxLoops => "the task-loop budget ran out before the goal completed",
+        HarnessRunReason::BlockedOnInput => "nothing workable remains and at least one task is blocked on input only the operator can supply — the run stopped with the work so far intact; resume the session with that input as the prompt",
         HarnessRunReason::Partial => "some tasks were dropped without completing — the goal was only partially accomplished",
         HarnessRunReason::Planned => "plan-only mode stopped after task decomposition — resume the session to execute the plan",
         HarnessRunReason::Unreconciled => "the goal finished but at least one expectation was left unreconciled — the state is persisted and the recorded anomalies should be reviewed before trusting the results",
@@ -662,6 +664,8 @@ fn reason_wire_tag(reason: HarnessRunReason) -> &'static str {
         HarnessRunReason::Error => "error",
         HarnessRunReason::Futile => "futile",
         HarnessRunReason::MaxIterations => "max-iterations",
+        HarnessRunReason::MaxLoops => "max-loops",
+        HarnessRunReason::BlockedOnInput => "blocked-on-input",
         HarnessRunReason::Partial => "partial",
         HarnessRunReason::Planned => "planned",
         HarnessRunReason::Unreconciled => "unreconciled",
@@ -811,6 +815,16 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
 
     if reason == HarnessRunReason::MaxIterations {
         lines.push("The cycle budget ran out — resume the goal to continue.".to_string());
+    }
+
+    if reason == HarnessRunReason::MaxLoops {
+        lines.push("The task-loop budget ran out — resume the goal to continue.".to_string());
+    }
+
+    if reason == HarnessRunReason::BlockedOnInput {
+        lines.push(
+            "The run is blocked on input only the operator can supply (see the blocked tasks above) — resume the session with that input as the prompt.".to_string(),
+        );
     }
 
     if reason == HarnessRunReason::Partial {

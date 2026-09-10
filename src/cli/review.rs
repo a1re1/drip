@@ -722,6 +722,7 @@ impl ReviewContext<'_> {
             index: &index,
             inference,
             max_iterations: Some(max_iterations),
+            max_loops: None,
             mentions: None,
             new_goal: false,
             no_repo_memory: true,

@@ -348,6 +348,7 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 			// planner happened to assign role: "author" itself.
 			bindings: Some(HarnessRoleBindings {
 				planning: Some("planner".to_string()),
+				replanning: None,
 				task: Some("author".to_string()),
 			}),
 			roles: vec![
@@ -375,6 +376,7 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 		"research" => Some(RoleSetupSource {
 			bindings: Some(HarnessRoleBindings {
 				planning: Some("researcher".to_string()),
+				replanning: None,
 				task: Some("researcher".to_string()),
 			}),
 			roles: vec![researcher_role()],
@@ -382,6 +384,7 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 		"team" => Some(RoleSetupSource {
 			bindings: Some(HarnessRoleBindings {
 				planning: Some("researcher".to_string()),
+				replanning: None,
 				task: Some("coder".to_string()),
 			}),
 			roles: vec![researcher_role(), coder_role(), reviewer_role()],
@@ -389,6 +392,7 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 		"planned" => Some(RoleSetupSource {
 			bindings: Some(HarnessRoleBindings {
 				planning: Some("architect".to_string()),
+				replanning: None,
 				task: Some("author".to_string()),
 			}),
 			roles: vec![architect_role(), planned_author_role()],
@@ -396,6 +400,7 @@ fn builtin_preset(name: &str) -> Option<RoleSetupSource> {
 		"lite" => Some(RoleSetupSource {
 			bindings: Some(HarnessRoleBindings {
 				planning: Some("planner".to_string()),
+				replanning: None,
 				task: Some("author".to_string()),
 			}),
 			roles: vec![lite_planner_role(), lite_author_role()],
@@ -573,6 +578,12 @@ fn normalize_bindings(value: Option<&serde_json::Value>) -> Option<HarnessRoleBi
 		.map(str::trim)
 		.filter(|s| !s.is_empty())
 		.map(String::from);
+	let replanning = value
+		.get("replanning")
+		.and_then(|v| v.as_str())
+		.map(str::trim)
+		.filter(|s| !s.is_empty())
+		.map(String::from);
 	let task = value
 		.get("task")
 		.and_then(|v| v.as_str())
@@ -581,7 +592,8 @@ fn normalize_bindings(value: Option<&serde_json::Value>) -> Option<HarnessRoleBi
 		.map(String::from);
 
 	// An empty bindings object is dropped entirely.
-	(planning.is_some() || task.is_some()).then_some(HarnessRoleBindings { planning, task })
+	(planning.is_some() || replanning.is_some() || task.is_some())
+		.then_some(HarnessRoleBindings { planning, replanning, task })
 }
 
 pub fn load_roles_from_config(config: &CliConfig, issues: &mut Vec<String>) -> RoleSetupSource {
@@ -862,6 +874,12 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 			.and_then(|b| b.planning.clone())
 			.or(project_source.bindings.as_ref().and_then(|b| b.planning.clone()))
 			.or(config_source.bindings.as_ref().and_then(|b| b.planning.clone())),
+		replanning: args
+			.extra_bindings
+			.as_ref()
+			.and_then(|b| b.replanning.clone())
+			.or(project_source.bindings.as_ref().and_then(|b| b.replanning.clone()))
+			.or(config_source.bindings.as_ref().and_then(|b| b.replanning.clone())),
 		task: args
 			.extra_bindings
 			.as_ref()
@@ -870,9 +888,10 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 			.or(config_source.bindings.as_ref().and_then(|b| b.task.clone())),
 	};
 
-	for kind in ["planning", "task"] {
+	for kind in ["planning", "replanning", "task"] {
 		let bound = match kind {
 			"planning" => merged_bindings.planning.clone(),
+			"replanning" => merged_bindings.replanning.clone(),
 			_ => merged_bindings.task.clone(),
 		};
 
@@ -881,17 +900,19 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 				issues.push(format!(
 					"role bindings: {kind} is bound to unknown role \"{bound}\" — the binding is ignored"
 				));
-				if kind == "planning" {
-					merged_bindings.planning = None;
-				} else {
-					merged_bindings.task = None;
+				match kind {
+					"planning" => merged_bindings.planning = None,
+					"replanning" => merged_bindings.replanning = None,
+					_ => merged_bindings.task = None,
 				}
 			}
 		}
 	}
 
-	let bindings = (merged_bindings.planning.is_some() || merged_bindings.task.is_some())
-		.then_some(merged_bindings);
+	let bindings = (merged_bindings.planning.is_some()
+		|| merged_bindings.replanning.is_some()
+		|| merged_bindings.task.is_some())
+	.then_some(merged_bindings);
 
 	ResolvedRoleSetup { bindings, issues, roles }
 }

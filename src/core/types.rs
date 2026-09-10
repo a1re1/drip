@@ -101,6 +101,11 @@ pub struct HarnessTask {
 	/// reason "blocked-on-input" instead of replanning around the gap.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub blocked_on: Option<HarnessTaskBlocker>,
+	/// Bounded history of recovery events (blocked/dropped/exhausted/
+	/// reopened) recorded by the harness. Old state files without this field
+	/// deserialize to None (no history); serialization omits it when empty.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub recovery_history: Option<Vec<HarnessRecoveryEvent>>,
 }
 
 /// Who must act before a blocked task can move again. "operator": material
@@ -110,6 +115,82 @@ pub struct HarnessTask {
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessTaskBlocker {
 	Operator,
+}
+
+/// Bounded per-task memory of how recovery attempts went, so replanning can
+/// see what was already tried instead of replaying identical failure loops.
+/// Events are recorded by the harness (finish/drop/exhaust/reopen) and stay
+/// on the task across reopen and drop; both the list and its text fields are
+/// capped so state growth stays bounded.
+pub const MAX_RECOVERY_EVENTS: usize = 8;
+/// Upper bound for each free-text field on a recovery event, counted in
+/// chars (not bytes) so emoji and CJK text truncate safely on char
+/// boundaries.
+pub const MAX_RECOVERY_TEXT_CHARS: usize = 200;
+
+/// What the harness did at a recovery point. `blocked` records a task
+/// entering the blocked state; `dropped` is model- or harness-initiated
+/// pruning; `exhausted` is the harness dropping a task whose reopen budget
+/// ran out; `reopened` is an automatic or review-driven unblock;
+/// `operator-reply` records operator input for an operator-blocked task —
+/// the independently observed change that starts a fresh recovery episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessRecoveryAction {
+	Blocked,
+	Dropped,
+	Exhausted,
+	Reopened,
+	OperatorReply,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessRecoveryEvent {
+	pub action: HarnessRecoveryAction,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub blocked_on: Option<String>,
+	pub at_iteration: i64,
+	/// The task's title when the event was recorded (the id is the task's
+	/// own id; history lives on the task). Clamped.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub task_title: Option<String>,
+	/// Why the task was blocked/dropped, or the note accompanying a reopen.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub detail: Option<String>,
+	/// Available failure evidence (e.g. the attempt digest of what tools ran
+	/// before the failure). Clamped.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub evidence: Option<String>,
+}
+
+impl HarnessRecoveryEvent {
+	/// Truncate a string to at most `max` chars without splitting a Unicode
+	/// scalar value (emoji, CJK safe).
+	pub fn clamp_text(text: &str, max: usize) -> String {
+		text.chars().take(max).collect()
+	}
+}
+
+/// Append a recovery event to a task's bounded history, clamping text fields
+/// and evicting the oldest entry past MAX_RECOVERY_EVENTS.
+pub fn push_recovery_event(task: &mut HarnessTask, event: HarnessRecoveryEvent) {
+	let mut event = event;
+	if let Some(detail) = event.detail {
+		event.detail = Some(HarnessRecoveryEvent::clamp_text(detail.trim(), MAX_RECOVERY_TEXT_CHARS));
+	}
+	if let Some(evidence) = event.evidence {
+		event.evidence = Some(HarnessRecoveryEvent::clamp_text(evidence.trim(), MAX_RECOVERY_TEXT_CHARS));
+	}
+	if let Some(title) = event.task_title {
+		event.task_title = Some(HarnessRecoveryEvent::clamp_text(title.trim(), MAX_RECOVERY_TEXT_CHARS));
+	}
+	let history = task.recovery_history.get_or_insert_with(Vec::new);
+	if history.len() >= MAX_RECOVERY_EVENTS {
+		let remove = history.len() + 1 - MAX_RECOVERY_EVENTS;
+		history.drain(0..remove);
+	}
+	history.push(event);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -965,6 +1046,7 @@ mod tests {
 			edit_nudged: None,
 			confidence: None,
 			blocked_on: None,
+			recovery_history: None,
 		};
 		let json = serde_json::to_value(&task).unwrap();
 		let obj = json.as_object().unwrap();

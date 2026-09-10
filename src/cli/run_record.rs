@@ -222,6 +222,7 @@ mod tests {
 			edit_nudged: None,
 			confidence: None,
 			blocked_on: None,
+			recovery_history: None,
 		}
 	}
 

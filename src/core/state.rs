@@ -22,8 +22,10 @@ use crate::core::types::{
 	HarnessGoalRecord,
 HarnessMemoryNote, HarnessObservation, HarnessState,
 HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats,
-VerificationSummary,
+	VerificationSummary,
+	MAX_RECOVERY_EVENTS, MAX_RECOVERY_TEXT_CHARS,
 };
+use crate::core::types::{HarnessRecoveryAction, HarnessRecoveryEvent, push_recovery_event};
 use crate::lib_fs::write_file_atomic;
 
 /// Placement for newly added tasks: appended to the end of the list, or
@@ -159,6 +161,20 @@ pub fn add_tasks(
 	entries: Vec<HarnessTaskInput>,
 	placement: HarnessTaskPlacement,
 ) -> Vec<HarnessTask> {
+	// Deterministic duplicate guard: a replacement task whose title matches an
+	// existing task (case-insensitive, whitespace-normalized) is refused —
+	// silently re-adding identical work would mint a clean task id and reset
+	// retry accounting and recovery history. Callers must finish, unblock or
+	// drop the original instead; genuinely new unblocking work is unaffected.
+	let normalize = |title: &str| -> String {
+		title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+	};
+	let existing_titles: std::collections::HashSet<String> =
+		state.tasks.iter().map(|task| normalize(&task.title)).collect();
+	let entries: Vec<HarnessTaskInput> = entries
+		.into_iter()
+		.filter(|entry| !existing_titles.contains(&normalize(&entry.title)))
+		.collect();
 	let mut added_tasks: Vec<HarnessTask> = Vec::new();
 
 	for entry in entries {
@@ -202,6 +218,7 @@ pub fn add_tasks(
 			edit_nudged: None,
 			confidence: None,
 			blocked_on: None,
+			recovery_history: None,
 		});
 	}
 
@@ -313,6 +330,22 @@ pub fn finish_task<'a>(state: &'a mut HarnessState, args: HarnessFinishArgs<'_>)
 		task.confidence = args.confidence;
 	}
 
+	// Recovery history: a blocked finish is a recovery point the replanner
+	// should see; completed finishes are outcomes, not recovery points. The
+	// blocker label (if the caller attaches one afterwards) stays readable on
+	// the task itself, so the event only carries the failure summary.
+	if args.status == HarnessTaskStatus::Blocked {
+		let event = HarnessRecoveryEvent {
+			action: HarnessRecoveryAction::Blocked,
+			blocked_on: None,
+			at_iteration: iteration,
+			task_title: Some(task.title.clone()),
+			detail: task.summary.clone(),
+			evidence: None,
+		};
+		push_recovery_event(task, event);
+	}
+
 	Some(task)
 }
 
@@ -331,6 +364,18 @@ pub fn drop_task<'a>(state: &'a mut HarnessState, task_id: &str, reason: &str) -
 	task.status = HarnessTaskStatus::Dropped;
 	let trimmed = reason.trim();
 	task.summary = Some(if trimmed.is_empty() { "Dropped without a reason.".to_string() } else { trimmed.to_string() });
+
+	// Dropped tasks keep their history: a replanner must see why earlier
+	// attempts (including this drop) failed before re-attempting the work.
+	let event = HarnessRecoveryEvent {
+		action: HarnessRecoveryAction::Dropped,
+		blocked_on: None,
+		at_iteration: iteration,
+		task_title: Some(task.title.clone()),
+		detail: task.summary.clone(),
+		evidence: None,
+	};
+	push_recovery_event(task, event);
 
 	Some(task)
 }
@@ -354,8 +399,7 @@ pub fn revise_task<'a>(state: &'a mut HarnessState, task_id: &str, title: &str) 
 
 	if trimmed_title != task.title {
 		task.notes.push(format!("Retitled from \"{}\".", task.title));
-		task.title = 
-trimmed_title.to_string();
+		task.title = trimmed_title.to_string();
 	}
 
 	Some(task)
@@ -371,6 +415,27 @@ pub fn reopen_task_for_rework(task: &mut HarnessTask, note: &str) {
 	task.finished_at_iteration = None;
 	task.summary = None;
 	append_task_note(task, note);
+}
+
+// Does the current recovery episode still have its one allowed fresh automatic
+// reopen? Scanning the bounded history from the tail: a Reopened event means
+// the episode's reopen already ran and came back blocked, and only an operator
+// reply (an independently observed change) starts a fresh episode after that.
+// No recorded history means the task never went through a recovery episode.
+fn has_unspent_reopen(task: &HarnessTask) -> bool {
+	let Some(history) = task.recovery_history.as_ref() else {
+		return true;
+	};
+
+	for event in history.iter().rev() {
+		match event.action {
+			HarnessRecoveryAction::Reopened => return false,
+			HarnessRecoveryAction::OperatorReply => return true,
+			HarnessRecoveryAction::Blocked | HarnessRecoveryAction::Dropped | HarnessRecoveryAction::Exhausted => continue,
+		}
+	}
+
+	true
 }
 
 pub fn reopen_blocked_tasks(
@@ -400,11 +465,29 @@ pub fn reopen_blocked_tasks(
 			}
 		}
 
+		// At most one fresh automatic reopen per recovery episode: once that
+		// reopen has run and the task came back blocked unchanged, further
+		// automatic retries would replay the identical stall loop. The task stays
+		// blocked so the evidence-aware planner must name changed evidence (or an
+		// operator reply must arrive) before work resumes.
+		if !has_unspent_reopen(task) {
+			continue;
+		}
+
 		task.reopen_count = Some(task.reopen_count.unwrap_or(0) + 1);
 		task.status = HarnessTaskStatus::Pending;
 		task.stall_count = 0;
 		task.finished_at_iteration = None;
 		append_task_note(task, note);
+		let event = HarnessRecoveryEvent {
+			action: HarnessRecoveryAction::Reopened,
+			blocked_on: None,
+			at_iteration: state.iteration,
+			task_title: Some(task.title.clone()),
+			detail: Some(note.to_string()),
+			evidence: None,
+		};
+		push_recovery_event(task, event);
 		reopened.push(task.clone());
 	}
 
@@ -422,6 +505,13 @@ pub fn drop_exhausted_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask
 			continue;
 		}
 
+		// Never drop a task whose current episode's fresh reopen has not been
+		// attempted yet: that would discard required work before its one allowed
+		// automatic retry had a chance to run.
+		if has_unspent_reopen(task) {
+			continue;
+		}
+
 		task.dropped_exhausted = Some(true);
 		task.finished_at_iteration = Some(state.iteration);
 		task.status = HarnessTaskStatus::Dropped;
@@ -429,8 +519,16 @@ pub fn drop_exhausted_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask
 			"Dropped after {} reopen cycle(s) without recorded progress — this task needs a different approach or user input.",
 			task.reopen_count.unwrap_or(0)
 		));
-		dropped
-.push(task.clone());
+		let event = HarnessRecoveryEvent {
+			action: HarnessRecoveryAction::Exhausted,
+			blocked_on: None,
+			at_iteration: state.iteration,
+			task_title: Some(task.title.clone()),
+			detail: task.summary.clone(),
+			evidence: None,
+		};
+		push_recovery_event(task, event);
+		dropped.push(task.clone());
 	}
 
 	dropped
@@ -477,6 +575,20 @@ pub fn reopen_operator_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTas
 		task.stall_count = 0;
 		task.finished_at_iteration = None;
 		append_task_note(task, &format!("Operator input received: {}", reply.text));
+		// The operator reply is an independently observed change: recording it
+		// closes the exhausted episode and starts a fresh one, and gives the
+		// planner evidence that this task recovered through operator input.
+		push_recovery_event(
+			task,
+			HarnessRecoveryEvent {
+				action: HarnessRecoveryAction::OperatorReply,
+				blocked_on: None,
+				at_iteration: state.iteration,
+				task_title: Some(task.title.clone()),
+				detail: Some(reply.text.clone()),
+				evidence: None,
+			},
+		);
 		reopened.push(task.clone());
 	}
 
@@ -1335,6 +1447,171 @@ mod tests {
         assert!(state.mutations_since_verification.is_none());
     }
 
+    // An unchanged task gets at most one fresh automatic reopen per recovery
+    // episode: the second stalled escalation must leave it blocked.
+    #[test]
+    fn unchanged_failure_gets_at_most_one_automatic_reopen_per_recovery_episode() {
+        let mut state = create_harness_state("episode goal");
+        add_tasks(&mut state, vec![input("flaky work")], HarnessTaskPlacement::End);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "tool failed", task_id: Some("task-1"), confidence: None },
+        );
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+
+        // First stalled escalation: the episode's one fresh reopen is allowed.
+        assert_eq!(reopen_blocked_tasks(&mut state, "retry once", Some(3)).len(), 1);
+        assert_eq!(state.tasks[0].reopen_count, Some(1));
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
+
+        // The retry comes back blocked unchanged.
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "tool failed again", task_id: Some("task-1"), confidence: None },
+        );
+
+        // Second escalation: no fresh reopen left, even though the global
+        // reopen budget is far from exhausted. The task stays blocked for the
+        // evidence-aware planner instead of replaying the identical loop.
+        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+        assert!(state.tasks[0].reopen_count.unwrap() < 3);
+    }
+
+    // Exhaustion may not drop a task whose episode's fresh reopen never ran.
+    #[test]
+    fn exhaustion_keeps_tasks_whose_fresh_reopen_has_not_been_attempted() {
+        let mut state = create_harness_state("exhaustion goal");
+        add_tasks(&mut state, vec![input("needed work")], HarnessTaskPlacement::End);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "blocked once", task_id: Some("task-1"), confidence: None },
+        );
+        drop_exhausted_blocked_tasks(&mut state);
+
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+        assert_eq!(state.tasks[0].dropped_exhausted, None);
+
+        // After the episode's reopen ran and failed again, exhaustion may drop.
+        reopen_blocked_tasks(&mut state, "retry", Some(2));
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "still blocked", task_id: Some("task-1"), confidence: None },
+        );
+        drop_exhausted_blocked_tasks(&mut state);
+
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Dropped);
+        assert_eq!(state.tasks[0].dropped_exhausted, Some(true));
+    }
+
+    // Only an operator reply — an independently observed change — refreshes a
+    // spent episode and allows another automatic reopen.
+    #[test]
+    fn operator_reply_refreshes_a_spent_recovery_episode() {
+        let mut state = create_harness_state("operator goal");
+        add_tasks(&mut state, vec![input("needs input")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "no credentials", task_id: Some("task-1"), confidence: None },
+        );
+        reopen_blocked_tasks(&mut state, "retry", Some(3));
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "no credentials still", task_id: Some("task-1"), confidence: None },
+        );
+        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+
+        push_recovery_event(
+            &mut state.tasks[0],
+            HarnessRecoveryEvent {
+                action: HarnessRecoveryAction::OperatorReply,
+                blocked_on: None,
+                at_iteration: 5,
+                task_title: Some("needs input".to_string()),
+                detail: Some("credentials provided".to_string()),
+                evidence: None,
+            },
+        );
+
+        assert_eq!(reopen_blocked_tasks(&mut state, "retry after reply", Some(3)).len(), 1);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
+    }
+
+    // Reblocking and note churn must not refresh a spent recovery episode.
+    #[test]
+    fn reblocking_and_note_churn_do_not_refresh_a_spent_recovery_episode() {
+        let mut state = create_harness_state("churn goal");
+        add_tasks(&mut state, vec![input("churny work")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "first failure", task_id: Some("task-1"), confidence: None },
+        );
+        reopen_blocked_tasks(&mut state, "retry", Some(3));
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "second failure", task_id: Some("task-1"), confidence: None },
+        );
+
+        // Pure churn: more blocked notes change nothing.
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "yet another note", task_id: Some("task-1"), confidence: None },
+        );
+        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+    }
+
+    // A replacement task with an identical title is refused, so retry
+    // accounting and recovery history cannot be reset by re-adding the work.
+    #[test]
+    fn duplicate_replacement_tasks_cannot_reset_retry_accounting() {
+        let mut state = create_harness_state("duplicate goal");
+        add_tasks(&mut state, vec![input("Investigate flake")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "failed once", task_id: Some("task-1"), confidence: None },
+        );
+        reopen_blocked_tasks(&mut state, "retry", Some(3));
+
+        let added = add_tasks(&mut state, vec![input("  investigate   FLAKE ")], HarnessTaskPlacement::End);
+
+        assert!(added.is_empty());
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.tasks[0].id, "task-1");
+        assert_eq!(state.tasks[0].reopen_count, Some(1));
+        assert!(state
+            .tasks[0]
+            .recovery_history
+            .as_ref()
+            .map(|history| history.len())
+            .unwrap_or(0) >= 2);
+    }
+
+    // Genuinely new unblocking work is unaffected by the duplicate guard.
+    #[test]
+    fn genuinely_new_unblocking_work_is_still_accepted() {
+        let mut state = create_harness_state("new work goal");
+        add_tasks(&mut state, vec![input("Investigate flake")], HarnessTaskPlacement::End);
+
+        let added = add_tasks(&mut state, vec![input("install missing toolchain")], HarnessTaskPlacement::End);
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(state.tasks.len(), 2);
+    }
+
+    // Operator-blocked tasks never reopen through the automatic path.
+    #[test]
+    fn operator_blocked_tasks_are_never_reopened_automatically() {
+        let mut state = create_harness_state("operator gate goal");
+        add_tasks(&mut state, vec![input("needs operator")], HarnessTaskPlacement::End);
+        state.tasks[0].status = HarnessTaskStatus::Blocked;
+        state.tasks[0].blocked_on = Some(HarnessTaskBlocker::Operator);
+
+        assert_eq!(reopen_blocked_tasks(&mut state, "escalate", Some(3)).len(), 0);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
+    }
+
     // Skips dependency-gated tasks until their dependencies are terminal.
     #[test]
     fn skips_dependency_gated_tasks_until_their_dependencies_are_terminal() {
@@ -2016,6 +2293,303 @@ mod tests {
                 .starts_with("completion anchor: none declared — "),
             "{}",
             describe_completion_anchor(&state)
+        );
+    }
+
+    // --- recovery-history unit coverage (task-1) -----------------------------
+
+    /// Old state files predate recovery_history: a task whose JSON lacks the
+    /// field entirely must load with a None history.
+    #[test]
+    fn old_state_without_recovery_history_loads_as_none() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("legacy task")], HarnessTaskPlacement::End);
+        let value: serde_json::Value = serde_json::to_value(&state.tasks[0]).unwrap();
+        assert!(value.get("recoveryHistory").is_none(), "{}", value);
+        let task: HarnessTask = serde_json::from_value(value).unwrap();
+        assert_eq!(task.recovery_history, None);
+    }
+
+    /// A populated history survives a state round-trip unchanged.
+    #[test]
+    fn recovery_history_round_trips_through_serde() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("history task")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "first failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        let raw = serde_json::to_string(&state).unwrap();
+        let back: HarnessState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.tasks[0].recovery_history, state.tasks[0].recovery_history);
+        let history = back.tasks[0].recovery_history.as_ref().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].action, HarnessRecoveryAction::Blocked);
+        assert_eq!(history[0].detail.as_deref(), Some("first failure"));
+    }
+
+    /// More pushes than the cap keep the newest MAX_RECOVERY_EVENTS entries
+    /// and evict the oldest first.
+    #[test]
+    fn recovery_history_evicts_oldest_past_the_cap() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("capped task")], HarnessTaskPlacement::End);
+        for round in 0..(MAX_RECOVERY_EVENTS as i64) + 4 {
+            push_recovery_event(
+                &mut state.tasks[0],
+                HarnessRecoveryEvent {
+                    action: HarnessRecoveryAction::Blocked,
+                    blocked_on: None,
+                    at_iteration: round,
+                    task_title: Some(format!("capped {round}")),
+                    detail: Some(format!("failure {round}")),
+                    evidence: None,
+                },
+            );
+        }
+        let history = state.tasks[0].recovery_history.as_ref().unwrap();
+        assert_eq!(history.len(), MAX_RECOVERY_EVENTS);
+        assert_eq!(history[0].detail.as_deref(), Some("failure 4"), "oldest entries evicted first");
+        let last = format!("failure {}", MAX_RECOVERY_EVENTS as i64 + 3);
+        assert_eq!(history[MAX_RECOVERY_EVENTS - 1].detail.as_deref(), Some(last.as_str()));
+    }
+
+    /// Clamping must respect Unicode char boundaries: multi-byte text is
+    /// truncated to MAX_RECOVERY_TEXT_CHARS characters without panicking or
+    /// splitting a code point.
+    #[test]
+    fn recovery_event_text_is_clamped_on_char_boundaries() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("unicode task")], HarnessTaskPlacement::End);
+        let long = "\u{1F980}".repeat(MAX_RECOVERY_TEXT_CHARS * 2);
+        push_recovery_event(
+            &mut state.tasks[0],
+            HarnessRecoveryEvent {
+                action: HarnessRecoveryAction::Dropped,
+                blocked_on: None,
+                at_iteration: 1,
+                task_title: Some(long.clone()),
+                detail: Some(long),
+                evidence: Some("\u{65E5}\u{672C}\u{8A9E}".repeat(100)),
+            },
+        );
+        let event = &state.tasks[0].recovery_history.as_ref().unwrap()[0];
+        let want = MAX_RECOVERY_TEXT_CHARS;
+        assert_eq!(event.task_title.as_ref().map(|t| t.chars().count()), Some(want));
+        assert_eq!(event.detail.as_ref().map(|t| t.chars().count()), Some(want));
+        assert_eq!(event.evidence.as_ref().map(|t| t.chars().count()), Some(want));
+        assert!(event.task_title.as_ref().unwrap().chars().all(|c| c == '\u{1F980}'));
+    }
+
+    /// History is append-only across recovery: reopen and drop both add an
+    /// event and never clear what came before.
+    #[test]
+    fn recovery_history_survives_reopen_and_drop() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("survivor")], HarnessTaskPlacement::End);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "stalled on data",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert_eq!(state.tasks[0].recovery_history.as_ref().unwrap().len(), 1);
+
+        let reopened = reopen_blocked_tasks(&mut state, "auto retry", Some(3));
+        assert_eq!(reopened.len(), 1);
+        let history = state.tasks[0].recovery_history.as_ref().unwrap();
+        assert_eq!(history.len(), 2, "Reopened recorded on top of Blocked");
+        assert_eq!(history[1].action, HarnessRecoveryAction::Reopened);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
+
+        drop_task(&mut state, "task-1", "no longer needed");
+        let history = state.tasks[0].recovery_history.as_ref().unwrap();
+        assert_eq!(history.len(), 3, "drop appends, never clears");
+        assert_eq!(history[2].action, HarnessRecoveryAction::Dropped);
+        assert_eq!(history[2].detail.as_deref(), Some("no longer needed"));
+    }
+
+    /// Full deterministic episode arc: an unchanged failing task gets exactly
+    /// one automatic reopen, then stays blocked for the evidence-aware
+    /// planner, and exhaustion ends in an honest Dropped outcome (never a
+    /// fake completion) while the whole history is preserved.
+    #[test]
+    fn same_failure_episode_stops_reopening_and_exhausts_to_honest_drop() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("flaky step")], HarnessTaskPlacement::End);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "failed once",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "failed the same way again",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert!(
+            reopen_blocked_tasks(&mut state, "auto retry", Some(3)).is_empty(),
+            "an unchanged failure must not be reopened twice in one episode"
+        );
+
+        let dropped = drop_exhausted_blocked_tasks(&mut state);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Dropped);
+        assert!(state.tasks[0].summary.as_deref().unwrap_or("").contains("Dropped after"));
+
+        let history = state.tasks[0].recovery_history.as_ref().unwrap();
+        let actions: Vec<HarnessRecoveryAction> = history.iter().map(|event| event.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                HarnessRecoveryAction::Blocked,
+                HarnessRecoveryAction::Reopened,
+                HarnessRecoveryAction::Blocked,
+                HarnessRecoveryAction::Exhausted,
+            ]
+        );
+    }
+
+    /// Drop/re-add churn: the deterministic duplicate guard refuses a
+    /// replacement whose title matches even after the original was dropped,
+    /// so the dropped task keeps its full recovery history and no fresh task
+    /// id can reset retry accounting.
+    #[test]
+    fn drop_and_readd_churn_cannot_reset_retry_accounting() {
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("flaky step")], HarnessTaskPlacement::End);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "same failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "same failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+
+        drop_task(&mut state, "task-1", "moving on");
+        let dropped_history_len =
+            state.tasks[0].recovery_history.as_ref().map(|history| history.len()).unwrap_or(0);
+        assert!(dropped_history_len >= 4, "blocked/reopened/blocked/dropped events are kept");
+
+        let added = add_tasks(&mut state, vec![input("Flaky  Step")], HarnessTaskPlacement::End);
+        assert!(added.is_empty(), "identical replacement is refused after a drop");
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.tasks[0].id, "task-1");
+        assert_eq!(
+            state.tasks[0].recovery_history.as_ref().map(|history| history.len()),
+            Some(dropped_history_len),
+            "history intact, nothing reset"
+        );
+    }
+
+    /// Operator-reply self-heal end to end: an operator-blocked task is never
+    /// auto-reopened or dropped, a real reply reopens it into a fresh
+    /// episode, and the whole recovery history (including the recorded
+    /// blockedOn) survives save/load so a resumed run keeps its evidence.
+    #[test]
+    fn operator_reply_self_heal_survives_save_and_load() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("state.json");
+        let mut state = blocked_state(Some(HarnessTaskBlocker::Operator));
+
+        assert!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).is_empty());
+        assert!(drop_exhausted_blocked_tasks(&mut state).is_empty());
+
+        state.operator_messages = Some(vec![HarnessOperatorMessage {
+            id: "m1".into(),
+            received_at_iteration: 5,
+            text: "originals are in /backup".into(),
+        }]);
+        assert_eq!(reopen_operator_blocked_tasks(&mut state).len(), 1);
+        assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
+
+        save_harness_state(&state_path, &state).unwrap();
+        let loaded = load_harness_state(&state_path).unwrap().unwrap();
+        let history = loaded.tasks[0].recovery_history.as_ref().unwrap();
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].action, HarnessRecoveryAction::Blocked);
+        // The landed event contract keeps blockedOn unset in events; the
+        // finish summary carries the human-readable reason.
+        assert_eq!(history[0].detail.as_deref(), Some("need the originals"));
+        assert_eq!(history[1].action, HarnessRecoveryAction::OperatorReply);
+        assert_eq!(history[1].detail.as_deref(), Some("originals are in /backup"));
+    }
+
+    /// A fresh reopen episode is durable state: after save/load the task is
+    /// still pending with its history, and a second failure on the resumed
+    /// run is not automatically reopened again.
+    #[test]
+    fn reopen_episode_state_survives_save_and_load() {
+        let temp = TempDir::new().unwrap();
+        let state_path = temp.path().join("state.json");
+        let mut state = HarnessState::default();
+        add_tasks(&mut state, vec![input("retry me")], HarnessTaskPlacement::End);
+
+        finish_task(
+            &mut state,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "first failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+
+        save_harness_state(&state_path, &state).unwrap();
+        let mut resumed = load_harness_state(&state_path).unwrap().unwrap();
+
+        assert_eq!(resumed.tasks[0].status, HarnessTaskStatus::Pending);
+        assert_eq!(resumed.tasks[0].reopen_count, Some(1));
+        let history = resumed.tasks[0].recovery_history.as_ref().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].action, HarnessRecoveryAction::Reopened);
+
+        finish_task(
+            &mut resumed,
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "second failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
+        );
+        assert!(
+            reopen_blocked_tasks(&mut resumed, "auto retry", Some(3)).is_empty(),
+            "the resumed episode is still spent after one retry"
         );
     }
 }

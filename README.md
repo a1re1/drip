@@ -1006,6 +1006,36 @@ accepted, so recent prompts can be reused without retyping:
 PRs welcome. Please run `cargo build --release && cargo test` before submitting.
 The Codex protocol tests also require Python 3 for their local mock server.
 
+## Recovery memory and retry semantics
+
+When a task is finished blocked or dropped, drip records a bounded recovery
+event on the task (blocked, reopened, dropped, retries exhausted, operator
+reply). History is capped at 8 events per task with the oldest evicted, and
+every text field is clamped to 200 characters on Unicode char boundaries, so
+state growth stays bounded and older state files without recovery history
+load unchanged.
+
+The loop uses this history to keep retries bounded and honest:
+
+- An unchanged failing task gets at most **one automatic reopen per recovery
+  episode**; after that it stays blocked so the replanner sees the failure
+  evidence instead of silently retrying forever.
+- Exhausted episodes are cleared only by an **independently observed change**
+  — a real completion or an operator reply — not by note churn, re-blocking,
+  retitling, or drop/re-add of the same work.
+- Re-adding a task whose title matches an existing task (including a dropped
+  one) is refused: identical replacement work cannot mint a fresh id and
+  reset retry accounting.
+- Tasks blocked on operator input are never reopened automatically; the run
+  ends awaiting your reply, and resuming with a reply starts a fresh episode.
+- Dropped exhausted tasks keep an honest dropped outcome (never a fake
+  completion), and the global futility exit still terminates runs without
+  useful work.
+
+Replanning prompts surface these recent outcomes per task (including for
+dropped tasks) so the planner resolves existing task ids with changed
+evidence instead of re-deriving identical work.
+
 ---
 
 ## License

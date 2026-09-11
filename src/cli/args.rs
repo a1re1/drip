@@ -184,6 +184,14 @@ pub struct ParsedCliArgs {
     /// do not fail finish_task closed on a missing/self-authored anchor.
     /// Usable with any roles preset; implied by --lite.
     pub no_review: bool,
+    /// --ui: serve the browser UI (a Bun-hosted app unpacked under the drip
+    /// home) instead of running a goal.
+    pub ui: bool,
+    /// --port N: port for --ui to bind (default 4141). Only valid with --ui.
+    pub port: Option<u16>,
+    /// --recursive: with --list, include sessions from every directory under
+    /// the drip home, not just this project. Only valid with --list.
+    pub recursive: bool,
 }
 
 impl Default for ParsedCliArgs {
@@ -201,6 +209,9 @@ impl Default for ParsedCliArgs {
             resume_id: None,
             lite: false,
             no_review: false,
+            ui: false,
+            port: None,
+            recursive: false,
             tools_path: "./tools".to_string(),
             version: false,
             prompt: None,
@@ -429,6 +440,15 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     parsed.wait = true;
                     set_session_ref(&mut parsed.wait_id, flag_name, value, &mut parsed.errors);
                 }
+                "--port" => {
+                    match value.parse::<u16>() {
+                        Ok(port) if port > 0 => parsed.port = Some(port),
+                        _ => parsed.errors.push(format!(
+                            "--port needs a port number between 1 and 65535, got \"{}\".",
+                            value
+                        )),
+                    }
+                }
                 _ => {
                     parsed.errors.push(format!(
                         "Unknown flag \"{}=...\" — only session-ref flags accept the equals form. Run drip --help.",
@@ -551,6 +571,25 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--list" => {
                 parsed.list = true;
+            }
+            "--recursive" => {
+                parsed.recursive = true;
+            }
+            "--ui" => {
+                parsed.ui = true;
+            }
+            "--port" => {
+                if let Some(raw) = take_required_value(argv, index, "--port", &mut parsed.errors) {
+                    match raw.parse::<u16>() {
+                        Ok(value) if value > 0 => parsed.port = Some(value),
+                        _ => parsed.errors.push(format!(
+                            "--port needs a port number between 1 and 65535, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
             }
             "--prompt" => {
                 match argv.get(index + 1) {
@@ -1023,6 +1062,16 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     .push(format!("{flag} only applies with --bash \"<command>\"."));
             }
         }
+    }
+
+    if parsed.port.is_some() && !parsed.ui {
+        parsed.errors
+            .push("--port only applies with --ui.".to_string());
+    }
+
+    if parsed.recursive && !parsed.list {
+        parsed.errors
+            .push("--recursive only applies with --list.".to_string());
     }
 
     parsed
@@ -1628,4 +1677,48 @@ mod tests {
         assert_eq!(parsed.roles_preset_or_path, None);
         assert_eq!(parsed.max_iterations, None);
     }
+
+    // --- ui/port/recursive flags ---
+
+    #[test]
+    fn parses_ui_port_and_recursive_flags_with_strict_values() {
+        assert!(parse(&["--ui"]).ui);
+        assert_eq!(parse(&["--ui", "--port", "4141"]).port, Some(4141));
+        assert_eq!(parse(&["--ui", "--port=4141"]).port, Some(4141));
+        assert!(parse(&["--list", "--recursive"]).recursive);
+
+        assert!(!parse(&["--port", "abc"]).errors.is_empty());
+        assert!(!parse(&["--port", "0"]).errors.is_empty());
+        assert!(!parse(&["--port", "99999"]).errors.is_empty());
+        assert!(!parse(&["--ui", "--port"]).errors.is_empty());
+ assert_eq!(
+            parse(&["--ui", "--port", "abc"]).errors,
+            vec!["--port needs a port number between 1 and 65535, got \"abc\".".to_string()]
+        );
+    }
+
+    #[test]
+    fn port_requires_ui_and_recursive_requires_list() {
+        let port_only = parse(&["--port", "4141"]);
+        assert!(
+            port_only.errors.iter().any(|e| e.contains("--port") && e.contains("--ui")),
+            "{:?}",
+            port_only.errors
+        );
+
+        let recursive_only = parse(&["--recursive"]);
+        assert!(
+            recursive_only.errors.iter().any(|e| e.contains("--recursive") && e.contains("--list")),
+            "{:?}",
+            recursive_only.errors
+        );
+
+        // --recursive without --list errors even next to --ui; --port errors
+        // even next to --list.
+        assert!(parse(&["--ui", "--recursive"]).errors.iter().any(|e| e.contains("--recursive")));
+        assert!(parse(&["--list", "--port", "4141"]).errors.iter().any(|e| e.contains("--port")));
+        assert!(parse(&["--list", "--recursive"]).errors.is_empty());
+        assert!(parse(&["--ui", "--port", "4141"]).errors.is_empty());
+    }
+
 }

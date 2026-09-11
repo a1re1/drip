@@ -257,8 +257,27 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
     }
 }
 
-fn print_session_list(cwd: &str, json: bool, project: &DripProject) {
-    let records = list_all_sessions(project, Some(30));
+const RECURSIVE_LIST_LIMIT: usize = 100;
+
+fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, project: &DripProject) {
+    // --recursive widens the sweep from this project's registry to every
+    // registry under the drip home (the same enumeration dripw's sidebar
+    // uses), filtered to sessions launched under this directory tree.
+    // Home-wide rows arrive newest first; the cap keeps the output bounded
+    // like the non-recursive branch (a wider tree gets a wider window).
+    let records = if recursive {
+        let mut records = crate::watch::data::sessions_under_dir(
+            &crate::core::sessions::list_all_home_sessions(Path::new(home_root)),
+            cwd,
+        );
+        records.truncate(RECURSIVE_LIST_LIMIT);
+        records
+    } else {
+        list_all_sessions(project, Some(30))
+    };
+    // Rows from other projects carry their own sessions_dir, which
+    // session_paths_for honours over the launch project's.
+    let paths_for = |record: &crate::core::sessions::SessionRecord| session_paths_for(project, record);
 
     if json {
         // Same curated shape as bare `drip --json`, so callers get paths without
@@ -269,11 +288,12 @@ fn print_session_list(cwd: &str, json: bool, project: &DripProject) {
         let rows: Vec<serde_json::Value> = records
             .iter()
             .map(|record| {
-                let paths = session_paths_for(project, record);
+                let paths = paths_for(record);
                 let lease = check_lease(Path::new(&paths.lease_path), &chrono::Utc::now);
                 let last_run = load_run_record(Path::new(&paths.result_path));
                 let mut row = json!({
                     "createdAt": record.created_at,
+                    "cwd": record.cwd,
                     "dir": paths.dir,
                     "goalCount": record.goal_count,
                     "id": record.id,
@@ -284,6 +304,7 @@ fn print_session_list(cwd: &str, json: bool, project: &DripProject) {
                     row["pid"] = json!(lease.pid);
                 }
                 row["running"] = json!(lease.alive());
+                row["resultPath"] = json!(paths.result_path);
                 row["statePath"] = json!(paths.state_path);
                 row["status"] = json!(record.status);
                 row["transcriptPath"] = json!(paths.transcript_path);
@@ -307,15 +328,18 @@ fn print_session_list(cwd: &str, json: bool, project: &DripProject) {
     for record in &records {
         // The lease is the truth about "running right now"; the status column
         // alone goes stale when a run crashes.
-        let live = check_lease(Path::new(&session_paths_for(project, record).lease_path), &chrono::Utc::now).alive();
+        let live = check_lease(Path::new(&paths_for(record).lease_path), &chrono::Utc::now).alive();
         let status = if live { "running" } else { record.status.as_str() };
 
+        // Recursive rows span directories, so the text form names the cwd too.
+        let location = if recursive { format!("  {}", record.cwd) } else { String::new() };
         println!(
-            "{}  {}  {:<9}  {} goal(s)  {}",
+            "{}  {}  {:<9}  {} goal(s){}  {}",
             record.id,
             record.updated_at,
             status,
             record.goal_count,
+            location,
             record.last_goal.as_deref().unwrap_or("")
         );
     }
@@ -457,6 +481,7 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
             "goalCount": session.goal_count,
             "id": session.id,
             "lastGoal": session.last_goal,
+            "resultPath": paths.result_path,
             "statePath": paths.state_path,
             "status": session.status,
             "transcriptPath": paths.transcript_path
@@ -1200,7 +1225,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 15] = [
+    let exclusive_modes: [(&str, bool); 16] = [
         ("--answer", cli_args.answer),
         ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
@@ -1213,6 +1238,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--skills", cli_args.skills),
         ("--praeparare", cli_args.praeparare),
         ("--state", cli_args.state),
+        ("--ui", cli_args.ui),
         ("--stop", cli_args.stop),
         ("--undo-last", cli_args.undo_last),
         ("--wait", cli_args.wait),
@@ -1244,7 +1270,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
     }
 
     if cli_args.list {
-        if !has_any_session_index(&project) {
+        // --recursive sweeps every registry under the home, so the launch
+        // directory having no registry of its own is not "no sessions".
+        if !cli_args.recursive && !has_any_session_index(&project) {
             if cli_args.json {
                 println!("[]");
                 return 0;
@@ -1254,7 +1282,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             return 0;
         }
 
-        print_session_list(&cwd, cli_args.json, &project);
+        print_session_list(&cwd, cli_args.json, cli_args.recursive, &home.root, &project);
         return 0;
     }
 
@@ -1583,6 +1611,11 @@ pub async fn main(argv: Vec<String>) -> i32 {
     // Headless is the default. The TUI is opt-in via --tui and needs a real
     // terminal on both ends; failing loudly beats silently degrading, because a
     // caller who asked for the TUI wants the TUI.
+    // --ui hands the terminal to bun; it is a mode, not a goal run.
+    if cli_args.ui {
+        return crate::cli::ui::run_ui(&cwd, &home.root, &config.settings, cli_args.port).await;
+    }
+
     if cli_args.tui && !(stdin_is_tty() && stdout_is_tty()) {
         eprintln!("--tui needs an interactive terminal (stdin and stdout must be TTYs).");
         return 1;
@@ -2310,4 +2343,44 @@ mod tests {
         assert_eq!(to_fixed_2(12.3456), "12.35");
         assert_eq!(to_fixed_2(131072.0 / 1_048_576.0), "0.13");
     }
+
+    #[test]
+    fn recursive_listing_includes_subdirectory_sessions_and_excludes_siblings() {
+        use crate::core::sessions::SessionRecord;
+        use crate::watch::data::sessions_under_dir;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sub = root.join("sub");
+        let deeper = sub.join("deeper");
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(&deeper).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let record = |id: &str, dir: &std::path::Path| SessionRecord {
+            sessions_dir: None,
+            created_at: "t".to_string(),
+            cwd: dir.to_string_lossy().into_owned(),
+            goal_count: 1,
+            id: id.to_string(),
+            last_goal: Some("g".to_string()),
+            project_slug: "p".to_string(),
+            status: "idle".to_string(),
+            updated_at: "t".to_string(),
+        };
+
+        // A drip started in `sub` sweeps its own tree: the directory itself,
+        // everything nested below it — but never a sibling directory.
+        let records = vec![
+            record("here", &sub),
+            record("inner", &deeper),
+            record("sibling", &sibling),
+        ];
+
+        // Same filter print_session_list applies for --list --recursive.
+        let kept = sessions_under_dir(&records, &sub.to_string_lossy());
+        let ids: Vec<&str> = kept.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["here", "inner"]);
+    }
+
 }

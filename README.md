@@ -682,6 +682,59 @@ transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
 
 dripw shows sessions started in the current directory or any directory beneath it.
 
+## Browser UI (`drip --ui`)
+
+`drip --ui` serves a browser UI for every session under the current directory
+— the same sessions `drip --tui`, `dripw`, and headless runs use, read from the
+same files. Run it from a repo root and open the printed URL:
+
+```sh
+drip --ui              # first free port from 4141, e.g. http://127.0.0.1:4141/
+drip --ui --port 4200  # pin the port
+```
+
+Run it in several projects at once and each takes the next free port. If a
+local [Caddy](https://caddyserver.com) is running (its admin API on
+`127.0.0.1:2019`, as `brew services start caddy` does), every instance also
+registers itself under one shared hub, so the addresses stay stable no matter
+which port each one landed on:
+
+```
+http://drip.localhost:4140/                 hub: every live UI, with links
+http://drip.localhost:4140/<dir>-<hash>/    one project (label printed at start)
+```
+
+The hub lives in Caddy only while a UI is running: instances add and remove
+their own `@id`-tagged routes through the admin API and never touch your
+Caddyfile; the last one out removes the hub server. `DRIP_UI_HUB` changes the
+hub address (default `drip.localhost:4140`), `DRIP_CADDY_ADMIN` the admin
+endpoint (`off` disables the hub). Without Caddy nothing changes — the direct
+URL is printed either way.
+
+The page lists running and recent sessions (running is lease-derived, exactly
+like `dripw`), tails the selected transcript grouped by iteration, and shows
+the task ledger, token totals, and context pressure (latest prompt tokens
+against the active profile's `max_context_tokens`). From the UI you can start
+a goal, message a running agent, stop it, or resume an idle session — each is
+an ordinary `drip` invocation (`--json --detach`, `--send`, `--stop`,
+`--resume`), so anything the UI starts is visible to every other surface.
+
+How it runs: the web app ships inside the `drip` binary and is unpacked to
+`~/.drip/ui/<version>/` on first use, where `bun install` runs once; nothing is
+written into the project directory. `bun` must be on your PATH
+(https://bun.sh). The Bun server is a thin bridge — it reads session files and
+invokes the drip binary; there is no HTTP server in the Rust crate. Its
+configuration is the environment drip hands it: `DRIP_BIN`, `DRIP_CWD`,
+`DRIP_HOME`, `DRIP_UI_VERSION`, `DRIP_UI_PORT` (only with `--port`), and
+`DRIP_MAX_CONTEXT_TOKENS`, plus the hub settings above. The page is bundled by
+Bun on first request with relative asset paths, which is what lets one
+instance serve both its own root and its hub prefix.
+
+The session list comes from `drip --list --json --recursive`, which is also
+available on its own: `--recursive` widens `--list` from this project to every
+session started in the current directory or any directory beneath it (across
+projects, so worktrees count), and each JSON row carries its `cwd`.
+
 ## Custom status line
 
 

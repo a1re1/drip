@@ -25,4 +25,5 @@ pub mod session_run;
 pub mod skills;
 pub mod terminal;
 pub mod transcript;
+pub mod ui;
 pub mod follow;

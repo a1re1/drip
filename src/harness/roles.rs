@@ -70,6 +70,10 @@ pub struct HarnessRoleRuntime {
 	/// Already-composed prompt material (role instructions + skill sections) appended to the system prompt for this role's loops.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub system_prompt_suffix: Option<String>,
+	/// MCP server names this role's loops may use, copied through from the
+	/// role definition (`mcpServers`); None lets the run-level set decide.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub mcp_servers: Option<Vec<String>>,
 	/// Workspace tool allowlist. Omitted means every loaded tool; an empty array means no workspace tools (harness ops always remain).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub tool_names: Option<Vec<String>>,
@@ -225,6 +229,7 @@ mod tests {
 				route: None,
 				system_prompt_suffix: None,
 				tool_names: None,
+				mcp_servers: None,
 				verified_by: None,
 				blind: false,
 			}

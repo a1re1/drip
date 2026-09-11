@@ -30,7 +30,8 @@ use crate::cli::marketplaces::{
 };
 use crate::cli::mentions::resolve_goal_mentions;
 use crate::cli::queue::{append_queued_goal, drain_queued_goals, pending_queued_goals, DrainError, QueuedGoal};
-use crate::cli::roles::{resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs, RoleSetupSource};
+use crate::cli::roles::{referenced_mcp_servers, resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs, RoleSetupSource};
+use crate::tools::mcp::{client::McpClient, config::load_mcp_servers, mcp_tool_definitions};
 use crate::cli::run_record::{load_run_record, RunRecord};
 use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
 use crate::cli::skills::{
@@ -863,7 +864,12 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
     let skills_pool = discover_all_skills(Path::new(args.cwd), args.home).unwrap_or_default();
     let marketplace_roles = list_enabled_marketplace_roles(Path::new(args.cwd), args.home).unwrap_or_default();
-    let role_setup = resolve_role_setup(&ResolveRoleSetupArgs {
+    // The configured MCP server set (global `mcpServers` merged with
+    // <cwd>/.drip/mcp.json, project wins) is read once here: roles validate
+    // their `mcpServers` against its names, and the spawn loop below looks up
+    // commands in it.
+    let mcp_configured = load_mcp_servers(&args.config.mcp_servers, Path::new(args.cwd));
+    let mut role_args = ResolveRoleSetupArgs {
         config: &args.config,
         cwd: args.cwd.to_string(),
         env: Some(&merged_env),
@@ -880,7 +886,47 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             .map(|tool| tool.name.clone())
             .chain(std::iter::once("DELEGATE".to_string()))
             .collect(),
-    });
+        mcp_server_names: mcp_configured.keys().cloned().collect(),
+    };
+
+    // MCP client wiring (goal sessions only; --plan keeps its reader-only
+    // surface and never sees these). The run-level gate is the CLI's alone:
+    // --no-mcp is a hard off, --mcp is the set for loops whose role sets no
+    // mcpServers, and neither means the roles decide. Every server any role
+    // in play asks for is spawned once here, so the pack the roles are
+    // validated against already carries its tools. Never fatal — a dead or
+    // unconfigured server warns and its tools stay unavailable.
+    let mcp_run_gate: Option<Vec<String>> = if args.cli_args.no_mcp {
+        Some(Vec::new())
+    } else if args.cli_args.mcp.is_empty() {
+        None
+    } else {
+        Some(args.cli_args.mcp.clone())
+    };
+    let mut mcp_clients: Vec<Arc<std::sync::Mutex<McpClient>>> = Vec::new();
+    if !args.cli_args.no_mcp && !plan {
+        let mut spawn_set: Vec<String> = args.cli_args.mcp.clone();
+        for server in referenced_mcp_servers(&role_args) {
+            if !spawn_set.contains(&server) {
+                spawn_set.push(server);
+            }
+        }
+        for name in &spawn_set {
+            let Some(server_config) = mcp_configured.get(name) else {
+                eprintln!("mcp: server \"{name}\": not in mcpServers config — its tools are unavailable");
+                continue;
+            };
+            match McpClient::spawn(name, server_config, Path::new(args.cwd)) {
+                Ok(client) => mcp_clients.push(Arc::new(std::sync::Mutex::new(client))),
+                Err(error) => eprintln!("mcp: server \"{name}\": {error} — its tools are unavailable"),
+            }
+        }
+    }
+    // Role `tools` allowlists may name MCP__<server>__<tool> entries.
+    role_args
+        .tool_names
+        .extend(mcp_tool_definitions(&mcp_clients).into_iter().map(|tool| tool.name));
+    let role_setup = resolve_role_setup(&role_args);
 
     for issue in &role_setup.issues {
         eprintln!("roles: {issue}");
@@ -924,6 +970,9 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 tool_services: None,
                 tools: base_tools_factory.clone(),
             }));
+            // MCP server tools ride on every goal session; the definitions
+            // come from the clients spawned above (zero when none survived).
+            tools.extend(mcp_tool_definitions(&mcp_clients));
             tools
         }
     };
@@ -941,6 +990,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         // parse_cli_args already applies the --praeparare default budget.
         max_iterations: args.cli_args.max_iterations,
         max_loops: args.cli_args.max_loops,
+        mcp_servers: mcp_run_gate.clone(),
         mentions: Some(resolved.mentions.clone()),
         new_goal: args.cli_args.new_goal,
         no_repo_memory: args.cli_args.no_repo_memory,
@@ -1082,6 +1132,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 // The --praeparare default budget was applied at parse time.
                 max_iterations: queued.max_iterations.or(args.cli_args.max_iterations),
                 max_loops: args.cli_args.max_loops,
+                mcp_servers: mcp_run_gate.clone(),
                 mentions: Some(queued_mentions.mentions.clone()),
                 new_goal: false,
                 no_repo_memory: args.cli_args.no_repo_memory,

@@ -79,6 +79,8 @@ pub struct SessionGoalArgs<'a> {
     pub inference: ResolvedInferenceConfig,
     pub max_iterations: Option<i64>,
     pub max_loops: Option<i64>,
+    /// Run-level MCP gate (`--mcp` / `--no-mcp`), threaded into the harness options.
+    pub mcp_servers: Option<Vec<String>>,
     /// `@name` mentions extracted from the goal, recorded on the transcript goal entry.
     pub mentions: Option<Vec<String>>,
     /// Archive an unfinished ledger and replan instead of continuing it.
@@ -278,6 +280,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         seed_tasks: args.seed_tasks.clone().filter(|tasks| !tasks.is_empty()),
         role_bindings: args.role_bindings.clone(),
         roles: args.roles.clone().filter(|roles| !roles.is_empty()),
+        mcp_servers: args.mcp_servers.clone(),
         signal: args.signal.clone(),
         skills: args.skills,
         state_path: paths.state_path.clone().into(),

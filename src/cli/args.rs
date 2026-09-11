@@ -76,6 +76,11 @@ pub struct ParsedCliArgs {
     pub allow_destructive: bool,
     /// Opt this run into network access (enables the FETCH tool).
     pub allow_net: bool,
+    /// MCP servers to expose for runs whose role does not set mcpServers
+    /// (repeatable --mcp, comma-separated).
+    pub mcp: Vec<String>,
+    /// Spawn no MCP servers and expose no MCP tools, regardless of roles.
+    pub no_mcp: bool,
     /// Opt this run into operator clarification surveys (enables the ask_user tool).
     pub ask: bool,
     /// Seconds a blocked ask_user survey waits for answers before ending the run (default 900).
@@ -231,6 +236,8 @@ impl Default for ParsedCliArgs {
             roles_preset_or_path: None,
             allow_destructive: false,
             allow_net: false,
+            mcp: Vec::new(),
+            no_mcp: false,
             ask: false,
             ask_timeout_secs: None,
             reference_roots: Vec::new(),
@@ -663,6 +670,23 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--allow-net" => {
                 parsed.allow_net = true;
             }
+            "--mcp" => {
+                if let Some(value) = take_required_value(argv, index, "--mcp", &mut parsed.errors) {
+                    // Repeatable, and a single occurrence may list several
+                    // comma-separated server names. Deduplicated: a repeated
+                    // name must not spawn twice or register its tools twice.
+                    for name in value.split(',') {
+                        let name = name.trim();
+                        if !name.is_empty() && !parsed.mcp.iter().any(|seen| seen == name) {
+                            parsed.mcp.push(name.to_string());
+                        }
+                    }
+                    index += 1;
+                }
+            }
+            "--no-mcp" => {
+                parsed.no_mcp = true;
+            }
             "--ask" => {
                 parsed.ask = true;
             }
@@ -1084,6 +1108,26 @@ mod tests {
     fn parse(flags: &[&str]) -> ParsedCliArgs {
         let argv: Vec<String> = flags.iter().map(|s| s.to_string()).collect();
         parse_cli_args(&argv)
+    }
+
+    // --- MCP flags ---
+
+    #[test]
+    fn mcp_flag_splits_commas_repeats_and_dedupes() {
+        let parsed = parse(&["--mcp", "a, b,", "--mcp", "a", "--mcp", "c", "goal"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.mcp, vec!["a", "b", "c"]);
+        assert!(!parsed.no_mcp);
+        assert_eq!(parsed.goal.as_deref(), Some("goal"));
+    }
+
+    #[test]
+    fn no_mcp_flag_sets_no_mcp() {
+        let parsed = parse(&["--no-mcp", "goal"]);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(parsed.no_mcp);
+        assert!(parsed.mcp.is_empty());
+        assert!(parse(&["--mcp"]).errors.iter().any(|problem| problem.contains("--mcp")));
     }
 
     // --- strict argument validation ---

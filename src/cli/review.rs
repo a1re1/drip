@@ -746,6 +746,8 @@ impl ReviewContext<'_> {
             no_review: false,
             tools: self.review_tools(),
             tool_services: None,
+            // Review children keep the reader-only tool surface; no MCP servers.
+            mcp_servers: None,
         });
 
         timebox.release();

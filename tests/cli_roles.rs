@@ -35,6 +35,7 @@ fn default_config() -> CliConfig {
     hooks: drip::harness::hooks::HooksConfig::default(),
         path: None,
         settings: indexmap::IndexMap::new(),
+        mcp_servers: std::collections::BTreeMap::new(),
         version: Some(1),
     }
 }
@@ -280,6 +281,7 @@ fn load_roles_from_file_reads_the_replanning_binding() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
     let bindings = setup.bindings.as_ref().unwrap();
     assert_eq!(bindings.planning.as_deref(), Some("architect"));
@@ -305,6 +307,7 @@ fn load_roles_from_file_reads_the_replanning_binding() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
     assert_eq!(setup.bindings.as_ref().unwrap().replanning.as_deref(), Some("scout"));
     assert!(setup.issues.is_empty(), "{:?}", setup.issues);
@@ -413,6 +416,7 @@ fn resolve_role_setup_reports_and_disarms_dangling_references() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec!["READ".to_string()],
+        mcp_server_names: vec![],
     });
 
     let worker = setup.roles.iter().find(|r| r.name == "worker").unwrap();
@@ -455,6 +459,7 @@ fn resolve_role_setup_bindings_precedence_extra_bindings_over_config() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
 
     let bindings = setup.bindings.as_ref().unwrap();
@@ -513,6 +518,7 @@ fn resolve_role_setup_project_roles_json_override_config_roles_and_bindings() {
         marketplace_roles: Some(marketplace_roles),
         skills: vec![],
         tool_names: vec!["READ".to_string(), "DIR".to_string()],
+        mcp_server_names: vec![],
     });
 
     let reviewer = setup.roles.iter().find(|r| r.name == "reviewer").unwrap();
@@ -562,6 +568,7 @@ fn resolve_role_setup_bad_json_in_settings_produces_issues() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
 
     assert!(setup.roles.is_empty());
@@ -629,6 +636,7 @@ fn resolve_role_setup_extra_roles_override_config_roles() {
     use drip::cli::roles::RoleDefinition;
     let extra_roles = vec![RoleDefinition {
         blind: false,
+        mcp_servers: None,
         description: None,
         r#loop: None,
         model: None,
@@ -648,6 +656,7 @@ fn resolve_role_setup_extra_roles_override_config_roles() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec!["READ".to_string(), "DIR".to_string()],
+        mcp_server_names: vec![],
     });
 
     // Flag roles replace same-named config roles wholesale
@@ -692,6 +701,7 @@ fn resolve_role_setup_extra_bindings_override_config_bindings() {
         marketplace_roles: None,
         skills: vec![],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
 
     // Extra bindings win per key; keys they leave unset fall back to config
@@ -728,6 +738,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
         env: None,
         extra_roles: Some(vec![RoleDefinition {
             blind: false,
+        mcp_servers: None,
             description: None,
             r#loop: None,
             model: None,
@@ -741,6 +752,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
         marketplace_roles: None,
         skills: vec![skill],
         tool_names: vec![],
+        mcp_server_names: vec![],
     });
     assert!(setup.issues.is_empty(), "unexpected issues: {:?}", setup.issues);
     setup.roles.into_iter().find(|r| r.name == "reviewer").unwrap()

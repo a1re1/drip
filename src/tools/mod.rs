@@ -8,6 +8,7 @@ pub mod command_policy;
 pub mod execute;
 pub mod helpers;
 pub mod loader;
+pub mod mcp;
 pub mod pack;
 pub mod patch_journal;
 pub mod types;

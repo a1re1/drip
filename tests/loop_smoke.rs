@@ -283,6 +283,7 @@ fn role(name: &str) -> drip::harness::roles::HarnessRoleRuntime {
         route: None,
         system_prompt_suffix: None,
         tool_names: None,
+        mcp_servers: None,
         verified_by: None,
         blind: false,
     }

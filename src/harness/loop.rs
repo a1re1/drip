@@ -1606,6 +1606,38 @@ pub struct OperatorInboxEntry {
 pub type NowFn = Arc<dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync>;
 pub type EmitFn = Arc<dyn Fn(HarnessEvent) + Send + Sync>;
 
+/// The MCP server set a loop may call: the role's `mcpServers` when it sets
+/// one, else the run-level `--mcp` set. A run-level empty set (`--no-mcp`) is
+/// a hard off that wins over any role.
+pub fn effective_mcp_servers(
+    role: Option<&HarnessRoleRuntime>,
+    run_gate: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    if run_gate.as_ref().map(|servers| servers.is_empty()).unwrap_or(false) {
+        return Some(Vec::new());
+    }
+    match role.and_then(|role| role.mcp_servers.as_ref()) {
+        Some(servers) => Some(servers.clone()),
+        None => run_gate,
+    }
+}
+
+/// Whether a workspace tool belongs in a loop's tool surface — the per-loop
+/// half of filterToolsForRole. Non-MCP tools follow the role's `tool_names`
+/// allowlist (None = every tool). MCP tools (`MCP__<server>__<tool>`, see
+/// `mcp_server_of`) ignore that allowlist: `mcpServers` is their opt-in, so
+/// they are in scope iff their server is in the loop's effective set.
+pub fn loop_allows_tool(
+    tool_name: &str,
+    role_tool_names: Option<&[String]>,
+    mcp_servers_for_loop: Option<&[String]>,
+) -> bool {
+    match crate::tools::mcp::mcp_server_of(tool_name) {
+        None => role_tool_names.map_or(true, |names| names.iter().any(|name| name == tool_name)),
+        Some(server) => mcp_servers_for_loop.map_or(false, |servers| servers.iter().any(|allowed| allowed == server)),
+    }
+}
+
 /// Options for constructing a `SolidStateHarness`. Every optional field is
 /// an `Option`; function-typed fields are trait objects.
 #[derive(Default)]
@@ -1674,6 +1706,9 @@ pub struct SolidStateHarnessOptions {
     pub tool_services: Option<ChatToolRuntimeServices>,
     pub tools: Vec<ChatToolDefinition>,
     pub url: Option<String>,
+    /// Run-level MCP gate: `Some(empty)` = `--no-mcp` (no loop sees MCP tools); `Some(names)` =
+    /// `--mcp` servers for loops whose role does not set `mcpServers`; `None` = roles decide.
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Bridge for the model caller's `onUsage` / `onRetryWait` / `getIteration`
@@ -2988,23 +3023,25 @@ impl HarnessRun {
                 self.replan_escalated,
             ),
         };
-        // filterToolsForRole.
-        let loop_tool_indexes: Vec<usize> = match role
-            .as_ref()
-            .and_then(|r| r.tool_names.as_ref())
-        {
-            None => (0..self.tools.len()).collect(),
-            Some(tool_names) => self
-                .tools
-                .iter()
-                .enumerate()
-                .filter(|(_, tool)| tool_names.contains(&tool.name))
-                .map(|(index, _)| index)
-                .collect(),
-        };
+        // filterToolsForRole. Non-MCP tools keep the plain tool_names
+        // behaviour; MCP tools (MCP__<server>__<tool>) additionally need their
+        // server in the loop's effective set: the role's mcpServers when it
+        // sets one, else the run-level --mcp set, else none.
+        let mcp_servers_for_loop =
+            effective_mcp_servers(role.as_ref(), self.options.mcp_servers.clone());
+        let role_tool_names = role.as_ref().and_then(|r| r.tool_names.as_deref());
+        let loop_tool_indexes: Vec<usize> = self
+            .tools
+            .iter()
+            .enumerate()
+            .filter(|(_, tool)| loop_allows_tool(&tool.name, role_tool_names, mcp_servers_for_loop.as_deref()))
+            .map(|(index, _)| index)
+            .collect();
         // transport tools.
-        let loop_transport_tools: Vec<OpenAICompatibleRequestTool> =
-            if role.as_ref().and_then(|r| r.tool_names.as_ref()).is_some() {
+        // The transport list must agree with the index list: the cached
+        // default covers the full pack only, so rebuild whenever the role
+        // allowlist or the MCP gate narrowed it.
+        let loop_transport_tools: Vec<OpenAICompatibleRequestTool> = if loop_tool_indexes.len() != self.tools.len() {
                 let mut tools = self
                     .tools
                     .iter()
@@ -5623,5 +5660,57 @@ mod review_opt_out_tests {
         start_follow_up_goal(&mut state, "Harden the draft: full rigor");
         assert_eq!(state.review_opt_out, None);
         assert_eq!(state.opt_out_warning_emitted, None);
+    }
+
+    fn mcp_role(mcp_servers: Option<Vec<&str>>, tool_names: Option<Vec<&str>>) -> HarnessRoleRuntime {
+        HarnessRoleRuntime {
+            description: None,
+            r#loop: None,
+            name: "author".to_string(),
+            route: None,
+            system_prompt_suffix: None,
+            tool_names: tool_names.map(|names| names.into_iter().map(String::from).collect()),
+            verified_by: None,
+            blind: false,
+            mcp_servers: mcp_servers.map(|names| names.into_iter().map(String::from).collect()),
+        }
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    // The role's mcpServers wins over the run-level --mcp set; a role without
+    // one inherits the run-level set; --no-mcp (Some(empty)) beats both.
+    #[test]
+    fn effective_mcp_servers_prefers_the_role_then_the_run_gate() {
+        let role = mcp_role(Some(vec!["github"]), None);
+        assert_eq!(
+            effective_mcp_servers(Some(&role), Some(strings(&["files"]))),
+            Some(strings(&["github"]))
+        );
+        let unscoped = mcp_role(None, None);
+        assert_eq!(
+            effective_mcp_servers(Some(&unscoped), Some(strings(&["files"]))),
+            Some(strings(&["files"]))
+        );
+        assert_eq!(effective_mcp_servers(None, Some(strings(&["files"]))), Some(strings(&["files"])));
+        assert_eq!(effective_mcp_servers(Some(&unscoped), None), None);
+        assert_eq!(effective_mcp_servers(Some(&role), Some(Vec::new())), Some(Vec::new()));
+    }
+
+    // MCP tools are gated by their server alone — the role's tool allowlist
+    // never has to name them — while builtins follow the allowlist as before.
+    #[test]
+    fn loop_allows_tool_scopes_mcp_tools_by_server_and_builtins_by_allowlist() {
+        let allowlist = strings(&["READ"]);
+        let scope = strings(&["github"]);
+        assert!(loop_allows_tool("READ", Some(&allowlist), Some(&scope)));
+        assert!(!loop_allows_tool("PATCH", Some(&allowlist), Some(&scope)));
+        assert!(loop_allows_tool("PATCH", None, Some(&scope)));
+        assert!(loop_allows_tool("MCP__github__search", Some(&allowlist), Some(&scope)));
+        assert!(!loop_allows_tool("MCP__files__read", Some(&allowlist), Some(&scope)));
+        assert!(!loop_allows_tool("MCP__github__search", None, None));
+        assert!(!loop_allows_tool("MCP__github__search", None, Some(&[])));
     }
 }

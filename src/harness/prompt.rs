@@ -542,6 +542,12 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         } else {
             "instruction: Complete the current task now, then call finish_task. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked. If what is missing can only come from the operator (original data, credentials, a decision), block with blockedOn: \"operator\" and say exactly what is needed — do not keep searching for it.".to_string()
         });
+        for task in &state.tasks {
+            if let Some(recovery_line) = format_task_recovery_line(task) {
+                task_sections.push(recovery_line);
+            }
+        }
+
         sections.push(task_sections.join("\n"));
     } else if state.tasks.is_empty() {
         sections.push("instruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.".to_string());
@@ -554,6 +560,43 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
     }
 
     sections.join("\n\n")
+}
+
+/// Bounded recovery-evidence line for the replanner: the most recent recorded
+/// outcome for this task (blocked/dropped/exhausted/reopened/operator reply)
+/// plus the total event count. It names what happened — it is not proof of
+/// which code or tools were tried — so the planner resolves existing task ids
+/// with changed evidence instead of re-deriving identical work. None when the
+/// task has no recovery history (e.g. fresh planning runs).
+fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
+    let history = task.recovery_history.as_ref()?;
+    let last = history.last()?;
+
+    let action = match last.action {
+        crate::core::types::HarnessRecoveryAction::Blocked => "blocked",
+        crate::core::types::HarnessRecoveryAction::Dropped => "dropped",
+        crate::core::types::HarnessRecoveryAction::Exhausted => "retries exhausted",
+        crate::core::types::HarnessRecoveryAction::Reopened => "reopened for a retry that then ran",
+        crate::core::types::HarnessRecoveryAction::OperatorReply => "operator replied",
+    };
+
+    let mut line = format!(
+        "recovery evidence: task \"{}\" was last {} at iteration {}",
+        last.task_title.as_deref().unwrap_or(&task.title),
+        action,
+        last.at_iteration
+    );
+
+    if let Some(detail) = last.detail.as_deref() {
+        line.push_str(": ");
+        line.push_str(detail);
+    }
+
+    if history.len() > 1 {
+        line.push_str(&format!(" ({} recovery events recorded)", history.len()));
+    }
+
+    Some(line)
 }
 
 pub fn build_iteration_messages(state: &HarnessState, args: &IterationMessagesArgs<'_>) -> Vec<TransportRequestMessage> {
@@ -1136,5 +1179,164 @@ mod tests {
              \x20 [ ] task-2: New task\n\
              \x20 run summary: all green"
         );
+    }
+
+    fn recovery_task(history: serde_json::Value) -> HarnessTask {
+        serde_json::from_value(json!({
+            "createdAtIteration": 1,
+            "stallCount": 0,
+            "notes": [],
+            "status": "blocked",
+            "title": "Flaky step",
+            "id": "task-1",
+            "activations": 0,
+            "finishedAtIteration": null,
+            "recoveryHistory": history
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn recovery_line_absent_without_history() {
+        let task = serde_json::from_value::<HarnessTask>(json!({
+            "createdAtIteration": 1,
+            "stallCount": 0,
+            "notes": [],
+            "status": "pending",
+            "title": "Fresh work",
+            "id": "task-1",
+            "activations": 0,
+            "finishedAtIteration": null
+        }))
+        .unwrap();
+
+        assert!(format_task_recovery_line(&task).is_none());
+    }
+
+    #[test]
+    fn recovery_line_reports_blocked_failure_with_detail() {
+        let task = recovery_task(json!([{
+            "action": "blocked",
+            "taskTitle": "Flaky step",
+            "detail": "tests failed the same way",
+            "atIteration": 7
+        }]));
+
+        assert_eq!(
+            format_task_recovery_line(&task).as_deref(),
+            Some("recovery evidence: task \"Flaky step\" was last blocked at iteration 7: tests failed the same way")
+        );
+    }
+
+    #[test]
+    fn recovery_line_covers_dropped_tasks_with_event_count() {
+        let task = recovery_task(json!([
+            {"action": "blocked", "taskTitle": "Flaky step", "detail": "fail a", "atIteration": 3},
+            {"action": "reopened", "taskTitle": "Flaky step", "atIteration": 4},
+            {"action": "dropped", "taskTitle": "Flaky step", "detail": "no longer needed", "atIteration": 5}
+        ]));
+        let line = format_task_recovery_line(&task).unwrap();
+
+        assert!(line.contains("was last dropped"), "line: {line}");
+        assert!(line.contains("(3 recovery events recorded)"), "line: {line}");
+    }
+
+    #[test]
+    fn recovery_line_labels_exhausted_and_operator_reply() {
+        let exhausted = recovery_task(json!([
+            {"action": "exhausted", "taskTitle": "Flaky step", "atIteration": 9}
+        ]));
+        assert!(
+            format_task_recovery_line(&exhausted)
+                .unwrap()
+                .contains("was last retries exhausted")
+        );
+
+        let replied = recovery_task(json!([
+            {"action": "operator-reply", "taskTitle": "Flaky step", "detail": "originals are in /backup", "atIteration": 11}
+        ]));
+        assert!(
+            format_task_recovery_line(&replied)
+                .unwrap()
+                .contains("was last operator replied")
+        );
+    }
+
+    #[test]
+    fn planner_prompt_carries_recovery_evidence_only_when_it_exists() {
+        let mut state = HarnessState::default();
+        state.tasks = serde_json::from_value(json!([
+                {
+                    "createdAtIteration": 1,
+                    "stallCount": 0,
+                    "notes": [],
+                    "status": "blocked",
+                    "title": "Flaky step",
+                    "id": "task-1",
+                    "activations": 2,
+                    "finishedAtIteration": null,
+                    "recoveryHistory": [
+                        {"action": "blocked", "taskTitle": "Flaky step", "detail": "tests failed the same way", "atIteration": 5},
+                        {"action": "reopened", "taskTitle": "Flaky step", "atIteration": 6}
+                    ]
+                },
+                {
+                    "createdAtIteration": 1,
+                    "stallCount": 0,
+                    "notes": [],
+                    "status": "pending",
+                    "title": "Fresh work",
+                    "id": "task-2",
+                    "activations": 0,
+                    "finishedAtIteration": null
+                }
+        ]))
+        .unwrap();
+
+        let prompt = build_iteration_user_message(
+            &state,
+            &IterationUserMessageArgs {
+                current_task: Some(&state.tasks[0]),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            prompt.contains("recovery evidence: task \"Flaky step\" was last reopened"),
+            "planner prompt must carry the task's recovery evidence"
+        );
+        assert!(
+            prompt.contains("(2 recovery events recorded)"),
+            "the count of recorded outcomes is surfaced to the planner"
+        );
+        assert!(
+            !prompt.contains("tests failed the same way"),
+            "only the most recent outcome is rendered, not a full history dump"
+        );
+        assert_eq!(
+            prompt.matches("recovery evidence:").count(),
+            1,
+            "tasks without history must not produce recovery lines"
+        );
+    }
+
+    #[test]
+    fn recovery_line_stays_bounded_with_full_history() {
+        let long_detail = "x".repeat(200);
+        let events: Vec<serde_json::Value> = (1..=8)
+            .map(|i| {
+                json!({
+                    "action": "blocked",
+                    "taskTitle": "Bounded",
+                    "detail": long_detail.clone(),
+                    "atIteration": i
+                })
+            })
+            .collect();
+        let task = recovery_task(json!(events));
+        let line = format_task_recovery_line(&task).unwrap();
+
+        assert!(line.contains("(8 recovery events recorded)"), "line: {line}");
+        assert!(line.len() < 350, "line should stay bounded, got {}", line.len());
     }
 }

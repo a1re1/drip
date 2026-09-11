@@ -1,18 +1,42 @@
-// App shell: three columns (sessions rail, timeline + composer, detail panel)
-// over a status bar. All data comes from polling — the server is a thin
-// bridge over drip's session files, so there is nothing to subscribe to.
+// App shell: a message stream with a floating header, flanked by a toggled
+// sessions sidebar on the left and a toggled details column on the right.
+// All data comes from polling — the server is a thin bridge over drip's
+// session files, so there is nothing to subscribe to.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { latestPromptTokens } from "../lib/transcript";
 import { api, type Bootstrap, type SessionLists, type SessionRow, type StateResponse, type TranscriptEntry } from "./api";
-import { Composer } from "./components/composer";
+import { Composer, type ComposerMode } from "./components/composer";
 import { DetailPanel } from "./components/detail-panel";
+import { Icon, IconButton } from "./components/icons";
 import { SessionsRail } from "./components/sessions-rail";
-import { StatusBar } from "./components/status-bar";
-import { Timeline } from "./components/timeline";
+import { PollCaption, StatusToast } from "./components/status-bar";
+import { fmtTokens, Timeline } from "./components/timeline";
 
 const EMPTY_LISTS: SessionLists = { running: [], recent: [] };
 const SESSIONS_POLL_MS = 2000;
 const TRANSCRIPT_POLL_MS = 1000;
 const STATE_POLL_MS = 2000;
+
+/** A per-browser layout preference; storage may be unavailable or throw. */
+function usePreference(key: string, fallback: boolean): [boolean, (next: boolean) => void] {
+  const [value, setValue] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored === null ? fallback : stored === "1";
+    } catch {
+      return fallback;
+    }
+  });
+  const update = (next: boolean) => {
+    setValue(next);
+    try {
+      localStorage.setItem(key, next ? "1" : "0");
+    } catch {
+      // A private window or blocked storage: the toggle still works for this page load.
+    }
+  };
+  return [value, update];
+}
 
 export function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -26,6 +50,8 @@ export function App() {
   // A run started from this page, shown until the next list poll knows it.
   const [pending, setPending] = useState<SessionRow | null>(null);
   const [lastPoll, setLastPoll] = useState<number | null>(null);
+  const [showSidebar, setShowSidebar] = usePreference("drip-ui.sidebar", false);
+  const [showDetails, setShowDetails] = usePreference("drip-ui.details", false);
   const offsetRef = useRef(0);
   const autoSelected = useRef(false);
 
@@ -33,7 +59,7 @@ export function App() {
     api.bootstrap().then(setBootstrap).catch((e: Error) => setError(e.message));
   }, []);
 
-  // Sessions rail.
+  // Sessions list.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -121,7 +147,7 @@ export function App() {
   }, [lists, pending]);
 
   // Runs one operator action; resolves true on success so callers can decide
-  // whether to clear a draft. Failures land in the status bar.
+  // whether to clear a draft. Failures land in the toast.
   const act = useCallback(async (work: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     setError(null);
@@ -157,7 +183,7 @@ export function App() {
       });
       setSelectedId(handle.sessionId);
     });
-  const handleSubmit = (text: string) => {
+  const handleMessage = (text: string) => {
     if (!selectedId) return Promise.resolve(false);
     return act(async () => {
       const outcome = await api.message(selectedId, text);
@@ -168,40 +194,88 @@ export function App() {
     if (selectedId) void act(() => api.stop(selectedId));
   };
 
+  const mode: ComposerMode = selectedId === null ? "new" : isRunning ? "running" : "idle";
+  const state = sessionState?.state ?? null;
+  const prompt = latestPromptTokens(entries);
+  const statusLine = selected
+    ? [
+        isRunning ? "Running" : selected.status,
+        state?.["iteration"] !== undefined ? `iteration ${String(state["iteration"])}` : "",
+        state?.["loop"] !== undefined ? `loop ${String(state["loop"])}` : "",
+        prompt !== null ? `${fmtTokens(prompt)} ctx` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "Describe a goal below to start one";
+
   return (
-    <div className="flex h-screen flex-col bg-neutral-950 text-neutral-200">
-      <div className="flex min-h-0 flex-1">
-        <SessionsRail lists={lists} selectedId={selectedId} onSelect={setSelectedId} onRun={handleRun} busy={busy} />
-        <main className="flex min-w-0 flex-1 flex-col border-x border-neutral-800">
-          <header className="flex items-center gap-3 border-b border-neutral-800 px-4 py-2 text-sm">
-            {selected ? (
-              <>
-                <span className={`h-2 w-2 rounded-full ${isRunning ? "bg-emerald-400" : "bg-neutral-600"}`} />
-                <span className="font-mono text-neutral-400">{selected.id.slice(0, 8)}</span>
-                <span className="truncate text-neutral-300">{selected.lastGoal ?? "(no goal yet)"}</span>
-                <span className="ml-auto text-xs text-neutral-500">{isRunning ? `running · pid ${selected.pid ?? "?"}` : selected.status}</span>
-              </>
-            ) : (
-              <span className="text-neutral-500">Select a session, or start one from the rail.</span>
-            )}
-          </header>
-          <Timeline entries={entries} />
-          <Composer
-            key={selectedId ?? "none"}
-            disabled={!selectedId || busy}
-            isRunning={isRunning}
-            onSubmit={handleSubmit}
-            onStop={handleStop}
-          />
-        </main>
-        <DetailPanel
-          row={selected}
-          state={sessionState?.state ?? null}
-          entries={entries}
-          maxContextTokens={bootstrap?.maxContextTokens ?? null}
+    <div className="fixed inset-0 flex" style={{ background: "var(--material-opaque)" }}>
+      {showSidebar && (
+        <SessionsRail
+          lists={lists}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onNew={() => setSelectedId(null)}
+          onHide={() => setShowSidebar(false)}
+        />
+      )}
+
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        {/* Floating header: controls left and right, a status pill in the middle. */}
+        <div
+          className="pointer-events-none absolute left-0 right-0 top-0 z-[5] grid items-start"
+          style={{ gridTemplateColumns: "1fr auto 1fr", gap: 12, padding: "10px 14px" }}
+        >
+          <div className="pointer-events-auto flex gap-1.5">
+            {!showSidebar && <IconButton icon="panel-left" label="Show sessions" size="l" onClick={() => setShowSidebar(true)} />}
+            <IconButton icon="plus" label="New session" size="l" pressed={selectedId === null} onClick={() => setSelectedId(null)} />
+          </div>
+          <div
+            className="glass glass-blur pointer-events-auto flex flex-col items-center"
+            style={{ gap: 1, padding: "6px 14px", borderRadius: "var(--radius-m)", borderColor: "var(--stroke-control)", maxWidth: "min(60vw, 440px)" }}
+          >
+            <div className="t-footnote flex max-w-full items-center gap-1.5 font-semibold whitespace-nowrap">
+              <span
+                className={`shrink-0 rounded-full${isRunning ? " pulse" : ""}`}
+                style={{ width: 7, height: 7, background: isRunning ? "var(--green)" : selected ? "var(--text-tertiary)" : "var(--accent)" }}
+              />
+              <span className="truncate">{selected ? (selected.lastGoal ?? "(no goal yet)") : "New session"}</span>
+              {selected && (
+                <button
+                  type="button"
+                  className="flex shrink-0 items-center"
+                  title="Toggle details"
+                  aria-label="Toggle details"
+                  onClick={() => setShowDetails(!showDetails)}
+                  style={{ color: "var(--text-tertiary)", background: "none", border: 0, padding: 0, cursor: "pointer" }}
+                >
+                  <Icon name="chevron-right" size={11} />
+                </button>
+              )}
+            </div>
+            <div className="t-caption c-secondary whitespace-nowrap">{statusLine}</div>
+          </div>
+          <div className="pointer-events-auto flex justify-end gap-1.5">
+            {isRunning && <IconButton icon="pause" label="Stop agent" size="l" disabled={busy} onClick={handleStop} />}
+            <IconButton icon="list" label="Toggle details" size="l" pressed={showDetails} onClick={() => setShowDetails(!showDetails)} />
+          </div>
+        </div>
+
+        {/* The toast anchors to the stream's bottom edge, so it floats just above the composer whatever its height. */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <Timeline entries={entries} isRunning={isRunning} footer={<PollCaption lastPoll={lastPoll} />} />
+          <StatusToast error={error} notice={notice} />
+        </div>
+        <Composer
+          key={selectedId ?? "none"}
+          mode={mode}
+          disabled={busy}
+          onSubmit={mode === "new" ? handleRun : handleMessage}
+          onStop={handleStop}
         />
       </div>
-      <StatusBar bootstrap={bootstrap} lastPoll={lastPoll} error={error} notice={notice} />
+
+      {showDetails && <DetailPanel row={selected} state={state} entries={entries} bootstrap={bootstrap} />}
     </div>
   );
 }

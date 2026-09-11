@@ -15,6 +15,8 @@ USAGE
 	drip --bash "<cmd>" --context "..."  Run a shell command and print a short distillation of its
 	                              output guided by --context, instead of the raw stream
 	drip --list                    List sessions recorded for this directory
+	drip --list --recursive       List sessions for this directory tree (and below)
+	drip --ui                     Serve the browser UI for sessions under this directory
 	drip --state [id]              Print harness state summary for the latest (or given) session
 	drip --result [id]             Replay the persisted outcome of a session's most recent run
 	drip --inspect [id]            Per-goal run analytics (wall time, tool stats, steering)
@@ -39,6 +41,23 @@ OPTIONS
 	                              with a live lease are never touched. Combine with --dry-run to
 	                              preview without writing and --json for machine-readable output.
 	--older-than <days>           Age threshold for --gc (positive integer, default 14)
+	--ui                          Serve the browser UI for the sessions under this
+	                              directory: drip unpacks a small Bun/React app under
+	                              ~/.drip/ui/ and runs it with bun (installed from
+	                              https://bun.sh, needed on PATH). Sessions it starts
+	                              are ordinary detached runs, shared with --tui and
+	                              dripw. With a local Caddy running, every UI also
+	                              registers under one hub (http://drip.localhost:4140/)
+	                              so several projects share a stable address. Nothing
+	                              is written into this directory.
+	--port <port>                 Pin the port --ui listens on. Without it the UI
+	                              takes the first free port from 4141, so several
+	                              projects can run at once; only valid with --ui.
+	--recursive                   With --list, also include sessions whose launch
+	                              directory is a subdirectory of this one (from every
+	                              registry under the drip home); only valid together
+	                              with --list. Add --json for the same row shape with
+	                              a "cwd" field on every row.
 	--review                      Review the diff against --base in review units, then synthesize
 	                              one holistic review. Read-only: it never edits, commits, or posts
 	                              to GitHub. Changed files are planned into units — docs/manifests
@@ -306,6 +325,9 @@ mod tests {
             "--continue",
             "--resume",
             "--list",
+            "--recursive",
+            "--ui",
+            "--port",
             "--state",
             "--send",
             "--follow",

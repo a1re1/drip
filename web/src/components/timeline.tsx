@@ -401,6 +401,7 @@ export function Timeline({ entries, isRunning, footer }: Props) {
   const stick = useRef(true);
   const [current, setCurrent] = useState(0);
   const [peek, setPeek] = useState<number | null>(null);
+  const rail = useRef<HTMLDivElement>(null);
   // Peek and scroll state re-render often; the block model only changes with the transcript.
   const blocks = useMemo(() => blocksOf(sectionsOf(entries)), [entries]);
   const turns = useMemo(() => blocks.flatMap((block) => ("turn" in block ? [block.turn] : [])), [blocks]);
@@ -431,18 +432,26 @@ export function Timeline({ entries, isRunning, footer }: Props) {
 
   const peeked = peek !== null ? turns[peek] : undefined;
 
+  // Long sessions have more ticks than the rail is tall: the list scrolls
+  // (scrollbar hidden) and the active tick is kept in view. Turn ids are
+  // dense, so the tick for a turn is the child at its id.
+  useEffect(() => {
+    const tick = rail.current?.children[current];
+    if (tick instanceof HTMLElement) tick.scrollIntoView({ block: "nearest" });
+  }, [current, turns.length]);
+
   return (
     <div className="relative flex min-h-0 flex-1">
       {turns.length > 0 && (
         <div className="absolute left-0 top-0 z-[4] flex items-center justify-center" style={{ bottom: 0, width: 36 }} onMouseLeave={() => setPeek(null)}>
-          <div className="flex flex-col items-start" style={{ gap: 5, padding: "10px 0" }}>
+          <div ref={rail} className="flex max-h-full flex-col items-start" style={{ gap: 5, padding: "10px 0", overflowY: "auto", scrollbarWidth: "none" }}>
             {turns.map((turn) => {
               const active = turn.id === current;
               const hot = turn.id === peek;
               return (
                 <div
                   key={turn.id}
-                  className="flex cursor-pointer items-center justify-center"
+                  className="flex shrink-0 cursor-pointer items-center justify-center"
                   style={{ width: 36, height: 9 }}
                   onMouseEnter={() => setPeek(turn.id)}
                   onClick={() => jump(turn.id)}

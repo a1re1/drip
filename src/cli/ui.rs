@@ -36,6 +36,7 @@ pub const UI_FILES: &[(&str, &str)] = &[
     ui_file!("src/app.tsx"),
     ui_file!("src/components/composer.tsx"),
     ui_file!("src/components/detail-panel.tsx"),
+    ui_file!("src/components/icons.tsx"),
     ui_file!("src/components/sessions-rail.tsx"),
     ui_file!("src/components/status-bar.tsx"),
     ui_file!("src/components/timeline.tsx"),

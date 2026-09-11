@@ -1,11 +1,17 @@
-// Center column: the session transcript in file order. Event entries are
-// grouped under "Iteration N" headers; every other entry type renders as its
-// own block. Sticks to the bottom while the reader is already there.
-import { useEffect, useRef } from "react";
+// Center column: the session transcript as a message stream. Operator goals
+// are bubbles on the right, model prose is plain text on the left, and the
+// tool/inference events of one iteration fold into a single glass card of
+// expandable rows. A tick rail on the left peeks and jumps between turns.
+// Sticks to the bottom while the reader is already there.
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { TranscriptEntry } from "../api";
+import { Tag } from "./icons";
 
 interface Props {
   entries: TranscriptEntry[];
+  isRunning: boolean;
+  /** Rendered under the stream, right-aligned (poll health). */
+  footer?: ReactNode;
 }
 
 type EventData = {
@@ -77,161 +83,321 @@ export function fmtTokens(value: number | undefined): string {
   return String(value);
 }
 
-function timeOf(entry: TranscriptEntry): string {
+function dateOf(entry: TranscriptEntry): Date | null {
   const at = entry.at;
-  if (typeof at !== "string") return "";
+  if (typeof at !== "string") return null;
   const parsed = new Date(at);
-  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleTimeString();
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-function Detail({ text }: { text: unknown }) {
-  if (typeof text !== "string" || text.trim() === "") return null;
+function clockOf(entry: TranscriptEntry, seconds: boolean): string {
+  const date = dateOf(entry);
+  if (!date) return "";
+  return date.toLocaleTimeString([], seconds ? { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false } : { hour: "numeric", minute: "2-digit" });
+}
+
+function dayOf(entry: TranscriptEntry): string {
+  const date = dateOf(entry);
+  if (!date) return "";
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  const clock = clockOf(entry, false);
+  return sameDay ? `Today ${clock}` : `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock}`;
+}
+
+const str = (value: unknown): string => (typeof value === "string" ? value : "");
+const firstLine = (value: string): string => value.split("\n", 1)[0] ?? "";
+const clip = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
+
+interface Row {
+  key: string;
+  time: string;
+  tag: string;
+  color: string;
+  text: string;
+  meta: string;
+  detail: string;
+}
+
+const KIND_TAG: Record<string, string> = { "iteration-start": "start", "context-expired": "context", "task-finished": "done", "rate-limited": "wait" };
+
+function colorForKind(kind: string): string {
+  if (kind.startsWith("context")) return "var(--purple)";
+  if (kind.includes("memory") || kind.startsWith("remember")) return "var(--orange)";
+  if (kind.startsWith("task")) return "var(--green)";
+  return "var(--text-tertiary)";
+}
+
+function rowOf(entry: TranscriptEntry, key: string): Row {
+  const time = clockOf(entry, true);
+  if (entry.type !== "event") {
+    let text = str(entry["text"]);
+    if (entry.type === "model") text = [str(entry["model"]), str(entry["provider"])].filter(Boolean).join(" · ");
+    if (entry.type === "skill") text = `${str(entry["name"])} ${entry["enabled"] ? "enabled" : "disabled"}`;
+    return { key, time, tag: entry.type, color: "var(--text-tertiary)", text: clip(firstLine(text), 200), meta: "", detail: text.length > 200 || text.includes("\n") ? text : "" };
+  }
+  const kind = str(entry["kind"]) || "event";
+  const data = (entry["data"] ?? {}) as EventData;
+  const detail = str(entry["detail"]);
+  switch (kind) {
+    case "tool-call":
+      return {
+        key,
+        time,
+        tag: data.toolName ?? "tool",
+        color: "var(--teal)",
+        text: [data.taskId, clip(firstLine(detail), 200)].filter(Boolean).join(" · "),
+        meta: "",
+        detail,
+      };
+    case "tool-result":
+      return {
+        key,
+        time,
+        tag: data.failed ? "failed" : "ok",
+        color: data.failed ? "var(--red)" : "var(--green)",
+        text: `${data.toolName ?? "tool"} ${data.failed ? "failed" : "ok"}`,
+        meta: typeof data.durationMs === "number" ? `${data.durationMs}ms` : "",
+        detail,
+      };
+    case "inference": {
+      const lines = [
+        `model ${data.model ?? "?"}${data.provider ? ` via ${data.provider}` : ""}`,
+        `prompt ${(data.promptTokens ?? 0).toLocaleString()} · completion ${(data.completionTokens ?? 0).toLocaleString()} · cache read ${(data.cacheReadTokens ?? 0).toLocaleString()} · cache write ${(data.cacheCreationTokens ?? 0).toLocaleString()}`,
+      ];
+      if (typeof data.latencyMs === "number") lines.push(`latency ${(data.latencyMs / 1000).toFixed(1)}s`);
+      const meta = [`prompt ${fmtTokens(data.promptTokens)}`, `completion ${fmtTokens(data.completionTokens)}`];
+      if (typeof data.latencyMs === "number") meta.push(`${(data.latencyMs / 1000).toFixed(1)}s`);
+      return { key, time, tag: "infer", color: "var(--accent)", text: data.model ?? "model", meta: meta.join(" · "), detail: [...lines, detail].filter(Boolean).join("\n") };
+    }
+    case "rate-limited":
+      return { key, time, tag: "wait", color: "var(--orange)", text: `rate limited${typeof data.waitSeconds === "number" ? ` · waiting ${data.waitSeconds}s` : ""}`, meta: "", detail };
+    default: {
+      const short = detail.length <= 160 && !detail.includes("\n");
+      return {
+        key,
+        time,
+        tag: KIND_TAG[kind] ?? kind.split("-")[0] ?? kind,
+        color: colorForKind(kind),
+        text: [data.taskId, short ? detail : clip(firstLine(detail), 160)].filter(Boolean).join(" · ") || kind,
+        meta: "",
+        detail: short ? "" : detail,
+      };
+    }
+  }
+}
+
+interface Turn {
+  id: number;
+  label: string;
+  time: string;
+  title: string;
+  excerpt: string;
+}
+
+type Block =
+  | { kind: "caption"; key: string; text: string }
+  | { kind: "user"; key: string; text: string; turn: Turn }
+  | { kind: "agent"; key: string; text: string; turn: Turn }
+  | { kind: "question"; key: string; text: string; turn: Turn }
+  | { kind: "card"; key: string; rows: Row[]; turn: Turn }
+  | { kind: "note"; key: string; text: string; tone: "error" | "muted" };
+
+/** Flatten sections into renderable blocks and number the turns the rail can jump to. */
+function blocksOf(sections: Section[]): Block[] {
+  const blocks: Block[] = [];
+  let nextTurn = 0;
+  const turn = (label: string, entry: TranscriptEntry, title: string, excerpt: string): Turn => ({
+    id: nextTurn++,
+    label,
+    time: clockOf(entry, false),
+    title: clip(firstLine(title), 120),
+    excerpt: clip(excerpt, 240),
+  });
+  for (const section of sections) {
+    if (section.kind === "entry") {
+      const entry = section.entry;
+      const key = `e${section.key}`;
+      const text = str(entry["text"]);
+      switch (entry.type) {
+        case "goal":
+          blocks.push({ kind: "caption", key: `${key}-t`, text: dayOf(entry) });
+          blocks.push({ kind: "user", key, text, turn: turn("You", entry, text, "") });
+          break;
+        case "run-end":
+          blocks.push({ kind: "caption", key, text: `Run ended · ${str(entry["reason"]) || "?"} · ${String(entry["iterations"] ?? "?")} iterations` });
+          break;
+        case "error":
+          blocks.push({ kind: "note", key, text, tone: "error" });
+          break;
+        case "model":
+          blocks.push({ kind: "caption", key, text: `${str(entry["model"])} · ${str(entry["provider"])}${entry["profileId"] ? ` · profile ${str(entry["profileId"])}` : ""}` });
+          break;
+        case "skill":
+          blocks.push({ kind: "caption", key, text: `skill ${str(entry["name"])} ${entry["enabled"] ? "enabled" : "disabled"}` });
+          break;
+        default:
+          blocks.push({ kind: "note", key, text, tone: "muted" });
+      }
+      continue;
+    }
+    const label = section.iteration === 0 ? "Run" : `Iteration ${section.iteration}`;
+    const meta = [label, section.loop !== null ? `loop ${section.loop}` : "", `${section.items.length} entries`].filter(Boolean).join(" · ");
+    blocks.push({ kind: "caption", key: `s${section.key}`, text: meta });
+    let rows: Row[] = [];
+    let first: TranscriptEntry | null = null;
+    const flush = () => {
+      if (rows.length === 0 || !first) return;
+      const excerpt = rows
+        .slice(0, 3)
+        .map((row) => `${row.tag} ${row.text}`)
+        .join(" · ");
+      blocks.push({ kind: "card", key: `c${rows[0]?.key ?? section.key}`, rows, turn: turn(label, first, `${rows.length} entries`, excerpt) });
+      rows = [];
+      first = null;
+    };
+    section.items.forEach((item, index) => {
+      const key = `${section.key}-${index}`;
+      const kind = item.type === "event" ? str(item["kind"]) : "";
+      const detail = str(item["detail"]);
+      if (kind === "model-text") {
+        flush();
+        blocks.push({ kind: "agent", key, text: detail, turn: turn("Agent", item, detail, detail.slice(firstLine(detail).length).trim()) });
+        return;
+      }
+      if (kind === "question") {
+        flush();
+        blocks.push({ kind: "question", key, text: detail, turn: turn("Question", item, detail, "") });
+        return;
+      }
+      if (kind === "operator-message") {
+        flush();
+        blocks.push({ kind: "user", key, text: detail, turn: turn("You", item, detail, "") });
+        return;
+      }
+      first ??= item;
+      rows.push(rowOf(item, key));
+    });
+    flush();
+  }
+  return blocks;
+}
+
+function EventCard({ rows }: { rows: Row[] }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({});
   return (
-    <details className="mt-1">
-      <summary className="cursor-pointer text-[11px] text-neutral-500">detail</summary>
-      <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-neutral-900 p-2 text-xs text-neutral-300">{text}</pre>
-    </details>
+    <div className="glass flex flex-col py-1" style={{ width: "min(100%, 720px)" }}>
+      {rows.map((row) => {
+        const expandable = row.detail !== "";
+        const isOpen = expandable && !!open[row.key];
+        return (
+          <div key={row.key} className="flex flex-col">
+            <div
+              className={`event-row${expandable ? " clickable" : ""}`}
+              onClick={expandable ? () => setOpen((prev) => ({ ...prev, [row.key]: !prev[row.key] })) : undefined}
+            >
+              <span className="mono t-caption c-tertiary shrink-0" style={{ width: 62 }}>
+                {row.time}
+              </span>
+              <span className="flex shrink-0" style={{ width: 64 }}>
+                <Tag color={row.color}>{row.tag}</Tag>
+              </span>
+              <span className="t-footnote min-w-0 flex-1 truncate">{row.text}</span>
+              {row.meta && <span className="t-caption c-tertiary whitespace-nowrap">{row.meta}</span>}
+            </div>
+            {isOpen && (
+              <pre
+                className="inset mono t-caption c-secondary whitespace-pre-wrap"
+                style={{ margin: "2px 12px 8px 84px", padding: "9px 11px", lineHeight: 1.55, maxHeight: 320, overflow: "auto" }}
+              >
+                {row.detail}
+              </pre>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-function EventLine({ entry }: { entry: TranscriptEntry }) {
-  const kind = String(entry["kind"] ?? "event");
-  const data = (entry["data"] ?? {}) as EventData;
-  const detail = entry["detail"];
-  const stamp = <span className="w-16 shrink-0 font-mono text-[10px] text-neutral-600">{timeOf(entry)}</span>;
-
-  switch (kind) {
-    case "model-text":
+function BlockView({ block }: { block: Block }) {
+  switch (block.kind) {
+    case "caption":
       return (
-        <div className="flex gap-2 py-1">
-          {stamp}
-          <div className="min-w-0 whitespace-pre-wrap text-sm text-neutral-200">{typeof detail === "string" ? detail : ""}</div>
+        <div className="t-caption c-tertiary text-center" style={{ padding: "8px 0 4px" }}>
+          {block.text}
         </div>
       );
-    case "tool-call":
+    case "user":
       return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="min-w-0 flex-1 text-xs">
-            <span className="font-mono text-sky-300">▸ {data.toolName ?? "tool"}</span>
-            {data.taskId && <span className="ml-2 text-neutral-500">{data.taskId}</span>}
-            <Detail text={detail} />
-          </div>
+        <div id={`turn-${block.turn.id}`} className="flex justify-end" style={{ paddingBottom: 10 }}>
+          <div className="bubble-user">{block.text}</div>
         </div>
       );
-    case "tool-result":
+    case "agent":
       return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="min-w-0 flex-1 text-xs">
-            <span className={`font-mono ${data.failed ? "text-red-400" : "text-neutral-400"}`}>
-              ◂ {data.toolName ?? "tool"} {data.failed ? "failed" : "ok"}
-            </span>
-            {typeof data.durationMs === "number" && <span className="ml-2 text-neutral-600">{data.durationMs}ms</span>}
-            <Detail text={detail} />
-          </div>
-        </div>
-      );
-    case "inference":
-      return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="text-[11px] text-neutral-500">
-            inference · {data.model ?? "model"} · prompt {fmtTokens(data.promptTokens)} · completion {fmtTokens(data.completionTokens)}
-            {typeof data.cacheReadTokens === "number" && data.cacheReadTokens > 0 && <> · cache read {fmtTokens(data.cacheReadTokens)}</>}
-            {typeof data.cacheCreationTokens === "number" && data.cacheCreationTokens > 0 && <> · cache write {fmtTokens(data.cacheCreationTokens)}</>}
-            {typeof data.latencyMs === "number" && <> · {(data.latencyMs / 1000).toFixed(1)}s</>}
-          </div>
-        </div>
-      );
-    case "task-finished":
-      return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="text-xs text-emerald-300">✓ {data.taskId ?? "task"} {typeof detail === "string" ? detail : ""}</div>
+        <div id={`turn-${block.turn.id}`} className="agent-text">
+          {block.text}
         </div>
       );
     case "question":
       return (
-        <div className="flex gap-2 py-1">
-          {stamp}
-          <div className="rounded border border-amber-700/60 bg-amber-950/40 px-2 py-1 text-sm text-amber-200">
-            <div className="text-[10px] uppercase tracking-wide text-amber-500">question for the operator</div>
-            {typeof detail === "string" ? detail : ""}
+        <div id={`turn-${block.turn.id}`} className="flex justify-start" style={{ padding: "4px 0 10px" }}>
+          <div
+            className="glass flex flex-col gap-1"
+            style={{ maxWidth: "min(88%, 720px)", padding: "9px 13px", borderColor: "color-mix(in oklab, var(--orange) 45%, transparent)" }}
+          >
+            <span className="section-label" style={{ color: "var(--orange)" }}>
+              Question for the operator
+            </span>
+            <span className="t-callout whitespace-pre-wrap" style={{ overflowWrap: "anywhere" }}>
+              {block.text}
+            </span>
           </div>
         </div>
       );
-    case "operator-message":
+    case "card":
       return (
-        <div className="flex gap-2 py-1">
-          {stamp}
-          <div className="rounded border border-sky-800/60 bg-sky-950/40 px-2 py-1 text-sm text-sky-100">
-            <div className="text-[10px] uppercase tracking-wide text-sky-500">operator</div>
-            {typeof detail === "string" ? detail : ""}
-          </div>
+        <div id={`turn-${block.turn.id}`} className="flex justify-start">
+          <EventCard rows={block.rows} />
         </div>
       );
-    case "rate-limited":
+    case "note":
       return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="text-xs text-orange-300">rate limited{typeof data.waitSeconds === "number" ? ` · waiting ${data.waitSeconds}s` : ""}</div>
-        </div>
-      );
-    default:
-      return (
-        <div className="flex gap-2 py-0.5">
-          {stamp}
-          <div className="min-w-0 flex-1 text-xs text-neutral-500">
-            {kind}
-            {typeof detail === "string" && detail.length <= 160 ? <span className="ml-2 text-neutral-400">{detail}</span> : <Detail text={detail} />}
-          </div>
+        <div
+          className={`whitespace-pre-wrap ${block.tone === "error" ? "t-callout" : "t-footnote c-secondary"}`}
+          style={{ padding: "4px 4px", overflowWrap: "anywhere", color: block.tone === "error" ? "var(--red)" : undefined }}
+        >
+          {block.text}
         </div>
       );
   }
 }
 
-function EntryBlock({ entry }: { entry: TranscriptEntry }) {
-  const text = typeof entry["text"] === "string" ? (entry["text"] as string) : "";
-  switch (entry.type) {
-    case "goal":
-      return (
-        <div className="my-3 ml-16 rounded-lg border border-emerald-800/60 bg-emerald-950/40 px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wide text-emerald-500">goal</div>
-          <div className="whitespace-pre-wrap text-sm text-emerald-50">{text}</div>
-        </div>
-      );
-    case "model":
-      return (
-        <div className="my-1 ml-16 text-[11px] text-neutral-500">
-          model {String(entry["model"] ?? "")} · {String(entry["provider"] ?? "")}
-          {entry["profileId"] ? <> · profile {String(entry["profileId"])}</> : null}
-        </div>
-      );
-    case "run-end":
-      return (
-        <div className="my-2 ml-16 rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300">
-          run ended · {String(entry["reason"] ?? "")} · {String(entry["iterations"] ?? "?")} iterations
-        </div>
-      );
-    case "error":
-      return <div className="my-1 ml-16 whitespace-pre-wrap text-sm text-red-300">{text}</div>;
-    case "skill":
-      return (
-        <div className="my-1 ml-16 text-[11px] text-neutral-500">
-          skill {String(entry["name"] ?? "")} {entry["enabled"] ? "enabled" : "disabled"}
-        </div>
-      );
-    default:
-      return <div className="my-1 ml-16 whitespace-pre-wrap text-xs text-neutral-400">{text}</div>;
+function lastModel(entries: TranscriptEntry[]): string {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (!entry) continue;
+    if (entry.type === "event" && str(entry["kind"]) === "inference") {
+      const model = (entry["data"] as EventData | undefined)?.model;
+      if (model) return model;
+    }
+    if (entry.type === "model" && str(entry["model"])) return str(entry["model"]);
   }
+  return "";
 }
 
-export function Timeline({ entries }: Props) {
+const HEADER_CLEARANCE = 84;
+
+export function Timeline({ entries, isRunning, footer }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  const sections = sectionsOf(entries);
+  const [current, setCurrent] = useState(0);
+  const [peek, setPeek] = useState<number | null>(null);
+  const blocks = blocksOf(sectionsOf(entries));
+  const turns = blocks.flatMap((block) => ("turn" in block ? [block.turn] : []));
+  const model = lastModel(entries);
 
   // Follow the tail on any content growth — new pages, expanded details,
   // fonts settling — not just when the entry count changes.
@@ -248,37 +414,103 @@ export function Timeline({ entries }: Props) {
     return () => observer.disconnect();
   }, []);
 
+  const jump = (id: number) => {
+    const scroller = container.current;
+    const target = scroller?.querySelector<HTMLElement>(`#turn-${id}`);
+    if (!scroller || !target) return;
+    stick.current = false;
+    scroller.scrollTo({ top: target.offsetTop - scroller.offsetTop - HEADER_CLEARANCE, behavior: "smooth" });
+  };
+
+  const peeked = peek !== null ? turns[peek] : undefined;
+
   return (
-    <div
-      ref={container}
-      onScroll={(event) => {
-        const node = event.currentTarget;
-        stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
-      }}
-      className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
-    >
-      <div ref={content}>
-        {entries.length === 0 && <p className="text-sm text-neutral-600">No transcript yet.</p>}
-        {sections.map((section) =>
-          section.kind === "entry" ? (
-            <EntryBlock key={section.key} entry={section.entry} />
-          ) : (
-            <section key={section.key} className="my-2">
-              <h3 className="sticky top-0 -mx-4 bg-neutral-950/95 px-4 py-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
-                {section.iteration === 0 ? "Run" : `Iteration ${section.iteration}`}
-                {section.loop !== null && <span className="ml-2 font-normal normal-case text-neutral-600">loop {section.loop}</span>}
-                <span className="ml-2 font-normal normal-case text-neutral-600">{section.items.length} entries</span>
-              </h3>
-              {section.items.map((item, index) =>
-                item.type === "event" ? (
-                  <EventLine key={`${section.key}-${index}`} entry={item} />
-                ) : (
-                  <EntryBlock key={`${section.key}-${index}`} entry={item} />
-                ),
+    <div className="relative flex min-h-0 flex-1">
+      {turns.length > 0 && (
+        <div className="absolute left-0 top-0 z-[4] flex items-center justify-center" style={{ bottom: 0, width: 36 }} onMouseLeave={() => setPeek(null)}>
+          <div className="flex flex-col items-start" style={{ gap: 5, padding: "10px 0" }}>
+            {turns.map((turn) => {
+              const active = turn.id === current;
+              const hot = turn.id === peek;
+              return (
+                <div
+                  key={turn.id}
+                  className="flex cursor-pointer items-center justify-center"
+                  style={{ width: 36, height: 9 }}
+                  onMouseEnter={() => setPeek(turn.id)}
+                  onClick={() => jump(turn.id)}
+                >
+                  <span
+                    className="block"
+                    style={{
+                      height: 2,
+                      borderRadius: 1,
+                      transition: "width var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out)",
+                      width: active ? 24 : hot ? 18 : 12,
+                      background: active ? "var(--text-primary)" : hot ? "var(--text-secondary)" : "var(--text-quaternary)",
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          {peeked && (
+            <div className="popover pointer-events-none absolute flex flex-col gap-1" style={{ left: 38, top: "50%", transform: "translateY(-50%)", width: 300, padding: "11px 13px" }}>
+              <div className="t-caption c-tertiary flex items-center gap-1.5">
+                <span>{peeked.label}</span>
+                <span className="ml-auto">{peeked.time}</span>
+              </div>
+              <div className="t-footnote font-semibold" style={{ lineHeight: 1.45 }}>
+                {peeked.title || "(empty)"}
+              </div>
+              {peeked.excerpt && (
+                <div className="t-footnote c-secondary" style={{ lineHeight: 1.45, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                  {peeked.excerpt}
+                </div>
               )}
-            </section>
-          ),
-        )}
+            </div>
+          )}
+        </div>
+      )}
+      <div
+        ref={container}
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
+          const mid = node.scrollTop + node.clientHeight * 0.45;
+          let active = 0;
+          for (const turn of turns) {
+            const target = node.querySelector<HTMLElement>(`#turn-${turn.id}`);
+            if (target && target.offsetTop - node.offsetTop <= mid) active = turn.id;
+          }
+          if (active !== current) setCurrent(active);
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+        style={{ padding: "78px 48px 10px" }}
+      >
+        <div ref={content} className="flex flex-col" style={{ margin: "auto auto 0", width: "min(100%, 760px)", gap: 6 }}>
+          {entries.length === 0 && (
+            <p className="t-footnote c-tertiary text-center" style={{ padding: "24px 0" }}>
+              No transcript yet.
+            </p>
+          )}
+          {blocks.map((block) => (
+            <BlockView key={block.key} block={block} />
+          ))}
+          {isRunning && (
+            <div className="flex justify-start" style={{ paddingTop: 4 }}>
+              <div className="glass t-footnote c-secondary inline-flex items-center gap-2" style={{ padding: "7px 12px", boxShadow: "none" }}>
+                <span className="pulse rounded-full" style={{ width: 6, height: 6, background: "var(--accent)" }} />
+                Working{model ? ` · ${model}` : ""}
+              </div>
+            </div>
+          )}
+          {footer && (
+            <div className="t-caption c-tertiary text-right" style={{ padding: "2px 4px" }}>
+              {footer}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

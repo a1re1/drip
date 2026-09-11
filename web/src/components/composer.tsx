@@ -1,67 +1,101 @@
-// Bottom of the timeline: operator input. The text always lands in the
-// session inbox (`drip --send`); a running goal picks it up at its next
-// cycle boundary, otherwise the server resumes the session and the new run
-// consumes it.
+// Bottom of the stream: one glass composer for every operator input. With a
+// session selected the text lands in its inbox (`drip --send`) — a running
+// goal picks it up at its next cycle boundary, otherwise the server resumes
+// the session. With no session selected it starts a new detached run.
 import { useState } from "react";
+import { Icon, IconButton } from "./icons";
+
+export type ComposerMode = "new" | "running" | "idle";
 
 interface Props {
+  mode: ComposerMode;
   disabled: boolean;
-  isRunning: boolean;
-  /** Resolves true when the message was accepted; the draft is kept otherwise. */
-  onSubmit: (text: string) => Promise<boolean>;
+  /** Resolves true when the text was accepted; the draft is kept otherwise. */
+  onSubmit: (text: string, maxIterations?: number) => Promise<boolean>;
   onStop: () => void;
 }
 
-export function Composer({ disabled, isRunning, onSubmit, onStop }: Props) {
+const PLACEHOLDER: Record<ComposerMode, string> = {
+  new: "Describe the goal for a new session",
+  running: "Message the running agent",
+  idle: "Resume this session with a prompt",
+};
+
+export function Composer({ mode, disabled, onSubmit, onStop }: Props) {
   const [text, setText] = useState("");
+  const [maxIterations, setMaxIterations] = useState("");
+  const hasDraft = text.trim() !== "";
 
   const submit = async () => {
     const trimmed = text.trim();
     if (!trimmed || disabled) return;
-    if (await onSubmit(trimmed)) setText("");
+    const limit = Number.parseInt(maxIterations, 10);
+    const accepted = await onSubmit(trimmed, mode === "new" && Number.isInteger(limit) && limit > 0 ? limit : undefined);
+    if (accepted) setText("");
   };
+
+  const rows = Math.min(6, Math.max(1, text.split("\n").length));
 
   return (
     <form
-      className="border-t border-neutral-800 p-3"
+      className="flex justify-center"
+      style={{ padding: "6px 48px 14px" }}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
-      <textarea
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-        disabled={disabled}
-        placeholder={isRunning ? "Message the running agent (lands at the next cycle boundary)…" : "Resume this session with a prompt…"}
-        rows={3}
-        className="w-full resize-none rounded-md border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-neutral-600 disabled:opacity-50"
-      />
-      <div className="mt-2 flex items-center gap-2">
-        <span className="text-[11px] text-neutral-600">Enter to send · Shift+Enter for a newline</span>
-        {isRunning && (
-          <button
-            type="button"
-            onClick={onStop}
-            disabled={disabled}
-            className="ml-auto rounded-md border border-red-800 px-3 py-1 text-xs text-red-300 disabled:opacity-40"
-          >
-            Stop
-          </button>
-        )}
-        <button
-          type="submit"
-          disabled={disabled || text.trim() === ""}
-          className={`${isRunning ? "" : "ml-auto"} rounded-md bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-900 disabled:opacity-40`}
-        >
-          {isRunning ? "Send" : "Resume"}
-        </button>
+      <div className="composer flex flex-col" style={{ width: "min(100%, 760px)", gap: 6, padding: "12px 12px 10px" }}>
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          disabled={disabled}
+          placeholder={PLACEHOLDER[mode]}
+          rows={rows}
+          className="t-callout w-full resize-none border-0 bg-transparent outline-none disabled:opacity-50"
+          style={{ lineHeight: 1.5, padding: "2px 4px", maxHeight: 200, color: "var(--text-primary)" }}
+        />
+        <div className="flex flex-wrap items-center gap-1" style={{ minHeight: 28 }}>
+          <span className="vt-btn vt-btn--muted vt-btn--s" style={{ cursor: "default" }}>
+            <Icon name={mode === "new" ? "plus" : mode === "running" ? "clock" : "play"} size={13} />
+            {mode === "new" ? "New session" : mode === "running" ? "Next cycle boundary" : "Resume session"}
+          </span>
+          {mode === "new" && (
+            <label className="vt-input t-footnote" style={{ height: 24, width: 120 }}>
+              <span className="c-tertiary whitespace-nowrap">max iters</span>
+              <input
+                value={maxIterations}
+                onChange={(event) => setMaxIterations(event.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="∞"
+                inputMode="numeric"
+                className="t-footnote"
+                style={{ width: 40 }}
+              />
+            </label>
+          )}
+          <span className="ml-auto" />
+          <span className="t-caption c-tertiary whitespace-nowrap" style={{ padding: "0 4px" }}>
+            {hasDraft ? `${text.length} chars · Enter to send` : "Shift+Enter for a newline"}
+          </span>
+          {mode === "running" && !hasDraft ? (
+            <IconButton icon="pause" label="Stop agent" variant="glass" size="m" disabled={disabled} onClick={onStop} />
+          ) : (
+            <IconButton
+              icon={mode === "idle" || mode === "new" ? "play" : "send"}
+              label={mode === "new" ? "Start session" : mode === "idle" ? "Resume" : "Send"}
+              variant={hasDraft ? "primary" : "glass"}
+              size="m"
+              type="submit"
+              disabled={disabled || !hasDraft}
+            />
+          )}
+        </div>
       </div>
     </form>
   );

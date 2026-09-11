@@ -261,7 +261,11 @@ export function App() {
           </div>
         </div>
 
-        <Timeline entries={entries} isRunning={isRunning} footer={<PollCaption lastPoll={lastPoll} />} />
+        {/* The toast anchors to the stream's bottom edge, so it floats just above the composer whatever its height. */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <Timeline entries={entries} isRunning={isRunning} footer={<PollCaption lastPoll={lastPoll} />} />
+          <StatusToast error={error} notice={notice} />
+        </div>
         <Composer
           key={selectedId ?? "none"}
           mode={mode}
@@ -269,7 +273,6 @@ export function App() {
           onSubmit={mode === "new" ? handleRun : handleMessage}
           onStop={handleStop}
         />
-        <StatusToast error={error} notice={notice} />
       </div>
 
       {showDetails && <DetailPanel row={selected} state={state} entries={entries} bootstrap={bootstrap} />}

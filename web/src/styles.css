@@ -1,8 +1,7 @@
 @import "tailwindcss";
 
 /* Vitrine tokens: translucent "glass" materials over a system font stack.
-   Light is the base palette; dark applies on system preference or an
-   explicit data-theme, and wins in both directions. */
+   Light is the base palette; dark follows the system preference. */
 :root {
   --accent: oklch(0.6 0.19 258);
   --accent-hover: oklch(0.56 0.2 258);
@@ -56,7 +55,7 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root {
     --accent: oklch(0.66 0.17 258);
     --accent-hover: oklch(0.71 0.16 258);
     --accent-soft: oklch(0.66 0.17 258 / 0.22);
@@ -81,31 +80,6 @@
     --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.14);
     color-scheme: dark;
   }
-}
-:root[data-theme="dark"] {
-  --accent: oklch(0.66 0.17 258);
-  --accent-hover: oklch(0.71 0.16 258);
-  --accent-soft: oklch(0.66 0.17 258 / 0.22);
-  --text-primary: rgba(255, 255, 255, 0.9);
-  --text-secondary: rgba(255, 255, 255, 0.55);
-  --text-tertiary: rgba(255, 255, 255, 0.3);
-  --text-quaternary: rgba(255, 255, 255, 0.14);
-  --material-thin: rgba(24, 24, 30, 0.52);
-  --material-regular: rgba(28, 28, 34, 0.68);
-  --material-thick: rgba(30, 30, 36, 0.84);
-  --material-opaque: #1e1e24;
-  --surface-card: rgba(255, 255, 255, 0.07);
-  --surface-control: rgba(255, 255, 255, 0.09);
-  --surface-control-hover: rgba(255, 255, 255, 0.15);
-  --surface-inset: rgba(0, 0, 0, 0.25);
-  --stroke-hairline: rgba(255, 255, 255, 0.12);
-  --stroke-glass: rgba(255, 255, 255, 0.18);
-  --stroke-control: rgba(255, 255, 255, 0.14);
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-3: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
-  --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.14);
-  color-scheme: dark;
 }
 
 html,
@@ -363,8 +337,8 @@ input::placeholder {
   transition: background var(--dur-fast) var(--ease-out);
 }
 .side-item:hover { background: var(--surface-control); }
-.side-item[aria-selected="true"] { background: var(--accent-soft); }
-.side-item[aria-selected="true"] .side-title { color: var(--accent); }
+.side-item[data-selected="true"] { background: var(--accent-soft); }
+.side-item[data-selected="true"] .side-title { color: var(--accent); }
 .task-row {
   display: flex;
   align-items: flex-start;

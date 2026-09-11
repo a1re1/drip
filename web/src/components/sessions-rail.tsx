@@ -27,7 +27,7 @@ function taskSummary(row: SessionRow): string | null {
 function Row({ row, selected, onSelect, now }: { row: SessionRow; selected: boolean; onSelect: () => void; now: number }) {
   const tasks = taskSummary(row);
   return (
-    <button type="button" onClick={onSelect} className="side-item flex flex-col" style={{ gap: 4 }} aria-selected={selected}>
+    <button type="button" onClick={onSelect} className="side-item flex flex-col" style={{ gap: 4 }} data-selected={selected}>
       <div className="flex items-center gap-2">
         <span
           className={`shrink-0 rounded-full${row.running ? " pulse" : ""}`}

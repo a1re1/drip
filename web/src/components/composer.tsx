@@ -21,6 +21,15 @@ const PLACEHOLDER: Record<ComposerMode, string> = {
   idle: "Resume this session with a prompt",
 };
 
+/**
+ * The max-iterations field as the server accepts it: a positive integer, or
+ * undefined (omit the key) for blank or zero — the server rejects 0.
+ */
+export function parseMaxIterations(raw: string): number | undefined {
+  const limit = Number.parseInt(raw, 10);
+  return Number.isInteger(limit) && limit > 0 ? limit : undefined;
+}
+
 export function Composer({ mode, disabled, onSubmit, onStop }: Props) {
   const [text, setText] = useState("");
   const [maxIterations, setMaxIterations] = useState("");
@@ -29,8 +38,7 @@ export function Composer({ mode, disabled, onSubmit, onStop }: Props) {
   const submit = async () => {
     const trimmed = text.trim();
     if (!trimmed || disabled) return;
-    const limit = Number.parseInt(maxIterations, 10);
-    const accepted = await onSubmit(trimmed, mode === "new" && Number.isInteger(limit) && limit > 0 ? limit : undefined);
+    const accepted = await onSubmit(trimmed, mode === "new" ? parseMaxIterations(maxIterations) : undefined);
     if (accepted) setText("");
   };
 

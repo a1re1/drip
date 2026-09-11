@@ -43,6 +43,7 @@ pub const UI_FILES: &[(&str, &str)] = &[
     ui_file!("src/main.tsx"),
     ui_file!("src/styles.css"),
     ui_file!("test/caddy.test.ts"),
+    ui_file!("test/composer.test.ts"),
     ui_file!("test/drip.test.ts"),
     ui_file!("test/instances.test.ts"),
     ui_file!("test/server.test.ts"),

@@ -3,7 +3,7 @@
 // tool/inference events of one iteration fold into a single glass card of
 // expandable rows. A tick rail on the left peeks and jumps between turns.
 // Sticks to the bottom while the reader is already there.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TranscriptEntry } from "../api";
 import { Tag } from "./icons";
 
@@ -203,8 +203,13 @@ type Block =
   | { kind: "card"; key: string; rows: Row[]; turn: Turn }
   | { kind: "note"; key: string; text: string; tone: "error" | "muted" };
 
-/** Flatten sections into renderable blocks and number the turns the rail can jump to. */
-function blocksOf(sections: Section[]): Block[] {
+/**
+ * Flatten sections into renderable blocks and number the turns the rail can
+ * jump to. Turn ids are dense (0..n-1) in stream order, so the rail can index
+ * its `turns` array by id; block keys stay stable as the transcript grows
+ * because they derive from entry positions, not turn numbers.
+ */
+export function blocksOf(sections: Section[]): Block[] {
   const blocks: Block[] = [];
   let nextTurn = 0;
   const turn = (label: string, entry: TranscriptEntry, title: string, excerpt: string): Turn => ({
@@ -395,8 +400,9 @@ export function Timeline({ entries, isRunning, footer }: Props) {
   const stick = useRef(true);
   const [current, setCurrent] = useState(0);
   const [peek, setPeek] = useState<number | null>(null);
-  const blocks = blocksOf(sectionsOf(entries));
-  const turns = blocks.flatMap((block) => ("turn" in block ? [block.turn] : []));
+  // Peek and scroll state re-render often; the block model only changes with the transcript.
+  const blocks = useMemo(() => blocksOf(sectionsOf(entries)), [entries]);
+  const turns = useMemo(() => blocks.flatMap((block) => ("turn" in block ? [block.turn] : [])), [blocks]);
   const model = lastModel(entries);
 
   // Follow the tail on any content growth — new pages, expanded details,
@@ -479,9 +485,8 @@ export function Timeline({ entries, isRunning, footer }: Props) {
           stick.current = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
           const mid = node.scrollTop + node.clientHeight * 0.45;
           let active = 0;
-          for (const turn of turns) {
-            const target = node.querySelector<HTMLElement>(`#turn-${turn.id}`);
-            if (target && target.offsetTop - node.offsetTop <= mid) active = turn.id;
+          for (const target of node.querySelectorAll<HTMLElement>('[id^="turn-"]')) {
+            if (target.offsetTop - node.offsetTop <= mid) active = Number(target.id.slice("turn-".length));
           }
           if (active !== current) setCurrent(active);
         }}

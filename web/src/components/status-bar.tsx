@@ -19,7 +19,7 @@ export function StatusToast({ error, notice }: { error: string | null; notice: s
   const text = error ?? notice;
   if (!text) return null;
   return (
-    <div className="pointer-events-none absolute left-0 right-0 z-10 flex justify-center" style={{ bottom: 96 }}>
+    <div className="pointer-events-none absolute left-0 right-0 z-10 flex justify-center" style={{ bottom: 8 }}>
       <div className="toast pointer-events-auto" title={text} style={{ color: error ? "var(--red)" : "var(--text-primary)" }}>
         <span className="shrink-0 rounded-full" style={{ width: 7, height: 7, background: error ? "var(--red)" : "var(--orange)" }} />
         <span className="truncate">{text}</span>

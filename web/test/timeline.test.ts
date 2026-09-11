@@ -3,7 +3,7 @@
 // values. Rendering itself is not exercised; sectionsOf is the pure part.
 import { describe, expect, test } from "bun:test";
 import type { TranscriptEntry } from "../lib/transcript";
-import { RUN_BOUNDARY, fmtTokens, sectionsOf } from "../src/components/timeline";
+import { RUN_BOUNDARY, blocksOf, fmtTokens, sectionsOf } from "../src/components/timeline";
 
 const event = (iteration: number, kind = "inference", data: Record<string, unknown> = {}): TranscriptEntry => ({
   type: "event",
@@ -61,5 +61,50 @@ describe("fmtTokens", () => {
     expect(fmtTokens(999)).toBe("999");
     expect(fmtTokens(12_345)).toBe("12.3k");
     expect(fmtTokens(2_500_000)).toBe("2.5M");
+  });
+});
+
+// blocksOf is the stream's render model: goals become bubbles, model prose
+// breaks an iteration's event card, and turn ids are dense so the rail can
+// index its turn list by id.
+const turnsOf = (entries: TranscriptEntry[]) =>
+  blocksOf(sectionsOf(entries)).flatMap((block) => ("turn" in block ? [`${block.turn.id}:${block.turn.label}`] : []));
+
+describe("blocksOf", () => {
+  const goal: TranscriptEntry = { type: "goal", at: "2026-09-10T10:00:00.000Z", text: "ship it" };
+
+  test("a goal renders as a time caption followed by a user bubble", () => {
+    const kinds = blocksOf(sectionsOf([goal])).map((block) => block.kind);
+    expect(kinds).toEqual(["caption", "user"]);
+  });
+
+  test("model prose splits an iteration into two cards and numbers turns densely", () => {
+    const entries: TranscriptEntry[] = [
+      goal,
+      event(1, "tool-call", { toolName: "BASH" }),
+      event(1, "tool-result", { toolName: "BASH", durationMs: 5 }),
+      { ...event(1, "model-text"), detail: "Looked around.\nMore detail." },
+      event(1, "inference", { model: "m" }),
+    ];
+    const kinds = blocksOf(sectionsOf(entries)).map((block) => block.kind);
+    expect(kinds).toEqual(["caption", "user", "caption", "card", "agent", "card"]);
+    expect(turnsOf(entries)).toEqual(["0:You", "1:Iteration 1", "2:Agent", "3:Iteration 1"]);
+  });
+
+  test("block keys are stable as the transcript grows", () => {
+    const first: TranscriptEntry[] = [goal, event(1, "tool-call", { toolName: "READ" })];
+    const later = [...first, event(1, "tool-result", { toolName: "READ" }), event(2, "inference")];
+    const keysOf = (entries: TranscriptEntry[]) => blocksOf(sectionsOf(entries)).map((block) => block.key);
+    expect(keysOf(later).slice(0, keysOf(first).length)).toEqual(keysOf(first));
+  });
+
+  test("run-end and question entries render as caption and question blocks", () => {
+    const entries: TranscriptEntry[] = [
+      goal,
+      { ...event(1, "question"), detail: "which branch?" },
+      { type: "run-end", at: "2026-09-10T10:01:00.000Z", reason: "blocked", iterations: 1 },
+    ];
+    const kinds = blocksOf(sectionsOf(entries)).map((block) => block.kind);
+    expect(kinds).toEqual(["caption", "user", "caption", "question", "caption"]);
   });
 });

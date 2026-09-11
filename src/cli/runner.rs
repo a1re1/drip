@@ -62,6 +62,8 @@ pub struct CliGoalRunArgs {
     pub role_bindings: Option<HarnessRoleBindings>,
     /// Resolved capability profiles applied per loop.
     pub roles: Option<Vec<HarnessRoleRuntime>>,
+    /// Run-level MCP gate threaded into the harness options (see `SolidStateHarnessOptions::mcp_servers`).
+    pub mcp_servers: Option<Vec<String>>,
     pub signal: Option<AbortSignal>,
     pub skills: Vec<LoadedCliSkill>,
     pub state_path: PathBuf,
@@ -410,6 +412,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         tool_route: args.inference.tool_route.as_ref().map(|route| route.to_model_route()),
         tools: args.tools,
         tool_services: args.tool_services.clone(),
+        mcp_servers: args.mcp_servers.clone(),
         url: Some(args.inference.url.clone()),
         hooks: args.hooks.clone(),
         ..SolidStateHarnessOptions::default()

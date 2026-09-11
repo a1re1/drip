@@ -65,6 +65,53 @@ tool error.
 shell tool from the model's reach, but anything `drip` itself is able to
 execute, it still can.
 
+## MCP client (per-role servers)
+
+drip can also *consume* MCP servers: it spawns stdio servers declared in
+config, lists their tools, and offers them to the model next to the built-in
+pack as `MCP__<server>__<tool>`. Which servers a loop sees is decided by the
+loop's **role**, so an author can reach a `github` server while the reviewer
+that checks its work never can.
+
+Declare servers once, under a top-level `mcpServers` section of
+`~/.drip/config.json` (the same shape as Claude Code's `.mcp.json`), or per
+project in `.drip/mcp.json` with a `{"mcpServers": {...}}` body. Project
+entries win on name collision:
+
+```json
+{
+  "mcpServers": {
+    "github": {"command": "github-mcp-server", "args": ["stdio"], "env": {"GITHUB_TOKEN": "..."}, "timeoutSecs": 60}
+  }
+}
+```
+
+`args`, `env`, and `timeoutSecs` (per-call and handshake timeout, default 60)
+are optional. Only stdio transport is supported. An entry without a `command`
+(for example a remote `{"type":"sse","url":...}` entry), a malformed entry, or
+a server name containing `__` (it separates `MCP__<server>__<tool>`) is
+skipped with a warning; its siblings still load.
+
+Roles opt in with `mcpServers` — a list of server names — in any role source
+(`runtime.role_profiles` in the config, `.drip/roles.json`, or a `--roles`
+file). A role's `tools` allowlist never has to name MCP tools: `mcpServers`
+is their opt-in, and a role without one sees no MCP tools at all. For a run
+without roles, or for loops whose role sets no `mcpServers`, pass
+`--mcp <name>[,<name>...]` (repeatable) to enable servers run-wide;
+`--no-mcp` spawns nothing and exposes nothing regardless of roles.
+
+```sh
+drip --mcp github "triage the open issues labelled bug and draft fixes"
+drip --roles ./roles.json "..."   # roles.json: {"roles":[{"name":"author","mcpServers":["github"]}]}
+```
+
+Every server any role in play asks for is spawned once per invocation and
+killed when the run ends. Startup is never fatal: a missing binary, a failed
+handshake, or a name absent from `mcpServers` prints a `mcp: server "<name>"`
+warning and exposes fewer tools. MCP calls never count as workspace progress
+for stall accounting, `--plan` keeps its reader-only surface, and `--review`
+children, `DELEGATE` children, and the watch TUI get no MCP surface.
+
 ## Quickstart
 
 ```sh
@@ -914,11 +961,13 @@ gets the first try and the expensive planner only runs when it gets nowhere):
   "settings": {
     "runtime.active_profile_id": "glm-5-3-flash",
     "runtime.role_profiles": [
-      { "id": "planner", "description": "Plans the loop", "model": "glm-5-3-flash" }
+      { "id": "planner", "description": "Plans the loop", "model": "glm-5-3-flash" },
+      { "id": "author", "model": "glm-5-3-flash", "mcpServers": ["github"] }
     ],
     "runtime.role_bindings": { "planner": "author" },
     "credentials.stored_api_keys": []
   },
+  "mcpServers": { "github": { "command": "github-mcp-server", "args": ["stdio"] } },
   "version": 1
 }
 ```

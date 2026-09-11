@@ -152,6 +152,8 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     no_review: false,
                     tools: child_tools,
                     tool_services: wiring.tool_services.clone(),
+                    // A delegate child gets no MCP surface of its own.
+                    mcp_servers: None,
                 }))
             })
             .map_err(|error| error.to_string())?;

@@ -183,6 +183,11 @@ OPTIONS
 	                              --wait/--result to collect the outcome
 	--allow-net                   Opt the run into network access: enables the FETCH
 	                              tool (bounded readable-text web fetch, off by default)
+	--mcp <name>[,<name>...]      Expose MCP servers configured under mcpServers (global
+	                              config or .drip/mcp.json) for every loop whose role
+	                              does not set its own mcpServers (repeatable)
+	--no-mcp                      Spawn no MCP servers and expose no MCP__ tools,
+	                              regardless of roles or --mcp
 	--reference-root <dir>        Point the REFERENCE tool at an oasis-indexed markdown
 	                              corpus (repeatable; also DRIP_REFERENCE_ROOTS or
 	                              OASIS_ROOTS, colon-separated). Without a root the tool
@@ -326,6 +331,8 @@ mod tests {
             "--ask-timeout",
             "--allow-destructive",
             "--allow-net",
+            "--mcp",
+            "--no-mcp",
             "--reference-root",
             "--enqueue",
             "--plan",

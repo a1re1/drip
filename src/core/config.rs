@@ -1120,6 +1120,12 @@ pub struct CliConfig {
     pub status_line: Option<StatusLineSetting>,
     #[serde(default, skip_serializing_if = "crate::harness::hooks::HooksConfig::is_empty")]
     pub hooks: crate::harness::hooks::HooksConfig,
+    #[serde(
+        rename = "mcpServers",
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub mcp_servers: crate::tools::mcp::config::McpServerMap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
 }
@@ -1130,6 +1136,7 @@ pub fn create_default_cli_config() -> CliConfig {
         settings: default_setting_values(),
         status_line: None,
         hooks: crate::harness::hooks::HooksConfig::default(),
+        mcp_servers: std::collections::BTreeMap::new(),
         version: Some(1),
     }
 }
@@ -1314,6 +1321,20 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         })
         .unwrap_or_default();
 
+    // mcpServers is opt-in and never fatal, like hooks: a malformed entry
+    // warns and the rest of the config still loads. No process is spawned
+    // here — spawning happens later, at session wiring time.
+    let mut mcp_warnings = Vec::new();
+    let mcp_servers =
+        crate::tools::mcp::config::parse_mcp_servers(parsed_value.get("mcpServers"), &mut mcp_warnings)
+            .unwrap_or_else(|error| {
+                eprintln!("warning: {}: {error}", path.display());
+                std::collections::BTreeMap::new()
+            });
+    for warning in mcp_warnings {
+        eprintln!("warning: {}: {warning}", path.display());
+    }
+
     // statusLine is opt-in and never fatal: a malformed entry warns and the
     // rest of the config still loads. No process is spawned here.
     let (status_line, warnings) = match parse_status_line_setting(parsed_value.get("statusLine")) {
@@ -1363,6 +1384,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         settings,
         status_line,
         hooks,
+        mcp_servers,
         version: Some(1),
     })
 }

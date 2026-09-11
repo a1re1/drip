@@ -61,6 +61,10 @@ pub struct RoleDefinition {
 	/// Role that must review this role's completed tasks.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub verified_by: Option<String>,
+	/// MCP server names this role's loops may use (JSON key `mcpServers`),
+	/// validated against the configured servers; a miss is an issue, not an error.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub mcp_servers: Option<Vec<String>>,
 	/// Blind loops start without the previous loop's tool exchanges or the
 	/// author's footprint: the role sees the goal and the artifact, not the
 	/// derivation, so its agreement is independent by construction.
@@ -567,6 +571,7 @@ fn normalize_role_definition(
 			.map(str::trim)
 			.filter(|s| !s.is_empty())
 			.map(String::from),
+		mcp_servers: string_list(input.get("mcpServers")),
 	})
 }
 
@@ -693,23 +698,22 @@ pub struct ResolveRoleSetupArgs<'a> {
 	pub skills: Vec<CliSkill>,
 	/// Loaded workspace tool names, for allowlist validation.
 	pub tool_names: Vec<String>,
+	/// Configured MCP server names (global `mcpServers` merged with the
+	/// project file), for `mcpServers` validation. The caller loads them so
+	/// this resolver stays free of filesystem I/O.
+	pub mcp_server_names: Vec<String>,
 }
 
-// Merges role definitions (project > config > marketplace agents, by name),
-// validates their references, and resolves them into the harness runtime
-// shape: composed prompt material, tool allowlists, and model routes.
-//
-// `definition.model` resolution goes through resolve_model_profile_route at
-// the bottom of this module (core::inference); an unresolvable profile
-// reports the fallback issue to the caller,
-// same as any other validation problem.
-pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
-	let mut issues: Vec<String> = Vec::new();
-	let config_source = load_roles_from_config(args.config, &mut issues);
-	let project_source = load_project_roles(&args.cwd, &mut issues);
-	// First definition per name wins in merge order (marketplace < config <
-	// project < extra), last write wins under a duplicate name: later
-	// sources replace earlier ones under the same key.
+// Merges every role definition source by name. Later sources replace earlier
+// ones under the same key (marketplace < config < project < extra), so the
+// --roles preset or file has the highest precedence. The config and project
+// sources come back too: their bindings still take part in resolution.
+fn merge_role_definitions(
+	args: &ResolveRoleSetupArgs,
+	issues: &mut Vec<String>,
+) -> (indexmap::IndexMap<String, RoleDefinition>, RoleSetupSource, RoleSetupSource) {
+	let config_source = load_roles_from_config(args.config, issues);
+	let project_source = load_project_roles(&args.cwd, issues);
 	let mut definitions: indexmap::IndexMap<String, RoleDefinition> = indexmap::IndexMap::new();
 
 	if let Some(entries) = &args.marketplace_roles {
@@ -726,12 +730,44 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 		definitions.insert(role.name.clone(), role.clone());
 	}
 
-	// Extra roles (from --roles flag) have the highest precedence.
 	if let Some(extra) = &args.extra_roles {
 		for role in extra {
 			definitions.insert(role.name.clone(), role.clone());
 		}
 	}
+
+	(definitions, config_source, project_source)
+}
+
+// Every MCP server name any role in play asks for, in first-seen order and
+// without duplicates. The CLI spawns this union once before resolving roles,
+// so the resolved tool pack already carries the servers' tools; source
+// issues are reported by resolve_role_setup, not here.
+pub fn referenced_mcp_servers(args: &ResolveRoleSetupArgs) -> Vec<String> {
+	let mut ignored_issues: Vec<String> = Vec::new();
+	let (definitions, _, _) = merge_role_definitions(args, &mut ignored_issues);
+	let mut servers: Vec<String> = Vec::new();
+	for definition in definitions.values() {
+		for server in definition.mcp_servers.iter().flatten() {
+			if !servers.contains(server) {
+				servers.push(server.clone());
+			}
+		}
+	}
+	servers
+}
+
+// Merges role definitions (project > config > marketplace agents, by name),
+// validates their references, and resolves them into the harness runtime
+// shape: composed prompt material, tool allowlists, and model routes.
+//
+// `definition.model` resolution goes through resolve_model_profile_route at
+// the bottom of this module (core::inference); an unresolvable profile
+// reports the fallback issue to the caller,
+// same as any other validation problem.
+pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
+	let mut issues: Vec<String> = Vec::new();
+	let (definitions, config_source, project_source) = merge_role_definitions(args, &mut issues);
 
 	let mut skills_by_name: HashMap<String, &CliSkill> = HashMap::new();
 	for skill in &args.skills {
@@ -742,6 +778,7 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 	// so the independence the pin was buying is gone and must be said out loud.
 	let mut unresolved_model_roles: HashSet<String> = HashSet::new();
 	let known_tool_names: HashSet<&str> = args.tool_names.iter().map(String::as_str).collect();
+	let mcp_configured_names: HashSet<&str> = args.mcp_server_names.iter().map(String::as_str).collect();
 	let mut roles: Vec<HarnessRoleRuntime> = Vec::new();
 
 	for definition in definitions.values() {
@@ -807,6 +844,24 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 			);
 		}
 
+		// MCP server names are validated like tool allowlists, but a miss is
+		// advisory: the run keeps going with fewer servers, it never fails.
+		if let Some(mcp_servers) = &definition.mcp_servers {
+			let unknown_servers: Vec<&str> = mcp_servers
+				.iter()
+				.map(String::as_str)
+				.filter(|server_name| !mcp_configured_names.contains(server_name))
+				.collect();
+
+			if !unknown_servers.is_empty() {
+				issues.push(format!(
+					"role \"{}\": unknown MCP server(s) {} — not in mcpServers config",
+					definition.name,
+					unknown_servers.join(", ")
+				));
+			}
+		}
+
 		let mut route: Option<ModelRoute> = None;
 
 		if let Some(model) = &definition.model {
@@ -835,6 +890,9 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 			system_prompt_suffix: (!prompt_sections.is_empty())
 				.then(|| prompt_sections.join("\n\n")),
 			tool_names,
+			// MCP servers ride along for per-loop tool filtering; a role's
+			// `tools` allowlist never needs to list them.
+			mcp_servers: definition.mcp_servers.clone(),
 			verified_by: definition.verified_by.clone(),
 			blind: definition.blind,
 		});
@@ -1130,6 +1188,112 @@ fn resolve_model_profile_route(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn mcp_servers_are_copied_through_to_the_runtime_role() {
+		let cwd = tempfile::tempdir().unwrap();
+		let config = CliConfig {
+			status_line: None,
+			hooks: crate::harness::hooks::HooksConfig::default(),
+			path: None,
+			settings: indexmap::IndexMap::new(),
+			mcp_servers: std::collections::BTreeMap::new(),
+			version: Some(1),
+		};
+		let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+			config: &config,
+			cwd: cwd.path().to_string_lossy().to_string(),
+			env: None,
+			extra_roles: Some(vec![RoleDefinition {
+				name: "author".to_string(),
+				mcp_servers: Some(vec!["files".to_string()]),
+				..RoleDefinition::default()
+			}]),
+			extra_bindings: None,
+			marketplace_roles: None,
+			skills: Vec::new(),
+			tool_names: Vec::new(),
+			mcp_server_names: vec!["files".to_string()],
+		});
+
+		assert_eq!(setup.issues, Vec::<String>::new());
+		assert_eq!(setup.roles[0].mcp_servers, Some(vec!["files".to_string()]));
+	}
+
+	#[test]
+	fn an_unknown_mcp_server_is_an_issue_not_an_error() {
+		let cwd = tempfile::tempdir().unwrap();
+		let config = CliConfig {
+			status_line: None,
+			hooks: crate::harness::hooks::HooksConfig::default(),
+			path: None,
+			settings: indexmap::IndexMap::new(),
+			mcp_servers: std::collections::BTreeMap::new(),
+			version: Some(1),
+		};
+		let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+			config: &config,
+			cwd: cwd.path().to_string_lossy().to_string(),
+			env: None,
+			extra_roles: Some(vec![RoleDefinition {
+				name: "author".to_string(),
+				mcp_servers: Some(vec!["ghost".to_string()]),
+				..RoleDefinition::default()
+			}]),
+			extra_bindings: None,
+			marketplace_roles: None,
+			skills: Vec::new(),
+			tool_names: Vec::new(),
+			mcp_server_names: Vec::new(),
+		});
+
+		// The role still resolves with its server list intact; the miss is
+		// advisory and names the missing server.
+		assert_eq!(setup.roles.len(), 1);
+		assert_eq!(setup.roles[0].mcp_servers, Some(vec!["ghost".to_string()]));
+		assert!(setup
+			.issues
+			.iter()
+			.any(|issue| issue.contains("unknown MCP server(s) ghost")
+				&& issue.contains("not in mcpServers config")));
+	}
+
+	#[test]
+	fn mcp_tool_names_pass_allowlist_validation() {
+		let cwd = tempfile::tempdir().unwrap();
+		let config = CliConfig {
+			status_line: None,
+			hooks: crate::harness::hooks::HooksConfig::default(),
+			path: None,
+			settings: indexmap::IndexMap::new(),
+			mcp_servers: std::collections::BTreeMap::new(),
+			version: Some(1),
+		};
+		let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+			config: &config,
+			cwd: cwd.path().to_string_lossy().to_string(),
+			env: None,
+			extra_roles: Some(vec![RoleDefinition {
+				name: "author".to_string(),
+				mcp_servers: Some(vec!["files".to_string()]),
+				tools: Some(vec!["MCP__files__search".to_string()]),
+				..RoleDefinition::default()
+			}]),
+			extra_bindings: None,
+			marketplace_roles: None,
+			skills: Vec::new(),
+			tool_names: vec!["MCP__files__search".to_string()],
+			mcp_server_names: vec!["files".to_string()],
+		});
+
+		// A role may list MCP tool names in `tools` once loaded_tools carries
+		// them; no spurious "unknown tool" issue.
+		assert_eq!(setup.issues, Vec::<String>::new());
+		assert_eq!(
+			setup.roles[0].tool_names,
+			Some(vec!["MCP__files__search".to_string()])
+		);
+	}
 
 	#[test]
 	fn quantified_goal_guidance_is_present_in_planning_prompts() {

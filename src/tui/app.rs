@@ -2114,6 +2114,15 @@ impl TuiApp {
             marketplace_roles: Some(list_enabled_marketplace_roles(cwd, home).unwrap_or_default()),
             skills: discover_all_skills(cwd, home).unwrap_or_default(),
             tool_names: self.tool_names(),
+            // Same merged set the CLI validates against (global mcpServers plus
+            // <cwd>/.drip/mcp.json), so both callers report the same unknowns.
+            mcp_server_names: crate::tools::mcp::config::load_mcp_servers(
+                &self.config.mcp_servers,
+                std::path::Path::new(&self.bootstrap.cwd),
+            )
+            .keys()
+            .cloned()
+            .collect(),
         });
 
         if role_setup.roles.is_empty() && role_setup.issues.is_empty() {
@@ -2291,6 +2300,15 @@ impl TuiApp {
             marketplace_roles: Some(list_enabled_marketplace_roles(cwd, &self.bootstrap.home).unwrap_or_default()),
             skills: discover_all_skills(cwd, &self.bootstrap.home).unwrap_or_default(),
             tool_names: self.tool_names(),
+            // Same merged set the CLI validates against (global mcpServers plus
+            // <cwd>/.drip/mcp.json), so both callers report the same unknowns.
+            mcp_server_names: crate::tools::mcp::config::load_mcp_servers(
+                &self.config.mcp_servers,
+                std::path::Path::new(&self.bootstrap.cwd),
+            )
+            .keys()
+            .cloned()
+            .collect(),
         });
         for issue in &role_setup.issues {
             self.push_info(format!("roles: {issue}"));
@@ -2365,6 +2383,9 @@ impl TuiApp {
                 no_review: false,
                 tools: builtin_tool_pack(tool_options.clone()),
                 tool_services: None,
+                // The watch view spawns no MCP clients, so its pack carries no
+                // MCP tools; None just leaves the (empty) gate to the roles.
+                mcp_servers: None,
             }));
             index.close();
             guard.armed = false;

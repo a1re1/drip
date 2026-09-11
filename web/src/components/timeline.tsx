@@ -128,28 +128,32 @@ function colorForKind(kind: string): string {
   return "var(--text-tertiary)";
 }
 
+/**
+ * The one clipping rule for card rows: up to 200 characters of the first
+ * line stay inline; a longer or multiline payload moves whole into the
+ * expandable detail. `prefix` (a task id) and `fallback` (the event kind)
+ * keep the row readable when the payload is short or empty.
+ */
+function splitRow(payload: string, prefix = "", fallback = ""): { text: string; detail: string } {
+  const expandable = payload.length > 200 || payload.includes("\n");
+  const text = [prefix, expandable ? clip(firstLine(payload), 200) : payload].filter(Boolean).join(" · ") || fallback;
+  return { text, detail: expandable ? payload : "" };
+}
+
 function rowOf(entry: TranscriptEntry, key: string): Row {
   const time = clockOf(entry, true);
   if (entry.type !== "event") {
-    let text = str(entry["text"]);
-    if (entry.type === "model") text = [str(entry["model"]), str(entry["provider"])].filter(Boolean).join(" · ");
-    if (entry.type === "skill") text = `${str(entry["name"])} ${entry["enabled"] ? "enabled" : "disabled"}`;
-    return { key, time, tag: entry.type, color: "var(--text-tertiary)", text: clip(firstLine(text), 200), meta: "", detail: text.length > 200 || text.includes("\n") ? text : "" };
+    let payload = str(entry["text"]);
+    if (entry.type === "model") payload = [str(entry["model"]), str(entry["provider"])].filter(Boolean).join(" · ");
+    if (entry.type === "skill") payload = `${str(entry["name"])} ${entry["enabled"] ? "enabled" : "disabled"}`;
+    return { key, time, tag: entry.type, color: "var(--text-tertiary)", meta: "", ...splitRow(payload) };
   }
   const kind = str(entry["kind"]) || "event";
   const data = (entry["data"] ?? {}) as EventData;
   const detail = str(entry["detail"]);
   switch (kind) {
     case "tool-call":
-      return {
-        key,
-        time,
-        tag: data.toolName ?? "tool",
-        color: "var(--teal)",
-        text: [data.taskId, clip(firstLine(detail), 200)].filter(Boolean).join(" · "),
-        meta: "",
-        detail,
-      };
+      return { key, time, tag: data.toolName ?? "tool", color: "var(--teal)", meta: "", ...splitRow(detail, data.taskId ?? "") };
     case "tool-result":
       return {
         key,
@@ -172,18 +176,15 @@ function rowOf(entry: TranscriptEntry, key: string): Row {
     }
     case "rate-limited":
       return { key, time, tag: "wait", color: "var(--orange)", text: `rate limited${typeof data.waitSeconds === "number" ? ` · waiting ${data.waitSeconds}s` : ""}`, meta: "", detail };
-    default: {
-      const short = detail.length <= 160 && !detail.includes("\n");
+    default:
       return {
         key,
         time,
         tag: KIND_TAG[kind] ?? kind.split("-")[0] ?? kind,
         color: colorForKind(kind),
-        text: [data.taskId, short ? detail : clip(firstLine(detail), 160)].filter(Boolean).join(" · ") || kind,
         meta: "",
-        detail: short ? "" : detail,
+        ...splitRow(detail, data.taskId ?? "", kind),
       };
-    }
   }
 }
 

@@ -7,7 +7,7 @@
 //! token accounting, or harness tools.
 
 use crate::core::config::{
-    default_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID,
+    baseline_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID,
     ACTIVE_TOOL_PROFILE_SETTING_ID,
     TERMINAL_TITLE_ENABLED_SETTING_ID, TERMINAL_TITLE_PROFILE_SETTING_ID,
 };
@@ -84,7 +84,7 @@ pub fn terminal_title_profile_id(settings: &indexmap::IndexMap<String, String>) 
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            default_setting_values()
+            baseline_setting_values()
                 .get(TERMINAL_TITLE_PROFILE_SETTING_ID)
                 .cloned()
                 .unwrap_or_default()
@@ -220,7 +220,7 @@ pub async fn generate_chat_title(
 mod tests {
     use super::*;
 
-    use crate::core::config::MODEL_PROFILES_SETTING_ID;
+    use crate::core::config::{default_setting_values, MODEL_PROFILES_SETTING_ID};
 
     fn response_with_content(content: &str) -> OpenAICompatibleResponse {
         // JSON-escape control characters so raw ESC/BEL fixtures stay valid JSON.

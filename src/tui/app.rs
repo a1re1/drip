@@ -3289,7 +3289,9 @@ mod pane_title_lifecycle_tests {
     use crate::tui::pane_title::fallback_title;
 
     fn enabled_settings() -> indexmap::IndexMap<String, String> {
-        crate::core::config::default_setting_values()
+        // Baseline (empty profile lists), not the first-run seed: these tests
+        // must not depend on the compiled-in catalogs.
+        crate::core::config::baseline_setting_values()
     }
 
     #[test]

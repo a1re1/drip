@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use indexmap::IndexMap;
 
 use crate::core::config::{
-    default_setting_values, parse_inference_model_profiles, parse_stored_api_key_entries,
+    baseline_setting_values, parse_inference_model_profiles, parse_stored_api_key_entries,
     parse_system_prompt_profiles, InferenceModelProfile, SystemPromptProfile,
     ACTIVE_INFERENCE_PROFILE_SETTING_ID, ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID,
     ACTIVE_TOOL_PROFILE_SETTING_ID, CEREBRAS_API_KEY_SETTING_ID, DEFAULT_MAX_CONTEXT_TOKENS,
@@ -245,39 +245,51 @@ pub fn resolve_profile_api_key(
 
 /// Returns the currently active model profile.
 pub fn resolve_active_inference_profile(settings: &IndexMap<String, String>) -> Result<InferenceModelProfile> {
-    let defaults = default_setting_values();
+    let baseline = baseline_setting_values();
     let active_profile_id = settings
         .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| defaults.get(ACTIVE_INFERENCE_PROFILE_SETTING_ID).cloned())
+        .or_else(|| baseline.get(ACTIVE_INFERENCE_PROFILE_SETTING_ID).cloned())
         .unwrap_or_default();
     let profiles = parse_inference_model_profiles(settings)?;
+
+    if profiles.is_empty() {
+        return Err(anyhow!(
+            "No model profiles configured. Add one to ~/.drip/config.json under settings.runtime.model_profiles."
+        ));
+    }
 
     profiles
         .into_iter()
         .find(|candidate| candidate.id == active_profile_id)
         .ok_or_else(|| anyhow!(
-            "Unknown active model id \"{active_profile_id}\". Add it to Model Profiles or switch Active Model ID."
+            "Unknown active model id \"{active_profile_id}\". Add a profile with that id to ~/.drip/config.json under settings.runtime.model_profiles, or change {ACTIVE_INFERENCE_PROFILE_SETTING_ID}."
         ))
 }
 
 /// Returns the currently active system-prompt profile.
 pub fn resolve_active_system_prompt_profile(settings: &IndexMap<String, String>) -> Result<SystemPromptProfile> {
-    let defaults = default_setting_values();
+    let baseline = baseline_setting_values();
     let active_prompt_id = settings
         .get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| defaults.get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID).cloned())
+        .or_else(|| baseline.get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID).cloned())
         .unwrap_or_default();
     let profiles = parse_system_prompt_profiles(settings)?;
+
+    if profiles.is_empty() {
+        return Err(anyhow!(
+            "No system prompt profiles configured. Add one to ~/.drip/config.json under settings.runtime.system_prompt_profiles."
+        ));
+    }
 
     profiles
         .into_iter()
         .find(|candidate| candidate.id == active_prompt_id)
         .ok_or_else(|| anyhow!(
-            "Unknown active system prompt id \"{active_prompt_id}\". Add it to System Prompt Profiles or switch Active System Prompt ID."
+            "Unknown active system prompt id \"{active_prompt_id}\". Add a profile with that id to ~/.drip/config.json under settings.runtime.system_prompt_profiles, or change {ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID}."
         ))
 }
 
@@ -298,7 +310,7 @@ pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Resul
 
     let explicit_id = raw_value.map(|value| value.trim().to_string()).unwrap_or_default();
     let tool_profile_id = if explicit_id.is_empty() {
-        default_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID).cloned().unwrap_or_default()
+        baseline_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID).cloned().unwrap_or_default()
     } else {
         explicit_id.clone()
     };
@@ -307,7 +319,7 @@ pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Resul
     match profiles.into_iter().find(|candidate| candidate.id == tool_profile_id) {
         Some(profile) => Ok(Some(profile)),
         None if !explicit_id.is_empty() => Err(anyhow!(
-            "Unknown tool-calling model id \"{tool_profile_id}\". Add it to Model Profiles or switch Tool-Calling Model ID."
+            "Unknown tool-calling model id \"{tool_profile_id}\". Add a profile with that id to ~/.drip/config.json under settings.runtime.model_profiles, or change runtime.active_tool_profile_id."
         )),
         None => Ok(None),
     }
@@ -463,7 +475,17 @@ pub fn resolve_model_profile_route(
     let profile = profiles
         .iter()
         .find(|candidate| candidate.id == profile_id)
-        .ok_or_else(|| anyhow!("Unknown model profile \"{profile_id}\". Add it to Model Profiles."))?;
+        .ok_or_else(|| {
+            if profiles.is_empty() {
+                anyhow!(
+                    "No model profiles configured. Add one to ~/.drip/config.json under settings.runtime.model_profiles."
+                )
+            } else {
+                anyhow!(
+                    "Unknown model profile \"{profile_id}\". Add it to ~/.drip/config.json under settings.runtime.model_profiles."
+                )
+            }
+        })?;
 
     resolve_profile_route(profile, settings, env, Some(&profiles))
 }
@@ -486,7 +508,7 @@ pub fn resolve_inference_config(settings: &IndexMap<String, String>, env: EnvSou
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
         let is_default_tool_selection = configured_tool_id.is_empty()
-            || Some(&configured_tool_id) == default_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID);
+            || Some(&configured_tool_id) == baseline_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID);
 
         match resolve_profile_route(&tool_profile, settings, env, Some(&profiles)) {
             Ok(route) => tool_route = Some(route),
@@ -519,7 +541,7 @@ pub fn resolve_inference_url(settings: &IndexMap<String, String>) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::MODEL_PROFILES_SETTING_ID;
+    use crate::core::config::{default_setting_values, MODEL_PROFILES_SETTING_ID};
 
     fn settings_with(entries: &[(&str, &str)]) -> IndexMap<String, String> {
         let mut settings = default_setting_values();
@@ -682,7 +704,7 @@ mod tests {
         let error = resolve_inference_config(&settings, Some(&HashMap::new())).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "Unknown tool-calling model id \"ghost\". Add it to Model Profiles or switch Tool-Calling Model ID."
+            "Unknown tool-calling model id \"ghost\". Add a profile with that id to ~/.drip/config.json under settings.runtime.model_profiles, or change runtime.active_tool_profile_id."
         );
     }
 
@@ -696,9 +718,11 @@ mod tests {
 
     #[test]
     fn codex_builtin_profile_resolves_without_credentials() {
-        // The shipped default catalog carries gpt-5.6-luna-high; with no user
-        // override it resolves to the local codex sentinel, effort high.
+        // The user's config carries gpt-5.6-luna-high explicitly; with no
+        // credentials it resolves to the local codex sentinel, effort high.
+        let profiles = r#"[{"id":"gpt-5.6-luna-high","label":"GPT-5.6 Luna high (Codex)","model":"gpt-5.6-luna","provider":"codex","reasoningEffort":"high"}]"#;
         let settings = settings_with(&[
+            (MODEL_PROFILES_SETTING_ID, profiles),
             (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "gpt-5.6-luna-high"),
             (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
         ]);

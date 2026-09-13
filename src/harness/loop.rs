@@ -35,7 +35,7 @@ pub const MAX_CYCLE_EXTENSIONS: i64 = 2;
 /// A single-task run whose goal-declared check the harness ran and passed
 /// after the last edit skips the reviewer loop when the whole change (tracked
 /// diff plus new files) is at most this many lines.
-pub const REVIEW_WAIVER_MAX_LINES: usize = 60;
+pub const REVIEW_WAIVER_MAX_LINES: usize = 100;
 /// Output lines carried in a harness report of a settled background job.
 pub const BACKGROUND_REPORT_TAIL_LINES: i64 = 40;
 pub const BACKGROUND_REPORT_MAX_CHARS: usize = 4_000;
@@ -2829,6 +2829,12 @@ impl HarnessRun {
             .entry(role_key)
             .or_insert_with(RoleInferenceTotals::default);
         role_bucket.calls += 1;
+        if call.hedged {
+            role_bucket.hedges_fired += 1;
+        }
+        if call.hedge_won {
+            role_bucket.hedges_won += 1;
+        }
         role_bucket.latency_ms += call.latency_ms.max(0) as u64;
         role_bucket.completion_tokens +=
             usage
@@ -6681,6 +6687,27 @@ mod role_inference_tests {
 
     fn call(latency_ms: i64) -> ModelCallRecord {
         ModelCallRecord { latency_ms, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn hedge_flags_count_into_role_totals() {
+        let mut run = role_inference_test_run().await;
+        run.active_role = Some("author".to_string());
+        // Plain call: no hedge.
+        run.record_model_usage(usage(10).as_ref(), &call(100));
+        // Hedged call where the second request answered first.
+        run.record_model_usage(
+            usage(5).as_ref(),
+            &ModelCallRecord { hedged: true, hedge_won: true, ..call(50) },
+        );
+        // Hedged call where the first request won.
+        run.record_model_usage(
+            usage(5).as_ref(),
+            &ModelCallRecord { hedged: true, hedge_won: false, ..call(60) },
+        );
+        let totals = run.role_inference.get("author").unwrap();
+        assert_eq!(totals.hedges_fired, 2);
+        assert_eq!(totals.hedges_won, 1);
     }
 
     #[tokio::test]

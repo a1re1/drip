@@ -248,6 +248,7 @@ mod review_brief_tests {
         std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
         git(dir.path(), &["commit", "-q", "-am", "during the run"]);
         std::fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
+        std::fs::write(dir.path().join("big.txt"), "line\n".repeat(REVIEW_BRIEF_MAX_INLINE_LINES + 1)).unwrap();
         let mut state = crate::core::state::create_harness_state("goal");
         state.verifications = Some(vec![crate::core::types::HarnessVerificationRecord {
             at_iteration: 2,
@@ -261,7 +262,9 @@ mod review_brief_tests {
         let brief = build_review_brief(&cwd, Some(&head), &state);
         assert!(brief.starts_with(REVIEW_BRIEF_PREFIX), "{brief}");
         assert!(brief.contains("+two"), "committed change is in the diff: {brief}");
-        assert!(brief.contains("untracked files") && brief.contains("new.txt"), "{brief}");
+        assert!(brief.contains("new file new.txt (1 lines, in full — do not READ it again):\n```\nfresh\n```"), "small new files ride along: {brief}");
+        assert!(brief.contains("new file big.txt (READ it; not in the diff)"), "big new files are only listed: {brief}");
+        assert!(brief.contains("do not READ a file that appears there"), "{brief}");
         assert!(brief.contains("v1 passed — python3 -m unittest -q"), "{brief}");
         let outside = build_review_brief(&std::env::temp_dir().to_string_lossy(), None, &state);
         assert!(outside.contains("diff: none"), "{outside}");
@@ -271,6 +274,11 @@ mod review_brief_tests {
 pub const REVIEW_BRIEF_PREFIX: &str = "review brief (harness-captured)";
 /// Diff text kept in a review brief; the reviewer can READ a file for more.
 pub const REVIEW_BRIEF_MAX_DIFF_CHARS: usize = 16_000;
+/// New (untracked) files inlined in full in the review brief: at most this
+/// many files, each within these line and character bounds.
+pub const REVIEW_BRIEF_MAX_INLINE_FILES: usize = 4;
+pub const REVIEW_BRIEF_MAX_INLINE_LINES: usize = 200;
+pub const REVIEW_BRIEF_MAX_INLINE_CHARS: usize = 8_000;
 
 fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git").args(args).current_dir(cwd).output().ok()?;
@@ -293,7 +301,27 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
         sections.push(format!("changed since run start ({}):\n{stat}", &base[..base.len().min(12)]));
     }
     if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
-        sections.push(format!("untracked files (READ them; not in the diff):\n{untracked}"));
+        // New files are not in the diff; small ones ride along in full so the
+        // reviewer does not spend a round per file re-reading what it was
+        // handed (bench reviewers READ every changed file before VERIFY).
+        let mut listed: Vec<String> = Vec::new();
+        let mut inlined = 0usize;
+        for path in untracked.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let full = std::path::Path::new(cwd).join(path);
+            let text = std::fs::read_to_string(&full).ok();
+            match text {
+                Some(text)
+                    if inlined < REVIEW_BRIEF_MAX_INLINE_FILES
+                        && text.lines().count() <= REVIEW_BRIEF_MAX_INLINE_LINES
+                        && text.chars().count() <= REVIEW_BRIEF_MAX_INLINE_CHARS =>
+                {
+                    inlined += 1;
+                    listed.push(format!("new file {path} ({} lines, in full — do not READ it again):\n```\n{}\n```", text.lines().count(), text.trim_end()));
+                }
+                _ => listed.push(format!("new file {path} (READ it; not in the diff)")),
+            }
+        }
+        sections.push(format!("untracked files:\n{}", listed.join("\n")));
     }
     match git_output(cwd, &["diff", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
         Some(diff) if diff.chars().count() <= REVIEW_BRIEF_MAX_DIFF_CHARS => sections.push(format!("diff:\n{diff}")),
@@ -322,7 +350,7 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
     if !records.is_empty() {
         sections.push(format!("verification records this run (newest first):\n{}", records.join("\n")));
     }
-    sections.push("Judge the diff against the goal and the task contracts. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it. Defects in code the diff did not touch are pre-existing and out of scope: mention them in a note_task, do not raise them as anomalies or block on them.".to_string());
+    sections.push("Judge the diff against the goal and the task contracts. The diff and the new files above ARE the change: do not READ a file that appears there unless a hunk's surrounding context is genuinely insufficient, and never READ it just to confirm the diff applied. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it. Defects in code the diff did not touch are pre-existing and out of scope: mention them in a note_task, do not raise them as anomalies or block on them.".to_string());
     sections.join("\n\n")
 }
 

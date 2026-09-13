@@ -379,6 +379,11 @@ pub struct ModelCallOptions {
     pub route: Option<ModelRoute>,
     pub transport_tools: Option<Vec<OpenAICompatibleRequestTool>>,
     pub usage_task_id: Option<String>,
+    /// Output cap for this call (None: provider default).
+    pub max_tokens: Option<u64>,
+    /// tool_choice override for OpenAI-compatible providers ("required"
+    /// forces a tool call); None sends "auto".
+    pub tool_choice: Option<String>,
 }
 
 pub struct ModelCallerDeps {
@@ -924,7 +929,7 @@ impl ModelCaller {
                 // One-shot calls (run summaries) never re-read their prefix, so a
                 // cache write would be a pure premium.
                 cache: Some(include_tools),
-                max_tokens: None,
+                max_tokens: call_options.max_tokens,
                 messages: messages.to_vec(),
                 model: model.clone(),
                 tools: if include_tools {
@@ -951,6 +956,8 @@ impl ModelCaller {
                 } else {
                     None
                 },
+                max_tokens: call_options.max_tokens,
+                tool_choice: call_options.tool_choice.clone(),
             }))
             .map_err(|error| {
                 ModelCallError::Message(format!("failed to serialize the request payload: {error}"))

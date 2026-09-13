@@ -698,11 +698,17 @@ pub struct HarnessLoopConfig {
 	pub max_tool_rounds_per_cycle: i64,
 }
 
+/// Loop budget defaults. Across ~2,300 recorded sessions 68% of cycles hit
+/// the old 4-round cap and 66% of rounds carried a single tool call, so a
+/// loop could do at most ~12 tool calls before its transcript was discarded
+/// and the next loop re-read everything; 42% of loops ended without
+/// finish_task. Eight rounds per cycle keeps one task's work in one
+/// transcript; ten hot results keeps the reads of that longer cycle unfolded.
 pub const DEFAULT_LOOP_CONFIG: HarnessLoopConfig = HarnessLoopConfig {
-	hot_tool_results: 6,
+	hot_tool_results: 10,
 	max_cycles: 3,
 	max_tool_result_chars: 8000,
-	max_tool_rounds_per_cycle: 4,
+	max_tool_rounds_per_cycle: 8,
 };
 
 pub const DEFAULT_TELEMETRY_CONFIG: HarnessTelemetryConfig = HarnessTelemetryConfig {
@@ -1114,9 +1120,9 @@ mod tests {
 		let loop_config = DEFAULT_LOOP_CONFIG;
 		let telemetry_config = DEFAULT_TELEMETRY_CONFIG;
 		assert_eq!(loop_config.max_cycles, 3);
-		assert_eq!(loop_config.hot_tool_results, 6);
+		assert_eq!(loop_config.hot_tool_results, 10);
 		assert_eq!(loop_config.max_tool_result_chars, 8000);
-		assert_eq!(loop_config.max_tool_rounds_per_cycle, 4);
+		assert_eq!(loop_config.max_tool_rounds_per_cycle, 8);
 		assert_eq!(telemetry_config.base_ttl, 3);
 		assert_eq!(telemetry_config.max_observations, 8);
 		assert_eq!(telemetry_config.max_observation_ttl, 12);

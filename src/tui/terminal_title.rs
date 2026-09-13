@@ -208,6 +208,8 @@ pub async fn generate_chat_title(
         route: Some(route),
         transport_tools: None,
         usage_task_id: None,
+        max_tokens: None,
+        tool_choice: None,
     };
     let attempt = caller.call_model(vec![message], Some(options));
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), attempt).await {

@@ -23,9 +23,10 @@ use crate::core::types::{
 HarnessMemoryNote, HarnessObservation, HarnessState,
 HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats,
 	VerificationSummary,
-	MAX_RECOVERY_EVENTS, MAX_RECOVERY_TEXT_CHARS,
 };
 use crate::core::types::{HarnessRecoveryAction, HarnessRecoveryEvent, push_recovery_event};
+#[cfg(test)]
+use crate::core::types::{MAX_RECOVERY_EVENTS, MAX_RECOVERY_TEXT_CHARS};
 use crate::lib_fs::write_file_atomic;
 
 /// Placement for newly added tasks: appended to the end of the list, or
@@ -968,7 +969,14 @@ pub fn describe_verification_evidence(evidence: Option<&crate::core::types::Veri
 		.as_deref()
 		.map(|detail| format!(" — {}", detail))
 		.unwrap_or_default();
-	let anchor_text = match &evidence.anchor {
+	let anchor_text = describe_verification_anchor(evidence.anchor.as_ref());
+	format!("; evidence: {}{}; anchor: {}", counts, detail, anchor_text)
+}
+
+/// The anchor label a VERIFY result and the harness both print, so the model
+/// reads back exactly the anchor the record carries.
+pub fn describe_verification_anchor(anchor: Option<&crate::core::types::VerificationAnchor>) -> String {
+	match anchor {
 		None => "undeclared".to_string(),
 		Some(anchor) => match anchor.kind {
 			crate::core::types::VerificationAnchorKind::External => match anchor.source.as_deref() {
@@ -985,8 +993,7 @@ pub fn describe_verification_evidence(evidence: Option<&crate::core::types::Veri
 			}
 			crate::core::types::VerificationAnchorKind::Undeclared => "undeclared".to_string(),
 		},
-	};
-	format!("; evidence: {}{}; anchor: {}", counts, detail, anchor_text)
+	}
 }
 
 /// One verdict vocabulary for every reporting surface, including legacy data.

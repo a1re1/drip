@@ -196,7 +196,7 @@ mod goal_check_tests {
         // No declared check: auto plans.
         assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto), None);
         // Too long: auto plans.
-        let long = format!("{} {}", small, "and more ".repeat(120));
+        let long = format!("{} {}", small, "and more ".repeat(200));
         assert_eq!(direct_task_title(&long, PlanMode::Auto), None);
         assert!(direct_task_title(&long, PlanMode::Direct).is_some());
         assert_eq!(direct_task_title("   ", PlanMode::Direct), None);
@@ -1374,9 +1374,9 @@ impl PlanMode {
 }
 
 /// Goal size under which `PlanMode::Auto` skips the planner.
-pub const DIRECT_PLAN_MAX_GOAL_CHARS: usize = 700;
+pub const DIRECT_PLAN_MAX_GOAL_CHARS: usize = 1400;
 /// Paths a goal may name explicitly and still count as small.
-pub const DIRECT_PLAN_MAX_PATHS: usize = 3;
+pub const DIRECT_PLAN_MAX_PATHS: usize = 6;
 
 /// The title of the direct task a run seeds instead of planning, or None
 /// when this goal should be planned: `Always` never seeds; `Direct` always

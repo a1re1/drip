@@ -1231,6 +1231,13 @@ folded as the transcript grows anyway, longer cycles are the cheaper way to
 keep context bounded. The multi-cycle bench tasks ran 11-29% faster at
 sixteen rounds in a three-repeat A/B.
 
+Auto plan mode now skips the planner for goals up to 1,400 characters naming
+up to six paths (was 700 and three) when the goal declares a backticked
+check. A three-repeat A/B on the two largest bench tasks: backend-refactor
+53s → 21s and http-serve 96s → 33s at the same pass rate, with inferences
+15 → 9 and 26 → 12; the planner's 15-18s call plus its task decomposition
+(each task its own loops and review) cost two to three times the wall.
+
 The review brief a reviewer loop opens with carries small new files in full
 (up to four files of at most 200 lines) next to the diff, and tells the
 reviewer not to READ files it was already handed; bench reviewers spent two of

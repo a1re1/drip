@@ -59,6 +59,45 @@ class SummarizeRunsTest(unittest.TestCase):
         self.assertEqual(b["hidden_pass_rate"], 0.0)
         self.assertEqual(b["rejections"], 2)
 
+class RoleTimingTest(unittest.TestCase):
+    @staticmethod
+    def role_run(task, plan_s, author_s, review_s, **kw):
+        return dict(run(task, 10.0, 5, True, 1), plan_s=plan_s, author_s=author_s, review_s=review_s, **kw)
+
+    def test_summarize_runs_with_role_timings(self):
+        rows = bench.summarize_runs([self.role_run("a", 1.0, 4.0, 2.0),
+                                     self.role_run("a", 3.0, 6.0, 4.0)])
+        s = rows[0]
+        self.assertEqual(s["plan_s_median"], 2.0)
+        self.assertEqual(s["author_s_median"], 5.0)
+        self.assertEqual(s["review_s_median"], 3.0)
+
+    def test_summarize_runs_legacy_without_role_fields_yields_zero(self):
+        rows = bench.summarize_runs([run("a", 10.0, 5, True, 1), run("a", 20.0, 7, True, 2)])
+        s = rows[0]
+        self.assertEqual(s["plan_s_median"], 0)
+        self.assertEqual(s["author_s_median"], 0)
+        self.assertEqual(s["review_s_median"], 0)
+
+    def test_extract_role_inference_last_run_end_wins(self):
+        stdout = ('{"type":"x"}\n'
+                  '{"type":"run-end","roleInference":{"planner":{"calls":1,"latencyMs":1500},'
+                  '"author":{"calls":3,"latencyMs":2300}}}\n')
+        self.assertEqual(bench.extract_role_inference(stdout),
+                         {"planner": {"calls": 1, "latencyMs": 1500},
+                          "author": {"calls": 3, "latencyMs": 2300}})
+
+    def test_extract_role_inference_absent_or_garbage(self):
+        self.assertEqual(bench.extract_role_inference('{"type":"result"}\nnot json\n'), {})
+        self.assertEqual(bench.extract_role_inference(""), {})
+
+    def test_role_seconds_mapping_and_defaults(self):
+        self.assertEqual(bench.role_seconds({"planner": {"latencyMs": 1500},
+                                             "author": {"latencyMs": 2300},
+                                             "reviewer": {"latencyMs": 900}}),
+                         dict(plan_s=1.5, author_s=2.3, review_s=0.9))
+        self.assertEqual(bench.role_seconds({}), dict(plan_s=0, author_s=0, review_s=0))
+
     def test_input_not_mutated(self):
         runs = [run("a", 10.0, 5, True, 1), run("a", 20.0, 7, False, 2)]
         snapshot = [dict(r) for r in runs]

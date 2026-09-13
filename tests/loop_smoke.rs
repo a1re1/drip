@@ -294,6 +294,41 @@ async fn task_loop_budget_blocks_a_task_that_never_finishes() {
     assert!(texts.iter().any(|t| t.contains("task loop budget: this is task loop 2 of 2")), "last-loop warning reaches the model");
 }
 
+/// A cycle that edited the workspace earns the loop one more cycle instead
+/// of a transcript reset: with a one-cycle, one-round budget the PATCH in
+/// cycle 1 extends the loop, and finish_task lands in cycle 2 of the SAME
+/// loop.
+#[tokio::test]
+async fn a_cycle_that_edits_extends_the_loop_by_one_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        text_response("Test added."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        max_iterations: Some(8), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        r#loop: Some(drip::harness::roles::PartialHarnessLoopConfig { max_cycles: Some(1), max_tool_rounds_per_cycle: Some(1), ..Default::default() }),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(result.r#loops, 2, "planning loop + one extended task loop");
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.detail.starts_with("cycle budget extended to 2")), "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.contains("cycle")).collect::<Vec<_>>());
+}
+
 /// The expectation gate end to end: an "external" anchor on a check that
 /// names the edited artifact is downgraded, a mismatched observation refuses
 /// `completed`, and `unreconciled` finishes the run with exit 0, the anomaly

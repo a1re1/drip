@@ -27,6 +27,11 @@ pub const DEFAULT_DYNAMIC_TOOL_NAMES: [&str; 1] = ["DIR"];
 /// at the transcript reset; 40 keeps a three-cycle loop's calls in view.
 pub const MAX_DIGEST_ACTIONS: usize = 40;
 pub const MAX_DIGEST_ACTION_CHARS: usize = 200;
+/// Extra cycles a task loop may earn past its `max_cycles` budget: one per
+/// cycle that edited or verified the workspace, so a loop in the middle of
+/// productive work is not reset (transcript discarded, workspace re-read)
+/// just because its fixed budget ran out. Loops that only read never extend.
+pub const MAX_CYCLE_EXTENSIONS: i64 = 2;
 pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
 pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
@@ -2030,6 +2035,14 @@ pub struct LoopScope {
     pub cycle: i64,
     pub task_finished: bool,
     pub made_progress: bool,
+    /// A workspace edit or verification happened in the current cycle —
+    /// the cycle-extension signal (reset in begin_cycle).
+    pub progress_this_cycle: bool,
+    /// Cycles granted past `max_cycles` this loop (≤ MAX_CYCLE_EXTENSIONS).
+    pub cycle_extensions: i64,
+    /// The loop works a review task: reads are its job, so the read-only
+    /// nudge stays quiet.
+    pub review_loop: bool,
     /// Successful READ/GREP/DIR calls so far this loop, and whether anything
     /// has been written or recorded — the read-only nudge's inputs.
     pub read_only_calls_this_loop: i64,
@@ -2991,6 +3004,7 @@ impl HarnessRun {
                     }
                 }
                 self.state.last_verification = Some(verification_record.clone());
+                scope.progress_this_cycle = true;
                 self.state.verifications = {
                     let mut timeline = self.state.verifications.clone().unwrap_or_default();
                     timeline.push(verification_record);
@@ -3439,7 +3453,12 @@ impl HarnessRun {
             self.fire_hook(crate::harness::hooks::HookEvent::LoopStart, None);
             self.fire_hook(crate::harness::hooks::HookEvent::TaskStart, None);
 
-            for cycle in 1..=scope.loop_budget.max_cycles {
+            let mut cycle: i64 = 0;
+            loop {
+                cycle += 1;
+                if cycle > scope.loop_budget.max_cycles + scope.cycle_extensions {
+                    break;
+                }
                 if scope.task_finished || scope.concluded_naturally || self.aborted {
                     break;
                 }
@@ -3483,6 +3502,32 @@ impl HarnessRun {
                 {
                     scope.planned_and_yielded = true;
                     break;
+                }
+
+                // Progress extension: a cycle that edited or verified earns
+                // the loop one more cycle (bounded), instead of a transcript
+                // reset in the middle of productive work.
+                if cycle == scope.loop_budget.max_cycles + scope.cycle_extensions
+                    && scope.progress_this_cycle
+                    && !scope.task_finished
+                    && !scope.concluded_naturally
+                    && scope.cycle_extensions < MAX_CYCLE_EXTENSIONS
+                    && self.state.iteration - self.start_iteration < self.max_iterations
+                {
+                    scope.cycle_extensions += 1;
+                    scope.affordable_cycles += 1;
+                    let detail = format!(
+                        "cycle budget extended to {} (cycle {cycle} edited or verified the workspace; {} extension(s) left)",
+                        scope.loop_budget.max_cycles + scope.cycle_extensions,
+                        MAX_CYCLE_EXTENSIONS - scope.cycle_extensions
+                    );
+                    scope.digest_actions.push(detail.clone());
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                        detail,
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::HarnessOp,
+                    });
                 }
             }
 
@@ -3717,6 +3762,10 @@ impl HarnessRun {
             loop_budget.max_cycles
         };
 
+        let review_loop = current_task_id
+            .as_deref()
+            .and_then(|id| core_state::get_task_by_id(&self.state, id))
+            .is_some_and(|task| task.review_of.is_some());
         LoopScope {
             loop_start_iteration: self.state.iteration,
             current_task_id,
@@ -3747,6 +3796,9 @@ impl HarnessRun {
             goal_check_used: false,
             cycles_run: 0,
             digest_actions: Vec::new(),
+            progress_this_cycle: false,
+            cycle_extensions: 0,
+            review_loop,
         }
     }
 
@@ -3828,6 +3880,7 @@ impl HarnessRun {
     /// cycle must not run (budget exhausted / aborted).
     pub fn begin_cycle(&mut self, scope: &mut LoopScope, cycle: i64) -> bool {
         scope.cycle = cycle;
+        scope.progress_this_cycle = false;
         if self
             .options
             .signal
@@ -4958,7 +5011,7 @@ impl HarnessRun {
 
             if (deduped_tool || read_only_bash) && !execution.failed {
                 scope.read_only_calls_this_loop += 1;
-                if !scope.persisted_this_loop && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
+                if !scope.persisted_this_loop && !scope.review_loop && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
                     tool_content = format!(
                         "{tool_content}\n\n{}",
                         build_read_only_loop_nudge(scope.read_only_calls_this_loop, scope.cycle, scope.affordable_cycles)
@@ -5012,6 +5065,7 @@ impl HarnessRun {
             if let Some(task_id) = scope.current_task_id.clone() {
                 if may_mutate && !execution.failed && tool_name != "PATCH" && !shell_write {
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
+                        scope.progress_this_cycle = true;
                         record_task_footprint(&mut task.footprint, &format!("edited via {tool_name}"));
                     }
                 }
@@ -5024,6 +5078,7 @@ impl HarnessRun {
                     let patched = extract_patched_paths(&raw_input);
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
                         for patched_path in patched {
+                            scope.progress_this_cycle = true;
                             record_task_footprint(&mut task.footprint, &format!("edited {patched_path}"));
                         }
                     }

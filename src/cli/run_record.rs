@@ -322,6 +322,8 @@ mod tests {
 				calls: 12,
 				latency_ms: 4800,
 				completion_tokens: 910,
+				prompt_tokens: 40_000,
+				cache_read_tokens: 30_000,
 				hedges_fired: 4,
 				hedges_won: 1,
 			},
@@ -332,6 +334,8 @@ mod tests {
 				calls: 3,
 				latency_ms: 1200,
 				completion_tokens: 210,
+				prompt_tokens: 5_000,
+				cache_read_tokens: 4_000,
 				hedges_fired: 0,
 				hedges_won: 0,
 			},
@@ -342,8 +346,8 @@ mod tests {
 		assert_eq!(
 			parsed["roleInference"],
 			serde_json::json!({
-				"author": { "calls": 12, "latencyMs": 4800, "completionTokens": 910, "hedgesFired": 4, "hedgesWon": 1 },
-				"planner": { "calls": 3, "latencyMs": 1200, "completionTokens": 210, "hedgesFired": 0, "hedgesWon": 0 },
+				"author": { "calls": 12, "latencyMs": 4800, "completionTokens": 910, "promptTokens": 40000, "cacheReadTokens": 30000, "hedgesFired": 4, "hedgesWon": 1 },
+				"planner": { "calls": 3, "latencyMs": 1200, "completionTokens": 210, "promptTokens": 5000, "cacheReadTokens": 4000, "hedgesFired": 0, "hedgesWon": 0 },
 			}),
 			"{json}"
 		);

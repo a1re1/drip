@@ -196,7 +196,7 @@ mod goal_check_tests {
         // No declared check: auto plans.
         assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto), None);
         // Too long: auto plans.
-        let long = format!("{} {}", small, "and more ".repeat(200));
+        let long = format!("{} {}", small, "and more ".repeat(300));
         assert_eq!(direct_task_title(&long, PlanMode::Auto), None);
         assert!(direct_task_title(&long, PlanMode::Direct).is_some());
         assert_eq!(direct_task_title("   ", PlanMode::Direct), None);
@@ -318,6 +318,11 @@ mod review_brief_tests {
         assert!(brief.contains("new file big.txt (READ it; not in the diff)"), "big new files are only listed: {brief}");
         assert!(brief.contains("do not READ a file that appears there"), "{brief}");
         assert!(brief.contains("v1 passed — python3 -m unittest -q"), "{brief}");
+        let settled = build_review_brief_with(&cwd, Some(&head), &state, Some("the harness ran the goal-declared check (cargo test --lib harness)"));
+        assert!(settled.contains("verification settled: the harness ran the goal-declared check (cargo test --lib harness) after the last edit"), "{settled}");
+        assert!(settled.contains("already settle verification; finish_task once the diff reads correct"), "{settled}");
+        assert!(!settled.contains("One VERIFY of the project's own check is enough"), "{settled}");
+        assert!(brief.contains("One VERIFY of the project's own check is enough"), "{brief}");
         let outside = build_review_brief(&std::env::temp_dir().to_string_lossy(), None, &state);
         assert!(outside.contains("diff: none"), "{outside}");
     }
@@ -379,6 +384,13 @@ pub fn git_head(cwd: &str) -> Option<String> {
 /// The reviewer's opening note: the run's change set (diff against the
 /// run-start HEAD, plus untracked files) and its verification records.
 pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &HarnessState) -> String {
+    build_review_brief_with(cwd, run_start_head, state, None)
+}
+
+/// `settled` names the goal-declared check that already passed after the last
+/// edit (see HarnessRun::verified_after_last_edit); the brief then tells the
+/// reviewer not to spend a round re-running it.
+pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &HarnessState, settled: Option<&str>) -> String {
     let mut sections = vec![REVIEW_BRIEF_PREFIX.to_string()];
     let base = run_start_head.unwrap_or("HEAD");
     if let Some(stat) = git_output(cwd, &["diff", "--stat", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
@@ -434,7 +446,15 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
     if !records.is_empty() {
         sections.push(format!("verification records this run (newest first):\n{}", records.join("\n")));
     }
-    sections.push("Judge the diff against the goal and the task contracts. The diff and the new files above ARE the change: do not READ a file that appears there unless a hunk's surrounding context is genuinely insufficient, and never READ it just to confirm the diff applied. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it. Defects in code the diff did not touch are pre-existing and out of scope: mention them in a note_task, do not raise them as anomalies or block on them.".to_string());
+    if let Some(settled) = settled {
+        sections.push(format!("verification settled: {settled} after the last edit and it passed. Do not re-run it — it costs a round and the same minutes again and answers nothing new. Spend the rounds on the diff; run a check only for something the records above do not cover."));
+    }
+    let verify_guidance = if settled.is_some() {
+        "The records above already settle verification; finish_task once the diff reads correct."
+    } else {
+        "One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it."
+    };
+    sections.push(format!("Judge the diff against the goal and the task contracts. The diff and the new files above ARE the change: do not READ a file that appears there unless a hunk's surrounding context is genuinely insufficient, and never READ it just to confirm the diff applied. {verify_guidance} Defects in code the diff did not touch are pre-existing and out of scope: mention them in a note_task, do not raise them as anomalies or block on them."));
     sections.join("\n\n")
 }
 
@@ -1452,9 +1472,9 @@ impl PlanMode {
 }
 
 /// Goal size under which `PlanMode::Auto` skips the planner.
-pub const DIRECT_PLAN_MAX_GOAL_CHARS: usize = 1400;
+pub const DIRECT_PLAN_MAX_GOAL_CHARS: usize = 2500;
 /// Paths a goal may name explicitly and still count as small.
-pub const DIRECT_PLAN_MAX_PATHS: usize = 6;
+pub const DIRECT_PLAN_MAX_PATHS: usize = 10;
 
 /// The title of the direct task a run seeds instead of planning, or None
 /// when this goal should be planned: `Always` never seeds; `Direct` always
@@ -2991,6 +3011,8 @@ impl HarnessRun {
                     .and_then(|details| details.cached_tokens)
             })
             .unwrap_or(0);
+        role_bucket.prompt_tokens += prompt_tokens.max(0) as u64;
+        role_bucket.cache_read_tokens += cache_read_tokens.max(0) as u64;
 
         self.run_usage.calls += 1;
         self.run_usage.prompt_tokens += prompt_tokens;
@@ -3462,6 +3484,21 @@ impl HarnessRun {
     /// harness_tools adds the task-shape conditions (single-task run).
     pub fn review_waiver_reason(&self, harness_ran: Option<&str>) -> Option<String> {
         let base = self.run_start_head.as_deref()?;
+        let (how, command) = self.verified_after_last_edit(harness_ran)?;
+        let bound = self.review_waiver_lines.unwrap_or(REVIEW_WAIVER_MAX_LINES);
+        let lines = workspace_changed_lines(&self.cwd, base).filter(|lines| *lines <= bound)?;
+        Some(format!(
+            "{how} ({}) after the last edit and it passed, and the whole change is {lines} line(s) (waiver bound {bound})",
+            truncate_text(&command, 80)
+        ))
+    }
+
+    /// The goal-declared check that settled the current change: run by the
+    /// harness (`harness_ran`) or as the agent's last VERIFY, passed, not
+    /// self-authored, with no workspace edit since. The waiver adds a size
+    /// bound on top; the review brief uses it as-is so the reviewer does not
+    /// spend a round re-running a check that already settled the change.
+    pub fn verified_after_last_edit(&self, harness_ran: Option<&str>) -> Option<(&'static str, String)> {
         let (how, command) = match harness_ran {
             Some(command) => ("the harness ran the goal-declared check", command.to_string()),
             None => {
@@ -3485,12 +3522,7 @@ impl HarnessRun {
                 ("the last VERIFY was the goal-declared check", command)
             }
         };
-        let bound = self.review_waiver_lines.unwrap_or(REVIEW_WAIVER_MAX_LINES);
-        let lines = workspace_changed_lines(&self.cwd, base).filter(|lines| *lines <= bound)?;
-        Some(format!(
-            "{how} ({}) after the last edit and it passed, and the whole change is {lines} line(s) (waiver bound {bound})",
-            truncate_text(&command, 80)
-        ))
+        Some((how, command))
     }
 
     pub fn auto_reverify_stale_finish(
@@ -4145,7 +4177,10 @@ impl HarnessRun {
                 task.review_of.is_some() && !task.notes.iter().any(|note| note.starts_with(REVIEW_BRIEF_PREFIX))
             });
             if wants_brief {
-                let brief = build_review_brief(&self.cwd, self.run_start_head.as_deref(), &self.state);
+                let settled = self
+                    .verified_after_last_edit(None)
+                    .map(|(how, command)| format!("{how} ({})", truncate_text(&command, 80)));
+                let brief = build_review_brief_with(&self.cwd, self.run_start_head.as_deref(), &self.state, settled.as_deref());
                 if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, task_id) {
                     crate::core::state::append_task_note(task, &brief);
                 }
@@ -6971,7 +7006,22 @@ mod role_inference_tests {
         run.record_model_usage(usage(10).as_ref(), &call(100));
         run.record_model_usage(usage(5).as_ref(), &call(50));
         let totals = run.role_inference.get("author").unwrap();
-        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (2, 150, 15));
+        assert_eq!(
+            (totals.calls, totals.latency_ms, totals.completion_tokens),
+            (2, 150, 15)
+        );
+        // prompt/cache-read are summed from each call's usage (Default usage()
+        // helper sets none, so seed an explicit one for the cache-read path).
+        let mut cached_usage = usage(10).unwrap();
+        cached_usage.prompt_tokens = Some(700);
+                cached_usage.prompt_tokens_details = Some(
+            crate::harness::model_call::OpenAICompatibleResponsePromptTokensDetails {
+                cached_tokens: Some(400),
+            },
+        );
+        run.record_model_usage(Some(&cached_usage), &call(10));
+        let totals = run.role_inference.get("author").unwrap();
+        assert_eq!((totals.prompt_tokens, totals.cache_read_tokens), (700, 400));
     }
 
     #[tokio::test]

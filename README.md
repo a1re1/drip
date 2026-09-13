@@ -1186,6 +1186,12 @@ rounds. The read-only nudge ("N reads and nothing written") waits for the
 second cycle of a loop (or sixteen reads): eight reads in a fresh loop's first
 cycle is orientation, not drift.
 
+When the goal-declared check already passed after the author's last edit
+(the same anchor the review waiver uses, without its size bound), the review
+brief says so under `verification settled:` and tells the reviewer not to
+re-run it — a reviewer re-running `cargo test` cost a round and the suite's
+minutes again on every recorded Rust dogfood.
+
 A `BASH` or `VERIFY` command that hits its timeout comes back marked as hung
 (`HUNG:` / `TIMED OUT`) with what to change, and the harness refuses to run
 the identical command text again until an edit lands: a test that starts a
@@ -1253,8 +1259,8 @@ folded as the transcript grows anyway, longer cycles are the cheaper way to
 keep context bounded. The multi-cycle bench tasks ran 11-29% faster at
 sixteen rounds in a three-repeat A/B.
 
-Auto plan mode now skips the planner for goals up to 1,400 characters naming
-up to six paths (was 700 and three) when the goal declares a backticked
+Auto plan mode now skips the planner for goals up to 2,500 characters naming
+up to ten paths (was 700 and three) when the goal declares a backticked
 check. A three-repeat A/B on the two largest bench tasks: backend-refactor
 53s → 21s and http-serve 96s → 33s at the same pass rate, with inferences
 15 → 9 and 26 → 12; the planner's 15-18s call plus its task decomposition

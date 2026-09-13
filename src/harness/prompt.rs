@@ -152,10 +152,24 @@ mod anchoring_render_tests {
         );
     }
 
+    #[test]
+    fn file_outlines_render_as_their_own_section() {
+        let state = HarnessState::default();
+        let with = build_iteration_user_message(
+            &state,
+            &IterationUserMessageArgs { file_outlines: Some("src/a.rs (900 lines): 3 pub fn a; 40 struct B"), ..iteration_args() },
+        );
+        assert!(with.contains(&format!("{FILE_OUTLINE_PREFIX} (harness-generated")), "{with}");
+        assert!(with.contains("src/a.rs (900 lines): 3 pub fn a; 40 struct B"));
+        let without = build_iteration_user_message(&state, &IterationUserMessageArgs { file_outlines: Some("  "), ..iteration_args() });
+        assert!(!without.contains(FILE_OUTLINE_PREFIX));
+    }
+
     fn iteration_args() -> IterationUserMessageArgs<'static> {
         IterationUserMessageArgs {
             current_date: "2026-01-01",
             current_task: None,
+            file_outlines: None,
             loop_info: None,
             repo_memory_dir: None,
             repo_memory_index: None,
@@ -219,6 +233,8 @@ pub struct HarnessLoopInfo {
 pub struct IterationUserMessageArgs<'a> {
     pub current_date: &'a str,
     pub current_task: Option<&'a HarnessTask>,
+    /// Harness-generated definition maps of the files the task names (see harness::outline).
+    pub file_outlines: Option<&'a str>,
     pub loop_info: Option<HarnessLoopInfo>,
     pub repo_memory_dir: Option<&'a str>,
     pub repo_memory_index: Option<&'a str>,
@@ -232,6 +248,7 @@ pub struct IterationUserMessageArgs<'a> {
 pub struct IterationMessagesArgs<'a> {
     pub current_date: &'a str,
     pub current_task: Option<&'a HarnessTask>,
+    pub file_outlines: Option<&'a str>,
     pub goal_context: Option<&'a str>,
     pub goal_images: Option<Vec<String>>,
     pub loop_info: Option<HarnessLoopInfo>,
@@ -527,6 +544,12 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         sections.push(warm_section);
     }
 
+    if let Some(outlines) = args.file_outlines.filter(|text| !text.trim().is_empty()) {
+        sections.push(format!(
+            "{FILE_OUTLINE_PREFIX} (harness-generated: line-numbered definitions of the files this task names — READ the specific line ranges you need instead of paging through whole files):\n{outlines}"
+        ));
+    }
+
     let last_activation_section = build_last_activation_section(state);
 
     if !last_activation_section.is_empty() {
@@ -590,6 +613,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 /// with changed evidence instead of re-deriving identical work. None when the
 /// task has no recovery history (e.g. fresh planning runs).
 pub const TASK_LOOP_BUDGET_PREFIX: &str = "task loop budget:";
+pub const FILE_OUTLINE_PREFIX: &str = "file_outline";
 
 fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
     let history = task.recovery_history.as_ref()?;
@@ -628,6 +652,7 @@ pub fn build_iteration_messages(state: &HarnessState, args: &IterationMessagesAr
         &IterationUserMessageArgs {
             current_date: args.current_date,
             current_task: args.current_task,
+            file_outlines: args.file_outlines,
             loop_info: args.loop_info.clone(),
             repo_memory_dir: args.repo_memory_dir,
             repo_memory_index: args.repo_memory_index,

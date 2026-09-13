@@ -109,6 +109,7 @@ fn iteration_user_message_matches() {
     let full = IterationUserMessageArgs {
         current_date: DATE,
         current_task: Some(&current),
+        file_outlines: None,
         loop_info: Some(HarnessLoopInfo {
             index: 3,
             max_cycles: 4,
@@ -157,6 +158,7 @@ fn iteration_messages_match() {
         &IterationMessagesArgs {
             current_date: DATE,
             current_task: Some(&current),
+            file_outlines: None,
             goal_context: Some("context line one\ncontext line two"),
             goal_images: Some(vec!["data:image/png;base64,AAAA".into(), "data:image/png;base64,BBBB".into()]),
             loop_info: Some(HarnessLoopInfo { index: 3, max_cycles: 4, role: None }),

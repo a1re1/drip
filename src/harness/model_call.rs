@@ -53,6 +53,35 @@ pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 240_000;
 /// ends resumable instead of burning its budget on a dead endpoint.
 pub const MAX_UNREACHABLE_WALL_MS: u64 = 600_000;
 
+// A stalled upstream rarely looks like a dead one: OpenRouter routes that
+// usually answer in 5-10s occasionally park one request for minutes (a
+// bench run spent 349s + 189s + 127s on three calls whose neighbours took
+// 8s). The fixed 240s bound only catches the worst of those. Once a model
+// has a few completed calls behind it, the FIRST attempt of each call is
+// bounded by a multiple of its median latency instead; a call that blows
+// that bound is retried at once, and the retry gets the full bound so a
+// legitimately long completion still lands.
+pub const STALL_TIMEOUT_MULTIPLIER: u64 = 8;
+pub const STALL_TIMEOUT_MIN_SAMPLES: usize = 3;
+pub const STALL_TIMEOUT_FLOOR_MS: u64 = 45_000;
+pub const STALL_LATENCY_SAMPLES: usize = 8;
+
+/// The first-attempt bound for a model with `samples` recent successful
+/// latencies (ms): STALL_TIMEOUT_MULTIPLIER × median, clamped to
+/// [STALL_TIMEOUT_FLOOR_MS, base]; `base` until enough samples exist.
+pub fn stall_timeout_ms(samples: &[u64], base: u64) -> u64 {
+    if samples.len() < STALL_TIMEOUT_MIN_SAMPLES {
+        return base;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    median
+        .saturating_mul(STALL_TIMEOUT_MULTIPLIER)
+        .max(STALL_TIMEOUT_FLOOR_MS)
+        .min(base)
+}
+
 /// The request outgrew the model's context window — recoverable by folding.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{0}")]
@@ -431,6 +460,8 @@ pub struct ModelCaller {
     http_client: reqwest::Client,
     request_timeout_ms: u64,
     sleep: SleepFn,
+    /// Recent successful latencies per model, for the stall-aware first-attempt bound.
+    latency_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
     /// Codex lane for tool-bearing calls (the run's main conversation).
     codex_tool_lane: tokio::sync::Mutex<Option<CodexBridge>>,
     /// Codex lane for include_tools=false calls (run summaries), so they never
@@ -457,6 +488,7 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         http_client,
         request_timeout_ms,
         sleep,
+        latency_samples: std::sync::Mutex::new(std::collections::HashMap::new()),
         codex_tool_lane: tokio::sync::Mutex::new(None),
         codex_summary_lane: tokio::sync::Mutex::new(None),
     }
@@ -564,6 +596,29 @@ fn backoff_seconds(attempt: u32) -> f64 {
 }
 
 impl ModelCaller {
+    /// The bound for one attempt: the stall-aware bound on the first attempt
+    /// once the model has STALL_TIMEOUT_MIN_SAMPLES completed calls, the full
+    /// per-attempt timeout otherwise (and always on retries).
+    fn attempt_timeout_ms(&self, model: &str, attempt: u32) -> u64 {
+        if attempt > 1 {
+            return self.request_timeout_ms;
+        }
+        let samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
+        match samples.get(model) {
+            Some(recent) => stall_timeout_ms(&recent.iter().copied().collect::<Vec<_>>(), self.request_timeout_ms),
+            None => self.request_timeout_ms,
+        }
+    }
+
+    fn record_latency(&self, model: &str, latency_ms: i64) {
+        let mut samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let recent = samples.entry(model.to_string()).or_default();
+        recent.push_back(latency_ms.max(0) as u64);
+        while recent.len() > STALL_LATENCY_SAMPLES {
+            recent.pop_front();
+        }
+    }
+
     fn emit(&self, event_type: HarnessEventType, detail: String, data: Option<HarnessEventData>) {
         (self.deps.emit)(HarnessEvent {
             data,
@@ -1067,6 +1122,7 @@ impl ModelCaller {
         let mut attempt: u32 = 1;
 
         loop {
+            let attempt_timeout_ms = self.attempt_timeout_ms(&model, attempt);
             let request_fut = {
                 let client = self.http_client.clone();
                 let url = url.clone();
@@ -1086,7 +1142,7 @@ impl ModelCaller {
                 }
             };
 
-            match run_bounded_request(request_fut, self.request_timeout_ms, self.deps.signal.as_ref()).await {
+            match run_bounded_request(request_fut, attempt_timeout_ms, self.deps.signal.as_ref()).await {
                 RequestOutcome::Stopped => {
                     return Err(ModelCallError::Message("The run was stopped.".to_string()));
                 }
@@ -1112,14 +1168,17 @@ impl ModelCaller {
                 }
                 RequestOutcome::TimedOut => {
                     // The headers arrived but the body never finished inside the bound.
-                    wait_out_unreachable(
-                        self,
-                        attempt,
-                        max_attempts,
-                        &request_timeout_message(self.request_timeout_ms),
-                        call_started_at,
-                    )
-                    .await?;
+                    let message = if attempt_timeout_ms < self.request_timeout_ms {
+                        format!(
+                            "{} — {}× this model's typical latency; the retry gets the full {}s",
+                            request_timeout_message(attempt_timeout_ms),
+                            STALL_TIMEOUT_MULTIPLIER,
+                            (self.request_timeout_ms as f64 / 1000.0).round() as i64
+                        )
+                    } else {
+                        request_timeout_message(attempt_timeout_ms)
+                    };
+                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at).await?;
                     attempt += 1;
                     continue;
                 }
@@ -1327,10 +1386,12 @@ impl ModelCaller {
                         continue;
                     }
 
+                    let latency_ms = call_started_at.elapsed().as_millis() as i64;
+                    self.record_latency(&model, latency_ms);
                     (self.deps.on_usage)(
                         &data,
                         ModelCallRecord {
-                            latency_ms: call_started_at.elapsed().as_millis() as i64,
+                            latency_ms,
                             model,
                             provider,
                             task_id: call_options.usage_task_id.clone(),
@@ -1420,6 +1481,36 @@ mod tests {
             "request timed out after 240s with no response"
         );
         assert_eq!(request_timeout_message(1500), "request timed out after 2s with no response");
+    }
+
+    #[test]
+    fn stall_timeout_needs_samples_and_clamps_to_the_floor_and_base() {
+        assert_eq!(stall_timeout_ms(&[8_000, 9_000], 240_000), 240_000, "too few samples: full bound");
+        assert_eq!(
+            stall_timeout_ms(&[8_000, 9_000, 7_000], 240_000),
+            8_000 * STALL_TIMEOUT_MULTIPLIER,
+            "median × multiplier"
+        );
+        assert_eq!(stall_timeout_ms(&[1_000, 1_000, 1_000], 240_000), STALL_TIMEOUT_FLOOR_MS, "floor");
+        assert_eq!(stall_timeout_ms(&[60_000, 70_000, 80_000], 240_000), 240_000, "never above the base");
+        assert_eq!(stall_timeout_ms(&[1_000, 1_000, 1_000], 30_000), 30_000, "base below the floor wins");
+    }
+
+    #[test]
+    fn first_attempt_uses_the_stall_bound_only_after_recorded_latencies() {
+        let caller = create_model_caller(test_deps("http://127.0.0.1:9/v1/chat/completions".to_string()));
+        assert_eq!(caller.attempt_timeout_ms("m", 1), DEFAULT_REQUEST_TIMEOUT_MS);
+        caller.record_latency("m", 6_000);
+        caller.record_latency("m", 7_000);
+        assert_eq!(caller.attempt_timeout_ms("m", 1), DEFAULT_REQUEST_TIMEOUT_MS, "two samples are not enough");
+        caller.record_latency("m", 8_000);
+        assert_eq!(caller.attempt_timeout_ms("m", 1), 7_000 * STALL_TIMEOUT_MULTIPLIER);
+        assert_eq!(caller.attempt_timeout_ms("m", 2), DEFAULT_REQUEST_TIMEOUT_MS, "retries get the full bound");
+        assert_eq!(caller.attempt_timeout_ms("other", 1), DEFAULT_REQUEST_TIMEOUT_MS, "per model");
+        for _ in 0..STALL_LATENCY_SAMPLES {
+            caller.record_latency("m", 20_000);
+        }
+        assert_eq!(caller.attempt_timeout_ms("m", 1), 20_000 * STALL_TIMEOUT_MULTIPLIER, "window forgets old samples");
     }
 
     #[test]

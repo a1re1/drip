@@ -129,11 +129,40 @@ fn message_text(message: &TransportRequestMessage) -> &str {
     }
 }
 
+/// What earned the cycle-budget extension for a cycle, rendered into the
+/// "cycle budget extended" harness event.
+pub fn describe_cycle_progress(edit: bool, verification: bool) -> String {
+    match (edit, verification) {
+        (true, true) => "edits and verification this cycle".to_string(),
+        (true, false) => "edits this cycle".to_string(),
+        (false, true) => "verification this cycle".to_string(),
+        (false, false) => "edited or verified the workspace".to_string(),
+    }
+}
+
 /// The tail of a loop transcript worth replaying into the next loop for the
 /// same task: whole assistant→tool exchanges (never a dangling tool result)
 /// covering at most `hot_tool_results` unfolded tool results and
 /// MAX_CARRYOVER_CHARS, with the loop's own user/system messages left out.
 /// Empty when the loop made no tool calls.
+#[cfg(test)]
+mod cycle_progress_tests {
+    use super::describe_cycle_progress;
+
+    #[test]
+    fn cycle_progress_detail_names_edits_verification_or_both() {
+        assert_eq!(describe_cycle_progress(true, false), "edits this cycle");
+        assert_eq!(
+            describe_cycle_progress(false, true),
+            "verification this cycle"
+        );
+        assert_eq!(
+            describe_cycle_progress(true, true),
+            "edits and verification this cycle"
+        );
+    }
+}
+
 #[cfg(test)]
 mod goal_check_tests {
     use super::goal_declared_check_commands;
@@ -2116,6 +2145,10 @@ pub struct LoopScope {
     /// A workspace edit or verification happened in the current cycle —
     /// the cycle-extension signal (reset in begin_cycle).
     pub progress_this_cycle: bool,
+    /// What earned that progress: a workspace edit, a verification record, or
+    /// both (reset in begin_cycle).
+    pub edit_progress_this_cycle: bool,
+    pub verification_progress_this_cycle: bool,
     /// Cycles granted past `max_cycles` this loop (≤ MAX_CYCLE_EXTENSIONS).
     pub cycle_extensions: i64,
     /// The loop works a review task: reads are its job, so the read-only
@@ -3086,6 +3119,7 @@ impl HarnessRun {
                 }
                 self.state.last_verification = Some(verification_record.clone());
                 scope.progress_this_cycle = true;
+                scope.verification_progress_this_cycle = true;
                 self.state.verifications = {
                     let mut timeline = self.state.verifications.clone().unwrap_or_default();
                     timeline.push(verification_record);
@@ -3630,8 +3664,12 @@ impl HarnessRun {
                 {
                     scope.cycle_extensions += 1;
                     scope.affordable_cycles += 1;
+                    let earned = describe_cycle_progress(
+                        scope.edit_progress_this_cycle,
+                        scope.verification_progress_this_cycle,
+                    );
                     let detail = format!(
-                        "cycle budget extended to {} (cycle {cycle} edited or verified the workspace; {} extension(s) left)",
+                        "cycle budget extended to {} (cycle {cycle} {earned}; {} extension(s) left)",
                         scope.loop_budget.max_cycles + scope.cycle_extensions,
                         MAX_CYCLE_EXTENSIONS - scope.cycle_extensions
                     );
@@ -3911,6 +3949,8 @@ impl HarnessRun {
             cycles_run: 0,
             digest_actions: Vec::new(),
             progress_this_cycle: false,
+            edit_progress_this_cycle: false,
+            verification_progress_this_cycle: false,
             cycle_extensions: 0,
             review_loop,
         }
@@ -3995,6 +4035,8 @@ impl HarnessRun {
     pub fn begin_cycle(&mut self, scope: &mut LoopScope, cycle: i64) -> bool {
         scope.cycle = cycle;
         scope.progress_this_cycle = false;
+        scope.edit_progress_this_cycle = false;
+        scope.verification_progress_this_cycle = false;
         if self
             .options
             .signal
@@ -4223,6 +4265,15 @@ impl HarnessRun {
         if cycle == 1 {
             let goal_context = self.options.goal_context.clone();
             let goal_images = self.options.goal_images.clone();
+            // Definition maps for the files the task names: no inference, and
+            // they land before the first round instead of after a page of READs.
+            let file_outlines = match current_task {
+                Some(task) if !scope.review_loop => {
+                    let notes = task.notes.join("\n");
+                    crate::harness::outline::outlines_for_texts(&self.cwd, &[task.title.as_str(), notes.as_str(), self.state.goal.as_str()])
+                }
+                _ => None,
+            };
             let repo_memory_index = self.options.repo_memory_index.clone();
             let repo_memory_dir = self
                 .options
@@ -4240,6 +4291,7 @@ impl HarnessRun {
                 &IterationMessagesArgs {
                     current_date: &(self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     current_task,
+                    file_outlines: file_outlines.as_deref(),
                     goal_context: goal_context.as_deref(),
                     goal_images,
                     loop_info: Some(HarnessLoopInfo {
@@ -5184,6 +5236,7 @@ impl HarnessRun {
                 if may_mutate && !execution.failed && tool_name != "PATCH" && !shell_write {
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
                         scope.progress_this_cycle = true;
+                        scope.edit_progress_this_cycle = true;
                         record_task_footprint(&mut task.footprint, &format!("edited via {tool_name}"));
                     }
                 }
@@ -5197,6 +5250,7 @@ impl HarnessRun {
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
                         for patched_path in patched {
                             scope.progress_this_cycle = true;
+                            scope.edit_progress_this_cycle = true;
                             record_task_footprint(&mut task.footprint, &format!("edited {patched_path}"));
                         }
                     }

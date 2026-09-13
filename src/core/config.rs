@@ -102,7 +102,9 @@ impl InferenceProviderId {
 // ---------------------------------------------------------------------------
 
 /// The shipped defaults as a settings map, with the profile lists
-/// JSON-string-encoded.
+/// JSON-string-encoded. Used ONLY to seed a brand-new config file on first
+/// run (create_default_cli_config) and by tests — existing config files are
+/// never merged with, or backfilled from, these catalogs.
 pub fn default_setting_values() -> IndexMap<String, String> {
     let mut settings: IndexMap<String, String> =
         serde_json::from_str(OTHER_SETTINGS_DEFAULT_JSON).expect("embedded other_settings parses");
@@ -118,6 +120,20 @@ pub fn default_setting_values() -> IndexMap<String, String> {
         STORED_API_KEYS_SETTING_ID.to_string(),
         STORED_API_KEYS_DEFAULT_JSON.to_string(),
     );
+    settings
+}
+
+/// The baseline for loading an EXISTING config: every known setting id at a
+/// neutral default, with the profile lists and stored API keys EMPTY (`"[]"`)
+/// rather than the compiled-in catalogs. The user's config.json is the only
+/// source of profiles once the file exists — nothing here re-seeds, merges,
+/// or backfills from the shipped catalogs.
+pub(crate) fn baseline_setting_values() -> IndexMap<String, String> {
+    let mut settings: IndexMap<String, String> =
+        serde_json::from_str(OTHER_SETTINGS_DEFAULT_JSON).expect("embedded other_settings parses");
+    settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), "[]".to_string());
+    settings.insert(SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(), "[]".to_string());
+    settings.insert(STORED_API_KEYS_SETTING_ID.to_string(), "[]".to_string());
     settings
 }
 
@@ -398,14 +414,12 @@ fn check_duplicate_ids(ids: &[String], label: &str) -> Result<()> {
 pub fn parse_inference_model_profiles(
     settings: &IndexMap<String, String>,
 ) -> Result<Vec<InferenceModelProfile>> {
-    let raw = settings
-        .get(MODEL_PROFILES_SETTING_ID)
-        .map(String::as_str)
-        .unwrap_or(MODEL_PROFILES_DEFAULT_JSON);
-    let raw = if raw.trim().is_empty() {
-        MODEL_PROFILES_DEFAULT_JSON
-    } else {
-        raw
+    // config.json is the only source of profiles: a missing or blank value
+    // resolves to an empty list, never the compiled-in seed catalog.
+    let raw = settings.get(MODEL_PROFILES_SETTING_ID).map(String::as_str);
+    let raw = match raw.map(str::trim).filter(|trimmed| !trimmed.is_empty()) {
+        Some(trimmed) => trimmed,
+        None => "[]",
     };
     let items = parse_settings_json_array("Model Profiles", raw)?;
     let mut profiles = Vec::new();
@@ -422,14 +436,12 @@ pub fn parse_inference_model_profiles(
 pub fn parse_system_prompt_profiles(
     settings: &IndexMap<String, String>,
 ) -> Result<Vec<SystemPromptProfile>> {
-    let raw = settings
-        .get(SYSTEM_PROMPT_PROFILES_SETTING_ID)
-        .map(String::as_str)
-        .unwrap_or(SYSTEM_PROMPT_PROFILES_DEFAULT_JSON);
-    let raw = if raw.trim().is_empty() {
-        SYSTEM_PROMPT_PROFILES_DEFAULT_JSON
-    } else {
-        raw
+    // config.json is the only source of profiles: a missing or blank value
+    // resolves to an empty list, never the compiled-in seed catalog.
+    let raw = settings.get(SYSTEM_PROMPT_PROFILES_SETTING_ID).map(String::as_str);
+    let raw = match raw.map(str::trim).filter(|trimmed| !trimmed.is_empty()) {
+        Some(trimmed) => trimmed,
+        None => "[]",
     };
     let items = parse_settings_json_array("System Prompt Profiles", raw)?;
     let mut profiles = Vec::new();
@@ -446,14 +458,12 @@ pub fn parse_system_prompt_profiles(
 pub fn parse_stored_api_key_entries(
     settings: &IndexMap<String, String>,
 ) -> Result<Vec<StoredApiKeyEntry>> {
-    let raw = settings
-        .get(STORED_API_KEYS_SETTING_ID)
-        .map(String::as_str)
-        .unwrap_or(STORED_API_KEYS_DEFAULT_JSON);
-    let raw = if raw.trim().is_empty() {
-        STORED_API_KEYS_DEFAULT_JSON
-    } else {
-        raw
+    // config.json is the only source of stored keys: a missing or blank value
+    // resolves to an empty list, never the compiled-in seed.
+    let raw = settings.get(STORED_API_KEYS_SETTING_ID).map(String::as_str);
+    let raw = match raw.map(str::trim).filter(|trimmed| !trimmed.is_empty()) {
+        Some(trimmed) => trimmed,
+        None => "[]",
     };
     let items = parse_settings_json_array("Stored API Keys", raw)?;
     let mut entries = Vec::new();
@@ -685,60 +695,6 @@ pub fn serialize_editable_system_prompt_profiles(
         })
         .collect();
     serde_json::to_string_pretty(&items).unwrap_or_else(|_| "[]".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// merge_missing_default_* helpers
-// ---------------------------------------------------------------------------
-
-pub fn merge_missing_default_inference_profiles(raw_value: Option<&str>) -> String {
-    let value = raw_value.unwrap_or("").trim();
-    if value.is_empty() {
-        return MODEL_PROFILES_DEFAULT_JSON.to_string();
-    }
-    let items = match serde_json::from_str::<Vec<Value>>(value) {
-        Ok(items) => items,
-        Err(_) => return value.to_string(),
-    };
-    let existing: Vec<String> = items
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(String::from))
-        .collect();
-    let defaults: Vec<Value> =
-        serde_json::from_str(MODEL_PROFILES_DEFAULT_JSON).unwrap_or_default();
-    let mut merged = items;
-    for default in defaults {
-        let id = default.get("id").and_then(Value::as_str).unwrap_or("");
-        if !existing.contains(&id.to_string()) {
-            merged.push(default);
-        }
-    }
-    serde_json::to_string(&merged).unwrap_or_else(|_| value.to_string())
-}
-
-pub fn merge_missing_default_system_prompt_profiles(raw_value: Option<&str>) -> String {
-    let value = raw_value.unwrap_or("").trim();
-    if value.is_empty() {
-        return SYSTEM_PROMPT_PROFILES_DEFAULT_JSON.to_string();
-    }
-    let items = match serde_json::from_str::<Vec<Value>>(value) {
-        Ok(items) => items,
-        Err(_) => return value.to_string(),
-    };
-    let existing: Vec<String> = items
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(String::from))
-        .collect();
-    let defaults: Vec<Value> =
-        serde_json::from_str(SYSTEM_PROMPT_PROFILES_DEFAULT_JSON).unwrap_or_default();
-    let mut merged = items;
-    for default in defaults {
-        let id = default.get("id").and_then(Value::as_str).unwrap_or("");
-        if !existing.contains(&id.to_string()) {
-            merged.push(default);
-        }
-    }
-    serde_json::to_string(&merged).unwrap_or_else(|_| value.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,95 +1133,6 @@ fn upgrade_cerebras_profiles(settings: &mut IndexMap<String, String>) {
         );
     }
 }
-
-// v0.73–0.74 shipped `glm-5-3-flash` / `glm-5-3` / `kimi-k3` on FriendliAI and
-// Baseten with hand-built fallback chains; v0.75 re-points the same ids at
-// OpenRouter. mergeMissingDefaultInferenceProfiles only fills in ids a saved
-// catalog lacks, so an upgraded config would keep the retired vendor route
-// under the very ids every preset and --review pin — and the one-key setup
-// would fail on a missing FRIENDLI_TOKEN. Re-point entries that still
-// sit on one of those two hosts to the shipped profile of the same id. Only
-// hosts a shipped default ever pointed those ids at qualify — Z.AI is not
-// one (its routes shipped under `zai-*` ids), so a user who deliberately
-// re-pointed a lane at api.z.ai keeps it, as does anyone on any other host.
-const RETIRED_VENDOR_HOSTS: [&str; 2] = ["api.friendli.ai", "inference.baseten.co"];
-
-// new URL(...).hostname semantics: scheme required, authority ends at the
-// first "/", "?" or "#"; userinfo and port are stripped; the host is
-// lowercased. Unparseable input yields None (isRetiredVendorHost → false).
-fn url_hostname(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://")?.1;
-    // Authority runs until the first "/", "?" or "#".
-    let authority = {
-        let end = after_scheme
-            .find(['/', '?', '#'])
-            .unwrap_or(after_scheme.len());
-        &after_scheme[..end]
-    };
-    // Userinfo ends at the last "@" in the authority; the port is the last
-    // ":" after that (IPv6 hosts keep their brackets, which never contain a
-    // bare ":" in these host strings).
-    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-    Some(host.to_ascii_lowercase())
-}
-
-fn is_retired_vendor_host(base_url: &str) -> bool {
-    match url_hostname(base_url) {
-        Some(host) => RETIRED_VENDOR_HOSTS.contains(&host.as_str()),
-        None => false,
-    }
-}
-
-fn upgrade_retired_vendor_profiles(settings: &mut IndexMap<String, String>) {
-    let profiles = match parse_editable_inference_model_profiles(
-        settings.get(MODEL_PROFILES_SETTING_ID).map(String::as_str),
-    ) {
-        Ok(profiles) => profiles,
-        Err(_) => return,
-    };
-
-    let mut changed = false;
-    let upgraded: Vec<EditableInferenceModelProfile> = profiles
-        .into_iter()
-        .map(|profile| {
-            let shipped = default_model_profile_by_id(profile.id.trim());
-
-            let shipped = shipped.filter(|_| is_retired_vendor_host(&profile.base_url));
-            match shipped {
-                Some(shipped) => {
-                    changed = true;
-                    shipped
-                }
-                None => profile,
-            }
-        })
-        .collect();
-
-    if changed {
-        settings.insert(
-            MODEL_PROFILES_SETTING_ID.to_string(),
-            serialize_editable_inference_model_profiles(&upgraded),
-        );
-    }
-}
-
-// defaultModelProfiles.find((candidate) => candidate.id === profile.id.trim()),
-// re-materialized as the EditableInferenceModelProfile the shipper would emit
-// (createEditableInferenceModelProfile) by running the default entry back
-// through the shared parse path.
-fn default_model_profile_by_id(id: &str) -> Option<EditableInferenceModelProfile> {
-    let defaults: Vec<Value> = serde_json::from_str(MODEL_PROFILES_DEFAULT_JSON).ok()?;
-    let item = defaults
-        .iter()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(id))?;
-    let text = serde_json::to_string(&Value::Array(vec![item.clone()])).ok()?;
-    parse_editable_inference_model_profiles(Some(&text))
-        .ok()?
-        .into_iter()
-        .next()
-}
-
 // loadCliConfig(): a missing file is created with the defaults; otherwise the
 // {"settings": {...}, "version": 1} wrapper is required or the load fails.
 pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
@@ -1291,19 +1158,9 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
 
     let mut settings = normalize_web_setting_values(settings_value.unwrap_or(&serde_json::Value::Null));
 
-    // New default profiles added by upgrades appear without clobbering user edits.
-    let merged = merge_missing_default_inference_profiles(
-        settings.get(MODEL_PROFILES_SETTING_ID).map(String::as_str),
-    );
-    settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), merged);
-    let merged = merge_missing_default_system_prompt_profiles(
-        settings
-            .get(SYSTEM_PROMPT_PROFILES_SETTING_ID)
-            .map(String::as_str),
-    );
-    settings.insert(SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(), merged);
+    // config.json is the only source of profiles once the file exists: the
+    // compiled-in catalogs are never merged, backfilled, or looked up here.
     upgrade_cerebras_profiles(&mut settings);
-    upgrade_retired_vendor_profiles(&mut settings);
 
     // hooks are opt-in and never fatal: a malformed entry warns and the
     // rest of the config still loads. No process is spawned here.
@@ -1350,8 +1207,8 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
 
     // One-time on-disk migration: lift legacy encoded JSON strings to native
     // nested containers. Only keys present in the original file are rewritten
-    // — defaults merged above and vendor upgrades stay load-time-only — and
-    // the file is left byte-for-byte untouched when nothing needs converting.
+    // — vendor upgrades stay load-time-only — and the file is left
+    // byte-for-byte untouched when nothing needs converting.
     let original_settings = parsed_value
         .get("settings")
         .cloned()
@@ -1393,7 +1250,10 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
 // definition default and overwritten only where the input holds a string or,
 // for known structured settings, a real nested JSON container.
 fn normalize_web_setting_values(input: &Value) -> IndexMap<String, String> {
-    let mut normalized = default_setting_values();
+    // Baseline has EMPTY profile lists: an existing config file is the only
+    // source of profiles, so a missing key must not fall back to the
+    // compiled-in catalogs.
+    let mut normalized = baseline_setting_values();
     if let Some(object) = input.as_object() {
         for (key, value) in object {
             let decoded = match (structured_setting_container(key), value) {
@@ -1442,7 +1302,7 @@ pub fn get_active_cli_profile_id(settings: &IndexMap<String, String>) -> String 
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            default_setting_values()
+            baseline_setting_values()
                 .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
                 .cloned()
                 .unwrap_or_default()
@@ -1454,7 +1314,9 @@ pub fn set_active_cli_profile(mut config: CliConfig, profile_id: &str) -> Result
         .iter()
         .any(|profile| profile.id == profile_id);
     if !known {
-        return Err(anyhow!("Unknown model profile \"{}\".", profile_id));
+        return Err(anyhow!(
+            "Unknown model profile \"{profile_id}\". Add it to ~/.drip/config.json under settings.runtime.model_profiles."
+        ));
     }
     config
         .settings
@@ -1475,7 +1337,9 @@ pub fn set_active_cli_tool_profile(mut config: CliConfig, profile_id: &str) -> R
             .iter()
             .any(|profile| profile.id == profile_id);
         if !known {
-            return Err(anyhow!("Unknown model profile \"{}\".", profile_id));
+            return Err(anyhow!(
+                "Unknown model profile \"{profile_id}\". Add it to ~/.drip/config.json under settings.runtime.model_profiles."
+            ));
         }
     }
     config
@@ -1489,7 +1353,9 @@ pub fn set_active_cli_system_prompt(mut config: CliConfig, prompt_profile_id: &s
         .iter()
         .any(|profile| profile.id == prompt_profile_id);
     if !known {
-        return Err(anyhow!("Unknown system prompt profile \"{}\".", prompt_profile_id));
+        return Err(anyhow!(
+            "Unknown system prompt profile \"{prompt_profile_id}\". Add it to ~/.drip/config.json under settings.runtime.system_prompt_profiles."
+        ));
     }
     config
         .settings
@@ -1506,6 +1372,87 @@ mod tests {
     use super::*;
 
     // (a) default_setting_values() parses into >=10 profiles incl. glm-5-3-flash.
+    #[test]
+    fn load_cli_config_profiles_come_only_from_the_file() {
+        let dir = unique_config_dir("only-file-profiles");
+        let path = dir.join("config.json");
+        let body = r#"{
+  "settings": {
+    "runtime.model_profiles": "[{\"id\":\"custom-only\",\"model\":\"m\",\"provider\":\"openai-compatible\",\"base_url\":\"https://example.invalid/v1\",\"api_key_ref\":\"env:CUSTOM_KEY\"}]"
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, body).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        let profiles = list_cli_model_profiles(&config.settings).unwrap();
+        assert_eq!(profiles.len(), 1, "{profiles:?}");
+        assert_eq!(profiles[0].id, "custom-only");
+        // Nothing from the compiled-in catalog leaks in once the file exists.
+        assert!(!profiles.iter().any(|p| p.id == "xai-grok-46"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_system_prompt_profiles_come_only_from_the_file() {
+        let dir = unique_config_dir("only-file-prompts");
+        let path = dir.join("config.json");
+        let body = r#"{
+  "settings": {
+    "runtime.system_prompt_profiles": "[{\"id\":\"custom-prompt\",\"title\":\"Custom\",\"prompt\":\"p\"}]"
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, body).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        let prompts = list_cli_system_prompt_profiles(&config.settings).unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].id, "custom-prompt");
+        // The seed catalog is not consulted: none of its ids appear.
+        let catalog_ids: Vec<String> = parse_system_prompt_profiles(&default_setting_values())
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(!catalog_ids.is_empty(), "seed catalog should be non-empty");
+        assert!(!prompts.iter().any(|p| catalog_ids.contains(&p.id)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_missing_profile_settings_resolves_empty_with_config_json_error() {
+        let dir = unique_config_dir("missing-profile-settings");
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{ "settings": {}, "version": 1 }"#).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        let profiles = list_cli_model_profiles(&config.settings).unwrap();
+        assert!(profiles.is_empty(), "{profiles:?}");
+
+        let err = crate::core::inference::resolve_active_inference_profile(&config.settings)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No model profiles configured."), "{err}");
+        assert!(err.contains("~/.drip/config.json"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_missing_path_still_seeds_catalog_once() {
+        let dir = unique_config_dir("first-run-seed");
+        let path = dir.join("config.json");
+        assert!(!path.exists());
+
+        let config = load_cli_config(&path).unwrap();
+        assert!(path.exists(), "first run writes the config file");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("glm-5-3-flash"), "seed catalog written once");
+        let profiles = list_cli_model_profiles(&config.settings).unwrap();
+        assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_default_setting_values_parses_profiles() {
         let settings = default_setting_values();
@@ -1554,17 +1501,6 @@ mod tests {
         let error = parse_inference_model_profiles(&settings).unwrap_err().to_string();
         assert_eq!(error, "Inference profile \"dup\" is duplicated.");
     }
-
-    // (d) merge appends missing defaults to a one-profile string.
-    #[test]
-    fn test_merge_missing_default_inference_profiles() {
-        let json = r#"[{"id":"custom","model":"m","provider":"openai"}]"#;
-        let merged = merge_missing_default_inference_profiles(Some(json));
-        let items: Vec<Value> = serde_json::from_str(&merged).expect("merged parses");
-        assert!(items.iter().any(|item| item.get("id").and_then(Value::as_str) == Some("custom")));
-        assert!(items.iter().any(|item| item.get("id").and_then(Value::as_str) == Some("glm-5-3-flash")));
-    }
-
     // upgradeCerebrasProfiles(): a cerebras profile with an inline apiKey has
     // credentialMode "none"? No — inline keys parse as "inline"; the upgraded
     // shape is a profile with NO credential at all plus the legacy key setting
@@ -1597,40 +1533,11 @@ mod tests {
             serde_json::from_str(&settings2[MODEL_PROFILES_SETTING_ID]).expect("json");
         assert!(items2[0].get("apiKeyRef").is_none());
     }
-
-    // upgradeRetiredVendorProfiles(): a FriendliAI baseUrl on a shipped id is
-    // re-pointed at the shipped OpenRouter profile; a non-retired host and a
-    // non-shipped id are left alone. Idempotent on re-run.
-    #[test]
-    fn test_upgrade_retired_vendor_profiles() {
-        let json = r#"[{"id":"glm-5-3-flash","model":"z-ai/glm-5.3-flash","provider":"openai-compatible","baseUrl":"https://api.friendli.ai/serverless/v1","label":"GLM","apiKeyRef":"env:FRIENDLI_TOKEN"},{"id":"custom","model":"m","provider":"openai","baseUrl":"https://api.z.ai/api/paas/v4","label":"Z"}]"#;
-        let mut settings = IndexMap::new();
-        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
-
-        upgrade_retired_vendor_profiles(&mut settings);
-        let items: Vec<Value> =
-            serde_json::from_str(&settings[MODEL_PROFILES_SETTING_ID]).expect("json");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["baseUrl"], "https://openrouter.ai/api/v1");
-        assert_eq!(items[0]["apiKeyRef"], "env:OPENROUTER_API_KEY");
-        assert_eq!(items[0]["provider"], "openrouter");
-        // Z.AI is not a retired host and "custom" is not a shipped id: kept.
-        assert_eq!(items[1]["baseUrl"], "https://api.z.ai/api/paas/v4");
-
-        // Idempotent: running twice changes nothing.
-        let once = settings[MODEL_PROFILES_SETTING_ID].clone();
-        upgrade_retired_vendor_profiles(&mut settings);
-        assert_eq!(settings[MODEL_PROFILES_SETTING_ID], once);
-    }
-
     // Both upgrades: a non-JSON model_profiles value leaves settings unchanged
     // (parsing fails and the upgrade returns early).
     #[test]
     fn test_upgrade_functions_non_json_noop() {
-        for upgrade in [
-            upgrade_cerebras_profiles as fn(&mut IndexMap<String, String>),
-            upgrade_retired_vendor_profiles as fn(&mut IndexMap<String, String>),
-        ] {
+        for upgrade in [upgrade_cerebras_profiles as fn(&mut IndexMap<String, String>)] {
             let mut settings = IndexMap::new();
             settings.insert(
                 MODEL_PROFILES_SETTING_ID.to_string(),
@@ -2130,7 +2037,7 @@ mod tests {
         // A legacy file (string blobs) still loads with full runtime semantics.
         std::fs::write(
             &path,
-            r#"{"settings": {"runtime.role_bindings": "{\"planner\":{\"task\":\"author\"}}"}, "version": 1}"#,
+            r#"{"settings": {"runtime.role_bindings": "{\"planner\":{\"task\":\"author\"}}", "runtime.model_profiles": "[{\"id\":\"glm-5-3-flash\",\"model\":\"glm-5.3-flash\",\"provider\":\"openrouter\",\"base_url\":\"https://openrouter.ai/api/v1\",\"api_key_ref\":\"env:OPENROUTER_API_KEY\"}]"}, "version": 1}"#,
         )
         .unwrap();
         let config = load_cli_config(&path).unwrap();
@@ -2203,6 +2110,8 @@ mod tests {
     "runtime.active_profile_id": "glm-5-3-flash",
     "runtime.role_profiles": "[{\"id\":\"planner\",\"description\":\"plans\"}]",
     "runtime.role_bindings": "{\"planner\":\"author\"}",
+    "runtime.model_profiles": "[{\"id\":\"glm-5-3-flash\",\"model\":\"glm-5.3-flash\",\"provider\":\"openrouter\",\"base_url\":\"https://openrouter.ai/api/v1\",\"api_key_ref\":\"env:OPENROUTER_API_KEY\"}]",
+    "runtime.system_prompt_profiles": "[{\"id\":\"default-coding-agent\",\"title\":\"Default\",\"prompt\":\"You are a coding agent.\"}]",
     "custom.thing": "keep-me"
   },
   "version": 1,
@@ -2334,10 +2243,13 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let config = load_cli_config(&path).unwrap();
-        // Defaults are merged into the runtime map...
+        // config.json is the only profile source: no key in the file means an
+        // empty list — the compiled-in catalog is neither merged nor
+        // backfilled (glm-5-3-flash exists only in the seed catalog).
         let profiles = parse_inference_model_profiles(&config.settings).expect("parse models");
-        assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
-        // ...but never written back as an accidental migration.
+        assert!(profiles.is_empty(), "{profiles:?}");
+        assert!(!profiles.iter().any(|p| p.id == "glm-5-3-flash"));
+        // ...and nothing is written back as an accidental migration.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         let _ = std::fs::remove_dir_all(&dir);
     }

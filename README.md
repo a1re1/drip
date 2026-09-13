@@ -160,15 +160,37 @@ For the full flag reference run `drip --help`.
 
 Model profiles live in `~/.drip/config.json` and reference credentials by name
 (`"apiKeyRef": "env:NAME"`) from `~/.drip/env.vars`, so tokens never sit in
-shell profiles. Every shipped hosted profile routes through
-[OpenRouter](https://openrouter.ai/) on a single `OPENROUTER_API_KEY` — add
-your vendor keys to your OpenRouter account (BYOK) and drip needs only the one:
+shell profiles. The config file is the only source of model and system-prompt
+profiles: a starter catalog is written into it once, when the file is first
+created, and after that drip never merges, backfills, or looks up profiles
+from its compiled-in defaults — a profile id absent from your config fails
+with an error telling you to add it there. Every hosted profile in that
+starter catalog routes through [OpenRouter](https://openrouter.ai/) on a
+single `OPENROUTER_API_KEY` — add your vendor keys to your OpenRouter account
+(BYOK) and drip needs only the one:
 
 ```sh
 echo 'OPENROUTER_API_KEY=sk-or-...' >> ~/.drip/env.vars   # or /env KEY=value inside drip
 drip "goal"                                              # glm-5-3-flash, the default lane
 drip --profile claude-opus-46 "goal"
 ```
+
+A minimal profile entry (settings are nested JSON; this one routes an
+OpenRouter model through your key without authoring any vendor key into the
+file):
+
+```jsonc
+"runtime.model_profiles": [
+  {
+    "id": "glm-5-3-flash",
+    "model": "z-ai/glm-5.3-flash",
+    "provider": "openrouter",
+    "apiKeyRef": "env:OPENROUTER_API_KEY"
+  }
+]
+```
+
+Starter profile ids (see `~/.drip/config.json` for the full seeded list):
 
 | Profile id | OpenRouter model | Notes |
 |------------|------------------|-------|
@@ -182,19 +204,21 @@ drip --profile claude-opus-46 "goal"
 | `gpt-oss-120b` | `openai/gpt-oss-120b:nitro` | `:nitro` sorts upstreams by throughput |
 | `local-default` / `ollama-local` | — | local runtimes, no key |
 
-No shipped profile carries a fallback chain: OpenRouter fails over between
+No starter profile carries a fallback chain: OpenRouter fails over between
 upstream providers itself, and the harness's retry ladder keeps its full
 backoff against a route with nothing behind it. To bypass the aggregator for
 one model, author a profile against the vendor's own base URL and key in
-`~/.drip/config.json` — a saved entry always wins over the shipped default of
-the same id, and `fallbackProfileId` still chains user-authored profiles.
+`~/.drip/config.json` — your config is the only source, so an entry there is
+just that profile, and `fallbackProfileId` still chains profiles within the
+same list.
 `"provider": "openrouter"` is a first-class provider (default base URL
 `https://openrouter.ai/api/v1`, OpenAI-compatible on the wire), so adding
 another OpenRouter model is one profile entry with its `vendor/model` slug.
 
 ### Codex (ChatGPT subscription, no API key)
 
-The built-in profile `gpt-5.6-luna-high` runs model `gpt-5.6-luna` with
+The starter profile `gpt-5.6-luna-high` — written into your config on first
+run, like every other profile — runs model `gpt-5.6-luna` with
 `reasoningEffort: "high"` through the `codex` provider. There is no HTTP
 endpoint and no Node SDK: drip is Rust and speaks the Codex CLI app-server
 protocol directly (JSON-RPC over stdio, the experimental `dynamicTools` API,
@@ -1031,11 +1055,13 @@ the first time a config containing valid encoded strings is loaded, those
 values are rewritten as nested containers (pretty-printed, atomically) while
 everything else — unknown keys, ordinary settings, `version`, and
 `statusLine` — is preserved as-is. The migration is one-time and idempotent:
-values that are already nested, malformed legacy strings, and the default
-profiles drip merges in at load time are never written back, so the file only
-changes when an actual legacy value is unflattened. Any string setting that
+values that are already nested and malformed legacy strings are never
+written back, so the file only changes when an actual legacy value is
+unflattened. Any string setting that
 merely *looks* like JSON (prompts, key references, notes) is always left
-untouched.
+untouched. Profile lists are never filled in from drip's compiled-in
+catalogs — an absent or empty list stays empty, and missing profile ids must
+be added to `~/.drip/config.json` by hand.
 
 ## Terminal pane title
 

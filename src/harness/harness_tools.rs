@@ -3248,17 +3248,19 @@ pub fn apply_harness_op(
             // next. The operator review opt-out completes the task directly:
             // no verified_by reviewer task is spawned (the gate itself is
             // untouched for gate-on runs).
-            // Review waiver: the harness ran the goal's own check after the
-            // last edit and it passed, the change is small, and this is the
-            // run's only author work — a reviewer loop would re-read a
-            // handful of lines to confirm what the harness already
-            // established. Only a single-task run qualifies: any task still
-            // awaiting review, or any remaining author work, keeps the gate.
+            // Review waiver: the goal's own check passed after the last edit,
+            // the run's whole change is small, and no author work remains —
+            // a reviewer loop would re-read a handful of lines to confirm
+            // what the check already established. The size bound and the
+            // check cover the whole workspace diff, so earlier tasks parked
+            // as awaiting the deferred review are released with this one;
+            // only an already-open review task keeps the gate.
             let waived = match (&ctx.review_waived, status.finishes_work(), ctx.review_opt_out) {
                 (Some(reason), true, false)
                     if !author_work_remains(state)
                         && !state.tasks.iter().any(|task| {
-                            task.id != finished_id && (task.awaiting_review_by.is_some() || task.review_of.is_some())
+                            task.review_of.is_some()
+                                && matches!(task.status, HarnessTaskStatus::Pending | HarnessTaskStatus::InProgress)
                         }) =>
                 {
                     Some(reason.clone())
@@ -3266,8 +3268,19 @@ pub fn apply_harness_op(
                 _ => None,
             };
             if let Some(reason) = waived {
+                let mut released: Vec<String> = Vec::new();
+                for task in state.tasks.iter_mut() {
+                    if task.id != finished_id && task.awaiting_review_by.take().is_some() {
+                        released.push(task.id.clone());
+                    }
+                }
+                let covers = if released.is_empty() {
+                    String::new()
+                } else {
+                    format!(" The same waiver covers the deferred review of {}.", released.join(", "))
+                };
                 return HarnessOpOutcome {
-                    text: format!("Task {finished_id} marked completed. Review waived: {reason}."),
+                    text: format!("Task {finished_id} marked completed. Review waived: {reason}.{covers}"),
                     state_changed: true,
                     task_finished: ends_loop,
                     ended_loop: ends_loop,
@@ -5762,6 +5775,20 @@ mod review_opt_out_enforcement_tests {
         );
         assert!(!finish.text.contains("Review waived"), "{}", finish.text);
         assert!(state.tasks[0].awaiting_review_by.is_some(), "the deferred review still covers it");
+
+        // The last task's waiver covers the whole run: the check and the size
+        // bound span the workspace diff, so the parked task is released too.
+        state.tasks[1].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let finish = apply_harness_op(
+            &mut state,
+            parse_op("finish_task", r#"{"status": "completed", "summary": "done", "taskId": "task-2", "anchor": "none", "anchorNote": "fixture"}"#),
+            &waiving,
+        );
+        assert!(finish.text.contains("Review waived"), "{}", finish.text);
+        assert!(finish.text.contains("covers the deferred review of task-1"), "{}", finish.text);
+        assert_eq!(state.tasks.len(), 2, "no review task spawned: {:?}", state.tasks.iter().map(|t| &t.title).collect::<Vec<_>>());
+        assert!(state.tasks.iter().all(|t| t.awaiting_review_by.is_none()));
+        assert!(!author_work_remains(&state));
     }
 
     #[test]

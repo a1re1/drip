@@ -1315,6 +1315,14 @@ suite run through BASH instead of VERIFY is recorded as a verification too
 (the result text says `recorded as verification record v<n>`), so a finish
 after `cargo test` via BASH is not bounced into re-running it as VERIFY.
 
+When a finish arrives with no check behind it and the goal declares none,
+the harness detects the project's own suite from the workspace layout
+(`Cargo.toml` → `cargo test -q`, `go.mod` → `go test ./...`, a `package.json`
+test script → `npm`/`bun`/`pnpm`/`yarn test`, a pytest configuration →
+`python3 -m pytest -q`, a `tests/` directory of Python files → `unittest
+discover`) and runs it once as the task-provided check — event `project
+check detected` — instead of bouncing the finish for the agent to guess.
+
 A finish bounced twice in a row for the same anomaly-family reason (a
 support gap, an expectation mismatch, an unobserved expectation) is
 re-applied by the harness as `unreconciled` with the anomalies on record —

@@ -215,6 +215,7 @@ mod tests {
 			review_round: None,
 			awaiting_review_by: None,
 			role: None,
+			loops_run: None,
 			stall_count: 0,
 			status,
 			summary: None,

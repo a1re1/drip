@@ -710,6 +710,23 @@ pub fn covering_external_record<'a>(
 /// Does `name` refer to `expectation`? Exact id or subject (case-insensitive),
 /// or the shapes small models produce: "e2: subject", "e2 (subject)", or the
 /// subject with extra words around it.
+/// Jaccard overlap of the word sets (words of 3+ chars, lowercased) of two
+/// task titles: 1.0 for the same words, 0.0 for none shared.
+pub fn title_overlap(a: &str, b: &str) -> f64 {
+    let words = |text: &str| -> std::collections::BTreeSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 3)
+            .map(|word| word.to_ascii_lowercase())
+            .collect()
+    };
+    let (a, b) = (words(a), words(b));
+    let union = a.union(&b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    a.intersection(&b).count() as f64 / union as f64
+}
+
 pub fn expectation_named(expectation: &crate::core::types::HarnessExpectation, name: &str) -> bool {
     let name = name.trim();
     if name.is_empty() {
@@ -928,6 +945,11 @@ pub struct RevisionSupport<'a> {
 pub struct ObservationGaps {
     pub persisted: Vec<crate::core::types::HarnessAnomaly>,
     pub resolved: Vec<(String, String, String)>,
+    /// Observations whose subject matches no registered expectation: not
+    /// written, returned so the caller can keep them as task notes instead
+    /// of bouncing the finish (a bounce here cost a model round and often
+    /// sent the model off to register the expectation after the fact).
+    pub unregistered: Vec<String>,
 }
 
 /// Validate and append finish_task observations to their expectations.
@@ -962,20 +984,19 @@ pub fn record_observations_with_watermark(
     let mut planned: Vec<(usize, crate::core::types::HarnessExpectationObservation)> = Vec::new();
     let mut gaps: Vec<crate::core::types::HarnessAnomaly> = Vec::new();
     let mut resolved: Vec<(String, String, String)> = Vec::new();
+    let mut unregistered: Vec<String> = Vec::new();
     for observation in observations {
         let Some(index) = expectations
             .iter()
             .position(|expectation| expectation_named(expectation, &observation.subject))
         else {
-            return Err(format!(
-                "observation names '{}', which is not a registered expectation; register it with plan_tasks.expectations first (registered: {})",
+            unregistered.push(format!(
+                "{}: observed {}{}",
                 observation.subject,
-                if expectations.is_empty() {
-                    "none".to_string()
-                } else {
-                    expectations.iter().map(|e| e.subject.clone()).collect::<Vec<_>>().join(", ")
-                }
+                observation.observed,
+                if observation.matches { "" } else { " (reported as a mismatch)" }
             ));
+            continue;
         };
         // The previous observation is the last one already recorded OR the
         // last one planned earlier in this same call: two observations for
@@ -1063,7 +1084,7 @@ pub fn record_observations_with_watermark(
     for (index, observation) in planned {
         expectations[index].observations.push(observation);
     }
-    Ok(ObservationGaps { persisted: gaps, resolved })
+    Ok(ObservationGaps { persisted: gaps, resolved, unregistered })
 }
 
 const PROSE_OBJECT_WORDS: &[&str] = &[
@@ -1533,7 +1554,7 @@ pub fn parse_harness_op_with_gate(
                 Some(word)
                     if matches!(
                         word.as_str(),
-                        "completed" | "complete" | "done" | "finished" | "success" | "succeeded" | "ok"
+                        "completed" | "complete" | "done" | "finished" | "success" | "succeeded" | "ok" | "passed" | "verified" | "resolved" | "fixed" | "implemented"
                     ) =>
                 {
                     FinishTaskStatus::Completed
@@ -1541,8 +1562,19 @@ pub fn parse_harness_op_with_gate(
                 Some(word) if matches!(word.as_str(), "unreconciled" | "anomalous" | "mismatch") => {
                     FinishTaskStatus::Unreconciled
                 }
-                _ => {
-                    return Err("The status field must be exactly \"completed\", \"blocked\", or \"unreconciled\".".to_string());
+                Some(word) if matches!(word.as_str(), "partial" | "incomplete" | "in_progress" | "in-progress" | "in progress" | "pending" | "wip") => {
+                    return Err(format!(
+                        "finish_task status \"{word}\" is not a terminal state. If work remains, keep working (note_task records partial progress) and call finish_task only when the task is completed, blocked, or unreconciled."
+                    ));
+                }
+                // A finish with no status at all is a completion claim: the
+                // gates below still judge it, and a bounce for the missing
+                // word alone cost a model round (seen in bench runs).
+                None => FinishTaskStatus::Completed,
+                Some(word) => {
+                    return Err(format!(
+                        "The status field must be exactly \"completed\", \"blocked\", or \"unreconciled\" (got \"{word}\")."
+                    ));
                 }
             };
             let confidence = match input.get("confidence").and_then(|v| v.as_str()).map(normalize_enum_word) {
@@ -2218,6 +2250,38 @@ pub fn apply_harness_op(
                 .as_ref()
                 .is_some_and(|gate| gate.roles.values().any(|spec| spec.verified_by.is_some()));
             let mut skipped_reviews: Vec<String> = Vec::new();
+            // A task loop that re-plans its own current task (same work,
+            // reworded) would run it twice; such entries are dropped with a
+            // note instead of queued.
+            let current_title = core_state::get_current_task(state)
+                .filter(|task| task.status == crate::core::types::HarnessTaskStatus::InProgress)
+                .map(|task| task.title.clone());
+            let mut skipped_duplicates: Vec<String> = Vec::new();
+            let entries: Vec<HarnessTaskInput> = match current_title {
+                Some(current) => entries
+                    .into_iter()
+                    .filter(|entry| {
+                        let duplicate = title_overlap(&entry.title, &current) >= 0.6;
+                        if duplicate {
+                            skipped_duplicates.push(entry.title.trim().to_string());
+                        }
+                        !duplicate
+                    })
+                    .collect(),
+                None => entries,
+            };
+            if entries.is_empty() && !skipped_duplicates.is_empty() {
+                return HarnessOpOutcome {
+                    text: format!(
+                        "No tasks were added: {} restate(s) the current task, which is already in progress — finish it with finish_task instead of re-planning it.{expectation_note}",
+                        skipped_duplicates.iter().map(|title| format!("\"{title}\"")).collect::<Vec<_>>().join(", ")
+                    ),
+                    state_changed: !registered.is_empty(),
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
             let entries: Vec<HarnessTaskInput> = if !ctx.review_opt_out && harness_reviews {
                 entries
                     .into_iter()
@@ -2645,6 +2709,14 @@ pub fn apply_harness_op(
                 // so a refusal from here on must still report state_changed.
                 mutated = staged != state.expectations || !gaps.persisted.is_empty() || !gaps.resolved.is_empty();
                 state.expectations = staged.clone();
+                if !gaps.unregistered.is_empty() {
+                    if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                        for note in &gaps.unregistered {
+                            crate::core::state::append_task_note(task, &format!("observation (names no registered expectation): {note}"));
+                        }
+                    }
+                    mutated = true;
+                }
                 // Persist this call's deduplicated support gaps, then drop
                 // any gap this call's fresh eligible evidence resolves.
                 for gap in gaps.persisted {
@@ -2977,14 +3049,35 @@ pub fn apply_harness_op(
                 // with nothing left to reconcile the finish is a completion.
                 if support_gaps.is_empty() {
                     let before = anomalies.len();
+                    // An "anomaly" that names no registered expectation is a
+                    // note, not a mismatch in a pre-registered value: keep it
+                    // on the task as a note instead of leaving the run
+                    // unreconciled over bookkeeping.
+                    let mut untethered: Vec<String> = Vec::new();
                     anomalies.retain(|anomaly| {
+                        let tethered = staged.iter().any(|expectation| expectation_named(expectation, &anomaly.subject));
+                        if !tethered && !staged.is_empty() {
+                            untethered.push(format!("{}: expected {}, observed {} — {}", anomaly.subject, anomaly.expected, anomaly.observed, anomaly.note));
+                            return false;
+                        }
                         !staged.iter().any(|expectation| {
                             expectation_named(expectation, &anomaly.subject)
                                 && expectation.observations.last().is_some_and(|observation| observation.matches)
                         })
                     });
-                    let dropped = before - anomalies.len();
-                    if dropped > 0 && anomalies.is_empty() && status == FinishTaskStatus::Unreconciled {
+                    if !untethered.is_empty() {
+                        if let Some(task) = core_state::get_task_by_id_mut(state, &target_id) {
+                            for note in &untethered {
+                                crate::core::state::append_task_note(task, &format!("declared note (names no registered expectation): {note}"));
+                            }
+                        }
+                        normalized_note.push_str(&format!(
+                            " ({} declared anomaly(ies) named no registered expectation and were kept as task notes.)",
+                            untethered.len()
+                        ));
+                    }
+                    let dropped = before - anomalies.len() - untethered.len();
+                    if (dropped > 0 || !untethered.is_empty()) && anomalies.is_empty() && status == FinishTaskStatus::Unreconciled {
                         status = FinishTaskStatus::Completed;
                         normalized_note = format!(
                             " ({dropped} declared anomaly(ies) named expectations whose observations match, so nothing is unreconciled; recorded as completed.)"
@@ -3500,6 +3593,33 @@ mod apply_harness_op_tests {
     /// The empty-tasks array path returns the refusal text and changes no
     /// state.
     #[test]
+    fn plan_tasks_from_a_task_loop_skips_entries_that_restate_the_current_task() {
+        let mut state = create_harness_state("ttl support");
+        let ctx = HarnessOpContext::default();
+        let plan = |state: &mut HarnessState, raw: &str| {
+            let op = parse_harness_op("plan_tasks", raw).expect("parses");
+            apply_harness_op(state, op, &ctx)
+        };
+        plan(&mut state, r#"{"tasks":["Add a --ttl float option to the CLI set subcommand and forward it to Store.set"]}"#);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let dup = plan(&mut state, r#"{"tasks":["Add --ttl float option to CLI set subcommand, forwarding to Store.set"]}"#);
+        assert!(!dup.state_changed, "{}", dup.text);
+        assert!(dup.text.contains("restate(s) the current task"), "{}", dup.text);
+        assert_eq!(state.tasks.len(), 1);
+        let other = plan(&mut state, r#"{"tasks":["Write the CHANGELOG entry for the release"]}"#);
+        assert!(other.state_changed, "{}", other.text);
+        assert_eq!(state.tasks.len(), 2);
+    }
+
+    #[test]
+    fn finish_task_without_a_status_is_a_completion_claim() {
+        let parsed = parse_harness_op("finish_task", r#"{"summary":"done","confidence":"high"}"#).expect("parses");
+        assert!(matches!(parsed, HarnessOp::FinishTask { status: FinishTaskStatus::Completed, .. }));
+        let error = parse_harness_op("finish_task", r#"{"status":"maybe","summary":"done"}"#).expect_err("refused");
+        assert!(error.contains("got \"maybe\""), "{error}");
+    }
+
+    #[test]
     fn plan_tasks_with_empty_tasks_array_is_refused() {
         let mut state = create_harness_state("test goal: empty plan");
         let raw = r#"{"tasks": []}"#;
@@ -3733,6 +3853,24 @@ mod apply_harness_op_tests {
         for name in ["e21", "e1", "final test", ""] {
             assert!(!expectation_named(&expectation, name), "{name}");
         }
+    }
+
+    /// An anomaly naming no registered expectation is kept as a task note;
+    /// with nothing else declared the unreconciled finish completes cleanly.
+    #[test]
+    fn untethered_declared_anomalies_become_task_notes() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let finished = finish(
+            &mut state,
+            &ctx,
+            r#"{"status":"unreconciled","summary":"done","observations":[{"subject":"total","observed":"100","matches":true}],"anomalies":[{"subject":"VERIFY record v2 (focused checks)","expected":"counts","observed":"0 executed","note":"Resolved: superseded by v3"}]}"#,
+        );
+        assert!(finished.task_finished, "{}", finished.text);
+        assert!(finished.text.contains("marked completed"), "{}", finished.text);
+        assert!(state.anomalies.is_empty(), "{:?}", state.anomalies);
+        assert!(state.tasks[0].notes.iter().any(|note| note.starts_with("declared note") && note.contains("VERIFY record v2")), "{:?}", state.tasks[0].notes);
     }
 
     /// A completed finish that lists an "anomaly" for an expectation it
@@ -4051,10 +4189,15 @@ mod apply_harness_op_tests {
         assert_eq!(auto.expectations[0].observations.len(), 1);
         assert!(auto.expectations[0].observations[0].matches);
 
-        let unknown = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#);
-        assert!(!unknown.task_finished);
-        assert!(unknown.text.contains("not a registered expectation"), "{}", unknown.text);
-        assert!(state.expectations[0].observations.is_empty(), "refused calls record nothing");
+        // An observation on an unregistered subject is kept as a task note
+        // instead of bouncing the finish; nothing is written to expectations
+        // for it (the harness still auto-observes e1 from the covering record).
+        let mut noted = state.clone();
+        let unknown = finish(&mut noted, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#);
+        assert!(unknown.task_finished, "{}", unknown.text);
+        assert!(noted.expectations[0].observations.iter().all(|observation| observation.observed != "3ms"));
+        assert!(noted.tasks[0].notes.iter().any(|note| note.contains("observation (names no registered expectation): latency: observed 3ms")), "{:?}", noted.tasks[0].notes);
+        assert!(state.expectations[0].observations.is_empty(), "the original state is untouched");
 
         let mismatch = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"output sign","observed":"negative","matches":false}]}"#);
         assert!(!mismatch.task_finished);
@@ -5077,9 +5220,9 @@ mod apply_harness_op_tests {
             &ctx,
             r#"{"taskId":"task-1","status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#,
         );
-        assert!(!unknown.task_finished, "{}", unknown.text);
-        assert!(!unknown.state_changed, "{}", unknown.text);
-        assert!(unknown.text.contains("not a registered expectation"), "{}", unknown.text);
+        assert!(!unknown.task_finished, "the standing gap still refuses: {}", unknown.text);
+        assert!(unknown.state_changed, "the unregistered observation lands as a task note: {}", unknown.text);
+        assert!(state.tasks[0].notes.iter().any(|note| note.contains("names no registered expectation): latency")), "{:?}", state.tasks[0].notes);
         assert_eq!(state.anomalies.len(), 1, "{:?}", state.anomalies);
 
         // Malformed finish input: refused at parse time, nothing mutated.

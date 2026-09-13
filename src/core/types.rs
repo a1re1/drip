@@ -73,6 +73,10 @@ pub struct HarnessTask {
 	/// Id of the task this one reviews: set by the verify gate when a role's completed work needs confirmation by its verifiedBy role.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub review_of: Option<String>,
+	/// Every task this review covers: set by spawn_deferred_review when one
+	/// deferred review task verifies multiple finished tasks as one change.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub reviews: Option<Vec<String>>,
 	/// How many review rejections this task has absorbed; at the cap a further rejection blocks it instead of reopening it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub review_round: Option<i64>,
@@ -1015,6 +1019,16 @@ pub struct HarnessLeakedJob {
 	pub started_at: String,
 }
 
+/// Per-role inference accounting: one bucket per loop role ("default" when
+/// the loop has no role), summed from every model-call usage record.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleInferenceTotals {
+	pub calls: u64,
+	pub latency_ms: u64,
+	pub completion_tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRunResult {
@@ -1037,6 +1051,10 @@ pub struct HarnessRunResult {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stop_latency_ms: Option<i64>,
 	pub usage: HarnessRunUsage,
+	/// Per-role model-call totals (calls / latencyMs / completionTokens),
+	/// keyed by loop role name; omitted when empty.
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
 }
 
 #[cfg(test)]
@@ -1058,6 +1076,7 @@ mod tests {
 			notes: vec![],
 			reopen_count: None,
 			review_of: None,
+			reviews: None,
 			review_round: None,
 			awaiting_review_by: None,
 			role: None,
@@ -1182,6 +1201,7 @@ mod tests {
 				retries: 1,
 				wall_ms: 4567,
 			},
+			role_inference: std::collections::BTreeMap::new(),
 		};
 		let json = serde_json::to_value(&result).unwrap();
 		let obj = json.as_object().unwrap();

@@ -28,6 +28,7 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " Checks are either correctness-class (compared against something the agent did not author — a pre-existing project test, a task-provided fixture, a published constant, or an invariant independent of the implementation) or consistency-class (compared only against the agent's own derivation); completion needs at least one correctness-class check or an explicit anchor=none declaration saying why no external anchor exists for the claim. Declare the anchor on every VERIFY call (anchor.kind external or self; a check that names a file you edited is downgraded to self), state your confidence (low, medium, high) on every finish_task, and when a revision changes a reported output, cite evidence outside the fix that the new value is closer to truth.",
     " When a goal produces a measurable output (a number, count, shape, sign, unit, latency, row count), register the expected value from the domain via plan_tasks.expectations BEFORE computing it, and treat a later mismatch as a defect in the model — finish with status unreconciled and record the anomaly rather than explaining the value away.",
     " Verification economy: make the edits first, then run ONE correctness-class check — the goal's declared acceptance command or the project's own test runner — and finish_task as soon as it passes. Do not stack extra ad-hoc probes, subprocess scripts, or repeated VERIFY calls after the project suite passes on the final edit, and do not spend rounds on observe/remember for facts a passing check or your finish_task summary already records.",
+    " Issue independent tool calls together in one round (several READ/GREP/BASH calls in the same reply) instead of one call per round: each round costs a full model turn, and reads that do not depend on each other never need to wait for one another.",
     " Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
 );
 
@@ -555,7 +556,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
         task_sections.push(if current_task.review_of.is_some() {
             format!(
-                "instruction: This is a REVIEW task: independently verify the work claimed by {} using your own tools — do not take its summary on faith. Call finish_task completed to confirm the work, or finish_task blocked with exactly what is wrong to send {} back for rework.",
+                "instruction: This is a REVIEW task: independently verify the work claimed by {} using your own tools — do not take its summary on faith. Call finish_task completed to confirm the work, or finish_task blocked with exactly what is wrong to send {} back for rework. Scope: judge the change against the goal and the task contract. Pre-existing behaviour the goal did not ask to change is out of scope — record it with note_task, never as an anomaly or a reason to block or finish unreconciled.",
                 current_task.review_of.as_deref().unwrap(),
                 current_task.review_of.as_deref().unwrap()
             )

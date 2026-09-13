@@ -1613,6 +1613,17 @@ pub fn parse_harness_op_with_gate(
                         .map(str::to_string)
                         .or_else(|| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string))
                 })
+                // The object may also arrive serialised as a string.
+                .map(|word| {
+                    if word.trim_start().starts_with('{') {
+                        serde_json::from_str::<serde_json::Value>(&word)
+                            .ok()
+                            .and_then(|value| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string))
+                            .unwrap_or(word)
+                    } else {
+                        word
+                    }
+                })
                 .map(|word| normalize_enum_word(&word))
                 .filter(|word| !word.is_empty())
                 .map(|word| match word.as_str() {
@@ -3668,6 +3679,8 @@ mod apply_harness_op_tests {
         }
         let error = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done","anchor":"maybe"}"#).expect_err("refused");
         assert!(error.contains("got \"maybe\""), "{error}");
+        let stringified = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done","anchor":"{\"kind\": \"external\", \"source\": \"suite\"}"}"#).expect("parses");
+        assert!(matches!(stringified, HarnessOp::FinishTask { anchor: Some(ref anchor), .. } if anchor == "external"), "{stringified:?}");
     }
 
     #[test]

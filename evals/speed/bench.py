@@ -127,6 +127,34 @@ def grade(ws, task):
     return res.returncode == 0, orig.returncode == 0, "\n".join(tail)
 
 
+ROLE_SECONDS = (("planner", "plan_s"), ("author", "author_s"), ("reviewer", "review_s"))
+
+
+def extract_role_inference(stdout):
+    """Return the roleInference map from the final run-end record of drip --json stdout.
+
+    Legacy stdout without roleInference (or empty/broken output) yields {}.
+    """
+    ri = {}
+    for line in stdout.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("roleInference"), dict):
+            ri = d["roleInference"]
+    return ri
+
+
+def role_seconds(role_inference):
+    """Map role latencyMs into per-run seconds; absent roles map to 0."""
+    out = {}
+    for role, field in ROLE_SECONDS:
+        ms = (role_inference.get(role) or {}).get("latencyMs") or 0
+        out[field] = round(ms / 1000, 1)
+    return out
+
+
 def run_one(task, repeat, opts, root):
     ws = make_workspace(root, task["id"], repeat)
     project_dir = os.path.join(ws, ".dripdata")
@@ -160,7 +188,7 @@ def run_one(task, repeat, opts, root):
                   timed_out=timed_out, exit_code=rc, reason=(result or {}).get("reason"),
                   hidden_pass=hidden_pass, original_pass=orig_pass, grade_tail=grade_out,
                   workspace=ws, drip_version=opts.drip_version, extra=opts.extra, started_at=started,
-                  max_iterations=opts.max_iterations, **metrics)
+                  max_iterations=opts.max_iterations, **role_seconds(extract_role_inference(stdout)), **metrics)
     if not opts.keep:
         shutil.rmtree(ws, ignore_errors=True)
     return record
@@ -249,16 +277,21 @@ def summarize_runs(runs):
             inferences_median=statistics.median([r.get("inferences") or 0 for r in rs]),
             hidden_pass_rate=sum(1 for r in rs if r["hidden_pass"]) / len(rs),
             rejections=sum(r.get("rejections") or 0 for r in rs),
+            plan_s_median=statistics.median([r.get("plan_s") or 0 for r in rs]),
+            author_s_median=statistics.median([r.get("author_s") or 0 for r in rs]),
+            review_s_median=statistics.median([r.get("review_s") or 0 for r in rs]),
         ))
     return rows
 
 
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
-    print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4}")
+    print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
-              f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4}")
+              f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
+              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f}")
 
 
 def main(argv=None):
@@ -299,7 +332,8 @@ def main(argv=None):
             rec = fut.result()
             records.append(rec)
             print(f"  {rec['task']:18} r{rec['repeat']} {rec['reason'] or 'timeout':14} wall={rec['wall_s']:.0f}s cycles={rec.get('cycles')} "
-                  f"inf={rec.get('inferences')} rej={rec.get('rejections')} hidden={'PASS' if rec['hidden_pass'] else 'FAIL'} "
+                  f"plan={rec.get('plan_s', 0):.1f}s author={rec.get('author_s', 0):.1f}s review={rec.get('review_s', 0):.1f}s "
+            f"inf={rec.get('inferences')} rej={rec.get('rejections')} hidden={'PASS' if rec['hidden_pass'] else 'FAIL'} "
                   f"orig={'ok' if rec['original_pass'] else 'BROKEN'}", flush=True)
     path = save(records, opts.label)
     print_table(opts.label, records)

@@ -1171,6 +1171,12 @@ every text field is clamped to 200 characters on Unicode char boundaries, so
 state growth stays bounded and older state files without recovery history
 load unchanged.
 
+A task loop's cycle budget stretches with progress: a cycle that edited or
+verified the workspace earns the loop one more cycle (at most two per loop,
+`MAX_CYCLE_EXTENSIONS`), so productive work is not cut off by a transcript
+reset; loops that only read never extend. Review loops get no read-only
+nudge — reading is their job.
+
 Every task also carries a **task loop budget** (`--task-loop-limit <n>`, default 6
 task loops): the prompt counts loops from the third one, warns on the last,
 and if that loop ends without `finish_task` the harness blocks the task

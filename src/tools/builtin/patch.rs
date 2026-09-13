@@ -360,6 +360,25 @@ pub struct PatchToolPrepared {
     pub display_input: String,
 }
 
+/// A "files" value sent as a JSON-encoded string, decoded when it holds an
+/// array. A second attempt repairs the escaping small models produce when
+/// they nest JSON in a string — structural quotes written as `\"` around
+/// keys and values (`\"path\": \"src/x.rs\"`) — without touching quotes
+/// inside find/replace text, which follow other characters.
+fn decode_files_string(encoded: &str) -> Option<Value> {
+    if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(encoded) {
+        return Some(decoded);
+    }
+    let opening = regex::Regex::new(r#"([\{\[,:]\s*)\\""#).ok()?;
+    let closing = regex::Regex::new(r#"\\"(\s*[:,\}\]])"#).ok()?;
+    let opened = opening.replace_all(encoded, "${1}\"").into_owned();
+    let repaired = closing.replace_all(&opened, "\"${1}").into_owned();
+    match serde_json::from_str::<Value>(&repaired) {
+        Ok(decoded @ Value::Array(_)) => Some(decoded),
+        _ => None,
+    }
+}
+
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     use anyhow::anyhow;
     let mut args = tool_arguments(args)?;
@@ -369,8 +388,26 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     // run lost a round to `"files": "[{...}]"`) is decoded when it holds an
     // array; anything else falls through to the usual shape errors.
     if let Some(Value::String(encoded)) = args.get("files") {
-        if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(encoded) {
+        if let Some(decoded) = decode_files_string(encoded) {
             args.insert("files".to_string(), decoded);
+        }
+    }
+
+    // Tolerance: a top-level "path" beside a files[] whose entries carry no
+    // path means every entry edits that one file (a recorded run sent three
+    // find/replace entries that way and lost a round to "Missing path").
+    if let (Some(Value::String(path)), Some(Value::Array(entries))) = (args.get("path").cloned(), args.get("files").cloned()) {
+        if !entries.is_empty() && entries.iter().all(|entry| entry.get("path").is_none()) {
+            let filled: Vec<Value> = entries
+                .into_iter()
+                .map(|mut entry| {
+                    if let Some(object) = entry.as_object_mut() {
+                        object.insert("path".to_string(), Value::String(path.clone()));
+                    }
+                    entry
+                })
+                .collect();
+            args.insert("files".to_string(), Value::Array(filled));
         }
     }
 
@@ -1590,6 +1627,32 @@ mod execute_tests {
         let outcome = execute(&serde_json::json!({"files": [{"path": edited, "find": "gamma\n", "replace": ""}]}), &ctx);
         assert!(!outcome.failed, "{}", outcome.text);
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), "alpha\n");
+    }
+
+    #[test]
+    fn a_top_level_path_fills_entries_that_carry_none() {
+        let workspace = temp_workspace("top-level-path");
+        let ctx = ctx_for(&workspace);
+        let file = workspace.join("notes.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        let outcome = execute(&serde_json::json!({"path": file, "files": [
+            {"find": "alpha", "replace": "ALPHA"},
+            {"find": "gamma", "replace": "GAMMA"}
+        ]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ALPHA\nbeta\nGAMMA\n");
+    }
+
+    #[test]
+    fn a_files_string_with_escaped_structural_quotes_is_repaired() {
+        // Structural quotes doubled by the model; the find text keeps its own quoted `"x"`.
+        let encoded = r#"[{"find": "let a = \"x\";", \"path\": \"notes.rs\", \"replace\": \"let a = 1;\"}]"#;
+        let decoded = decode_files_string(encoded).expect("repaired");
+        let entry = &decoded.as_array().unwrap()[0];
+        assert_eq!(entry["path"], "notes.rs");
+        assert_eq!(entry["find"], "let a = \"x\";");
+        assert_eq!(entry["replace"], "let a = 1;");
+        assert!(decode_files_string("not json at all").is_none());
     }
 
     #[test]

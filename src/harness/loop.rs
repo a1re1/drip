@@ -885,6 +885,51 @@ pub fn build_warmup_command(cwd: &str) -> Option<(String, Vec<String>)> {
     None
 }
 
+/// The project's own test command when the goal declares none, from the
+/// workspace layout: Cargo.toml, go.mod, package.json with a test script, a
+/// pytest configuration, or a tests/ directory. Used by the unchecked-finish
+/// re-verify so a finish with no check behind it gets the project suite run
+/// once by the harness instead of a bounce the agent answers by guessing.
+pub fn detect_project_check_command(cwd: &str) -> Option<(String, &'static str)> {
+    let root = Path::new(cwd);
+    if root.join("Cargo.toml").is_file() {
+        return Some(("cargo test -q".to_string(), "Cargo.toml"));
+    }
+    if root.join("go.mod").is_file() {
+        return Some(("go test ./...".to_string(), "go.mod"));
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
+        let has_test_script = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|json| json.get("scripts")?.get("test")?.as_str().map(|script| !script.trim().is_empty() && !script.contains("no test specified")))
+            .unwrap_or(false);
+        if has_test_script {
+            let runner = if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+                "bun test"
+            } else if root.join("pnpm-lock.yaml").is_file() {
+                "pnpm test"
+            } else if root.join("yarn.lock").is_file() {
+                "yarn test"
+            } else {
+                "npm test --silent"
+            };
+            return Some((runner.to_string(), "package.json test script"));
+        }
+    }
+    if root.join("pytest.ini").is_file() || root.join("conftest.py").is_file() || root.join("tests/conftest.py").is_file() {
+        return Some(("python3 -m pytest -q".to_string(), "pytest configuration"));
+    }
+    if root.join("tests").is_dir() {
+        let has_python_tests = std::fs::read_dir(root.join("tests"))
+            .map(|entries| entries.flatten().any(|entry| entry.file_name().to_string_lossy().ends_with(".py")))
+            .unwrap_or(false);
+        if has_python_tests {
+            return Some(("python3 -m unittest discover -s tests -q".to_string(), "tests/ directory"));
+        }
+    }
+    None
+}
+
 /// True when a BASH/VERIFY result says the command was killed at its timeout.
 pub fn output_reports_hang(tool_content: &str) -> bool {
     tool_content.contains("TIMED OUT after") || tool_content.contains("HUNG: the command did not finish")
@@ -3933,10 +3978,22 @@ impl HarnessRun {
             .last_verification
             .clone()
             .filter(|record| record.command.chars().count() < 200 && !record.command.starts_with("CHECK "));
+        let mut detected_source: Option<&'static str> = None;
         let (record, goal_declared) = if stale && rerunnable.is_some() {
             (rerunnable.unwrap(), false)
         } else if (unchecked || stale) && !scope.goal_check_used {
-            let Some(command) = goal_declared_check_commands(&self.state.goal).into_iter().next() else { return outcome };
+            let declared = goal_declared_check_commands(&self.state.goal).into_iter().next();
+            let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
+            let Some(command) = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone())) else { return outcome };
+            if let Some((_, source)) = &detected {
+                detected_source = Some(source);
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    detail: format!("project check detected: {command} ({source}) — the goal declares no check, so the harness runs the project suite for this unchecked finish"),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+            }
             scope.goal_check_used = true;
             (
                 HarnessVerificationRecord {
@@ -3957,7 +4014,9 @@ impl HarnessRun {
         if goal_declared {
             input["anchor"] = serde_json::json!({
                 "kind": "external",
-                "source": "goal-declared acceptance check, run by the harness",
+                "source": detected_source
+                    .map(|source| format!("project test suite detected by the harness ({source}), run by the harness"))
+                    .unwrap_or_else(|| "goal-declared acceptance check, run by the harness".to_string()),
                 "coverage": "reportedClaim"
             });
             input[GOAL_DECLARED_CHECK_MARKER] = serde_json::json!(true);
@@ -4008,7 +4067,7 @@ impl HarnessRun {
             return crate::harness::harness_tools::HarnessOpOutcome {
                 text: format!(
                     "harness: not accepted yet — the harness ran the {} ({}) and it FAILED. Fix the failure, then finish_task.\n{}",
-                    if goal_declared { "goal-declared check" } else { "last check again after your edits" },
+                    if detected_source.is_some() { "project check the harness detected (the goal declares none)" } else if goal_declared { "goal-declared check" } else { "last check again after your edits" },
                     truncate_text(&record.command, 120),
                     truncate_text_keeping_ends(&execution.tool_content, 1200)
                 ),
@@ -7414,6 +7473,29 @@ mod role_inference_tests {
         run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
         run.state.mutations_since_verification = Some(1);
         assert!(run.verified_after_last_edit(None).is_none(), "an edit after the check unsettles it");
+    }
+
+    #[test]
+    fn project_check_is_detected_from_the_workspace_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        assert!(detect_project_check_command(&cwd).is_none(), "empty workspace");
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        assert!(detect_project_check_command(&cwd).is_none(), "tests/ without python files");
+        std::fs::write(dir.path().join("tests/test_a.py"), "").unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m unittest discover -s tests -q");
+        std::fs::write(dir.path().join("pytest.ini"), "[pytest]\n").unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m pytest -q");
+        std::fs::write(dir.path().join("package.json"), r#"{"scripts": {"test": "echo \"Error: no test specified\" && exit 1"}}"#).unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m pytest -q", "a placeholder npm test script is ignored");
+        std::fs::write(dir.path().join("package.json"), r#"{"scripts": {"test": "vitest run"}}"#).unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "npm test --silent");
+        std::fs::write(dir.path().join("bun.lockb"), "").unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "bun test");
+        std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "go test ./...");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        assert_eq!(detect_project_check_command(&cwd).unwrap(), ("cargo test -q".to_string(), "Cargo.toml"));
     }
 
     #[test]

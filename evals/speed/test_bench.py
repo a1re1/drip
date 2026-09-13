@@ -128,5 +128,34 @@ class RoleTimingTest(unittest.TestCase):
         self.assertEqual(runs, snapshot)
 
 
+class ReviewWaivedTest(unittest.TestCase):
+    def test_transcript_metrics_counts_review_waived_events(self):
+        import tempfile
+        lines = [
+            '{"type":"event","kind":"harness-op","detail":"review waived: cosmetic nit"}',
+            '{"type":"event","kind":"harness-op","detail":"review waived: deferred P2"}',
+            '{"type":"event","kind":"harness-op","detail":"review waiver: not a waived event"}',
+            '{"type":"event","kind":"harness-op","detail":"hedge resolved: the second request"}',
+           ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            m = bench.transcript_metrics(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(m["review_waived"], 2)
+
+    def test_summarize_runs_sums_review_waived(self):
+        runs = [run("a", 10.0, 5, True, 0), dict(run("a", 20.0, 7, True, 1), review_waived=3),
+                dict(run("a", 30.0, 9, False, 0), review_waived=4)]
+        s = bench.summarize_runs(runs)[0]
+        self.assertEqual(s["review_waived"], 7)
+
+    def test_summarize_runs_legacy_without_review_waived_yields_zero(self):
+        s = bench.summarize_runs([run("a", 10.0, 5, True, 1)])[0]
+        self.assertEqual(s["review_waived"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

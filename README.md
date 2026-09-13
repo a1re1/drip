@@ -1305,6 +1305,12 @@ one. The agent's own VERIFY of a goal-declared check counts the same way
 command is one of the goal's declared checks is upgraded to external
 evidence: the operator declared it, the agent only ran it. Before that
 upgrade the harness bounced such a finish and re-ran the very same command.
+When the goal declares no check at all, an external-anchored VERIFY of the
+project's own suite through a native runner (`cargo test`, `pytest`,
+`unittest`, `go test`, `vitest`, `bun test`, `npm test`), passed with nothing
+edited since, settles the change the same way — for the waiver's size-bounded
+skip and for the reviewer's `verification settled` note — since most real
+goals declare no check and their reviews re-ran exactly that suite.
 
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own

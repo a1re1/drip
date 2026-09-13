@@ -133,6 +133,31 @@ pub fn confidence_basis_line(
     }
 }
 
+/// One plain-text line naming the credential env vars that were withheld
+/// from tool subprocesses (via DRIP_SCRUB_ENV), so the operator understands
+/// why a check can pass inside drip yet fail in their own shell. Only names
+/// actually present in drip's own process env qualify (via `is_present`).
+/// Names are sorted; `None` when no name qualifies.
+pub fn withheld_env_line(
+    scrub_names: &str,
+    is_present: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let mut names: Vec<&str> = scrub_names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && is_present(name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "verification env: withheld from tool commands: {} (set in your shell; a check that passes here may behave differently there)",
+        names.join(", ")
+    ))
+}
+
 pub struct HeadlessResultArgs<'a> {
     pub record: &'a RunRecord,
     pub result_path: &'a str,
@@ -301,6 +326,34 @@ mod tests {
             state_path: "/s",
             transcript_path: "/t",
         })
+    }
+
+    #[test]
+    fn withheld_env_line_empty_scrub_list_is_none() {
+        assert_eq!(withheld_env_line("", |_| true), None);
+        assert_eq!(withheld_env_line("  , ,, ", |_| true), None);
+    }
+
+    #[test]
+    fn withheld_env_line_skips_names_not_present() {
+    assert_eq!(
+        withheld_env_line("AWS_SECRET_ACCESS_KEY, OTHER", |_| false),
+        None
+    );
+    }
+
+    #[test]
+    fn withheld_env_line_sorts_and_joins_present_names() {
+    assert_eq!(
+        withheld_env_line(
+            "OTHER_TOKEN,ALPHA_KEY",
+            |name| name == "ALPHA_KEY" || name == "OTHER_TOKEN"
+        ),
+        Some(
+            "verification env: withheld from tool commands: ALPHA_KEY, OTHER_TOKEN (set in your shell; a check that passes here may behave differently there)"
+                .to_string()
+        )
+    );
     }
 
     #[test]

@@ -1101,6 +1101,16 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             println!("{}", summary.text);
         }
 
+        // Name the credential env vars that were withheld from tool
+        // subprocesses, so a check that passes inside drip failing in the
+        // operator's own shell is not a mystery.
+        if let Some(line) = crate::cli::headless_output::withheld_env_line(
+            &std::env::var("DRIP_SCRUB_ENV").unwrap_or_default(),
+            |name| std::env::var_os(name).is_some(),
+        ) {
+            println!("{line}");
+        }
+
         if payload.pending_operator_messages > 0 {
             println!();
             println!(

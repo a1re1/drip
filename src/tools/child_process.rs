@@ -211,6 +211,42 @@ fn spawn_detached(
     command_builder.spawn()
 }
 
+/// A build warm-up started at run start (`cargo build --tests` for a Cargo
+/// workspace) so the author's first test run finds the compile already done
+/// instead of paying it after orientation; output goes nowhere, and the job
+/// is killed with its process group when the run drops it.
+pub struct WarmupJob {
+    child: Child,
+    pub command: String,
+}
+
+impl WarmupJob {
+    pub fn spawn(program: &str, args: &[String], cwd: &str) -> std::io::Result<WarmupJob> {
+        let mut builder = Command::new(program);
+        builder.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            builder.process_group(0);
+        }
+        let child = builder.spawn()?;
+        Ok(WarmupJob { child, command: format!("{program} {}", args.join(" ")) })
+    }
+
+    pub fn finished(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+}
+
+impl Drop for WarmupJob {
+    fn drop(&mut self) {
+        if !self.finished() {
+            kill_tree(&mut self.child, libc::SIGTERM);
+            let _ = self.child.wait();
+        }
+    }
+}
+
 /// Signal the negative pid (the whole process group) first, and fall through
 /// to the direct kill when the group is gone or the child is not the leader.
 fn kill_tree(child: &mut Child, signal: i32) {

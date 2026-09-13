@@ -1186,6 +1186,12 @@ rounds. The read-only nudge ("N reads and nothing written") waits for the
 second cycle of a loop (or sixteen reads): eight reads in a fresh loop's first
 cycle is orientation, not drift.
 
+A Cargo workspace gets a build warm-up: `cargo build --tests --quiet` starts
+in the background at run start (its output goes nowhere; the job is killed
+with the run), so the author's first `cargo test` finds the compile done
+instead of paying it after 20-40s of orientation during which the CPU sat
+idle. `DRIP_NO_WARMUP=1` disables it.
+
 When the goal-declared check already passed after the author's last edit
 (the same anchor the review waiver uses, without its size bound), the review
 brief says so under `verification settled:` and tells the reviewer not to

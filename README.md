@@ -128,6 +128,11 @@ drip "refactor auth module" \
 # directly (an unfinished run resumes with the same cap)
 drip "repair the corrupted shards" --max-loops 30
 
+# Other budget/planning flags
+# --task-loop-limit N: task loops one task may consume before the harness blocks it (default 6)
+# --plan-mode always|auto|direct: how a run gets its first task list; auto skips the planner
+# for small goals that declare their own check
+
 # In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
 # skills appear above the input line; up/down selects, tab completes, and
 # enter enables the skill for that session. Typing a full skill name as a
@@ -1170,6 +1175,15 @@ reply). History is capped at 8 events per task with the oldest evicted, and
 every text field is clamped to 200 characters on Unicode char boundaries, so
 state growth stays bounded and older state files without recovery history
 load unchanged.
+
+`--plan-mode auto|always|direct` decides how a run gets its first task list.
+`auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that declares its own backticked
+acceptance check: one direct task is seeded from the goal text and the author
+starts at once — the planner cost 13-20s on every speed-bench run, half the
+wall time of a small task, while the goal already said what to do and how to
+check it, and with `auto` the bench's small and medium tasks ran 25-60% faster at
+the same hidden-test pass rate. `always` runs the planner role first for every
+goal; `direct` always seeds the direct task. The reviewer still verifies.
 
 A task loop's cycle budget stretches with progress: a cycle that edited or
 verified the workspace earns the loop one more cycle (at most two per loop,

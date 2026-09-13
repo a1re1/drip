@@ -148,6 +148,10 @@ OPTIONS
 	--max-iterations N            Cap harness cycles for this run
 	--max-loops N                 Cap task loops for this run (each loop is at least one model
 	                              call; a replanning loop is exactly one planner call)
+	--task-loop-limit N           Task loops one task may consume before the harness blocks it
+	                              (default 6; each loop is at least one model call)
+	--plan-mode always|auto|direct  How a run gets its first task list; auto skips the planner
+	                              for small goals that declare their own check
 	--no-repo-memory              Disable the repo memory bank (~/.drip/projects/<slug>/memory) for this run:
 	                              no index injection, repo-scoped remember/forget refused
 	--profile <id>                Model profile for this invocation — applies to both the
@@ -341,6 +345,8 @@ mod tests {
             "--prompt",
             "--max-iterations",
             "--max-loops",
+            "--task-loop-limit",
+            "--plan-mode",
             "--lite",
             "--no-review",
             "--profile",

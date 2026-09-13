@@ -150,6 +150,22 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn direct_task_title_follows_the_plan_mode_and_goal_shape() {
+        use super::{direct_task_title, PlanMode};
+        let small = "Add a `count` subcommand to kvstore/cli.py. Run `python3 -m unittest discover -s tests -q`.";
+        assert_eq!(direct_task_title(small, PlanMode::Always), None);
+        assert_eq!(direct_task_title(small, PlanMode::Auto).as_deref(), Some(small));
+        assert!(direct_task_title(small, PlanMode::Direct).is_some());
+        // No declared check: auto plans.
+        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto), None);
+        // Too long: auto plans.
+        let long = format!("{} {}", small, "and more ".repeat(120));
+        assert_eq!(direct_task_title(&long, PlanMode::Auto), None);
+        assert!(direct_task_title(&long, PlanMode::Direct).is_some());
+        assert_eq!(direct_task_title("   ", PlanMode::Direct), None);
+    }
+
+    #[test]
     fn compact_tool_input_names_what_the_call_touched() {
         assert_eq!(super::compact_tool_input(r#"{"command":"grep -n   foo\n src/ | head"}"#, 90), "grep -n foo src/ | head");
         assert_eq!(super::compact_tool_input(r#"{"path":"src/a.rs","content":"..."}"#, 90), "src/a.rs");
@@ -1160,6 +1176,61 @@ pub fn is_goal_declared_verification(goal: &str, command: &str) -> bool {
 /// Check commands the goal itself declares in backticks (`python3 -m unittest
 /// discover -s tests -q`, `cargo test`, `npm test`): task-provided acceptance
 /// checks the harness may run on the agent's behalf.
+/// How a run gets its first task list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanMode {
+    /// The planner role always runs first.
+    Always,
+    /// Default. Small goals that declare their own acceptance check skip
+    /// the planner: one direct task is seeded from the goal and the author
+    /// starts at once. The planner run cost 13-20s on every run in the
+    /// speed bench — half the wall time of a small task — while the goal
+    /// already said what to do and how to check it; with auto the bench's
+    /// S/M tasks ran 25-60% faster at the same hidden-test pass rate.
+    Auto,
+    /// Always seed the direct task, never plan.
+    Direct,
+}
+
+impl PlanMode {
+    pub fn parse(raw: Option<&str>) -> PlanMode {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("always") => PlanMode::Always,
+            Some("direct") => PlanMode::Direct,
+            _ => PlanMode::Auto,
+        }
+    }
+}
+
+/// Goal size under which `PlanMode::Auto` skips the planner.
+pub const DIRECT_PLAN_MAX_GOAL_CHARS: usize = 700;
+/// Paths a goal may name explicitly and still count as small.
+pub const DIRECT_PLAN_MAX_PATHS: usize = 3;
+
+/// The title of the direct task a run seeds instead of planning, or None
+/// when this goal should be planned: `Always` never seeds; `Direct` always
+/// does; `Auto` seeds only for a short goal naming few paths that declares
+/// its own backticked acceptance check (so the harness can still verify).
+pub fn direct_task_title(goal: &str, mode: PlanMode) -> Option<String> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return None;
+    }
+    let small = goal.chars().count() <= DIRECT_PLAN_MAX_GOAL_CHARS
+        && extract_goal_paths(goal).len() <= DIRECT_PLAN_MAX_PATHS
+        && !goal_declared_check_commands(goal).is_empty();
+    let seed = match mode {
+        PlanMode::Always => false,
+        PlanMode::Direct => true,
+        PlanMode::Auto => small,
+    };
+    if !seed {
+        return None;
+    }
+    let first_line = goal.lines().next().unwrap_or(goal);
+    Some(truncate_text(&collapse_whitespace(first_line), 200))
+}
+
 pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
     let mut commands: Vec<String> = Vec::new();
     for span in goal.split('`').skip(1).step_by(2) {
@@ -1895,6 +1966,10 @@ pub struct SolidStateHarnessOptions {
     /// Task loops one task may consume before the harness blocks it
     /// (default DEFAULT_TASK_LOOP_LIMIT).
     pub task_loop_limit: Option<i64>,
+    /// Planning mode: "auto" (default) seeds a direct task for small goals
+    /// that declare their own check; "always" runs the planner first;
+    /// "direct" always seeds one (see PlanMode).
+    pub plan_mode: Option<String>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
     /// Draft mode (--lite): single author lane; terminal reason "draft",
@@ -1973,6 +2048,7 @@ pub struct HarnessRun {
     pub loop_config: HarnessLoopConfig,
     pub stall_limit: i64,
     pub task_loop_limit: i64,
+    pub plan_mode: PlanMode,
     pub max_task_reopens: i64,
     pub system_prompt: String,
     pub telemetry_config: HarnessTelemetryConfig,
@@ -1998,6 +2074,8 @@ pub struct HarnessRun {
     /// The last replanning loop left the ledger unworkable: the next one runs
     /// under the planning role instead of the (cheaper) replanning role.
     pub replan_escalated: bool,
+    /// The direct-plan decision runs once per run, before the first loop.
+    pub direct_plan_checked: bool,
     pub ask_user_awaiting: bool,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
@@ -2326,6 +2404,7 @@ impl HarnessRun {
             clamp_loop_value(loop_config.max_tool_result_chars, 1, defaults.max_tool_result_chars);
 
         let stall_limit = options.stall_limit.unwrap_or(3);
+        let plan_mode = PlanMode::parse(options.plan_mode.as_deref());
         let task_loop_limit = options
             .task_loop_limit
             .unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT)
@@ -2509,6 +2588,7 @@ impl HarnessRun {
             loop_config,
             stall_limit,
             task_loop_limit,
+            plan_mode,
             max_task_reopens,
             system_prompt,
             telemetry_config,
@@ -2529,6 +2609,7 @@ impl HarnessRun {
             run_futile: false,
             blocked_on_input: false,
             replan_escalated: false,
+            direct_plan_checked: false,
             ask_user_awaiting: false,
             answers_path: run_answers_path,
             continue_command: None,
@@ -3430,6 +3511,39 @@ impl HarnessRun {
             {
                 self.blocked_on_input = true;
                 break;
+            }
+
+            // Direct planning: a small goal with its own acceptance check
+            // becomes one task without a planner loop (PlanMode).
+            if !self.direct_plan_checked {
+                self.direct_plan_checked = true;
+                if self.state.tasks.is_empty() {
+                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode) {
+                        let added = core_state::add_tasks(
+                            &mut self.state,
+                            vec![core_state::HarnessTaskInput { depends_on: None, review_of: None, role: None, title }],
+                            core_state::HarnessTaskPlacement::End,
+                        );
+                        if let Some(task) = added.first().and_then(|task| core_state::get_task_by_id_mut(&mut self.state, &task.id)) {
+                            core_state::append_task_note(
+                                task,
+                                "direct task: the planner was skipped (plan mode); the goal text is the contract — read what it names, make the change, run the check it declares.",
+                            );
+                        }
+                        let detail = format!(
+                            "direct task seeded, planner skipped (plan mode {:?}): {}",
+                            self.plan_mode,
+                            added.first().map(|task| task.id.as_str()).unwrap_or("?")
+                        );
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { task_id: added.first().map(|task| task.id.clone()), ..Default::default() }),
+                            detail,
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        self.persist();
+                    }
+                }
             }
 
             // One task loop: a subagent takes the current task (or planning duty) and

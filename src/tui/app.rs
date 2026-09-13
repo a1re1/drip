@@ -86,6 +86,7 @@ pub struct TuiBootstrap {
     pub max_iterations: Option<i64>,
     pub max_loops: Option<i64>,
     pub task_loop_limit: Option<i64>,
+    pub plan_mode: Option<String>,
     pub no_repo_memory: bool,
     pub project: DripProject,
     pub roles_flag: Option<RoleSetupSource>,
@@ -2327,6 +2328,7 @@ impl TuiApp {
         let max_iterations = self.bootstrap.max_iterations;
         let max_loops = self.bootstrap.max_loops;
         let task_loop_limit = self.bootstrap.task_loop_limit;
+        let plan_mode = self.bootstrap.plan_mode.clone();
         let no_repo_memory = self.bootstrap.no_repo_memory;
         let ask_user_enabled = self.bootstrap.ask;
         let ask_user_timeout_seconds = self.bootstrap.ask_timeout_secs;
@@ -2367,6 +2369,7 @@ impl TuiApp {
                 max_iterations,
                 max_loops,
                 task_loop_limit,
+                plan_mode,
                 mentions: Some(mentions),
                 new_goal: false,
                 no_repo_memory,
@@ -3487,6 +3490,7 @@ mod rename_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+            plan_mode: None,
             no_repo_memory: false,
             project,
             roles_flag: None,
@@ -3885,6 +3889,7 @@ mod skill_activation_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+            plan_mode: None,
             no_repo_memory: true,
             project: drip_project,
             roles_flag: None,
@@ -4427,6 +4432,7 @@ mod prompt_history_wiring_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+            plan_mode: None,
             no_repo_memory: true,
             project: drip_project,
             roles_flag: None,

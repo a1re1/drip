@@ -537,6 +537,17 @@ enum RequestOutcome {
     Stopped,
 }
 
+impl RequestOutcome {
+    fn describe(&self) -> &'static str {
+        match self {
+            RequestOutcome::Completed(_) => "completed",
+            RequestOutcome::Failed(_) => "failed",
+            RequestOutcome::TimedOut => "timed out",
+            RequestOutcome::Stopped => "stopped",
+        }
+    }
+}
+
 async fn wait_for_abort(signal: &AbortSignal) {
     loop {
         if signal.is_aborted() {
@@ -658,6 +669,7 @@ impl ModelCaller {
         Fut: Future<Output = RawResponse>,
     {
         let signal = self.deps.signal.as_ref();
+        let started = Instant::now();
         let primary = run_bounded_request(build(), timeout_ms, signal);
         tokio::pin!(primary);
         let delay = tokio::time::sleep(Duration::from_millis(delay_ms));
@@ -677,10 +689,17 @@ impl ModelCaller {
         );
         let hedge = run_bounded_request(build(), timeout_ms, signal);
         tokio::pin!(hedge);
-        tokio::select! {
-            outcome = &mut primary => outcome,
-            outcome = &mut hedge => outcome,
-        }
+        let (winner, outcome) = tokio::select! {
+            outcome = &mut primary => ("first request", outcome),
+            outcome = &mut hedge => ("second request", outcome),
+        };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.emit(
+            HarnessEventType::HarnessOp,
+            format!("hedge resolved: the {winner} {} after {elapsed_ms}ms", outcome.describe()),
+            None,
+        );
+        outcome
     }
 
     fn record_latency(&self, model: &str, latency_ms: i64) {
@@ -1754,6 +1773,10 @@ mod tests {
         assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("hedged")));
         let events = events.lock().unwrap();
         assert!(events.iter().any(|detail| detail.starts_with("hedged model request: test-model has not answered after 0.2s")), "{events:?}");
+        let resolved = events.iter().find(|detail| detail.starts_with("hedge resolved: ")).expect("a hedge resolution event should be emitted");
+        assert!(resolved.starts_with("hedge resolved: the second request completed after "), "{resolved}");
+        let elapsed_ms: u64 = resolved.rsplit_once("after ").unwrap().1.trim_end_matches("ms").trim().parse().unwrap();
+        assert!((200..2_500).contains(&elapsed_ms), "elapsed should cover the hedge delay but not the 3s primary: {resolved}");
     }
 
     #[tokio::test]

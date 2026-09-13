@@ -256,6 +256,9 @@ impl JobLogger {
 pub struct AsyncJobRecord {
     pub job: ChatAsyncToolJob,
     pub settled: bool,
+    /// The settled result reached the model (a completed wait, a tail after
+    /// settling, or the harness's own end-of-round report).
+    pub reported: bool,
 }
 
 /// In-memory job registry.
@@ -320,6 +323,7 @@ impl AsyncToolJobManager {
             .push(AsyncJobRecord {
                 job: job.clone(),
                 settled: false,
+                reported: false,
             });
 
         Ok(job)
@@ -446,6 +450,29 @@ impl AsyncToolJobManager {
         });
 
         Ok(job)
+    }
+
+    /// Marks a settled job's result as seen by the model.
+    pub fn mark_reported(&self, job_id: &str) {
+        let mut guard = self.records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(record) = guard.iter_mut().find(|record| record.job.id == job_id) {
+            if record.job.status != ChatAsyncToolJobStatus::Running {
+                record.reported = true;
+            }
+        }
+    }
+
+    /// Settled, not-yet-reported jobs, each returned exactly once.
+    pub fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
+        let mut guard = self.records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .iter_mut()
+            .filter(|record| record.job.status != ChatAsyncToolJobStatus::Running && !record.reported)
+            .map(|record| {
+                record.reported = true;
+                record.job.clone()
+            })
+            .collect()
     }
 
     /// Lines clamp to [1, 400] and the log is tail-trimmed; appends are
@@ -795,11 +822,23 @@ impl ChatAsyncToolRuntime for Arc<AsyncToolJobManager> {
     }
 
     fn tail_job(&self, job_id: &str, lines: Option<i64>) -> Result<ChatAsyncToolTailResult> {
-        AsyncToolJobManager::tail_job(self, job_id, lines.unwrap_or(60))
+        let result = AsyncToolJobManager::tail_job(self, job_id, lines.unwrap_or(60))?;
+        if result.job.status != ChatAsyncToolJobStatus::Running {
+            self.mark_reported(job_id);
+        }
+        Ok(result)
     }
 
     fn wait_for_job(&self, job_id: &str, timeout_ms: Option<i64>) -> Result<ChatAsyncToolWaitResult> {
-        AsyncToolJobManager::wait_for_job(self, job_id, timeout_ms.unwrap_or(60_000))
+        let result = AsyncToolJobManager::wait_for_job(self, job_id, timeout_ms.unwrap_or(60_000))?;
+        if result.completed {
+            self.mark_reported(job_id);
+        }
+        Ok(result)
+    }
+
+    fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
+        AsyncToolJobManager::take_settled_unreported(self)
     }
 }
 
@@ -1053,6 +1092,31 @@ mod tests {
         assert!(log.contains("[cwd] /tmp\n"));
         assert!(log.contains("[session] drip-test\n"));
         assert!(log.contains("[finish] status=completed exitCode=0\n"));
+    }
+
+    #[test]
+    fn settled_jobs_are_reported_once_and_a_completed_wait_counts_as_reported() {
+        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test")));
+        let runtime: Arc<dyn ChatAsyncToolRuntime> = Arc::new(Arc::clone(&manager));
+        let seen = manager.start_task("/tmp", "seen by a wait", "BASH_ASYNC", |_| Ok(())).unwrap();
+        let unseen = manager.start_task("/tmp", "nobody waited", "BASH_ASYNC", |_| Ok(())).unwrap();
+        let running = manager
+            .start_task("/tmp", "still running", "BASH_ASYNC", |_| {
+                thread::sleep(Duration::from_millis(1_500));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(runtime.wait_for_job(&seen.id, Some(10_000)).unwrap().completed);
+        AsyncToolJobManager::wait_for_job(&manager, &unseen.id, 10_000).unwrap();
+
+        let reported: Vec<String> = runtime.take_settled_unreported().into_iter().map(|job| job.id).collect();
+        assert_eq!(reported, vec![unseen.id.clone()], "the waited job is already reported; the running one is not settled");
+        assert!(runtime.take_settled_unreported().is_empty(), "each job is reported once");
+
+        AsyncToolJobManager::wait_for_job(&manager, &running.id, 10_000).unwrap();
+        runtime.tail_job(&running.id, Some(5)).unwrap();
+        assert!(runtime.take_settled_unreported().is_empty(), "a tail after settling counts as reported");
     }
 
     #[test]

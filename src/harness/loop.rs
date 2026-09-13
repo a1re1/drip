@@ -32,6 +32,10 @@ pub const MAX_DIGEST_ACTION_CHARS: usize = 200;
 /// productive work is not reset (transcript discarded, workspace re-read)
 /// just because its fixed budget ran out. Loops that only read never extend.
 pub const MAX_CYCLE_EXTENSIONS: i64 = 2;
+/// Output lines carried in a harness report of a settled background job.
+pub const BACKGROUND_REPORT_TAIL_LINES: i64 = 40;
+pub const BACKGROUND_REPORT_MAX_CHARS: usize = 4_000;
+pub const BACKGROUND_REPORT_PREFIX: &str = "harness:";
 pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
 pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
@@ -4462,6 +4466,51 @@ impl HarnessRun {
     /// text-only reply concludes (or is nudged once); tool calls are
     /// normalized and dispatched via `dispatch_tool_calls`.
     /// Fires `RelayStart` on entry and `RelayFinish` on every exit path.
+    /// Background jobs that settled since the model last looked at them are
+    /// reported before the next model call, output tail included, so a round
+    /// is never spent on ASYNC_WAIT / "sleep N; cat log" for a job that has
+    /// already finished.
+    fn report_settled_background_jobs(&mut self, scope: &mut LoopScope) {
+        let settled = self.tool_services.async_jobs.take_settled_unreported();
+        for job in settled {
+            let tail = self
+                .tool_services
+                .async_jobs
+                .tail_job(&job.id, Some(BACKGROUND_REPORT_TAIL_LINES))
+                .map(|result| result.output)
+                .unwrap_or_default();
+            let status = match job.status {
+                crate::tools::types::ChatAsyncToolJobStatus::Completed => "completed",
+                crate::tools::types::ChatAsyncToolJobStatus::Failed => "failed",
+                crate::tools::types::ChatAsyncToolJobStatus::Running => "running",
+            };
+            let exit = job.exit_code.flatten().map(|code| format!(" (exit {code})")).unwrap_or_default();
+            let headline = format!("background job {} ({}) finished: {status}{exit}", job.id, truncate_text(&job.title, 80));
+            let tail = tail.trim();
+            let text = if tail.is_empty() {
+                format!("{BACKGROUND_REPORT_PREFIX} {headline}. It produced no output. No ASYNC_WAIT or ASYNC_TAIL is needed for this job.")
+            } else {
+                format!(
+                    "{BACKGROUND_REPORT_PREFIX} {headline}. Last {} line(s) of its output:\n{}\nNo ASYNC_WAIT or ASYNC_TAIL is needed for this job.",
+                    tail.lines().count(),
+                    truncate_text(tail, BACKGROUND_REPORT_MAX_CHARS)
+                )
+            };
+            scope.transport_messages.push(TransportRequestMessage {
+                content: Some(TransportContent::Text(text)),
+                role: ChatRoleTag::User,
+                ..Default::default()
+            });
+            scope.digest_actions.push(headline.clone());
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                detail: format!("{headline} — reported to the model"),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+        }
+    }
+
     pub async fn run_round(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
         self.fire_hook(crate::harness::hooks::HookEvent::RelayStart, None);
         let outcome = self.run_round_inner(scope, cycle, round).await;
@@ -4506,6 +4555,8 @@ impl HarnessRun {
                 });
             }
         }
+
+        self.report_settled_background_jobs(scope);
 
         let task_id = scope.current_task_id.clone();
 

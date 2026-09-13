@@ -55,6 +55,8 @@ pub const SYNTHESIS_WALL_CLOCK_MS: u64 = 10 * 60_000;
 // Both lanes run on the presets' fast profile (`glm-5-3-flash`).
 pub const DEFAULT_REVIEW_FILE_PROFILE: &str = PRESET_FAST_PROFILE_ID;
 pub const DEFAULT_REVIEW_SYNTH_PROFILE: &str = PRESET_FAST_PROFILE_ID;
+/// Reasoning effort for per-file review children whose profile sets none.
+pub const DEFAULT_REVIEW_FILE_REASONING_EFFORT: &str = "low";
 
 /// Builds a fresh tool pack for one child (tool closures cannot be shared
 /// across the pool's threads).

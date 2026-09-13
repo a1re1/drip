@@ -29,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = os.path.join(HERE, "fixture")
 TASKS = os.path.join(HERE, "tasks", "tasks.json")
 HIDDEN = os.path.join(HERE, "tasks", "hidden")
+GRADE_TIMEOUT_S = 120
 RESULTS = os.path.join(HERE, "results")
 UNITTEST = ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]
 
@@ -68,7 +69,8 @@ def transcript_metrics(path):
     m = dict(inferences=0, inference_ms=0, tool_calls=0, tool_ms=0, loops=0, cycles=0,
              rejections=0, read_only_nudges=0, output_cutoffs=0, patches=0, verifies=0,
              context_expired=0, tasks_finished=0, prompt_tokens=0, completion_tokens=0,
-             cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0)
+             cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0,
+             hedge_wins=0, background_reports=0)
     for line in open(path, errors="ignore"):
         try:
             d = json.loads(line)
@@ -105,6 +107,10 @@ def transcript_metrics(path):
             m["context_expired"] += 1
         elif kind == "harness-op" and detail.startswith("hedged model request"):
             m["hedges"] += 1
+        elif kind == "harness-op" and detail.startswith("hedge resolved: the second request"):
+            m["hedge_wins"] += 1
+        elif kind == "harness-op" and detail.startswith("background job ") and detail.endswith("reported to the model"):
+            m["background_reports"] += 1
         elif kind == "rate-limited" and "typical latency" in detail:
             m["stall_timeouts"] += 1
         elif kind == "harness-op" and detail.startswith("finish_task: harness: not accepted"):
@@ -120,15 +126,23 @@ def transcript_metrics(path):
 
 def grade(ws, task):
     """Return (hidden_pass, original_pass, output)."""
-    orig = subprocess.run(UNITTEST, cwd=ws, capture_output=True, text=True, timeout=120)
+    def run_suite(argv):
+        # A suite the agent left hanging (a server test without shutdown) must
+        # grade as a failure, not kill the whole batch.
+        try:
+            res = subprocess.run(argv, cwd=ws, capture_output=True, text=True, timeout=GRADE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return 124, f"grading timed out after {GRADE_TIMEOUT_S}s: {' '.join(argv)}"
+        return res.returncode, res.stdout + res.stderr
+
+    orig_code, _ = run_suite(UNITTEST)
     hidden_src = os.path.join(HIDDEN, task["hidden"])
     hidden_dst = os.path.join(ws, "tests", f"test_hidden_{task['id'].replace('-', '_')}.py")
     shutil.copy(hidden_src, hidden_dst)
-    res = subprocess.run(["python3", "-m", "unittest", "-q", os.path.relpath(hidden_dst, ws).replace("/", ".")[:-3]],
-                         cwd=ws, capture_output=True, text=True, timeout=120)
+    code, out = run_suite(["python3", "-m", "unittest", "-q", os.path.relpath(hidden_dst, ws).replace("/", ".")[:-3]])
     os.remove(hidden_dst)
-    tail = (res.stdout + res.stderr).strip().splitlines()[-6:]
-    return res.returncode == 0, orig.returncode == 0, "\n".join(tail)
+    tail = out.strip().splitlines()[-6:]
+    return code == 0, orig_code == 0, "\n".join(tail)
 
 
 ROLE_SECONDS = (("planner", "plan_s"), ("author", "author_s"), ("reviewer", "review_s"))
@@ -298,6 +312,7 @@ def summarize_runs(runs):
             author_s_median=statistics.median([r.get("author_s") or 0 for r in rs]),
             review_s_median=statistics.median([r.get("review_s") or 0 for r in rs]),
             hedges=sum(r.get("hedges") or 0 for r in rs),
+            hedge_wins=sum(r.get("hedge_wins") or 0 for r in rs),
             inference_s_max=max(((r.get("inference_ms") or 0) / 1000.0) for r in rs),
         ))
     return rows
@@ -306,11 +321,11 @@ def summarize_runs(runs):
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
     print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
-          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6}")
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6} {'won':>4}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
               f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
-              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6}")
+              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4}")
 
 
 def main(argv=None):
@@ -348,7 +363,12 @@ def main(argv=None):
     with concurrent.futures.ThreadPoolExecutor(max_workers=opts.jobs) as pool:
         futures = {pool.submit(run_one, t, r, opts, root): (t["id"], r) for t, r in jobs}
         for fut in concurrent.futures.as_completed(futures):
-            rec = fut.result()
+            try:
+                rec = fut.result()
+            except Exception as error:  # one broken run must not lose the batch
+                task_id, repeat = futures[fut]
+                print(f"  {task_id:18} r{repeat} CRASHED: {error}", flush=True)
+                continue
             records.append(rec)
             print(f"  {rec['task']:18} r{rec['repeat']} {rec['reason'] or 'timeout':14} wall={rec['wall_s']:.0f}s cycles={rec.get('cycles')} "
                   f"plan={rec.get('plan_s', 0):.1f}s author={rec.get('author_s', 0):.1f}s review={rec.get('review_s', 0):.1f}s "

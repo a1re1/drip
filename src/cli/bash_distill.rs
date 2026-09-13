@@ -406,6 +406,7 @@ pub async fn distill_with_model(
         reasoning_effort: route.reasoning_effort.clone(),
         request_timeout_ms: Some(timeout_ms),
         hedge_floor_ms: Some(0),
+        latency_store: None,
         signal: None,
         sleep_impl: None,
         tool_route: None,

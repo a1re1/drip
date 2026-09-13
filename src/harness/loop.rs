@@ -2739,6 +2739,10 @@ impl HarnessRun {
                 reasoning_effort: options.reasoning_effort.clone(),
                 request_timeout_ms: options.request_timeout_ms,
                 hedge_floor_ms: None,
+                latency_store: Some(
+                    PathBuf::from(crate::core::home::resolve_drip_home_root())
+                        .join(crate::harness::model_call::LATENCY_STORE_FILE),
+                ),
                 signal: options.signal.clone(),
                 sleep_impl: options.sleep_impl.clone(),
                 tool_route: options.tool_route.clone(),
@@ -4479,7 +4483,13 @@ impl HarnessRun {
             let file_outlines = match current_task {
                 Some(task) if !scope.review_loop => {
                     let notes = task.notes.join("\n");
-                    crate::harness::outline::outlines_for_texts(&self.cwd, &[task.title.as_str(), notes.as_str(), self.state.goal.as_str()])
+                    let texts = [task.title.as_str(), notes.as_str(), self.state.goal.as_str()];
+                    let outlines = crate::harness::outline::outlines_for_texts(&self.cwd, &texts);
+                    let hits = crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts);
+                    match (outlines, hits) {
+                        (Some(outlines), Some(hits)) => Some(format!("{outlines}\n{hits}")),
+                        (outlines, hits) => outlines.or(hits),
+                    }
                 }
                 _ => None,
             };

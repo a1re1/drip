@@ -73,8 +73,46 @@ pub const STALL_LATENCY_SAMPLES: usize = 8;
 // at Scale") races a second identical request once the first has run past a
 // multiple of the model's median; whichever answers first wins and the other
 // is dropped. Costs a duplicate request on the slow few percent of calls.
-pub const HEDGE_MULTIPLIER: u64 = 4;
+pub const HEDGE_MULTIPLIER: u64 = 2;
 pub const HEDGE_FLOOR_MS: u64 = 8_000;
+/// File under the drip home that remembers each model's recent latencies
+/// across runs, so the stall bound and hedge point apply from the first call.
+pub const LATENCY_STORE_FILE: &str = "latency.json";
+
+type LatencySamples = std::collections::HashMap<String, std::collections::VecDeque<u64>>;
+
+/// Reads the persisted latency samples; empty when the file is missing or unreadable.
+pub fn load_latency_store(path: &std::path::Path) -> LatencySamples {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return LatencySamples::new();
+    };
+    let Ok(raw) = serde_json::from_str::<std::collections::HashMap<String, Vec<u64>>>(&text) else {
+        return LatencySamples::new();
+    };
+    raw.into_iter()
+        .map(|(model, samples)| {
+            let keep = samples.len().saturating_sub(STALL_LATENCY_SAMPLES);
+            (model, samples.into_iter().skip(keep).collect())
+        })
+        .collect()
+}
+
+/// Writes the samples atomically (temp file + rename); errors are ignored
+/// because the store is a cache, never a source of truth.
+pub fn save_latency_store(path: &std::path::Path, samples: &LatencySamples) {
+    let raw: std::collections::BTreeMap<&str, Vec<u64>> = samples
+        .iter()
+        .map(|(model, recent)| (model.as_str(), recent.iter().copied().collect()))
+        .collect();
+    let Ok(text) = serde_json::to_string(&raw) else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
 
 /// When to hedge a first attempt for a model with `samples` recent latencies:
 /// HEDGE_MULTIPLIER × median clamped to [floor, timeout/2]; None until enough
@@ -473,6 +511,8 @@ pub struct ModelCallerDeps {
     /// Earliest point (ms) at which a slow first attempt is hedged with a second identical request
     /// (default HEDGE_FLOOR_MS; Some(0) disables hedging — used by one-shot helper callers).
     pub hedge_floor_ms: Option<u64>,
+    /// Persisted per-model latency samples (LATENCY_STORE_FILE under the drip home); None keeps them in memory only.
+    pub latency_store: Option<std::path::PathBuf>,
     pub signal: Option<AbortSignal>,
     pub sleep_impl: Option<SleepFn>,
     pub tool_route: Option<ModelRoute>,
@@ -490,6 +530,7 @@ pub struct ModelCaller {
     http_client: reqwest::Client,
     request_timeout_ms: u64,
     hedge_floor_ms: u64,
+    latency_store: Option<std::path::PathBuf>,
     sleep: SleepFn,
     /// Recent successful latencies per model, for the stall-aware first-attempt bound.
     latency_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
@@ -506,6 +547,20 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         _ => DEFAULT_REQUEST_TIMEOUT_MS,
     };
     let hedge_floor_ms = deps.hedge_floor_ms.unwrap_or(HEDGE_FLOOR_MS);
+    let latency_store = deps.latency_store.clone();
+    let seeded = latency_store.as_deref().map(load_latency_store).unwrap_or_default();
+    if let Some(path) = latency_store.as_deref().filter(|_| !seeded.is_empty()) {
+        (deps.emit)(HarnessEvent {
+            data: None,
+            detail: format!(
+                "latency memory: seeded {} model(s) from {} — stall bound and hedge point apply from the first call",
+                seeded.len(),
+                path.display()
+            ),
+            iteration: (deps.get_iteration)(),
+            r#type: HarnessEventType::HarnessOp,
+        });
+    }
     let http_client = deps
         .http_client
         .clone()
@@ -520,8 +575,9 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         http_client,
         request_timeout_ms,
         hedge_floor_ms,
+        latency_store,
         sleep,
-        latency_samples: std::sync::Mutex::new(std::collections::HashMap::new()),
+        latency_samples: std::sync::Mutex::new(seeded),
         codex_tool_lane: tokio::sync::Mutex::new(None),
         codex_summary_lane: tokio::sync::Mutex::new(None),
     }
@@ -718,6 +774,9 @@ impl ModelCaller {
         recent.push_back(latency_ms.max(0) as u64);
         while recent.len() > STALL_LATENCY_SAMPLES {
             recent.pop_front();
+        }
+        if let Some(path) = self.latency_store.as_deref() {
+            save_latency_store(path, &samples);
         }
     }
 
@@ -1722,6 +1781,7 @@ mod tests {
             reasoning_effort: None,
             request_timeout_ms: None,
             hedge_floor_ms: None,
+            latency_store: None,
             signal: None,
             sleep_impl: None,
             tool_route: None,
@@ -1831,9 +1891,44 @@ mod tests {
     fn hedge_delay_clamps_and_respects_the_off_switch() {
         assert_eq!(hedge_delay_ms(&[2_000, 2_000], 8_000, 240_000), None, "too few samples");
         assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 8_000, 240_000), Some(8_000), "floor");
-        assert_eq!(hedge_delay_ms(&[5_000, 4_000, 6_000], 8_000, 240_000), Some(20_000), "4× median");
+        assert_eq!(hedge_delay_ms(&[5_000, 4_000, 6_000], 8_000, 240_000), Some(10_000), "2× median");
         assert_eq!(hedge_delay_ms(&[50_000, 50_000, 50_000], 8_000, 100_000), Some(50_000), "half the timeout");
         assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 0, 240_000), None, "floor 0 disables");
+    }
+
+    #[test]
+    fn latency_store_round_trips_and_caps_samples() {
+        let dir = std::env::temp_dir().join(format!("drip-latency-{}", std::process::id()));
+        let path = dir.join("nested").join(LATENCY_STORE_FILE);
+        assert!(load_latency_store(&path).is_empty(), "missing file reads as empty");
+        let mut samples = LatencySamples::new();
+        samples.insert("m".to_string(), (1..=(STALL_LATENCY_SAMPLES as u64 + 3)).collect());
+        save_latency_store(&path, &samples);
+        let loaded = load_latency_store(&path);
+        let recent: Vec<u64> = loaded["m"].iter().copied().collect();
+        assert_eq!(recent.len(), STALL_LATENCY_SAMPLES, "capped to the recent window");
+        assert_eq!(recent.last().copied(), Some(STALL_LATENCY_SAMPLES as u64 + 3), "keeps the newest samples");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_latency_store(&path).is_empty(), "corrupt file reads as empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seeded_latency_store_hedges_from_the_first_call() {
+        let dir = std::env::temp_dir().join(format!("drip-latency-seed-{}", std::process::id()));
+        let path = dir.join(LATENCY_STORE_FILE);
+        let mut samples = LatencySamples::new();
+        samples.insert("m".to_string(), [2_000, 2_000, 2_000].into_iter().collect());
+        save_latency_store(&path, &samples);
+        let mut deps = test_deps("http://127.0.0.1:9".to_string());
+        deps.latency_store = Some(path.clone());
+        let caller = create_model_caller(deps);
+        assert_eq!(caller.hedge_delay_for("m", 1, 240_000), Some(8_000), "hedges before any call in this run");
+        assert_eq!(caller.attempt_timeout_ms("m", 1), STALL_TIMEOUT_FLOOR_MS, "stall bound from the seeded samples");
+        caller.record_latency("m", 3_000);
+        let persisted: Vec<u64> = load_latency_store(&path)["m"].iter().copied().collect();
+        assert_eq!(persisted, vec![2_000, 2_000, 2_000, 3_000], "new samples are written back");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn user_message(text: &str) -> TransportRequestMessage {

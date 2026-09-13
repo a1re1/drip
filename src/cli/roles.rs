@@ -319,7 +319,7 @@ fn lite_planner_role() -> RoleDefinition {
             .join("\n"),
         ),
         r#loop: Some(PartialHarnessLoopConfig {
-            max_tool_rounds_per_cycle: Some(8),
+            max_tool_rounds_per_cycle: Some(16),
             max_tool_result_chars: Some(16_000),
             ..PartialHarnessLoopConfig::default()
         }),
@@ -346,7 +346,7 @@ fn lite_author_role() -> RoleDefinition {
             .join("\n"),
         ),
         r#loop: Some(PartialHarnessLoopConfig {
-            max_tool_rounds_per_cycle: Some(8),
+            max_tool_rounds_per_cycle: Some(16),
             max_tool_result_chars: Some(16_000),
             ..PartialHarnessLoopConfig::default()
         }),

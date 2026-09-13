@@ -213,6 +213,7 @@ mod tests {
 			reopen_count: None,
 			review_of: None,
 			review_round: None,
+			awaiting_review_by: None,
 			role: None,
 			stall_count: 0,
 			status,

@@ -136,6 +136,7 @@ fn base_options(
             jobs_root: Some(temp.join("jobs")),
         })),
         url: Some(url),
+        summarize_run: Some(true),
         tools: Vec::new(),
         ..Default::default()
     }

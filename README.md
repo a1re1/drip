@@ -507,6 +507,14 @@ when a *task* is finished, so a planning loop that could edit files would ship
 changes no reviewer ever sees — denying PATCH there makes "plan only" enforced by
 tool filtering rather than requested in a prompt.
 
+The review is deferred: finishing a task under a role with a `verifiedBy`
+reviewer marks it as awaiting review, and one review task covering every
+finished task is spawned once no author work remains (the last task finished
+or was dropped). A run with N tasks pays for one reviewer loop instead of N;
+the review task's title names every task it covers and its note carries each
+task's recorded footprint. A rejection reopens the most recently finished task
+with the reviewer's summary as its rework note.
+
 Researcher, planner, and reviewer roles are denied `PATCH`, drip's only journaled
 (`--undo-last`-able) write path. They keep `BASH`, so treat them as
 "no journaled edits" rather than a write sandbox — a role can still shell out to
@@ -520,6 +528,12 @@ The `reviewer` role is also `blind`: its loops never inherit the author's tool
 exchanges or footprint, so it judges the artifact against the goal and against
 anchors the author did not write. Any role definition (`~/.drip/config.json`
 or `.drip/roles.json`) can set `blind: true`.
+
+Any role can also set `reasoningEffort` (`"low"`, `"medium"`, `"high"`) to
+override the model profile's own setting for that role's loops. Tool-round
+latency is decode-bound (roughly 130 tokens/s on GLM-5.3 Flash, with most calls
+spending their time on reasoning tokens), so an author on a fast model usually
+wants `"low"` while the planner keeps the profile default.
 
 Every preset role pins its own model profile, so a preset routes reproducibly
 regardless of the caller's active profile or `--profile`. Reviewer roles pin a

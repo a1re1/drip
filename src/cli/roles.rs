@@ -49,6 +49,11 @@ pub struct RoleDefinition {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub model: Option<String>,
 	pub name: String,
+	/// Per-role reasoning effort override ("low" | "medium" | "high"),
+	/// applied on top of the model profile's own setting. Tool-round latency
+	/// is decode-bound, so an author role on a fast model usually wants
+	/// "low" while a planner keeps the profile default.
+	pub reasoning_effort: Option<String>,
 	/// Extra system prompt material for this role's loops.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub prompt: Option<String>,
@@ -194,6 +199,9 @@ fn planner_role() -> RoleDefinition {
 fn coder_role() -> RoleDefinition {
 	RoleDefinition {
 		model: Some(PRESET_FAST_PROFILE_ID.to_string()),
+		// Tool rounds are decode-bound; the implementer on the fast model
+		// does not need the profile's reasoning budget for every round.
+		reasoning_effort: Some("low".to_string()),
 		name: "coder".to_string(),
 		prompt: Some("You are the coder agent. Implement the task fully using all available tools, building on the researcher's findings. When you finish, your work will be independently reviewed by the reviewer role before it is accepted. Known defects or unresolved assumptions that undermine a reported value or goal requirement are blocking P1s even in your own caveats/deviations: resolve them or finish blocked. Ordinary statistical uncertainty and justified limitations are not automatically defects. Numeric deliverables require a different validation method/reference, meaningful bound or simulation; identify shared assumptions. Repeating the same arithmetic or checking hardcoded expected output establishes consistency only.".to_string()),
 		verified_by: Some("reviewer".to_string()),
@@ -324,6 +332,9 @@ fn lite_planner_role() -> RoleDefinition {
 fn lite_author_role() -> RoleDefinition {
     RoleDefinition {
         model: Some(PRESET_FAST_PROFILE_ID.to_string()),
+		// Tool rounds are decode-bound; the implementer on the fast model
+		// does not need the profile's reasoning budget for every round.
+		reasoning_effort: Some("low".to_string()),
         name: "author".to_string(),
         prompt: Some(
             [
@@ -551,6 +562,12 @@ fn normalize_role_definition(
 		r#loop: if has_loop { Some(r#loop) } else { None },
 		model: input
 			.get("model")
+			.and_then(|v| v.as_str())
+			.map(str::trim)
+			.filter(|s| !s.is_empty())
+			.map(String::from),
+		reasoning_effort: input
+			.get("reasoningEffort")
 			.and_then(|v| v.as_str())
 			.map(str::trim)
 			.filter(|s| !s.is_empty())
@@ -866,10 +883,13 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 
 		if let Some(model) = &definition.model {
 			match resolve_model_profile_route(&args.config.settings, model, args.env) {
-				Ok(resolved) => {
+				Ok(mut resolved) => {
 					// Spread rather than enumerate: a field-by-field copy silently drops
 					// route fields the resolver adds (it dropped fallbackRoute once
 					// already, quietly disabling failover for role models).
+					if let Some(effort) = &definition.reasoning_effort {
+						resolved.reasoning_effort = Some(effort.clone());
+					}
 					route = Some(resolved);
 				}
 				Err(error) => {

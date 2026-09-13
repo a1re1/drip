@@ -76,6 +76,12 @@ pub struct HarnessTask {
 	/// How many review rejections this task has absorbed; at the cap a further rejection blocks it instead of reopening it.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub review_round: Option<i64>,
+	/// Set when this task completed under a role with a verified_by
+	/// reviewer but the review was deferred: one review task covers every
+	/// task awaiting review once no other work remains. Holds the reviewer
+	/// role name; cleared when the review task is spawned.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub awaiting_review_by: Option<String>,
 	/// Role (capability profile) whose loop works this task; unset tasks use the run's task binding.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub role: Option<String>,
@@ -1043,6 +1049,7 @@ mod tests {
 			reopen_count: None,
 			review_of: None,
 			review_round: None,
+			awaiting_review_by: None,
 			role: None,
 			stall_count: 0,
 			status: HarnessTaskStatus::InProgress,

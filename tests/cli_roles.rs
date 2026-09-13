@@ -645,6 +645,7 @@ fn resolve_role_setup_extra_roles_override_config_roles() {
         skills: None,
         tools: Some(vec!["READ".to_string()]),
         verified_by: None,
+        reasoning_effort: None,
     }];
 
     let setup = resolve_role_setup(&ResolveRoleSetupArgs {
@@ -747,6 +748,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
             skills: Some(vec![skill.name.clone()]),
             tools: None,
             verified_by: None,
+        reasoning_effort: None,
         }]),
         extra_bindings: None,
         marketplace_roles: None,

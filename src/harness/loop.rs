@@ -241,6 +241,31 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_native_runner_suite_naming_no_edited_file_is_promoted_to_external() {
+        use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 12, passed: 12, failed: 0, skipped: None, detail: None };
+        let edited = vec!["src/lib.rs".to_string(), "tests/test_store.py".to_string()];
+        // Undeclared anchor on a plain suite run: promoted.
+        let promoted = promote_native_runner_anchor(None, "cargo test --release -q", &tests, &edited).expect("promoted");
+        assert_eq!(promoted.kind, VerificationAnchorKind::External);
+        assert!(promoted.source.as_deref().unwrap_or("").contains("cargo test"), "{:?}", promoted.source);
+        // A "self" label without a harness downgrade: promoted, label kept in the source.
+        let declared = VerificationAnchor { kind: VerificationAnchorKind::SelfAuthored, source: Some("I added a test".into()), downgraded_reason: None, coverage: None, expectation_subject: None };
+        let promoted = promote_native_runner_anchor(Some(declared), "python3 -m unittest discover -s tests -q", &tests, &edited).expect("promoted");
+        assert_eq!(promoted.kind, VerificationAnchorKind::External);
+        assert!(promoted.source.as_deref().unwrap_or("").contains("I added a test"));
+        // Names an edited file: stays as it was.
+        assert!(promote_native_runner_anchor(None, "python3 -m pytest tests/test_store.py -q", &tests, &edited).is_none());
+        // A harness downgrade is never undone.
+        let downgraded = VerificationAnchor { kind: VerificationAnchorKind::SelfAuthored, source: None, downgraded_reason: Some("names an edited file".into()), coverage: None, expectation_subject: None };
+        assert_eq!(promote_native_runner_anchor(Some(downgraded), "cargo test", &tests, &[]).unwrap().kind, VerificationAnchorKind::SelfAuthored);
+        // Not a native runner, or nothing executed: unchanged.
+        assert!(promote_native_runner_anchor(None, "python3 probe.py", &tests, &[]).is_none());
+        let none_ran = VerificationEvidence { executed: 0, passed: 0, kind: VerificationEvidenceKind::Unverified, ..tests.clone() };
+        assert!(promote_native_runner_anchor(None, "cargo test", &none_ran, &[]).is_none());
+    }
+
+    #[test]
     fn a_self_labelled_goal_declared_check_is_upgraded_to_external() {
         use crate::core::types::VerificationAnchorKind;
         let goal = "Fix the bug. Run `python3 -m unittest discover -s tests -q` to confirm.";
@@ -1228,6 +1253,76 @@ pub fn declared_verification_anchor_for_goal(
         }
     }
     Some(anchor)
+}
+
+/// A project test suite run through a native runner (cargo test, pytest,
+/// unittest, go test, vitest, bun test, npm test) whose command names no file
+/// this run edited is correctness-class evidence whoever labelled it: the
+/// suite pre-exists the run even when the agent added a test to it. Recorded
+/// sessions show "no correctness-class evidence" as the most common finish
+/// rejection before a run hit its iteration cap (44 of 192 rejections), with
+/// the agent having run the project suite and left the anchor undeclared or
+/// labelled "self". Undeclared and undowngraded "self" anchors on such a
+/// command are promoted to external; a check the harness downgraded because
+/// its command names an edited file stays self-authored.
+pub fn promote_native_runner_anchor(
+    anchor: Option<crate::core::types::VerificationAnchor>,
+    command: &str,
+    evidence: &crate::core::types::VerificationEvidence,
+    edited_paths: &[String],
+) -> Option<crate::core::types::VerificationAnchor> {
+    use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidenceKind};
+    if evidence.kind != VerificationEvidenceKind::Tests || evidence.executed <= 0 {
+        return anchor;
+    }
+    let names_edited_file = edited_paths.iter().any(|path| {
+        let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path.as_str());
+        !name.is_empty() && command.contains(name)
+    });
+    if names_edited_file {
+        return anchor;
+    }
+    let runner = native_runner_name(command);
+    let Some(runner) = runner else { return anchor };
+    match anchor {
+        None => Some(VerificationAnchor {
+            kind: VerificationAnchorKind::External,
+            source: Some(format!("project test suite via {runner} (anchor undeclared by the agent; promoted by the harness)")),
+            downgraded_reason: None,
+            coverage: None,
+            expectation_subject: None,
+        }),
+        Some(mut declared)
+            if declared.kind != VerificationAnchorKind::External && declared.downgraded_reason.is_none() =>
+        {
+            declared.kind = VerificationAnchorKind::External;
+            declared.source = Some(match declared.source.take() {
+                Some(source) => format!("project test suite via {runner} (declared self by the agent: {source}; promoted by the harness)"),
+                None => format!("project test suite via {runner} (declared self by the agent; promoted by the harness)"),
+            });
+            Some(declared)
+        }
+        other => other,
+    }
+}
+
+fn native_runner_name(command: &str) -> Option<&'static str> {
+    const RUNNERS: &[(&str, &str)] = &[
+        ("cargo test", "cargo test"),
+        ("cargo nextest", "cargo nextest"),
+        ("pytest", "pytest"),
+        ("-m unittest", "unittest"),
+        ("-m pytest", "pytest"),
+        ("go test", "go test"),
+        ("vitest", "vitest"),
+        ("bun test", "bun test"),
+        ("npm test", "npm test"),
+        ("npm run test", "npm test"),
+        ("pnpm test", "pnpm test"),
+        ("yarn test", "yarn test"),
+        ("jest", "jest"),
+    ];
+    RUNNERS.iter().find(|(needle, _)| command.contains(needle)).map(|(_, name)| *name)
 }
 
 pub fn declared_verification_anchor(
@@ -3480,6 +3575,18 @@ impl HarnessRun {
                     let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
                     if tool_name == "VERIFY" {
                         evidence.anchor = declared_verification_anchor_for_goal(&raw_input, &self.state.edited_paths, &self.state.goal);
+                        let before = evidence.anchor.as_ref().map(|anchor| anchor.kind.clone());
+                        evidence.anchor = promote_native_runner_anchor(evidence.anchor.take(), &verification_command, &evidence, &self.state.edited_paths);
+                        if evidence.anchor.as_ref().map(|anchor| anchor.kind.clone()) != before
+                            && evidence.anchor.as_ref().map_or(false, |anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
+                        {
+                            self.emit(HarnessEvent {
+                                data: None,
+                                detail: format!("verification anchor promoted to external: project suite run by a native runner ({})", truncate_text(&verification_command, 80)),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::HarnessOp,
+                            });
+                        }
                         // The tool built its result text before the harness
                         // attached the declared anchor, so it reads
                         // "anchor: undeclared" for every call; a model that
@@ -4822,7 +4929,19 @@ impl HarnessRun {
                     if parts.is_empty() {
                         None
                     } else {
-                        Some(parts.join("\n"))
+                        let text = parts.join("\n");
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            detail: format!(
+                                "file outline: {} section(s), {} chars injected into {}'s first prompt (definition maps, symbol hits, changes so far)",
+                                parts.len(),
+                                text.chars().count(),
+                                task.id
+                            ),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        Some(text)
                     }
                 }
                 _ => None,

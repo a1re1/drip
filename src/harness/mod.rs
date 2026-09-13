@@ -9,6 +9,7 @@ pub mod hooks;
 #[allow(non_snake_case)]
 pub mod r#loop;
 pub mod model_call;
+pub mod outline;
 pub mod prompt;
 pub mod redact;
 pub mod roles;

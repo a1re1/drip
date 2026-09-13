@@ -1306,7 +1306,7 @@ pub fn promote_native_runner_anchor(
     }
 }
 
-fn native_runner_name(command: &str) -> Option<&'static str> {
+pub fn native_runner_name(command: &str) -> Option<&'static str> {
     const RUNNERS: &[(&str, &str)] = &[
         ("cargo test", "cargo test"),
         ("cargo nextest", "cargo nextest"),
@@ -3732,10 +3732,23 @@ impl HarnessRun {
                 }
                 let declared = goal_declared_check_commands(&self.state.goal);
                 let command = record.command.trim().to_string();
-                if !declared.iter().any(|check| command.contains(check.trim())) {
+                if declared.iter().any(|check| command.contains(check.trim())) {
+                    ("the last VERIFY was the goal-declared check", command)
+                } else if record
+                    .evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.anchor.as_ref())
+                    .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
+                    && native_runner_name(&command).is_some()
+                {
+                    // No declared check to match: an external-anchored run of
+                    // the project's own suite through a native runner settles
+                    // the change just as well (most real goals declare no
+                    // check; their reviews re-ran the same suite).
+                    ("the last VERIFY was the project suite with an external anchor", command)
+                } else {
                     return None;
                 }
-                ("the last VERIFY was the goal-declared check", command)
             }
         };
         Some((how, command))
@@ -7206,6 +7219,47 @@ mod role_inference_tests {
         let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
         let after_edit = run.execute_workspace_tool("c5", r#"{"command":"false"}"#, None, "BASH");
         assert!(!after_edit.tool_content.contains("[harness] this command shape"), "{}", after_edit.tool_content);
+    }
+
+    #[tokio::test]
+    async fn an_external_native_runner_suite_settles_the_change_without_a_declared_check() {
+        use crate::core::types::{HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        let dir = tempfile::tempdir().unwrap();
+        let options = SolidStateHarnessOptions {
+            goal: "tidy the helper; no check declared".into(),
+            state_path: Some(dir.path().join("state.json")),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            ..SolidStateHarnessOptions::default()
+        };
+        let mut run = HarnessRun::new(options).await.unwrap();
+        let record = |command: &str, kind: VerificationAnchorKind| HarnessVerificationRecord {
+            at_iteration: 1,
+            command: command.to_string(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 3,
+                passed: 3,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor { kind, source: None, downgraded_reason: None, coverage: None, expectation_subject: None }),
+            }),
+            id: Some("v1".into()),
+        };
+        run.state.mutations_since_verification = Some(0);
+        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
+        let (how, _) = run.verified_after_last_edit(None).expect("external suite settles the change");
+        assert!(how.contains("project suite"), "{how}");
+        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::SelfAuthored));
+        assert!(run.verified_after_last_edit(None).is_none(), "self-authored never settles");
+        run.state.last_verification = Some(record("python3 probe.py", VerificationAnchorKind::External));
+        assert!(run.verified_after_last_edit(None).is_none(), "an ad-hoc probe is not the project suite");
+        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
+        run.state.mutations_since_verification = Some(1);
+        assert!(run.verified_after_last_edit(None).is_none(), "an edit after the check unsettles it");
     }
 
     #[tokio::test]

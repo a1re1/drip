@@ -839,7 +839,10 @@ pub fn has_external_anchor(state: &HarnessState) -> bool {
     // A goal-level external check (bound to no expectation) anchors the
     // whole claim; binding is only needed when every eligible record was
     // scoped to a particular expectation, in which case each registered
-    // expectation needs its own bound record.
+    // expectation needs its own bound record. A run of the project's own
+    // suite through a native runner is goal-level evidence whatever subject
+    // the agent tagged it with: a recorded run bound `cargo test …` to one
+    // of two expectations and lost a round to the bounce.
     let unbound = |record: &crate::core::types::HarnessVerificationRecord| {
         record
             .evidence
@@ -847,6 +850,7 @@ pub fn has_external_anchor(state: &HarnessState) -> bool {
             .and_then(|evidence| evidence.anchor.as_ref())
             .and_then(|anchor| anchor.expectation_subject.as_deref())
             .is_none()
+            || crate::harness::r#loop::native_runner_name(&record.command).is_some()
     };
     if state.expectations.is_empty() || state.verifications.iter().flatten().any(|record| eligible(record) && unbound(record)) {
         state.verifications.iter().flatten().any(&eligible)
@@ -4126,6 +4130,32 @@ mod apply_harness_op_tests {
     /// Consistency-class evidence alone cannot complete edited work: the
     /// finish bounces until an external check passes or anchor=none is
     /// declared with a reason. The declaration is recorded on state.
+    #[test]
+    fn a_native_runner_suite_bound_to_one_expectation_still_anchors_the_whole_claim() {
+        use crate::core::types::{HarnessExpectation, HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        let mut state = create_harness_state("two expectations");
+        let expectation = |id: &str| serde_json::from_value::<HarnessExpectation>(serde_json::json!({
+            "id": id, "subject": format!("subject {id}"), "expected": "ok", "registeredAtIteration": 1
+        })).expect("expectation fixture");
+        state.expectations = vec![expectation("e1"), expectation("e2")];
+        let record = |command: &str| HarnessVerificationRecord {
+            at_iteration: 2,
+            command: command.to_string(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests, executed: 6, passed: 6, failed: 0, skipped: None, detail: None,
+                anchor: Some(VerificationAnchor { kind: VerificationAnchorKind::External, source: None, downgraded_reason: None, coverage: None, expectation_subject: Some("e1".into()) }),
+            }),
+            id: Some("v1".into()),
+        };
+        state.verifications = Some(vec![record("python3 probe.py")]);
+        assert!(!has_external_anchor(&state), "a probe bound to e1 leaves e2 unanchored");
+        state.verifications = Some(vec![record("cargo test harness::outline::tests")]);
+        assert!(has_external_anchor(&state), "the project suite anchors the whole claim");
+    }
+
     #[test]
     fn completion_requires_an_external_anchor_or_an_explicit_none_declaration() {
         use crate::core::types::{ClaimedConfidence, CompletionAnchorKind};

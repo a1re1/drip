@@ -180,5 +180,36 @@ class ReviewWaivedTest(unittest.TestCase):
         self.assertEqual(s["review_waived"], 0)
 
 
+class NudgesTest(unittest.TestCase):
+    def test_transcript_metrics_counts_flailing_nudges(self):
+        import tempfile
+        lines = [
+            '{"type":"event","kind":"harness-op","detail":"flailing nudge: python3 -m unittest ran 3 times with no edit between"}',
+            '{"type":"event","kind":"harness-op","detail":"flailing nudge: cargo test ran 3 times with no edit between"}',
+            '{"type":"event","kind":"harness-op","detail":"flailing nudge lookalike: not counted"}',
+            '{"type":"event","kind":"run-warning","detail":"read-only nudge"}',
+            '{"type":"event","kind":"harness-op","detail":"review waived: cosmetic nit"}',
+           ]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write("\n".join(lines) + "\n")
+            path = f.name
+        try:
+            m = bench.transcript_metrics(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(m["nudges"], 2)
+        self.assertEqual(m["read_only_nudges"], 1)
+
+    def test_summarize_runs_sums_nudges(self):
+        runs = [run("a", 10.0, 5, True, 0), dict(run("a", 20.0, 7, True, 1), nudges=2),
+                dict(run("a", 30.0, 9, False, 0), nudges=5)]
+        s = bench.summarize_runs(runs)[0]
+        self.assertEqual(s["nudges"], 7)
+
+    def test_summarize_runs_legacy_without_nudges_yields_zero(self):
+        s = bench.summarize_runs([run("a", 10.0, 5, True, 1)])[0]
+        self.assertEqual(s["nudges"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

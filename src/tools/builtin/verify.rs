@@ -733,7 +733,7 @@ pub fn prepare(args: &serde_json::Value, ctx: &super::ToolCtx) -> anyhow::Result
     if raw_command.map_or(true, |s| s.trim().is_empty()) {
         return Err(anyhow::anyhow!("Missing required string argument \"command\"."));
     }
-    let command = raw_command.unwrap().trim().to_string();
+    let command = strip_trailing_tail_pipe(raw_command.unwrap().trim());
 
     let policy_verdict = crate::tools::command_policy::evaluate_command_policy(
         &command,
@@ -776,6 +776,15 @@ pub fn prepare(args: &serde_json::Value, ctx: &super::ToolCtx) -> anyhow::Result
         },
         display_input,
     })
+}
+
+/// A trailing `| tail -N` / `| head -N` on a VERIFY command hides the runner
+/// summary the parser needs (a recorded run's `unittest -q ... | tail -5`
+/// showed only stray prints and came back UNVERIFIED, costing a re-run). The
+/// pipe is dropped; the tool already shows a bounded tail of the output.
+pub fn strip_trailing_tail_pipe(command: &str) -> String {
+    let re = regex::Regex::new(r"\s*\|\s*(tail|head)(\s+-[a-zA-Z]*\s*\d+|\s+-\d+)?\s*$").unwrap();
+    re.replace(command, "").trim().to_string()
 }
 
 pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyVerdict> {
@@ -1075,6 +1084,16 @@ mod tests {
     }
 
     // -- go test -------------------------------------------------------------
+
+    #[test]
+    fn trailing_tail_and_head_pipes_are_dropped_from_verify_commands() {
+        use super::strip_trailing_tail_pipe as strip;
+        assert_eq!(strip("python3 -m unittest discover -s tests -q 2>&1 | tail -5"), "python3 -m unittest discover -s tests -q 2>&1");
+        assert_eq!(strip("cargo test --release -q --lib 2>&1 | tail -n 20"), "cargo test --release -q --lib 2>&1");
+        assert_eq!(strip("pytest -q | head -40"), "pytest -q");
+        assert_eq!(strip("cargo test -q | grep -c ok"), "cargo test -q | grep -c ok");
+        assert_eq!(strip("tail -f log"), "tail -f log");
+    }
 
     #[test]
     fn probe_output_that_merely_says_ok_or_fail_is_not_go_test() {

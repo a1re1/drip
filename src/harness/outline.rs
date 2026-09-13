@@ -258,23 +258,30 @@ pub fn file_outline(path: &Path, display: &str) -> Option<String> {
 /// goal), first-mentioned first, at most OUTLINE_MAX_FILES; None when no
 /// named file earns one.
 pub fn outlines_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut outlines: Vec<String> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
     for text in texts {
         for rel in crate::harness::r#loop::extract_goal_paths(text) {
-            if seen.contains(&rel) {
-                continue;
+            if !paths.contains(&rel) {
+                paths.push(rel);
             }
-            seen.push(rel.clone());
-            let full = Path::new(cwd).join(&rel);
-            if !full.is_file() {
-                continue;
-            }
-            if let Some(outline) = file_outline(&full, &rel) {
-                outlines.push(outline);
-                if outlines.len() >= OUTLINE_MAX_FILES {
-                    return Some(outlines.join("\n"));
-                }
+        }
+    }
+    outlines_for_paths(cwd, &paths)
+}
+
+/// Outlines for explicit workspace-relative paths (files that do not exist or
+/// are too small to outline are skipped), capped at OUTLINE_MAX_FILES.
+pub fn outlines_for_paths(cwd: &str, paths: &[String]) -> Option<String> {
+    let mut outlines: Vec<String> = Vec::new();
+    for rel in paths {
+        let full = Path::new(cwd).join(rel);
+        if !full.is_file() {
+            continue;
+        }
+        if let Some(outline) = file_outline(&full, rel) {
+            outlines.push(outline);
+            if outlines.len() >= OUTLINE_MAX_FILES {
+                break;
             }
         }
     }

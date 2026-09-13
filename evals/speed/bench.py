@@ -69,7 +69,7 @@ def find_transcripts(project_dir):
 
 def transcript_metrics(path):
     m = dict(inferences=0, inference_ms=0, tool_calls=0, tool_ms=0, loops=0, cycles=0,
-             rejections=0, read_only_nudges=0, output_cutoffs=0, patches=0, verifies=0,
+             rejections=0, read_only_nudges=0, nudges=0, output_cutoffs=0, patches=0, verifies=0,
              context_expired=0, tasks_finished=0, prompt_tokens=0, completion_tokens=0,
              cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0,
              hedge_wins=0, background_reports=0, review_waived=0)
@@ -120,6 +120,8 @@ def transcript_metrics(path):
             m["rejection_reasons"].append(detail[len("finish_task: harness: not accepted yet — "):][:120])
         elif kind == "harness-op" and detail.startswith("review waived"):
             m["review_waived"] += 1
+        elif kind == "harness-op" and detail.startswith("flailing nudge:"):
+            m["nudges"] += 1
         elif kind == "run-warning":
             if detail.startswith("read-only nudge"):
                 m["read_only_nudges"] += 1
@@ -258,7 +260,8 @@ def summarize(records):
         out[task] = dict(n=len(rs), pass_rate=sum(1 for r in rs if r["hidden_pass"]) / len(rs),
                          wall_s=med("wall_s"), cycles=med("cycles"), loops=med("loops"), inferences=med("inferences"),
                          inference_min=round(med("inference_ms") / 60000, 1), tool_calls=med("tool_calls"),
-                         rejections=med("rejections"), completed=sum(1 for r in rs if r["reason"] == "completed") / len(rs))
+                         rejections=med("rejections"), nudges=med("nudges"),
+                         completed=sum(1 for r in rs if r["reason"] == "completed") / len(rs))
     total = dict(n=len(records), pass_rate=sum(1 for r in records if r["hidden_pass"]) / max(1, len(records)),
                  wall_s=statistics.median([r["wall_s"] for r in records]) if records else 0,
                  cycles=statistics.median([r.get("cycles") or 0 for r in records]) if records else 0,
@@ -273,10 +276,10 @@ def print_table(label, records):
     print(f"\n== {label}: {total['n']} runs, pass {total['pass_rate']:.0%}, median wall {total['wall_s']:.0f}s, "
           f"median cycles {total['cycles']:.0f}, median inferences {total['inferences']:.0f}, "
           f"median rejections {total['rejections']:.0f}, total wall {total['sum_wall_min']} min")
-    print(f"{'task':18} {'n':>2} {'pass':>5} {'done':>5} {'wall_s':>7} {'cyc':>4} {'loops':>5} {'inf':>4} {'inf_min':>7} {'tools':>5} {'rej':>4}")
+    print(f"{'task':18} {'n':>2} {'pass':>5} {'done':>5} {'wall_s':>7} {'cyc':>4} {'loops':>5} {'inf':>4} {'inf_min':>7} {'tools':>5} {'rej':>4} {'nud':>4}")
     for task, s in per.items():
         print(f"{task:18} {s['n']:>2} {s['pass_rate']:>5.0%} {s['completed']:>5.0%} {s['wall_s']:>7.0f} {s['cycles']:>4.0f} "
-              f"{s['loops']:>5.0f} {s['inferences']:>4.0f} {s['inference_min']:>7} {s['tool_calls']:>5.0f} {s['rejections']:>4.0f}")
+              f"{s['loops']:>5.0f} {s['inferences']:>4.0f} {s['inference_min']:>7} {s['tool_calls']:>5.0f} {s['rejections']:>4.0f} {s['nudges']:>4.0f}")
 
 
 def compare(a, b):
@@ -291,7 +294,7 @@ def compare(a, b):
     rows_b = {r["task"]: r for r in summarize_runs(rb)}
     print(f"\n== compare {a} vs {b}")
     print(f"{'task':18} {'A_wall':>9} {'B_wall':>9} {'delta%':>8} {'A_inf':>8} {'B_inf':>8} "
-          f"{'A_pass':>7} {'B_pass':>7}")
+          f"{'A_pass':>7} {'B_pass':>7} {'A_nud':>6} {'B_nud':>6}")
     for task in sorted(set(rows_a) | set(rows_b)):
         ta, tb = rows_a.get(task), rows_b.get(task)
         if ta and tb:
@@ -301,8 +304,9 @@ def compare(a, b):
         fmt_wall = lambda s: f"{s['wall_s_median']:>9.1f}" if s else f"{'-':>9}"
         fmt_inf = lambda s: f"{s['inferences_median']:>8.1f}" if s else f"{'-':>8}"
         fmt_pass = lambda s: f"{s['hidden_pass_rate']:>7.0%}" if s else f"{'-':>7}"
+        fmt_nud = lambda s: f"{s['nudges']:>6}" if s else f"{'-':>6}"
         print(f"{task:18} {fmt_wall(ta)} {fmt_wall(tb)} {delta:>8} {fmt_inf(ta)} {fmt_inf(tb)} "
-              f"{fmt_pass(ta)} {fmt_pass(tb)}")
+              f"{fmt_pass(ta)} {fmt_pass(tb)} {fmt_nud(ta)} {fmt_nud(tb)}")
 
 
 def summarize_runs(runs):
@@ -335,6 +339,7 @@ def summarize_runs(runs):
             hedges=sum(r.get("hedges") or 0 for r in rs),
             hedge_wins=sum(r.get("hedge_wins") or 0 for r in rs),
             review_waived=sum(r.get("review_waived") or 0 for r in rs),
+            nudges=sum(r.get("nudges") or 0 for r in rs),
             inference_s_max=max(((r.get("inference_ms") or 0) / 1000.0) for r in rs),
         ))
     return rows
@@ -343,12 +348,12 @@ def summarize_runs(runs):
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
     print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
-          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'acache':>7} {'rcache':>7} {'hedges':>6} {'won':>4} {'waived':>7}")
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'acache':>7} {'rcache':>7} {'hedges':>6} {'won':>4} {'waived':>7} {'nud':>4}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
               f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
               f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('acache_median', 0):>7.0f} {s.get('rcache_median', 0):>7.0f} "
-          f"{s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7}")
+          f"{s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7} {s.get('nudges', 0):>4}")
 
 
 def main(argv=None):

@@ -177,6 +177,20 @@ def role_seconds(role_inference):
     return out
 
 
+ROLE_CACHE = (("author", "author_cache_pct"), ("reviewer", "review_cache_pct"))
+
+
+def role_cache_pct(role_inference):
+    """cacheReadTokens as a percentage of promptTokens per role; absent roles or zero promptTokens map to 0."""
+    out = {}
+    for role, field in ROLE_CACHE:
+        entry = role_inference.get(role) or {}
+        prompt = entry.get("promptTokens") or 0
+        cached = entry.get("cacheReadTokens") or 0
+        out[field] = round(cached / prompt * 100) if prompt else 0
+    return out
+
+
 def run_one(task, repeat, opts, root):
     ws = make_workspace(root, task["id"], repeat)
     project_dir = os.path.join(ws, ".dripdata")
@@ -210,7 +224,8 @@ def run_one(task, repeat, opts, root):
                   timed_out=timed_out, exit_code=rc, reason=(result or {}).get("reason"),
                   hidden_pass=hidden_pass, original_pass=orig_pass, grade_tail=grade_out,
                   workspace=ws, drip_version=opts.drip_version, extra=opts.extra, started_at=started,
-                  max_iterations=opts.max_iterations, **role_seconds(extract_role_inference(stdout)), **metrics)
+                  max_iterations=opts.max_iterations,
+                  **role_seconds(extract_role_inference(stdout)), **role_cache_pct(extract_role_inference(stdout)), **metrics)
     if not opts.keep:
         shutil.rmtree(ws, ignore_errors=True)
     return record
@@ -315,6 +330,8 @@ def summarize_runs(runs):
             plan_s_median=statistics.median([r.get("plan_s") or 0 for r in rs]),
             author_s_median=statistics.median([r.get("author_s") or 0 for r in rs]),
             review_s_median=statistics.median([r.get("review_s") or 0 for r in rs]),
+            acache_median=statistics.median([r.get("author_cache_pct") or 0 for r in rs]),
+            rcache_median=statistics.median([r.get("review_cache_pct") or 0 for r in rs]),
             hedges=sum(r.get("hedges") or 0 for r in rs),
             hedge_wins=sum(r.get("hedge_wins") or 0 for r in rs),
             review_waived=sum(r.get("review_waived") or 0 for r in rs),
@@ -326,11 +343,12 @@ def summarize_runs(runs):
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
     print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
-          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6} {'won':>4} {'waived':>7}")
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'acache':>7} {'rcache':>7} {'hedges':>6} {'won':>4} {'waived':>7}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
               f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
-              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7}")
+              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('acache_median', 0):>7.0f} {s.get('rcache_median', 0):>7.0f} "
+          f"{s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7}")
 
 
 def main(argv=None):

@@ -1310,7 +1310,10 @@ project's own suite through a native runner (`cargo test`, `pytest`,
 `unittest`, `go test`, `vitest`, `bun test`, `npm test`), passed with nothing
 edited since, settles the change the same way — for the waiver's size-bounded
 skip and for the reviewer's `verification settled` note — since most real
-goals declare no check and their reviews re-ran exactly that suite.
+goals declare no check and their reviews re-ran exactly that suite. The same
+suite run through BASH instead of VERIFY is recorded as a verification too
+(the result text says `recorded as verification record v<n>`), so a finish
+after `cargo test` via BASH is not bounced into re-running it as VERIFY.
 
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own

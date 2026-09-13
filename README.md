@@ -1224,6 +1224,13 @@ effort setting they produced a median 1,162 completion tokens per call (3,782
 on the slow ones) against about 105 for the same model at low effort, taking
 75s per file. The review banner names the effort in use.
 
+A cycle allows sixteen tool rounds (was eight). A cycle boundary folds the
+transcript's cold tool results and adds a continuation message, so every
+boundary costs the model a page of re-orientation READs; with cold results
+folded as the transcript grows anyway, longer cycles are the cheaper way to
+keep context bounded. The multi-cycle bench tasks ran 11-29% faster at
+sixteen rounds in a three-repeat A/B.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

@@ -383,7 +383,14 @@ and closes the exits that let an anomaly be explained away:
   independent of the implementation. Self means the check derives from the
   agent's own implementation. An `external` claim on a command that names a file
   the run has edited is downgraded to self-authored (with a run warning): a
-  check the agent wrote is consistency, not correctness. Finishing a task that
+  check the agent wrote is consistency, not correctness. The reverse promotion
+  also holds: a project suite run through a native runner (`cargo test`,
+  `pytest`, `unittest`, `go test`, `vitest`, `bun test`, `npm test`) whose
+  command names no file the run edited is external evidence even when the
+  agent left the anchor undeclared or labelled it self — the suite pre-exists
+  the run — and the harness records the promotion as an event (recorded
+  sessions hit the iteration cap re-finishing behind "no correctness-class
+  evidence" after running exactly that suite). Finishing a task that
   edited the workspace needs one passing external-anchored check, or
   `finish_task` `anchor: "none"` plus an `anchorNote` saying why no external
   anchor exists. The declaration is recorded as `completionAnchor` and

@@ -174,6 +174,20 @@ pub fn find_incomplete_overwrite_error(old_text: &str, new_text: &str) -> Option
     let old_line_count = old_lines;
     let new_line_count = count_lines(new_text);
 
+    // A fragment sent as "content": the new text opens with an indented line
+    // and is much shorter than the file. A recorded run overwrote a 44-line
+    // module with a 5-line indented snippet, then spent two rounds restoring
+    // it; whole files essentially never start indented.
+    if old_lines >= FRAGMENT_GUARD_MIN_LINES
+        && new_line_count * FRAGMENT_GUARD_SHRINK_RATIO < old_line_count
+        && new_text.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'))
+    {
+        return Some(format!(
+            "the new content starts with an indented line and has {} line(s) against the file's {} — that reads as a fragment meant for find + replace, not a whole file. Send find + replace for the region that changes, or the complete file.",
+            new_line_count, old_line_count
+        ));
+    }
+
     if old_lines >= SHRINK_GUARD_MIN_LINES
         && new_line_count < old_line_count * SHRINK_GUARD_KEEP_RATIO
     {
@@ -234,6 +248,8 @@ pub fn find_duplicated_copy_error(old_text: &str, new_text: &str) -> Option<Stri
 }
 
 const SHRINK_GUARD_MIN_LINES: usize = 200;
+const FRAGMENT_GUARD_MIN_LINES: usize = 10;
+const FRAGMENT_GUARD_SHRINK_RATIO: usize = 2; // fragment must be under half the file
 const SHRINK_GUARD_KEEP_RATIO: usize = 2; // oldLines * 0.5 == oldLines / 2
 
 /// The elision-marker pattern, compiled once as a lazy static and shared
@@ -346,8 +362,17 @@ pub struct PatchToolPrepared {
 
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     use anyhow::anyhow;
-    let args = tool_arguments(args)?;
+    let mut args = tool_arguments(args)?;
     let workspace_root = ctx.cwd.to_string_lossy().into_owned();
+
+    // Tolerance: a "files" value sent as a JSON-encoded string (a recorded
+    // run lost a round to `"files": "[{...}]"`) is decoded when it holds an
+    // array; anything else falls through to the usual shape errors.
+    if let Some(Value::String(encoded)) = args.get("files") {
+        if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(encoded) {
+            args.insert("files".to_string(), decoded);
+        }
+    }
 
     // Multi-file transaction mode: files array takes precedence
     if args.get("files").map_or(false, |v| v.is_array()) {
@@ -1524,6 +1549,30 @@ mod execute_tests {
         assert!(outcome.text.contains("same file"));
         assert!(!first.exists());
         assert!(!workspace.join("new").exists());
+    }
+
+    #[test]
+    fn an_indented_fragment_does_not_overwrite_a_module() {
+        let module: String = (1..=44).map(|i| format!("def f{i}():\n    return {i}\n")).collect();
+        let fragment = "    p_set = sub.add_parser(\"set\")\n    p_set.add_argument(\"key\")\n    p_set.add_argument(\"value\")\n";
+        let error = find_incomplete_overwrite_error(&module, fragment).expect("fragment rejected");
+        assert!(error.contains("starts with an indented line"), "{error}");
+        // A complete short rewrite (unindented first line) is still allowed.
+        assert!(find_incomplete_overwrite_error(&module, "import os\n\ndef f1():\n    return 1\n").is_none());
+        // A short file rewritten with an indented first line is not guarded.
+        assert!(find_incomplete_overwrite_error("a\nb\nc\n", "    x\n").is_none());
+    }
+
+    #[test]
+    fn a_files_array_sent_as_a_json_string_is_decoded() {
+        let workspace = temp_workspace("files-as-string");
+        let ctx = ctx_for(&workspace);
+        let file = workspace.join("notes.txt");
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+        let encoded = serde_json::json!([{"path": file, "find": "beta", "replace": "gamma"}]).to_string();
+        let outcome = execute(&serde_json::json!({"files": encoded}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\ngamma\n");
     }
 
     #[test]

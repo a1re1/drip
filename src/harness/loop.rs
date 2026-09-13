@@ -710,6 +710,20 @@ pub fn extract_bash_command(raw_input: &str) -> Option<String> {
     parsed.get("command").and_then(Value::as_str).map(str::to_string)
 }
 
+/// The build warm-up for a workspace, if any: `cargo build --tests` when a
+/// Cargo.toml sits at the root. Recorded Rust dogfoods paid 20-60s of
+/// compile inside their first `cargo test`, after 20-40s of orientation in
+/// which the CPU sat idle. DRIP_NO_WARMUP=1 disables it.
+pub fn build_warmup_command(cwd: &str) -> Option<(String, Vec<String>)> {
+    if std::env::var_os("DRIP_NO_WARMUP").is_some() {
+        return None;
+    }
+    if Path::new(cwd).join("Cargo.toml").is_file() {
+        return Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]));
+    }
+    None
+}
+
 /// True when a BASH/VERIFY result says the command was killed at its timeout.
 pub fn output_reports_hang(tool_content: &str) -> bool {
     tool_content.contains("TIMED OUT after") || tool_content.contains("HUNG: the command did not finish")
@@ -740,6 +754,26 @@ pub fn normalize_command_shape(command: &str) -> String {
         }
     }
     let mut words: Vec<&str> = text.split_whitespace().collect();
+    // Leading `cd <dir> &&` prefix and `VAR=value` environment assignments.
+    let is_env_assignment = |word: &str| match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    };
+    loop {
+        if words.len() >= 4 && words[0] == "cd" {
+            if let Some(index) = words.iter().position(|word| *word == "&&") {
+                words.drain(0..=index);
+                continue;
+            }
+        }
+        if words.len() > 1 && is_env_assignment(words[0]) {
+            words.remove(0);
+            continue;
+        }
+        break;
+    }
     if words.len() > 2 && matches!(words[0], "timeout" | "gtimeout") && words[1].chars().all(|c| c.is_ascii_digit() || c == 's' || c == 'm') {
         words.drain(0..2);
     }
@@ -769,7 +803,7 @@ pub fn hung_command_refusal(tool_name: &str, command: &str) -> String {
 /// The nudge appended to a read-only result when a loop keeps reading without persisting.
 pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: i64) -> String {
     format!(
-        "[harness] {read_only_calls} read-only calls this loop (cycle {cycle}/{max_cycles}) and nothing written or recorded yet. What this loop has read is dropped when the loop ends — act on it now: PATCH the change you can already make, record the facts you need with remember/observe, or finish_task blocked with what is missing."
+        "[harness] {read_only_calls} read-only calls this loop (cycle {cycle}/{max_cycles}) and nothing written or recorded yet. What this loop has read is dropped when the loop ends — act on it now: PATCH the change you can already make, record the facts you need with remember/observe, or finish_task blocked with what is missing. If the goal names code that does not exist in this workspace, stop searching for it: say what exists instead and either make the smallest reasonable version of the change or finish_task blocked naming the discrepancy."
     )
 }
 
@@ -2366,6 +2400,8 @@ pub struct HarnessRun {
     /// BASH/VERIFY command texts that hung (timed out) this run; an identical
     /// re-run is refused instead of hanging again.
     pub hung_commands: Vec<String>,
+    /// The build warm-up started at run start (see build_warmup_command); dropped (killed) with the run.
+    pub warmup: Option<crate::tools::child_process::WarmupJob>,
     /// The last BASH/VERIFY command shape and how many times in a row it ran
     /// with no workspace edit in between (see repeated_command_nudge).
     pub repeated_command: Option<(String, u32)>,
@@ -2700,6 +2736,16 @@ impl HarnessRun {
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
         let max_loops = options.max_loops.unwrap_or(i64::MAX);
         let run_start_head = git_head(&cwd);
+        let warmup = build_warmup_command(&cwd)
+            .and_then(|(program, args)| crate::tools::child_process::WarmupJob::spawn(&program, &args, &cwd).ok());
+        if let Some(job) = &warmup {
+            (emit_fn)(HarnessEvent {
+                data: None,
+                detail: format!("warm-up: `{}` started in the background so the first test run finds the build done", job.command),
+                iteration: 0,
+                r#type: HarnessEventType::HarnessOp,
+            });
+        }
 
         // DEFAULT_LOOP_CONFIG overlaid with options.loop; maxToolRoundsPerCycle
         // falls back to maxToolRoundsPerIteration when the loop block does not
@@ -2921,6 +2967,7 @@ impl HarnessRun {
             task_loop_limit,
             review_waiver_lines,
             hung_commands: Vec::new(),
+            warmup,
             repeated_command: None,
             plan_mode,
             max_task_reopens,
@@ -6904,12 +6951,27 @@ mod role_inference_tests {
 
 
     #[test]
+    fn warmup_command_only_for_cargo_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        assert_eq!(build_warmup_command(&cwd), None);
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(
+            build_warmup_command(&cwd),
+            Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]))
+        );
+    }
+
+    #[test]
     fn command_shape_ignores_timeout_wrappers_filters_and_verbosity() {
         let base = "python3 -m unittest discover -s tests";
         for variant in [
             "python3 -m unittest discover -s tests -q 2>&1 | tail -20",
             "timeout 60 python3 -m unittest discover -s tests -v 2>&1 | tail -50; echo \"exit=$?\"",
             "timeout 90s python3 -m unittest discover -s tests 2>&1 | tail -60 | head -5",
+            "cd /tmp && python3 -m unittest discover -s tests",
+            "RUST_BACKTRACE=1 python3 -m unittest discover -s tests",
+            "cd crate && RUST_BACKTRACE=1 python3 -m unittest discover -s tests -v",
         ] {
             assert_eq!(normalize_command_shape(variant), base, "{variant}");
         }

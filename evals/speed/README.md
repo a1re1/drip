@@ -71,8 +71,11 @@ rejections, and total wall time in minutes.
 `--summary` (per task): `runs`, `wall_med`/`wall_min`/`wall_max` (seconds),
 `inf_med` (median inferences), `pass` (hidden pass rate), `rej` (total
 finish_task rejections), `plan_med`/`auth_med`/`rev_med` (median
-planner/author/reviewer inference seconds from `roleInference`), `hedges`
-(total hedged requests), `won` (hedges the second request won).
+planner/author/reviewer inference seconds from `roleInference`), `acache`/`rcache`
+(median share of the author's / reviewer's prompt tokens served from the
+prompt cache, from `cacheReadTokens` / `promptTokens`; drip 0.121+), `hedges`
+(total hedged requests), `won` (hedges the second request won), `waived`
+(runs whose review was waived).
 
 `--compare A B` (per task, tasks present in either label): `A_wall`,
 `B_wall` (median wall seconds; `-` if the task is missing from that label),

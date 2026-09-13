@@ -493,6 +493,10 @@ struct TuiApp {
     rename_epoch: u64,
     title_next_tick: Option<Instant>,
     tx: Sender<Msg>,
+    /// Test injection: when Some, replaces the process environment in
+    /// merged_env so credential resolution is deterministic regardless of
+    /// what the developer's shell exports (e.g. OPENROUTER_API_KEY).
+    env_overlay: Option<BTreeMap<String, String>>,
 }
 
 /// Pure render decision: the painted custom status row for a finished job.
@@ -622,6 +626,7 @@ impl TuiApp {
             status_line_runner,
             text: String::new(),
             tx,
+            env_overlay: None,
         }
     }
 
@@ -1976,7 +1981,13 @@ impl TuiApp {
     }
 
     fn merged_env(&self) -> HashMap<String, String> {
-        load_merged_env(Path::new(&self.bootstrap.home.env_vars_path), None).into_iter().collect()
+        let process_env: Option<BTreeMap<String, String>> = self
+            .env_overlay
+            .clone()
+            .or_else(|| Some(std::env::vars().collect()));
+        load_merged_env(Path::new(&self.bootstrap.home.env_vars_path), process_env.as_ref())
+            .into_iter()
+            .collect()
     }
 
     fn marketplace_command(&mut self, args: &str) {
@@ -3503,7 +3514,12 @@ mod rename_tests {
         };
         let (tx, _rx) = mpsc::channel::<Msg>();
         let (mention_tx, _mention_rx) = mpsc::channel::<(u64, String)>();
-        TuiApp::new(bootstrap, tx, mention_tx)
+        let mut app = TuiApp::new(bootstrap, tx, mention_tx);
+        // Strip the shell's credentials: with OPENROUTER_API_KEY present the
+        // /rename auto-name path resolves a route and spawns a real request
+        // thread instead of the "no profile configured" error branch.
+        app.env_overlay = Some(BTreeMap::new());
+        app
     }
 
     fn label(app: &TuiApp) -> String {
@@ -4447,7 +4463,11 @@ mod prompt_history_wiring_tests {
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
-        let app = TuiApp::new(bootstrap, tx, mention_tx);
+        let mut app = TuiApp::new(bootstrap, tx, mention_tx);
+        // Strip the shell's credentials (e.g. OPENROUTER_API_KEY): with one
+        // present the goal run resolves a route and keeps `running` true,
+        // which breaks the deterministic Up/Down recall assertions.
+        app.env_overlay = Some(BTreeMap::new());
         HistoryFixture {
             app,
             _cwd: cwd,

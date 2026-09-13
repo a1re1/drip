@@ -114,6 +114,29 @@ class RoleTimingTest(unittest.TestCase):
         self.assertEqual(bench.extract_role_inference('{"type":"result"}\nnot json\n'), {})
         self.assertEqual(bench.extract_role_inference(""), {})
 
+    def test_role_cache_pct_mapping_and_defaults(self):
+        self.assertEqual(bench.role_cache_pct({"author": {"promptTokens": 1000, "cacheReadTokens": 750},
+                                              "reviewer": {"promptTokens": 400, "cacheReadTokens": 100}}),
+                         dict(author_cache_pct=75, review_cache_pct=25))
+        # rounding to nearest int, absent roles, zero promptTokens
+        self.assertEqual(bench.role_cache_pct({"author": {"promptTokens": 300, "cacheReadTokens": 100}}),
+                         dict(author_cache_pct=33, review_cache_pct=0))
+        self.assertEqual(bench.role_cache_pct({"reviewer": {"promptTokens": 0, "cacheReadTokens": 50}}),
+                         dict(author_cache_pct=0, review_cache_pct=0))
+        self.assertEqual(bench.role_cache_pct({}), dict(author_cache_pct=0, review_cache_pct=0))
+
+    def test_summarize_runs_with_cache_pcts(self):
+        rows = bench.summarize_runs([dict(run("a", 10.0, 5, True, 1), author_cache_pct=60, review_cache_pct=20),
+                                     dict(run("a", 20.0, 7, True, 2), author_cache_pct=80, review_cache_pct=40)])
+        s = rows[0]
+        self.assertEqual(s["acache_median"], 70)
+        self.assertEqual(s["rcache_median"], 30)
+
+    def test_summarize_runs_legacy_without_cache_fields_yields_zero(self):
+        s = bench.summarize_runs([run("a", 10.0, 5, True, 1)])[0]
+        self.assertEqual(s["acache_median"], 0)
+        self.assertEqual(s["rcache_median"], 0)
+
     def test_role_seconds_mapping_and_defaults(self):
         self.assertEqual(bench.role_seconds({"planner": {"latencyMs": 1500},
                                              "author": {"latencyMs": 2300},

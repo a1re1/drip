@@ -13,6 +13,10 @@ pub const OUTLINE_MIN_LINES: usize = 200;
 pub const OUTLINE_MAX_ENTRIES: usize = 60;
 /// Files a task may name and still get outlines for all of them.
 pub const OUTLINE_MAX_FILES: usize = 4;
+/// Definitions past OUTLINE_MAX_ENTRIES are listed compactly as `name@line`
+/// up to this many more, so a 4,000-line file's methods are all reachable
+/// from the first prompt (a recorded run spent 36 READ windows on one such file).
+pub const OUTLINE_MAX_COMPACT: usize = 300;
 /// Longest signature kept per entry.
 const OUTLINE_ENTRY_CHARS: usize = 90;
 
@@ -194,6 +198,28 @@ fn signature(line: &str) -> String {
     }
 }
 
+/// The bare name of a definition line: the first identifier after its
+/// keywords (`pub async fn merged_env(` -> `merged_env`, `impl TuiApp {` -> `TuiApp`).
+fn short_name(line: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "pub", "pub(crate)", "async", "fn", "struct", "enum", "trait", "impl", "mod", "const", "static", "type", "def", "class",
+        "function", "export", "default", "func", "interface", "public", "private", "protected", "override", "internal", "open",
+        "fun", "object", "protocol", "extension", "module", "macro_rules!",
+    ];
+    let body = line.trim();
+    for word in body.split(|c: char| c.is_whitespace()) {
+        let word = word.trim_matches(|c: char| c == '{' || c == ':' || c == '(' || c == ',');
+        if word.is_empty() || KEYWORDS.contains(&word) {
+            continue;
+        }
+        let name: String = word.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    body.chars().take(20).collect()
+}
+
 /// The outline of one file: "<display> (N lines): 12 pub fn a; 40 struct B; …",
 /// or None when the file is small, unreadable, or has no recognisable
 /// definitions.
@@ -204,19 +230,26 @@ pub fn file_outline(path: &Path, display: &str) -> Option<String> {
     if lines.len() < OUTLINE_MIN_LINES {
         return None;
     }
-    let entries: Vec<String> = lines
+    let definitions: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
         .filter(|(_, line)| is_definition(ext, line))
-        .map(|(index, line)| format!("{} {}", index + 1, signature(line)))
+        .map(|(index, line)| (index + 1, *line))
         .collect();
-    if entries.is_empty() {
+    if definitions.is_empty() {
         return None;
     }
-    let shown = entries.len().min(OUTLINE_MAX_ENTRIES);
-    let mut out = format!("{display} ({} lines): {}", lines.len(), entries[..shown].join("; "));
-    if entries.len() > shown {
-        out.push_str(&format!("; +{} more", entries.len() - shown));
+    let shown = definitions.len().min(OUTLINE_MAX_ENTRIES);
+    let entries: Vec<String> = definitions[..shown].iter().map(|(number, line)| format!("{number} {}", signature(line))).collect();
+    let mut out = format!("{display} ({} lines): {}", lines.len(), entries.join("; "));
+    let rest = &definitions[shown..];
+    if !rest.is_empty() {
+        let compact_shown = rest.len().min(OUTLINE_MAX_COMPACT);
+        let compact: Vec<String> = rest[..compact_shown].iter().map(|(number, line)| format!("{}@{number}", short_name(line))).collect();
+        out.push_str(&format!("; then (name@line) {}", compact.join(" ")));
+        if rest.len() > compact_shown {
+            out.push_str(&format!("; +{} more", rest.len() - compact_shown));
+        }
     }
     Some(out)
 }
@@ -337,11 +370,19 @@ mod tests {
     fn long_outlines_are_capped() {
         let dir = std::env::temp_dir().join(format!("outline-cap-{}", std::process::id()));
         let mut body = String::new();
-        for i in 0..(OUTLINE_MAX_ENTRIES + 5) {
-            body.push_str(&format!("fn f{i}() {{}}\n\n\n\n"));
+        for i in 0..(OUTLINE_MAX_ENTRIES + OUTLINE_MAX_COMPACT + 5) {
+            body.push_str(&format!("    pub async fn f{i}(&self) {{}}\n\n\n\n"));
         }
         let path = write(&dir, "many.rs", &body);
         let outline = file_outline(&path, "many.rs").expect("outline");
+        let last_full = OUTLINE_MAX_ENTRIES - 1;
+        assert!(outline.contains(&format!("pub async fn f{last_full}(&self)")), "{outline}");
+        assert!(outline.contains(&format!("; then (name@line) f{}@", OUTLINE_MAX_ENTRIES)), "{outline}");
+        let last_compact = OUTLINE_MAX_ENTRIES + OUTLINE_MAX_COMPACT - 1;
+        assert!(outline.contains(&format!(" f{last_compact}@")), "{outline}");
         assert!(outline.ends_with("; +5 more"), "{outline}");
+        assert_eq!(short_name("impl TuiApp {"), "TuiApp");
+        assert_eq!(short_name("    pub(crate) fn merged_env(&self) -> BTreeMap<String, String> {"), "merged_env");
+        assert_eq!(short_name("export default class Foo extends Bar {"), "Foo");
     }
 }

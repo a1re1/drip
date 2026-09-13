@@ -289,6 +289,27 @@ mod review_brief_tests {
     }
 
     #[test]
+    fn changes_so_far_lists_edited_and_new_files_outside_dot_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        let cwd = dir.path().to_string_lossy().to_string();
+        let head = git_head(&cwd).expect("head");
+        assert!(changes_so_far(&cwd, &head).is_none(), "nothing changed yet");
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "x\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".dripdata")).unwrap();
+        std::fs::write(dir.path().join(".dripdata/state.json"), "{}").unwrap();
+        let (section, files) = changes_so_far(&cwd, &head).expect("changes");
+        assert!(section.starts_with("changes so far this run"), "{section}");
+        assert!(section.contains("a.txt | 1 +"), "{section}");
+        assert!(section.contains("new files: new.txt"), "{section}");
+        assert_eq!(files, vec!["a.txt".to_string(), "new.txt".to_string()]);
+    }
+
+    #[test]
     fn review_brief_shows_the_change_set_since_run_start() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
@@ -347,6 +368,47 @@ fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
 
 /// Lines changed in the workspace since `base`: added + deleted lines of the
 /// tracked diff plus every line of each untracked file. None outside git.
+/// Files changed since run start (tracked edits plus untracked files outside
+/// dot-directories), for a later author task's prompt. The list feeds file
+/// outlines; the text is a `git diff --stat` capped at CHANGES_SO_FAR_MAX_LINES.
+pub const CHANGES_SO_FAR_MAX_LINES: usize = 20;
+
+pub fn changes_so_far(cwd: &str, base: &str) -> Option<(String, Vec<String>)> {
+    let stat = git_output(cwd, &["diff", "--stat", base]).map(|text| text.trim().to_string()).unwrap_or_default();
+    let mut files: Vec<String> = git_output(cwd, &["diff", "--name-only", base])
+        .map(|text| text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default();
+    let untracked: Vec<String> = git_output(cwd, &["ls-files", "--others", "--exclude-standard"])
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.split('/').any(|part| part.starts_with('.')))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for path in &untracked {
+        if !files.contains(path) {
+            files.push(path.clone());
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = vec!["changes so far this run (git diff --stat vs run start; the files below are already edited — build on them, do not redo their work):".to_string()];
+    let stat_lines: Vec<&str> = stat.lines().collect();
+    for line in stat_lines.iter().take(CHANGES_SO_FAR_MAX_LINES) {
+        lines.push(line.to_string());
+    }
+    if stat_lines.len() > CHANGES_SO_FAR_MAX_LINES {
+        lines.push(format!("… +{} more", stat_lines.len() - CHANGES_SO_FAR_MAX_LINES));
+    }
+    if !untracked.is_empty() {
+        lines.push(format!("new files: {}", untracked.join(", ")));
+    }
+    Some((lines.join("\n"), files))
+}
+
 pub fn workspace_changed_lines(cwd: &str, base: &str) -> Option<usize> {
     let numstat = git_output(cwd, &["diff", "--numstat", base])?;
     let mut lines = 0usize;
@@ -4735,11 +4797,32 @@ impl HarnessRun {
                 Some(task) if !scope.review_loop => {
                     let notes = task.notes.join("\n");
                     let texts = [task.title.as_str(), notes.as_str(), self.state.goal.as_str()];
-                    let outlines = crate::harness::outline::outlines_for_texts(&self.cwd, &texts);
-                    let hits = crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts);
-                    match (outlines, hits) {
-                        (Some(outlines), Some(hits)) => Some(format!("{outlines}\n{hits}")),
-                        (outlines, hits) => outlines.or(hits),
+                    let mut parts: Vec<String> = Vec::new();
+                    parts.extend(crate::harness::outline::outlines_for_texts(&self.cwd, &texts));
+                    parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
+                    // A later author task of the run sees what earlier tasks
+                    // changed, with outlines of those files: planned runs
+                    // spent 2-3× the author time of direct runs on the same
+                    // task count because each task loop re-explored the work.
+                    let earlier_author_work = self.state.tasks.iter().any(|other| {
+                        other.id != task.id && other.review_of.is_none() && other.status == HarnessTaskStatus::Completed
+                    });
+                    if earlier_author_work {
+                        if let Some((section, files)) = self.run_start_head.as_deref().and_then(|base| changes_so_far(&self.cwd, base)) {
+                            self.emit(HarnessEvent {
+                                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                                detail: format!("changes so far: {} file(s) edited by earlier tasks carried into {}'s prompt with their outlines", files.len(), task.id),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::HarnessOp,
+                            });
+                            parts.push(section);
+                            parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &files));
+                        }
+                    }
+                    if parts.is_empty() {
+                        None
+                    } else {
+                        Some(parts.join("\n"))
                     }
                 }
                 _ => None,

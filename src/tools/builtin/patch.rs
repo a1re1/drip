@@ -391,8 +391,15 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 _ => return Err(anyhow!("[entry {}] Missing or empty \"path\".", i)),
             };
 
-            let has_find = entry.get("find").map_or(false, Value::is_string);
-            let has_replace = entry.get("replace").map_or(false, Value::is_string);
+            let content_present = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+            let find_empty = entry.get("find").and_then(Value::as_str) == Some("");
+            let replace_empty = entry.get("replace").and_then(Value::as_str) == Some("");
+            // Empty-string find/replace beside a real content are placeholders
+            // (recorded runs sent `find: "", replace: ""` with a whole file, and
+            // `find: <text>, replace: ""` with the replacement in content); an
+            // empty replace beside a real find and no content is a deletion.
+            let has_find = entry.get("find").map_or(false, Value::is_string) && !(content_present && find_empty);
+            let has_replace = entry.get("replace").map_or(false, Value::is_string) && !(content_present && replace_empty);
             // Small models routinely send `content: ""` as a placeholder next to a
             // real find/replace pair; an empty content beside a find is noise, not
             // an overwrite request (an actual empty overwrite has no find).
@@ -459,11 +466,13 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 
             files.push(FileEntry {
                 path: path.clone(),
-                find: entry.get("find").and_then(Value::as_str).map(str::to_string),
+                find: if has_find { entry.get("find").and_then(Value::as_str).map(str::to_string) } else { None },
                 replace: if content_as_replace {
                     entry.get("content").and_then(Value::as_str).map(str::to_string)
-                } else {
+                } else if has_replace {
                     entry.get("replace").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
                 },
                 expected_occurrences: entry
                     .get("expectedOccurrences")
@@ -1561,6 +1570,26 @@ mod execute_tests {
         assert!(find_incomplete_overwrite_error(&module, "import os\n\ndef f1():\n    return 1\n").is_none());
         // A short file rewritten with an indented first line is not guarded.
         assert!(find_incomplete_overwrite_error("a\nb\nc\n", "    x\n").is_none());
+    }
+
+    #[test]
+    fn empty_find_and_replace_placeholders_beside_content_are_ignored() {
+        let workspace = temp_workspace("placeholders-beside-content");
+        let ctx = ctx_for(&workspace);
+        let whole = workspace.join("whole.txt");
+        let edited = workspace.join("edited.txt");
+        std::fs::write(&edited, "alpha\nbeta\n").unwrap();
+        let outcome = execute(&serde_json::json!({"files": [
+            {"path": whole, "content": "new file\n", "find": "", "replace": ""},
+            {"path": edited, "find": "beta", "replace": "", "content": "gamma"}
+        ]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&whole).unwrap(), "new file\n");
+        assert_eq!(std::fs::read_to_string(&edited).unwrap(), "alpha\ngamma\n");
+        // A deletion (find + empty replace, no content) still deletes.
+        let outcome = execute(&serde_json::json!({"files": [{"path": edited, "find": "gamma\n", "replace": ""}]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&edited).unwrap(), "alpha\n");
     }
 
     #[test]

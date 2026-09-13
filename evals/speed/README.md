@@ -64,7 +64,9 @@ batch and its results are still saved.
 rate), `done` (runs that finished with reason `completed`), `wall_s` (median
 wall-clock seconds), `cyc` (median iterations), `loops` (median task loops),
 `inf` (median model inferences), `inf_min` (median total inference time, in
-minutes), `tools` (median tool calls), `rej` (median finish_task rejections).
+minutes), `tools` (median tool calls), `rej` (median finish_task rejections), `nud` (median flailing nudges —
+harness-op events where the same command shape ran three times with no edit
+between).
 The header line adds overall pass rate, median wall/cycles/inferences/
 rejections, and total wall time in minutes.
 
@@ -75,12 +77,13 @@ planner/author/reviewer inference seconds from `roleInference`), `acache`/`rcach
 (median share of the author's / reviewer's prompt tokens served from the
 prompt cache, from `cacheReadTokens` / `promptTokens`; drip 0.121+), `hedges`
 (total hedged requests), `won` (hedges the second request won), `waived`
-(runs whose review was waived).
+(runs whose review was waived), `nud` (total flailing nudges).
 
 `--compare A B` (per task, tasks present in either label): `A_wall`,
 `B_wall` (median wall seconds; `-` if the task is missing from that label),
 `delta%` (B wall relative to A wall), `A_inf`, `B_inf` (median inferences),
-`A_pass`, `B_pass` (hidden pass rates).
+`A_pass`, `B_pass` (hidden pass rates), `A_nud`, `B_nud` (total flailing
+nudges per label).
 
 ## Adding a task
 

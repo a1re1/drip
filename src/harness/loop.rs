@@ -3842,10 +3842,16 @@ impl HarnessRun {
                 Some((last, count)) if last == shape => count + 1,
                 _ => 1,
             };
-            self.repeated_command = Some((shape, count));
+            self.repeated_command = Some((shape.clone(), count));
             if count >= REPEATED_COMMAND_NUDGE_AT {
                 tool_content.push_str("\n\n");
                 tool_content.push_str(&repeated_command_nudge(count));
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                    detail: format!("flailing nudge: {shape} ran {count} times with no edit between"),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
             }
         }
         self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
@@ -6998,6 +7004,31 @@ mod role_inference_tests {
         let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
         let after_edit = run.execute_workspace_tool("c5", r#"{"command":"false"}"#, None, "BASH");
         assert!(!after_edit.tool_content.contains("[harness] this command shape"), "{}", after_edit.tool_content);
+    }
+
+    #[tokio::test]
+    async fn repeated_command_nudge_also_emits_a_harness_op_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<std::sync::Mutex<Vec<HarnessEvent>>> = Arc::default();
+        let sink = events.clone();
+        let options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            on_event: Some(Arc::new(move |event: HarnessEvent| {
+                sink.lock().unwrap().push(event);
+            })),
+            ..SolidStateHarnessOptions::default()
+        };
+        let mut run = HarnessRun::new(options).await.unwrap();
+        for call in ["c1", "c2", "c3"] {
+            let _ = run.execute_workspace_tool(call, r#"{"command":"false 2>&1 | tail -3"}"#, None, "BASH");
+        }
+        let events = events.lock().unwrap();
+        let nudges: Vec<&HarnessEvent> = events.iter().filter(|event| event.r#type == HarnessEventType::HarnessOp && event.detail.contains("flailing nudge")).collect();
+        assert_eq!(nudges.len(), 1, "one nudge event after three identical runs");
+        assert_eq!(nudges[0].detail, "flailing nudge: false ran 3 times with no edit between");
     }
 
     #[tokio::test]

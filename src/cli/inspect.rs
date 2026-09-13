@@ -593,6 +593,7 @@ mod tests {
 			max_iterations: None,
 			max_loops: None,
 			pending_operator_messages: 0,
+			plan_mode: None,
 			result: &HarnessRunResult {
 				continue_command: None,
 				error_message: None,

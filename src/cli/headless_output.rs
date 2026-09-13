@@ -256,6 +256,7 @@ mod tests {
             completion_anchor: None,
             anomalies: None,
             role_inference: Default::default(),
+            plan_mode: None,
         }
     }
 

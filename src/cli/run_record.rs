@@ -65,6 +65,9 @@ pub struct RunRecord {
 	/// Expectations the run could not reconcile (reason "unreconciled").
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub anomalies: Option<Vec<crate::core::types::HarnessAnomaly>>,
+	/// The --plan-mode the run was given, when one was set.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub plan_mode: Option<String>,
 }
 
 pub struct BuildRunRecordArgs<'a> {
@@ -74,6 +77,7 @@ pub struct BuildRunRecordArgs<'a> {
 	pub max_iterations: Option<i64>,
 	pub max_loops: Option<i64>,
 	pub pending_operator_messages: i64,
+	pub plan_mode: Option<&'a str>,
 	pub result: &'a HarnessRunResult,
 }
 
@@ -120,6 +124,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 		// Run-level record: `status` uses the run vocabulary marker, not a
 		// task finish status, so consumers never confuse the two.
 		reason,
+		plan_mode: args.plan_mode.map(|mode| mode.to_string()),
 	}
 }
 
@@ -288,7 +293,20 @@ mod tests {
 				},
 				role_inference: std::collections::BTreeMap::new(),
 			},
+			plan_mode: None,
 		})
+	}
+
+	#[test]
+	fn serialises_plan_mode_and_omits_it_when_none() {
+		let record = make_record();
+		let json = serde_json::to_string(&record).unwrap();
+		assert!(!json.contains("planMode"), "{json}");
+
+		let mut record = record;
+		record.plan_mode = Some("auto".into());
+		let json = serde_json::to_string(&record).unwrap();
+		assert!(json.contains(r#""planMode":"auto""#), "{json}");
 	}
 
 	#[test]

@@ -206,6 +206,10 @@ fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPre
     let title = builtin::bash::get_optional_string_argument(&args, "title")
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| format!("tmux {session_name}: {}", truncate_text(&compact_whitespace(&command), 72)));
+    let wait_ms = get_optional_number_argument(&args, "waitMs")
+        .map_err(|error| error.to_string())?
+        .map(|value| value.max(0.0).min(60_000.0) as i64)
+        .unwrap_or(ASYNC_BASH_GRACE_MS);
 
     Ok(ChatToolPreparedInput {
         display_input: format!("{display_cwd}\nsession {session_name}\n{command}"),
@@ -214,11 +218,19 @@ fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPre
             "command": command,
             "displayCwd": display_cwd,
             "sessionName": session_name,
-            "title": title
+            "title": title,
+            "waitMs": wait_ms
         }),
         tags: None,
     })
 }
+
+/// How long BASH_ASYNC waits for its command before returning while it
+/// keeps running. Most "background" commands models start (a build, a test
+/// suite, a git operation) finish well inside this window; returning their
+/// output inline saves the poll rounds ("sleep 12; cat log") that recorded
+/// sessions spent whole loops on.
+pub const ASYNC_BASH_GRACE_MS: i64 = 15_000;
 
 fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolResult, String> {
     let input = &request.prepared.input;
@@ -227,6 +239,7 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
     let command = input["command"].as_str().unwrap_or_default().to_string();
     let session_name = input["sessionName"].as_str().unwrap_or_default().to_string();
     let title = input["title"].as_str().unwrap_or_default().to_string();
+    let wait_ms = input["waitMs"].as_i64().unwrap_or(ASYNC_BASH_GRACE_MS);
 
     crate::tools::helpers::assert_directory_path(std::path::Path::new(&absolute_cwd), &display_cwd)
         .map_err(|error| error.to_string())?;
@@ -307,18 +320,54 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
         tool_name: "BASH_ASYNC".to_string(),
     });
 
+    // Grace wait: finished-in-time commands return their output inline.
+    let wait_result = request
+        .services
+        .async_jobs
+        .wait_for_job(&job.id, Some(wait_ms))
+        .map_err(|error| error.to_string())?;
+    let tail = request
+        .services
+        .async_jobs
+        .tail_job(&job.id, Some(60))
+        .map(|tail| tail.output)
+        .unwrap_or_default();
+    let started_at = job.started_at.clone();
+    let finished_job = wait_result.job.clone();
+    let elapsed_ms = crate::tools::async_jobs::session_age_ms(&started_at).unwrap_or(0);
+    let (output_text, status) = if wait_result.completed {
+        let exit = finished_job.exit_code.flatten();
+        (
+            format!(
+                "Background command finished in {:.1}s with status {}{}.",
+                elapsed_ms as f64 / 1000.0,
+                job_status_text(finished_job.status),
+                exit.map(|code| format!(" (exit {code})")).unwrap_or_default()
+            ),
+            job_status_to_tool_call_status(finished_job.status),
+        )
+    } else {
+        (
+            format!("Started background bash command in tmux session {session_name}; still running after {wait_ms}ms."),
+            ToolCallStatus::Running,
+        )
+    };
+
     Ok(ChatToolResult {
-        async_job: Some(job),
+        async_job: Some(if wait_result.completed { finished_job } else { job }),
         data: Some(json!({
             "attachCommand": attach_command,
             "command": command,
             "cwd": absolute_cwd,
             "killCommand": kill_command,
-            "sessionName": session_name
+            "sessionName": session_name,
+            "completed": wait_result.completed,
+            "waitMs": wait_ms,
+            "tail": tail
         })),
         error: None,
-        output_text: Some(format!("Started background bash command in tmux session {session_name}.")),
-        status: Some(ToolCallStatus::Running),
+        output_text: Some(output_text),
+        status: Some(status),
         tags: None,
     })
 }
@@ -328,26 +377,30 @@ fn async_bash_complete(request: ChatToolCompleteRequest<'_>) -> Result<ChatToolC
     let session_name = data["sessionName"].as_str().unwrap_or_default();
     let attach_command = data["attachCommand"].as_str().unwrap_or_default();
     let kill_command = data["killCommand"].as_str().unwrap_or_default();
+    let completed = data["completed"].as_bool().unwrap_or(false);
+    let wait_ms = data["waitMs"].as_i64().unwrap_or(ASYNC_BASH_GRACE_MS);
+    let tail = data["tail"].as_str().unwrap_or_default().trim().to_string();
+    let headline = request.result.output_text.clone().unwrap_or_default();
+
+    let (text, tool_content) = if completed {
+        let output = if tail.is_empty() { "(no output)".to_string() } else { fallback_log_preview(&tail) };
+        (
+            format!("{headline}\n{output}"),
+            format!("{headline}\nOutput (last lines):\n{output}"),
+        )
+    } else {
+        let so_far = if tail.is_empty() { String::new() } else { format!("\nOutput so far:\n{}", fallback_log_preview(&tail)) };
+        (
+            [format!("Started tmux session {session_name} (still running after {wait_ms}ms)."), format!("Attach: {attach_command}"), format!("Kill: {kill_command}")].join("\n"),
+            format!(
+                "{headline}{so_far}\nTo get the result: ASYNC_WAIT {{\"jobId\": \"{session_name}\"}} blocks until it finishes (ASYNC_TAIL peeks). Do not poll with sleep probes.\nAttach: {attach_command}\nKill: {kill_command}"
+            ),
+        )
+    };
 
     Ok(ChatToolCompletionResult {
-        blocks: Some(vec![ChatMessageBlock::Text(TextBlock {
-            context_state: None,
-            tags: None,
-            text: [
-                format!("Started tmux session {session_name}."),
-                format!("Attach: {attach_command}"),
-                format!("Kill: {kill_command}"),
-            ]
-            .join("\n"),
-        })]),
-        tool_content: Some(
-            [
-                format!("Started background bash command in tmux session {session_name}."),
-                format!("Attach: {attach_command}"),
-                format!("Kill: {kill_command}"),
-            ]
-            .join("\n"),
-        ),
+        blocks: Some(vec![ChatMessageBlock::Text(TextBlock { context_state: None, tags: None, text })]),
+        tool_content: Some(tool_content),
         tags: None,
     })
 }
@@ -932,6 +985,36 @@ mod tests {
         assert_eq!(clamp_timeout_ms(None), 60_000);
         assert_eq!(clamp_timeout_ms(Some(-5.0)), 0);
         assert_eq!(clamp_timeout_ms(Some(9e9)), 3_600_000);
+    }
+
+    fn tmux_available() -> bool {
+        builtin::bash::assert_tmux_available().is_ok()
+    }
+
+    #[test]
+    fn bash_async_returns_finished_output_inline_within_the_grace_window() {
+        if !tmux_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tools = vec![async_bash_tool()];
+        let (content, failed) = run(&tools, "BASH_ASYNC", r#"{"command":"echo grace-hello"}"#, dir.path());
+        assert!(!failed, "{content}");
+        assert!(content.contains("finished in"), "{content}");
+        assert!(content.contains("grace-hello"), "{content}");
+    }
+
+    #[test]
+    fn bash_async_keeps_running_past_the_grace_window() {
+        if !tmux_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tools = vec![async_bash_tool()];
+        let (content, failed) = run(&tools, "BASH_ASYNC", r#"{"command":"sleep 5; echo late","waitMs":300}"#, dir.path());
+        assert!(!failed, "{content}");
+        assert!(content.contains("still running after 300ms"), "{content}");
+        assert!(content.contains("ASYNC_WAIT"), "{content}");
     }
 
     #[test]

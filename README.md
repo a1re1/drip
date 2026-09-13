@@ -1176,6 +1176,16 @@ every text field is clamped to 200 characters on Unicode char boundaries, so
 state growth stays bounded and older state files without recovery history
 load unchanged.
 
+`BASH_ASYNC` waits up to `waitMs` (default 15s) for its command and returns
+the output inline when it finishes in time; only genuinely long commands stay
+in the background, and the result then says to use `ASYNC_WAIT` (blocks) or
+`ASYNC_TAIL` (peeks) rather than sleep-and-poll probes. A role whose tool
+list includes `BASH_ASYNC` always gets `ASYNC_WAIT` and `ASYNC_TAIL` too —
+recorded sessions without them spent whole loops on "sleep 12; cat log"
+rounds. The read-only nudge ("N reads and nothing written") waits for the
+second cycle of a loop (or sixteen reads): eight reads in a fresh loop's first
+cycle is orientation, not drift.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

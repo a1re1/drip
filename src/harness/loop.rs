@@ -5125,7 +5125,11 @@ impl HarnessRun {
 
             if (deduped_tool || read_only_bash) && !execution.failed {
                 scope.read_only_calls_this_loop += 1;
-                if !scope.persisted_this_loop && !scope.review_loop && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
+                // Eight reads in the first cycle of a fresh loop is normal
+                // orientation, not drift: the nudge waits for the second
+                // cycle (or sixteen reads), so it lands when it means something.
+                let orientation = scope.cycle <= 1 && scope.read_only_calls_this_loop < READ_ONLY_NUDGE_EVERY * 2;
+                if !scope.persisted_this_loop && !scope.review_loop && !orientation && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
                     tool_content = format!(
                         "{tool_content}\n\n{}",
                         build_read_only_loop_nudge(scope.read_only_calls_this_loop, scope.cycle, scope.affordable_cycles)

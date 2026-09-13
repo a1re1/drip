@@ -822,16 +822,6 @@ mod tests {
         assert!(result.is_err(), "expected a panic containing sess-1");
     }
 
-    // Path join over string parts.
-    macro_rules! join {
-        ($base:expr $(, $part:expr)*) => {{
-            #[allow(unused_mut)]
-            let mut p = ::std::path::PathBuf::from($base);
-            $( p.push($part); )*
-            p.to_string_lossy().into_owned()
-        }};
-    }
-
     fn parent_of(path: &str) -> String {
         Path::new(path)
             .parent()

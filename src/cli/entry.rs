@@ -524,10 +524,23 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     };
     let file_profile_id = cli_args.review_file_profile.clone().unwrap_or_else(|| DEFAULT_REVIEW_FILE_PROFILE.to_string());
     let synth_profile_id = cli_args.review_synth_profile.clone().unwrap_or_else(|| DEFAULT_REVIEW_SYNTH_PROFILE.to_string());
-    let file_inference = match resolve_route(&file_profile_id, "--file-profile") {
+    let mut file_inference = match resolve_route(&file_profile_id, "--file-profile") {
         Ok(inference) => inference,
         Err(code) => return code,
     };
+    // Per-file reviewers answer a fixed report format from a diff they were
+    // handed; they do not need the profile's reasoning budget. Recorded
+    // review children on a profile without an effort setting produced a
+    // median 1,162 completion tokens per call (3,782 on the slow ones) against
+    // ~105 for the same model at low effort, and took 75s per file.
+    // Gated like resolve_cli_inference gates the profile's own setting: a
+    // provider that does not take the field must not see it on the wire
+    // (drip --review found this one — a P1 on the first version of this hunk).
+    if file_inference.route.reasoning_effort.is_none()
+        && crate::core::inference::supports_openai_reasoning_effort(&file_inference.route.provider, &file_inference.route.model)
+    {
+        file_inference.route.reasoning_effort = Some(crate::cli::review::DEFAULT_REVIEW_FILE_REASONING_EFFORT.to_string());
+    }
     let synth_inference = match resolve_route(&synth_profile_id, "--synth-profile") {
         Ok(inference) => inference,
         Err(code) => return code,
@@ -549,8 +562,15 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
 
     // stderr, so --json stdout stays a single parseable object.
     eprintln!(
-        "review: {review_source} · files on {file_profile_id} ({}) · synthesis on {synth_profile_id} ({})",
-        file_inference.model, synth_inference.model
+        "review: {review_source} · files on {file_profile_id} ({}{}) · synthesis on {synth_profile_id} ({})",
+        file_inference.model,
+        file_inference
+            .route
+            .reasoning_effort
+            .as_deref()
+            .map(|effort| format!(", effort {effort}"))
+            .unwrap_or_default(),
+        synth_inference.model
     );
 
     let started_at = std::time::Instant::now();

@@ -1209,6 +1209,21 @@ The `hedged model request` event marks each race; the duplicate is billed but
 only the winner's usage is recorded. One-shot helper calls (session names,
 terminal titles, bash distillation) do not hedge.
 
+A background job the model started (`BASH_ASYNC`, or any async tool) that
+settles between rounds is reported by the harness before the next model call:
+a `harness: background job … finished: completed (exit 0)` message carrying
+the last forty output lines, plus a `harness-op` event. A job whose result the
+model already saw (a completed `ASYNC_WAIT`, an `ASYNC_TAIL` after it settled,
+the `BASH_ASYNC` grace wait) is not reported again. Recorded sessions spent
+whole loops on "sleep 12; cat log" probes for jobs that had long finished.
+
+`drip --review` runs its per-file reviewers at low reasoning effort unless the
+file profile (`--file-profile`) sets an effort of its own: the reviewers fill a
+fixed report format from a diff they were handed, and on a profile without an
+effort setting they produced a median 1,162 completion tokens per call (3,782
+on the slow ones) against about 105 for the same model at low effort, taking
+75s per file. The review banner names the effort in use.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

@@ -180,6 +180,12 @@ pub trait ChatAsyncToolRuntime: Send + Sync {
     fn tail_job(&self, job_id: &str, lines: Option<i64>) -> anyhow::Result<ChatAsyncToolTailResult>;
     /// waitForJob(jobId, timeoutMs = 60_000)
     fn wait_for_job(&self, job_id: &str, timeout_ms: Option<i64>) -> anyhow::Result<ChatAsyncToolWaitResult>;
+    /// Settled jobs whose result nobody has seen yet (no completed wait, no
+    /// tail after settling). Each job is returned once; the harness reports
+    /// them to the model at the next round so it never spends a round polling.
+    fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
+        Vec::new()
+    }
 }
 
 // export type ChatToolRuntimeServices = { asyncJobs, tmuxSessions }

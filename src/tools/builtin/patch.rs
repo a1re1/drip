@@ -14,12 +14,12 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "PATCH",
-            "description": "Apply a change to a file and save it to disk. Pass find + replace to swap exact text (every occurrence), or content to create the file or overwrite it entirely.",
+            "description": "Apply a change to a file and save it to disk. Pass find + replace to swap exact text (every occurrence), or content to create a new file. For an existing file use find + replace on the regions that change — several entries for the same file in one files[] call apply in order — instead of rewriting it: a full rewrite re-sends every line and costs output time proportional to the file (recorded runs spent nine times the output on rewrites as on targeted edits). Rewriting a file of a few dozen lines is fine.",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
                     "content": {
-                        "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files or full rewrites.",
+                        "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; for an existing file prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
                         "type": "string"
                     },
                     "expectedOccurrences": {
@@ -378,11 +378,12 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             // field (small models echo the snippet they are inserting); apply
             // the pair and say so rather than costing a round on the error.
             // Content beside an empty or missing find is still ambiguous.
-            let stray_content = has_content
-                && has_find
-                && has_replace
-                && !entry.get("find").and_then(Value::as_str).unwrap_or("").is_empty();
-            let has_content = has_content && !stray_content;
+            let find_nonempty = !entry.get("find").and_then(Value::as_str).unwrap_or("").is_empty();
+            // {find, content} with no replace: content is the replacement text.
+            let content_as_replace = has_content && has_find && !has_replace && find_nonempty;
+            let has_replace = has_replace || content_as_replace;
+            let stray_content = has_content && has_find && has_replace && find_nonempty && !content_as_replace;
+            let has_content = has_content && !stray_content && !content_as_replace;
 
             if has_content && (has_find || has_replace) {
                 return Err(anyhow!(
@@ -434,19 +435,20 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             files.push(FileEntry {
                 path: path.clone(),
                 find: entry.get("find").and_then(Value::as_str).map(str::to_string),
-                replace: entry
-                    .get("replace")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                replace: if content_as_replace {
+                    entry.get("content").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    entry.get("replace").and_then(Value::as_str).map(str::to_string)
+                },
                 expected_occurrences: entry
                     .get("expectedOccurrences")
                     .and_then(Value::as_f64)
                     .map(|n| n as i64),
-                content: entry
+                content: if content_as_replace { None } else { entry
                     .get("content")
                     .and_then(Value::as_str)
                     .filter(|text| !(text.is_empty() && has_find) && !stray_content)
-                    .map(str::to_string),
+                    .map(str::to_string) },
             });
         }
 
@@ -491,6 +493,13 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
         }
     }
 
+    // content beside a non-empty find and no replace is the replacement text
+    // under the wrong name (recorded runs sent {find, content} for a targeted
+    // edit); read it as replace rather than costing a round on the error.
+    let (content, replace) = match (content, replace) {
+        (Some(text), None) if find.as_deref().map_or(false, |f| !f.is_empty()) => (None, Some(text)),
+        pair => pair,
+    };
     // A non-empty find beside content is a targeted edit with a stray content
     // field (small models echo the snippet they are inserting); apply the
     // find + replace and say so rather than costing a round on the error.
@@ -672,6 +681,19 @@ pub fn validate_file_entry(
     index: usize,
     workspace_root: &str,
 ) -> Result<ResolvedEntry, String> {
+    resolve_file_entry(entry, index, workspace_root, None)
+}
+
+/// `base_text` replaces the on-disk pre-image for a find + replace entry: a
+/// later entry for the same file in one transaction resolves against the
+/// post-image of the earlier one, so several targeted edits to one file can
+/// ride in a single PATCH call.
+pub fn resolve_file_entry(
+    entry: &FileEntry,
+    index: usize,
+    workspace_root: &str,
+    base_text: Option<&str>,
+) -> Result<ResolvedEntry, String> {
     let tag = format!("[entry {} \"{}\"]", index, entry.path);
 
     // Mutual-exclusion: content XOR find/replace
@@ -768,9 +790,12 @@ pub fn validate_file_entry(
         ));
     }
 
-    let existing_text = match std::fs::read_to_string(&absolute_path_buf) {
-        Ok(text) => text,
-        Err(error) => return Err(format!("{} {}", tag, error)),
+    let existing_text = match base_text {
+        Some(text) => text.to_string(),
+        None => match std::fs::read_to_string(&absolute_path_buf) {
+            Ok(text) => text,
+            Err(error) => return Err(format!("{} {}", tag, error)),
+        },
     };
     let mut effective_find = entry.find.clone().unwrap_or_default();
     let mut effective_replace = entry.replace.clone().unwrap_or_default();
@@ -942,7 +967,7 @@ fn reject_duplicate_destinations(resolved: &[ResolvedEntry]) -> Result<(), Strin
         let identity = canonical_destination_identity(&entry.absolute_path);
         if !identities.insert(identity) {
             return Err(format!(
-                "Transaction rejected: two entries target the same file (\"{}\"). Writes in one transaction overwrite each other and the earlier edit would be lost. Send separate PATCH calls for each edit to the same path, or merge them into one entry with a single content write.",
+                "Transaction rejected: two entries write content to the same file (\"{}\"). Writes in one transaction overwrite each other and the earlier edit would be lost. Use one content write per file; several find + replace entries for one file are fine and apply in order.",
                 entry.display_path
             ));
         }
@@ -1081,7 +1106,29 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     if !prepared.input.files.is_empty() {
         let mut resolved: Vec<ResolvedEntry> = Vec::new();
         for (index, file_entry) in prepared.input.files.iter().enumerate() {
-            resolved.push(validate_file_entry(file_entry, index, &workspace_root)?);
+            // A second find + replace for a file already in this transaction
+            // chains onto that entry's post-image and folds into it (one write
+            // per file); content writes keep the duplicate-destination rejection.
+            let chained = if file_entry.content.is_none() {
+                let absolute = resolve_tool_path(&workspace_root, &file_entry.path);
+                let identity = canonical_destination_identity(&absolute.to_string_lossy());
+                resolved.iter().position(|earlier| earlier.content.is_none() && canonical_destination_identity(&earlier.absolute_path) == identity)
+            } else {
+                None
+            };
+            match chained {
+                Some(earlier_index) => {
+                    let base = resolved[earlier_index].new_text.clone();
+                    let next = resolve_file_entry(file_entry, index, &workspace_root, Some(&base))?;
+                    let earlier = &mut resolved[earlier_index];
+                    earlier.new_text = next.new_text;
+                    earlier.occurrences = Some(earlier.occurrences.unwrap_or(0) + next.occurrences.unwrap_or(0));
+                    if let Some(lines) = next.match_lines {
+                        earlier.match_lines.get_or_insert_with(Vec::new).extend(lines);
+                    }
+                }
+                None => resolved.push(validate_file_entry(file_entry, index, &workspace_root)?),
+            }
         }
         execute_transaction(&resolved, &workspace_root)?;
         let mut summary_lines: Vec<String> = Vec::new();
@@ -1442,7 +1489,7 @@ mod execute_tests {
     }
 
     #[test]
-    fn same_path_edits_in_one_transaction_are_rejected_before_any_write() {
+    fn same_path_edits_in_one_transaction_apply_in_order() {
         let workspace = temp_workspace("dup-same-path");
         let ctx = ctx_for(&workspace);
         let file = workspace.join("notes.txt");
@@ -1459,26 +1506,8 @@ mod execute_tests {
             &ctx,
         );
 
-        let after = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(
-            after, original,
-            "rejection must leave all original bytes unchanged; the file now reads:\n{}",
-            after
-        );
-        assert!(
-            outcome.failed,
-            "two edits to one path must be rejected with an error, got success: {}",
-            outcome.text
-        );
-        assert!(
-            outcome.text.contains("separate PATCH calls"),
-            "error must point at separate PATCH calls, got: {}",
-            outcome.text
-        );
-        assert!(
-            !crate::tools::patch_journal::patch_journal_path(&workspace).exists(),
-            "rejected transaction must not append journal entries"
-        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nbeta\nTHREE\n");
     }
 
     #[test]
@@ -1498,13 +1527,14 @@ mod execute_tests {
     }
 
     #[test]
-    fn dot_slash_alias_of_the_same_file_is_rejected() {
+    fn same_file_find_replace_entries_chain_in_one_transaction() {
         let workspace = temp_workspace("dup-dot-slash");
         let ctx = ctx_for(&workspace);
         let file = workspace.join("notes.txt");
-        let original = "alpha\nbeta\ngamma\n";
-        std::fs::write(&file, original).unwrap();
+        std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
 
+        // Two find + replace entries for one file (here through a ./ alias)
+        // chain in order and land as a single write.
         let outcome = execute(
             &serde_json::json!({
                 "files": [
@@ -1514,28 +1544,34 @@ mod execute_tests {
             }),
             &ctx,
         );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nbeta\nTHREE\n");
+        assert!(outcome.text.contains("replaced 2 occurrence(s)"), "{}", outcome.text);
+    }
 
-        let after = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(
-            after, original,
-            "./ alias rejection must leave the file unchanged; the file now reads:\n{}",
-            after
+    #[test]
+    fn content_write_plus_edit_on_one_file_is_still_rejected() {
+        let workspace = temp_workspace("dup-content");
+        let ctx = ctx_for(&workspace);
+        let file = workspace.join("notes.txt");
+        std::fs::write(&file, "alpha\n").unwrap();
+        let outcome = execute(
+            &serde_json::json!({
+                "files": [
+                    { "path": "notes.txt", "content": "fresh\n" },
+                    { "path": "notes.txt", "find": "alpha", "replace": "ONE" }
+                ]
+            }),
+            &ctx,
         );
-        assert!(
-            outcome.failed,
-            "./ alias of the same path must be rejected with an error, got success: {}",
-            outcome.text
-        );
-        assert!(
-            outcome.text.contains("separate PATCH calls"),
-            "error must point at separate PATCH calls, got: {}",
-            outcome.text
-        );
+        assert!(outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("write content to the same file"), "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\n");
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_alias_of_the_same_file_is_rejected() {
+    fn symlink_alias_entries_chain_onto_the_real_file() {
         let workspace = temp_workspace("dup-symlink");
         let ctx = ctx_for(&workspace);
         let real = workspace.join("real.txt");
@@ -1553,22 +1589,8 @@ mod execute_tests {
             &ctx,
         );
 
-        let after = std::fs::read_to_string(&real).unwrap();
-        assert_eq!(
-            after, original,
-            "symlink alias rejection must leave the real file unchanged; it now reads:\n{}",
-            after
-        );
-        assert!(
-            outcome.failed,
-            "symlink alias of the same file must be rejected with an error, got success: {}",
-            outcome.text
-        );
-        assert!(
-            outcome.text.contains("separate PATCH calls"),
-            "error must point at separate PATCH calls, got: {}",
-            outcome.text
-        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "ONE\nbeta\nTHREE\n");
     }
 
     #[cfg(unix)]
@@ -1602,8 +1624,8 @@ mod execute_tests {
             outcome.text
         );
         assert!(
-            outcome.text.contains("separate PATCH calls"),
-            "error must point at separate PATCH calls, got: {}",
+            outcome.text.contains("write content to the same file"),
+            "error must name the duplicate content write, got: {}",
             outcome.text
         );
         let _ = (content_one, content_two);
@@ -1988,6 +2010,18 @@ mod prepare_tests {
         assert_eq!(prepared.input.content, None, "the stray content is dropped");
         assert_eq!(prepared.input.find.as_deref(), Some("x"));
         assert!(prepared.display_input.ends_with("(replace; stray content ignored)"), "{}", prepared.display_input);
+    }
+
+    #[test]
+    fn content_beside_find_without_replace_is_the_replacement() {
+        let prepared = prepare(&json!({ "path": "a.txt", "find": "old", "content": "new" }), &test_ctx()).unwrap();
+        assert_eq!(prepared.input.content, None);
+        assert_eq!(prepared.input.find.as_deref(), Some("old"));
+        assert_eq!(prepared.input.replace.as_deref(), Some("new"));
+        assert!(!prepared.input.stray_content);
+        let multi = prepare(&json!({ "files": [{ "path": "a.txt", "find": "old", "content": "new" }] }), &test_ctx()).unwrap();
+        assert_eq!(multi.input.files[0].content, None);
+        assert_eq!(multi.input.files[0].replace.as_deref(), Some("new"));
     }
 
     #[test]

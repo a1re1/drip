@@ -439,11 +439,33 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
 }
 
 pub fn extract_loop_carryover(messages: &[TransportRequestMessage], hot_tool_results: usize) -> Vec<TransportRequestMessage> {
+    extract_loop_carryover_excluding(messages, hot_tool_results, &[])
+}
+
+/// The same tail selection, dropping every exchange whose call named one of
+/// `exclude_tools`. Used when the next loop already carries that tool's output
+/// another way — a review loop's brief holds the diff and every new file in
+/// full, so replaying PATCH calls would only double the reviewer's prompt.
+pub fn extract_loop_carryover_excluding(
+    messages: &[TransportRequestMessage],
+    hot_tool_results: usize,
+    exclude_tools: &[&str],
+) -> Vec<TransportRequestMessage> {
     // Blocks: an assistant message plus every tool result that follows it.
     let mut blocks: Vec<Vec<&TransportRequestMessage>> = Vec::new();
     for message in messages {
         match message.role {
-            ChatRoleTag::Assistant => blocks.push(vec![message]),
+            ChatRoleTag::Assistant => {
+                let excluded = message
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref().and_then(|function| function.name.as_deref()))
+                    .any(|name| exclude_tools.contains(&name));
+                if !excluded {
+                    blocks.push(vec![message]);
+                }
+            }
             ChatRoleTag::Tool => {
                 if let Some(last) = blocks.last_mut() {
                     last.push(message);
@@ -1747,6 +1769,45 @@ mod loop_helpers_tests {
             build_carryover_note(&planning, "task-1", 2),
             "harness: loop 1 worked the planning step; its last 2 tool exchange(s) are replayed above, verbatim, so this task builds on what was already read instead of re-reading. Act on what they show now."
         );
+    }
+
+    // "a review loop's carryover drops PATCH exchanges and keeps the rest"
+    #[test]
+    fn review_carryover_excludes_patch_exchanges() {
+        fn exchange(id: &str, tool: &str, content: &str) -> Vec<TransportRequestMessage> {
+            vec![
+                TransportRequestMessage {
+                    role: ChatRoleTag::Assistant,
+                    tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
+                        function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
+                            arguments: Some("{}".to_string()),
+                            name: Some(tool.to_string()),
+                        }),
+                        id: Some(id.to_string()),
+                        tool_type: Some("function".to_string()),
+                    }]),
+                    ..Default::default()
+                },
+                TransportRequestMessage {
+                    content: Some(TransportContent::Text(content.to_string())),
+                    name: Some(tool.to_string()),
+                    role: ChatRoleTag::Tool,
+                    tool_call_id: Some(id.to_string()),
+                    ..Default::default()
+                },
+            ]
+        }
+        let mut messages = Vec::new();
+        messages.extend(exchange("p", "PATCH", "whole new file body"));
+        messages.extend(exchange("r", "READ", "file contents"));
+        messages.extend(exchange("v", "VERIFY", "cargo test ok"));
+
+        let kept = extract_loop_carryover_excluding(&messages, 6, &["PATCH"]);
+        let tools: Vec<&str> = kept.iter().filter_map(|m| m.name.as_deref()).collect();
+        assert_eq!(tools, vec!["READ", "VERIFY"]);
+
+        // Unfiltered selection is unchanged.
+        assert_eq!(extract_loop_carryover(&messages, 6).len(), 6);
     }
 
     #[test]
@@ -4632,8 +4693,25 @@ impl HarnessRun {
 
             let blind_role = scope.role.as_ref().filter(|role| role.blind).map(|role| role.name.clone());
             let carried = match (&self.carryover, &scope.current_task_id) {
-                (Some(carryover), Some(_)) if carryover.r#loop == self.state.r#loop - 1 && !carryover.messages.is_empty() => {
-                    Some(carryover.clone())
+                (Some(carryover), Some(task_id)) if carryover.r#loop == self.state.r#loop - 1 && !carryover.messages.is_empty() => {
+                    let mut carryover = carryover.clone();
+                    // A review loop's brief already carries the diff and every
+                    // new file in full; replaying PATCH exchanges (the whole
+                    // file the author wrote) would double the reviewer's prompt.
+                    let next_is_review = crate::core::state::get_task_by_id(&self.state, task_id).is_some_and(|task| task.review_of.is_some());
+                    if next_is_review {
+                        let before = carryover.messages.len();
+                        carryover.messages = extract_loop_carryover_excluding(&carryover.messages, before, &["PATCH"]);
+                        if carryover.messages.len() < before {
+                            self.emit(HarnessEvent {
+                                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: Some(task_id.clone()), ..Default::default() }),
+                                detail: format!("review carryover: dropped {} PATCH exchange(s) from loop {} — the review brief already carries the diff", (before - carryover.messages.len()) / 2, carryover.r#loop),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::HarnessOp,
+                            });
+                        }
+                    }
+                    (!carryover.messages.is_empty()).then_some(carryover)
                 }
                 _ => None,
             };

@@ -35,12 +35,12 @@
     "type": "function",
     "function": {
       "name": "PATCH",
-      "description": "Apply a change to a file and save it to disk. Pass find + replace to swap exact text (every occurrence), or content to create the file or overwrite it entirely.",
+      "description": "Apply a change to a file and save it to disk. Pass find + replace to swap exact text (every occurrence), or content to create a new file. For an existing file use find + replace on the regions that change — several entries for the same file in one files[] call apply in order — instead of rewriting it: a full rewrite re-sends every line and costs output time proportional to the file (recorded runs spent nine times the output on rewrites as on targeted edits). Rewriting a file of a few dozen lines is fine.",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "content": {
-            "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files or full rewrites.",
+            "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; for an existing file prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
             "type": "string"
           },
           "expectedOccurrences": {
@@ -233,7 +233,7 @@
     "type": "function",
     "function": {
       "name": "VERIFY",
-      "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. The marker must be printed by the script or runner that ran the checks — a command that merely echoes DRIP_VERIFY, with no real check &&-chained before it, is rejected as fabricated. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared. Every VERIFY call is recorded as a verification record and the result text reports its stable record ref (\"verification record: v<n>\"); cite that ref as evidence when revising an observed expectation value.",
+      "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. pytest, unittest, cargo test, go test, vitest, bun test and tsc output is parsed automatically — run them plainly. Only for a check script of your own emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. The marker must be printed by the script or runner that ran the checks — a command that merely echoes DRIP_VERIFY, with no real check &&-chained before it, is rejected as fabricated. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared. Every VERIFY call is recorded as a verification record and the result text reports its stable record ref (\"verification record: v<n>\"); cite that ref as evidence when revising an observed expectation value.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

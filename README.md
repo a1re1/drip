@@ -1340,8 +1340,11 @@ whose observation matched, or whose observed text reports success (exit 0,
 verification record, without anchor bookkeeping.
 
 `--plan-mode auto|always|direct` decides how a run gets its first task list.
-`auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that declares its own backticked
-acceptance check: one direct task is seeded from the goal text and the author
+`auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that the harness can still
+verify — it declares its own backticked acceptance check, or the workspace has
+a detectable project suite (`Cargo.toml`, `go.mod`, a `package.json` test
+script, pytest config, or a `tests/` of `.py` files; the seeded event names
+it): one direct task is seeded from the goal text and the author
 starts at once — the planner cost 13-20s on every speed-bench run, half the
 wall time of a small task, while the goal already said what to do and how to
 check it, and with `auto` the bench's small and medium tasks ran 25-60% faster at

@@ -190,16 +190,20 @@ mod goal_check_tests {
     fn direct_task_title_follows_the_plan_mode_and_goal_shape() {
         use super::{direct_task_title, PlanMode};
         let small = "Add a `count` subcommand to kvstore/cli.py. Run `python3 -m unittest discover -s tests -q`.";
-        assert_eq!(direct_task_title(small, PlanMode::Always), None);
-        assert_eq!(direct_task_title(small, PlanMode::Auto).as_deref(), Some(small));
-        assert!(direct_task_title(small, PlanMode::Direct).is_some());
+        assert_eq!(direct_task_title(small, PlanMode::Always, false), None);
+        assert_eq!(direct_task_title(small, PlanMode::Auto, false).as_deref(), Some(small));
+        assert!(direct_task_title(small, PlanMode::Direct, false).is_some());
+        // No declared check: direct only when the workspace has a detectable project suite.
+        let unchecked = "Rename the helper in kvstore/cli.py and update its callers.";
+        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, false), None);
+        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, true).as_deref(), Some(unchecked));
         // No declared check: auto plans.
-        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto), None);
+        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto, false), None);
         // Too long: auto plans.
         let long = format!("{} {}", small, "and more ".repeat(300));
-        assert_eq!(direct_task_title(&long, PlanMode::Auto), None);
-        assert!(direct_task_title(&long, PlanMode::Direct).is_some());
-        assert_eq!(direct_task_title("   ", PlanMode::Direct), None);
+        assert_eq!(direct_task_title(&long, PlanMode::Auto, true), None);
+        assert!(direct_task_title(&long, PlanMode::Direct, false).is_some());
+        assert_eq!(direct_task_title("   ", PlanMode::Direct, true), None);
     }
 
     #[test]
@@ -263,6 +267,18 @@ mod review_brief_tests {
         assert!(promote_native_runner_anchor(None, "python3 probe.py", &tests, &[]).is_none());
         let none_ran = VerificationEvidence { executed: 0, passed: 0, kind: VerificationEvidenceKind::Unverified, ..tests.clone() };
         assert!(promote_native_runner_anchor(None, "cargo test", &none_ran, &[]).is_none());
+        // Newer runners map through native_runner_name to their short names.
+        for (command, name) in [
+            ("mix test", "mix test"),
+            ("dotnet test --logger trx", "dotnet test"),
+            ("mvn test -q", "mvn test"),
+            ("gradle test", "gradle test"),
+            ("./gradlew test --tests core.*", "gradle test"),
+        ] {
+            let promoted = promote_native_runner_anchor(None, command, &tests, &edited).expect("promoted");
+            assert_eq!(promoted.kind, VerificationAnchorKind::External);
+            assert!(promoted.source.as_deref().unwrap_or("").contains(name), "{:?}", promoted.source);
+        }
     }
 
     #[test]
@@ -1440,6 +1456,11 @@ pub fn native_runner_name(command: &str) -> Option<&'static str> {
         ("pnpm test", "pnpm test"),
         ("yarn test", "yarn test"),
         ("jest", "jest"),
+        ("mix test", "mix test"),
+        ("dotnet test", "dotnet test"),
+        ("mvn test", "mvn test"),
+        ("gradle test", "gradle test"),
+        ("./gradlew test", "gradle test"),
     ];
     RUNNERS.iter().find(|(needle, _)| command.contains(needle)).map(|(_, name)| *name)
 }
@@ -1788,16 +1809,20 @@ pub const DIRECT_PLAN_MAX_PATHS: usize = 10;
 
 /// The title of the direct task a run seeds instead of planning, or None
 /// when this goal should be planned: `Always` never seeds; `Direct` always
-/// does; `Auto` seeds only for a short goal naming few paths that declares
-/// its own backticked acceptance check (so the harness can still verify).
-pub fn direct_task_title(goal: &str, mode: PlanMode) -> Option<String> {
+/// does; `Auto` seeds only for a short goal naming few paths whose change
+/// the harness can still verify — the goal declares its own backticked
+/// acceptance check, or `project_check` says the workspace has a detectable
+/// suite (see detect_project_check_command). Most real goals declare no
+/// check, and every one of them paid a 13-16s planner call for a plan of
+/// one task.
+pub fn direct_task_title(goal: &str, mode: PlanMode, project_check: bool) -> Option<String> {
     let goal = goal.trim();
     if goal.is_empty() {
         return None;
     }
     let small = goal.chars().count() <= DIRECT_PLAN_MAX_GOAL_CHARS
         && extract_goal_paths(goal).len() <= DIRECT_PLAN_MAX_PATHS
-        && !goal_declared_check_commands(goal).is_empty();
+        && (!goal_declared_check_commands(goal).is_empty() || project_check);
     let seed = match mode {
         PlanMode::Always => false,
         PlanMode::Direct => true,
@@ -4406,7 +4431,12 @@ impl HarnessRun {
             if !self.direct_plan_checked {
                 self.direct_plan_checked = true;
                 if self.state.tasks.is_empty() {
-                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode) {
+                    let project_check = if goal_declared_check_commands(&self.state.goal).is_empty() {
+                        detect_project_check_command(&self.cwd)
+                    } else {
+                        None
+                    };
+                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode, project_check.is_some()) {
                         let added = core_state::add_tasks(
                             &mut self.state,
                             vec![core_state::HarnessTaskInput { depends_on: None, review_of: None, role: None, title }],
@@ -4419,9 +4449,13 @@ impl HarnessRun {
                             );
                         }
                         let detail = format!(
-                            "direct task seeded, planner skipped (plan mode {:?}): {}",
+                            "direct task seeded, planner skipped (plan mode {:?}): {}{}",
                             self.plan_mode,
-                            added.first().map(|task| task.id.as_str()).unwrap_or("?")
+                            added.first().map(|task| task.id.as_str()).unwrap_or("?"),
+                            project_check
+                                .as_ref()
+                                .map(|(command, source)| format!(" — the goal declares no check; the project suite {command} ({source}) verifies it"))
+                                .unwrap_or_default()
                         );
                         self.emit(HarnessEvent {
                             data: Some(HarnessEventData { task_id: added.first().map(|task| task.id.clone()), ..Default::default() }),

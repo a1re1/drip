@@ -1238,6 +1238,15 @@ check. A three-repeat A/B on the two largest bench tasks: backend-refactor
 15 → 9 and 26 → 12; the planner's 15-18s call plus its task decomposition
 (each task its own loops and review) cost two to three times the wall.
 
+Two observations from the speed benches that are configuration, not code.
+The planner role on `gpt-6-astra` costs 15-18s per call; the same bench with
+the planner on `glm-5-3-flash` (low effort) planned in about 5s at the same
+pass rate, so a fast profile for the planner suits small and medium goals
+(keep the stronger model for goals that need real design). And across 31
+hedged requests in seven benches the second request won 18 times (resolved in
+9-18s where the first would have taken longer) and lost 13, mostly within two
+seconds of the 8s floor; the floor is right where it is.
+
 The review brief a reviewer loop opens with carries small new files in full
 (up to four files of at most 200 lines) next to the diff, and tells the
 reviewer not to READ files it was already handed; bench reviewers spent two of

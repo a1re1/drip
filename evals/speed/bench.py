@@ -72,7 +72,7 @@ def transcript_metrics(path):
              rejections=0, read_only_nudges=0, output_cutoffs=0, patches=0, verifies=0,
              context_expired=0, tasks_finished=0, prompt_tokens=0, completion_tokens=0,
              cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0,
-             hedge_wins=0, background_reports=0)
+             hedge_wins=0, background_reports=0, review_waived=0)
     for line in open(path, errors="ignore"):
         try:
             d = json.loads(line)
@@ -118,6 +118,8 @@ def transcript_metrics(path):
         elif kind == "harness-op" and detail.startswith("finish_task: harness: not accepted"):
             m["rejections"] += 1
             m["rejection_reasons"].append(detail[len("finish_task: harness: not accepted yet — "):][:120])
+        elif kind == "harness-op" and detail.startswith("review waived"):
+            m["review_waived"] += 1
         elif kind == "run-warning":
             if detail.startswith("read-only nudge"):
                 m["read_only_nudges"] += 1
@@ -315,6 +317,7 @@ def summarize_runs(runs):
             review_s_median=statistics.median([r.get("review_s") or 0 for r in rs]),
             hedges=sum(r.get("hedges") or 0 for r in rs),
             hedge_wins=sum(r.get("hedge_wins") or 0 for r in rs),
+            review_waived=sum(r.get("review_waived") or 0 for r in rs),
             inference_s_max=max(((r.get("inference_ms") or 0) / 1000.0) for r in rs),
         ))
     return rows
@@ -323,11 +326,11 @@ def summarize_runs(runs):
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
     print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
-          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6} {'won':>4}")
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6} {'won':>4} {'waived':>7}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
               f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
-              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4}")
+              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7}")
 
 
 def main(argv=None):

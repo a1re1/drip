@@ -5187,6 +5187,18 @@ impl HarnessRun {
                             crate::harness::harness_tools::HarnessOp::AskUser { .. }
                         );
                         let outcome = apply_harness_op(&mut self.state, op, &op_context);
+                        // The waiver's event was only emitted on the harness-run
+                        // re-verify path; a finish the agent's own goal-declared
+                        // VERIFY earned was waived silently (bench counters missed it).
+                        if outcome.text.contains("Review waived:") {
+                            self.emit(HarnessEvent {
+                                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                                detail: format!("review waived — {}", op_context.review_waived.clone().unwrap_or_default()),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::HarnessOp,
+                            });
+                            scope.digest_actions.push("review waived: harness-verified small change".to_string());
+                        }
                         let outcome = self.auto_reverify_stale_finish(scope, &tool_name, &raw_input, &call_id, &op_context, outcome);
                         // ask_user accepted: expose the survey as a question
                         // event (the blocking answers.jsonl wait and the

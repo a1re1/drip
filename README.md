@@ -1236,6 +1236,18 @@ The review brief a reviewer loop opens with carries small new files in full
 reviewer not to READ files it was already handed; bench reviewers spent two of
 their four rounds re-reading changed files before verifying.
 
+A single-task run whose goal-declared check the harness ran after the last
+edit, and which passed, skips the reviewer loop when the whole change (tracked
+diff plus new files) is at most sixty lines: the finish reads `Review waived:
+…` and a `review waived` event records the check and the line count. Any task
+still awaiting review, or any remaining author work, keeps the review gate;
+so does a goal without a backticked check, since then the harness never ran
+one. The agent's own VERIFY of a goal-declared check counts the same way
+(passed, nothing edited since), and a VERIFY the agent labelled "self" whose
+command is one of the goal's declared checks is upgraded to external
+evidence: the operator declared it, the agent only ran it. Before that
+upgrade the harness bounced such a finish and re-ran the very same command.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

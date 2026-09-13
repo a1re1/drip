@@ -39,6 +39,8 @@ pub struct ParsedCliArgs {
     pub max_loops: Option<i64>,
     /// --task-loop-limit: cap on task loop cycles per task (each is at least one model call).
     pub task_loop_limit: Option<i64>,
+    /// --review-waiver-lines: override REVIEW_WAIVER_MAX_LINES for the small-change review waiver (0 disables the waiver).
+    pub review_waiver_lines: Option<usize>,
     pub plan_mode: Option<String>,
     pub profile: Option<String>,
     pub resume: bool,
@@ -213,6 +215,7 @@ impl Default for ParsedCliArgs {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+            review_waiver_lines: None,
             plan_mode: None,
             profile: None,
             resume: false,
@@ -815,6 +818,19 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--review-waiver-lines" => {
+                if let Some(raw) = take_required_value(argv, index, "--review-waiver-lines", &mut parsed.errors) {
+                    match raw.parse::<usize>() {
+                        Ok(value) => parsed.review_waiver_lines = Some(value),
+                        Err(_) => parsed.errors.push(format!(
+                            "--review-waiver-lines needs a nonnegative integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
             "--marketplace-list" => {
                 parsed.marketplace_list = true;
             }
@@ -1365,6 +1381,25 @@ mod tests {
         assert_eq!(parse(&["do it", "--plan-mode", "Direct"]).plan_mode.as_deref(), Some("direct"));
         assert_eq!(parse(&["do it"]).plan_mode, None);
         assert!(!parse(&["--plan-mode", "sometimes"]).errors.is_empty());
+    }
+
+    #[test]
+    fn review_waiver_lines_parses_zero_and_positive_and_rejects_the_rest() {
+        assert_eq!(
+            parse(&["do it", "--review-waiver-lines", "30"]).review_waiver_lines,
+            Some(30)
+        );
+        assert_eq!(
+            parse(&["do it", "--review-waiver-lines", "0"]).review_waiver_lines,
+            Some(0)
+        );
+        assert_eq!(parse(&["do it"]).review_waiver_lines, None);
+        assert_eq!(
+            parse(&["--review-waiver-lines", "abc"]).errors,
+            vec!["--review-waiver-lines needs a nonnegative integer, got \"abc\".".to_string()]
+        );
+        assert!(!parse(&["--review-waiver-lines", "-2"]).errors.is_empty());
+        assert!(!parse(&["--review-waiver-lines"]).errors.is_empty());
     }
 
     #[test]

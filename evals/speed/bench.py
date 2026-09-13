@@ -51,6 +51,8 @@ def make_workspace(root, task_id, repeat):
         shutil.rmtree(ws)
     shutil.copytree(FIXTURE, ws)
     git = lambda *a: subprocess.run(["git", *a], cwd=ws, check=True, capture_output=True)
+    with open(os.path.join(ws, ".gitignore"), "w") as fh:
+        fh.write("__pycache__/\n")
     git("init", "-q")
     git("-c", "user.name=bench", "-c", "user.email=bench@example.com", "add", "-A")
     git("-c", "user.name=bench", "-c", "user.email=bench@example.com", "commit", "-q", "-m", "fixture")

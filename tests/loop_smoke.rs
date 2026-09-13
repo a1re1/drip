@@ -367,6 +367,46 @@ async fn plan_mode_auto_seeds_a_direct_task_for_a_small_goal() {
     assert!(bodies[0].to_string().contains("tests/test_ok.py"), "the first call already carries the task");
 }
 
+/// A declared anomaly whose own observed text reports success (exit 0, 0
+/// failures) does not end the run unreconciled: it becomes a task note and
+/// the run completes. Two real sessions had ended unreconciled on green work.
+#[tokio::test]
+async fn self_passing_anomalies_do_not_end_the_run_unreconciled() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"], "expectations":[{"subject":"suite result","expected":"all pass"}]})),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+        tool_call_response("v", "VERIFY", serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact fixture"}})),
+        tool_call_response("f", "finish_task", serde_json::json!({
+            "status":"unreconciled","summary":"done","confidence":"high","anchor":"none","anchorNote":"fixture",
+            "observations":[{"subject":"suite result","observed":"exit 0; 83 pass / 0 fail","matches":false}],
+            "anomalies":[{"subject":"suite result","expected":"all pass","observed":"exit 0; 83 pass / 0 fail","note":"test count drifted from the baseline"}]
+        })),
+        text_response("Artifact produced."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a measured artifact".into(),
+        plan_mode: Some("always".into()),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert!(result.state.anomalies.is_empty());
+    assert!(result.state.tasks[0].notes.iter().any(|note| note.starts_with("non-blocking anomaly")), "{:?}", result.state.tasks[0].notes);
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.detail.contains("did not block completion")));
+}
+
 /// The expectation gate end to end: an "external" anchor on a check that
 /// names the edited artifact is downgraded, a mismatched observation refuses
 /// `completed`, and `unreconciled` finishes the run with exit 0, the anomaly

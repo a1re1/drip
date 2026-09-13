@@ -5577,6 +5577,47 @@ impl HarnessRun {
 
         let start_iteration = self.start_iteration;
 
+        // Anomalies that do not block a completed run (informational ones,
+        // or whose expectation matched, or whose own text reports success)
+        // become notes: the run completes instead of ending unreconciled.
+        if core_state::is_goal_complete(&self.state) && !self.state.anomalies.is_empty() {
+            let blocking = self
+                .state
+                .anomalies
+                .iter()
+                .any(|anomaly| crate::harness::harness_tools::anomaly_blocks_completion(&self.state, anomaly));
+            if !blocking {
+                let notes: Vec<String> = self
+                    .state
+                    .anomalies
+                    .iter()
+                    .map(|anomaly| format!("non-blocking anomaly (informational, or its observation matched): {} — expected {}; observed {}", anomaly.subject, anomaly.expected, anomaly.observed))
+                    .collect();
+                // The note lands on the work task, not the review that covered it.
+                let target = self
+                    .state
+                    .tasks
+                    .iter()
+                    .rev()
+                    .find(|task| task.status == HarnessTaskStatus::Completed && task.review_of.is_none())
+                    .or_else(|| self.state.tasks.iter().rev().find(|task| task.status == HarnessTaskStatus::Completed))
+                    .map(|task| task.id.clone());
+                if let Some(task) = target.and_then(|id| core_state::get_task_by_id_mut(&mut self.state, &id)) {
+                    for note in &notes {
+                        core_state::append_task_note(task, note);
+                    }
+                }
+                let count = self.state.anomalies.len();
+                self.state.anomalies.clear();
+                self.emit(HarnessEvent {
+                    data: None,
+                    detail: format!("{count} anomaly(ies) did not block completion (informational, or their observation matched); kept as task notes"),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+            }
+        }
+
         let reason: HarnessRunReason = if self.run_error.is_some() {
             HarnessRunReason::Error
         } else if self.ask_user_awaiting {

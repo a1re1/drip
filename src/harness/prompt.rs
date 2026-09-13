@@ -22,14 +22,14 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " Prefer the project's declared commands (package.json scripts, Makefile targets) over improvised equivalents.",
     " When a check fails because of the runner or environment (wrong test command, missing global, unavailable module), fix the invocation — never edit product code to accommodate a different runner (no stubbing globals or modules to make tests run).",
     " If the goal is a question or asks for a status report and needs no workspace changes, answer it from the shared state (history, memory, task summaries) with the respond op instead of planning tasks — verify with tools first only if the answer is not already recorded.",
-    " If the task list is empty or exhausted, call plan_tasks to break the goal into small, concrete tasks for the other subagents.",
+    " If the task list is empty or exhausted, call plan_tasks with the fewest tasks that cover the goal: one task per coherent change even when it spans several files (a task loop holds dozens of rounds), split only where pieces are independent enough to be reviewed on their own or must wait on something. Every extra task costs a full loop of re-orientation plus its share of review.",
     " The todo list is shared and yours to keep truthful as you learn: drop_task removes tasks that are no longer needed, revise_task rewrites titles that no longer match reality, and plan_tasks with placement \"next\" inserts newly discovered prerequisite work before the remaining tasks.",
     " Make file edits with PATCH rather than shell in-place editing (sed -i, or inline scripts that rewrite files) — PATCH validates the edit, journals an undo entry, and reports an honest per-edit result; shell edits bypass all three.",
     " Checks are either correctness-class (compared against something the agent did not author — a pre-existing project test, a task-provided fixture, a published constant, or an invariant independent of the implementation) or consistency-class (compared only against the agent's own derivation); completion needs at least one correctness-class check or an explicit anchor=none declaration saying why no external anchor exists for the claim. Declare the anchor on every VERIFY call (anchor.kind external or self; a check that names a file you edited is downgraded to self), state your confidence (low, medium, high) on every finish_task, and when a revision changes a reported output, cite evidence outside the fix that the new value is closer to truth.",
     " When a goal produces a measurable output (a number, count, shape, sign, unit, latency, row count), register the expected value from the domain via plan_tasks.expectations BEFORE computing it, and treat a later mismatch as a defect in the model — finish with status unreconciled and record the anomaly rather than explaining the value away. Do not register process steps as expectations (a command's exit status, a merge or install outcome, a check passing): those are verified by running them, and an anomaly whose observation is green is not an anomaly.",
     " Verification economy: make the edits first, then run ONE correctness-class check — the goal's declared acceptance command or the project's own test runner — and finish_task as soon as it passes. Do not stack extra ad-hoc probes, subprocess scripts, or repeated VERIFY calls after the project suite passes on the final edit, and do not spend rounds on observe/remember for facts a passing check or your finish_task summary already records.",
     " Issue independent tool calls together in one round (several READ/GREP/BASH calls in the same reply) instead of one call per round: each round costs a full model turn, and reads that do not depend on each other never need to wait for one another.",
-    " Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
+    " Prefer few, complete tasks that one loop can finish over many small ones. Do not narrate; act through tool calls."
 );
 
 #[cfg(test)]
@@ -594,7 +594,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
         sections.push(task_sections.join("\n"));
     } else if state.tasks.is_empty() {
-        sections.push("instruction: No tasks exist yet. Break the goal into small, concrete tasks and call plan_tasks.".to_string());
+        sections.push("instruction: No tasks exist yet. Call plan_tasks with the fewest concrete tasks that cover the goal (usually one or two).".to_string());
     } else if state.tasks.iter().any(|task| task.status == crate::core::types::HarnessTaskStatus::Blocked) {
         sections.push(
             "instruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned. If a task waits on something only the operator can supply, re-block it with blockedOn: \"operator\" stating what is needed and stop — the run ends awaiting that input with the finished work intact; do not plan more search or workaround tasks for it.".to_string(),
@@ -724,7 +724,7 @@ pub fn build_cycle_continuation_message(state: &HarnessState, args: &CycleContin
     } else if args.current_task.is_some() {
         "instruction: Continue the current task from where the transcript leaves off. Call finish_task when it is done; persist partial findings with observe or remember.".to_string()
     } else {
-        "instruction: Continue planning. Call plan_tasks with small, concrete tasks for the goal.".to_string()
+        "instruction: Continue planning. Call plan_tasks with the fewest concrete tasks that cover the goal.".to_string()
     });
 
     sections.join("\n\n")

@@ -668,6 +668,62 @@ pub fn extract_bash_command(raw_input: &str) -> Option<String> {
     parsed.get("command").and_then(Value::as_str).map(str::to_string)
 }
 
+/// True when a BASH/VERIFY result says the command was killed at its timeout.
+pub fn output_reports_hang(tool_content: &str) -> bool {
+    tool_content.contains("TIMED OUT after") || tool_content.contains("HUNG: the command did not finish")
+}
+
+/// Consecutive runs of one command shape (no edit between) before the result
+/// carries a flailing nudge.
+pub const REPEATED_COMMAND_NUDGE_AT: u32 = 3;
+
+/// A command reduced to what it runs: leading `timeout N`, `2>&1`, trailing
+/// `| tail/head …` and `; echo …` suffixes, and -v/-q verbosity flags are
+/// dropped, so `timeout 60 X -v 2>&1 | tail -50; echo "exit=$?"` and `X`
+/// count as the same shape.
+pub fn normalize_command_shape(command: &str) -> String {
+    let mut text = command.trim().to_string();
+    // `; echo …` / `; printf …` reporting suffix.
+    if let Some(index) = text.rfind("; echo ").or_else(|| text.rfind("; printf ")) {
+        text.truncate(index);
+    }
+    // Trailing `| tail …` / `| head …` filters (any number of them).
+    loop {
+        let Some(index) = text.rfind('|') else { break };
+        let tail = text[index + 1..].trim_start();
+        if tail.starts_with("tail") || tail.starts_with("head") {
+            text.truncate(index);
+        } else {
+            break;
+        }
+    }
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() > 2 && matches!(words[0], "timeout" | "gtimeout") && words[1].chars().all(|c| c.is_ascii_digit() || c == 's' || c == 'm') {
+        words.drain(0..2);
+    }
+    words.retain(|word| !matches!(*word, "2>&1" | "-v" | "-vv" | "-q" | "--verbose" | "--quiet"));
+    words.join(" ")
+}
+
+/// Appended to a BASH/VERIFY result once the same command shape has run
+/// `count` times in a row with no edit in between.
+pub fn repeated_command_nudge(count: u32) -> String {
+    format!(
+        "[harness] this command shape has now run {count} times in a row with no workspace edit in between — running it again will give the same result. If it hangs or times out, find the hanging piece (run one module or test at a time under `timeout 20`) and fix it; if it fails, read the failure and PATCH; if it passes, VERIFY it once and finish_task."
+    )
+}
+
+/// The result handed back instead of running a command that already hung
+/// this run: a hanging test or blocking command hangs the same way every
+/// time, and each re-run costs the full timeout (recorded runs spent three
+/// two-minute timeouts on one unchanged `unittest discover`).
+pub fn hung_command_refusal(tool_name: &str, command: &str) -> String {
+    format!(
+        "harness: not run — this exact {tool_name} command already hung and was killed at its timeout earlier in this run: {}\nRe-running it unchanged would hang again. Change the command: run a narrower target (one test module or -k pattern), fix the hang (a test that starts a server must shut it down; bind port 0; add socket timeouts), or wrap it in a shorter timeout (`timeout 30 …`).",
+        truncate_text(command, 200)
+    )
+}
+
 /// The nudge appended to a read-only result when a loop keeps reading without persisting.
 pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: i64) -> String {
     format!(
@@ -2175,6 +2231,10 @@ pub struct SolidStateHarnessOptions {
     /// Run-level MCP gate: `Some(empty)` = `--no-mcp` (no loop sees MCP tools); `Some(names)` =
     /// `--mcp` servers for loops whose role does not set `mcpServers`; `None` = roles decide.
     pub mcp_servers: Option<Vec<String>>,
+    /// Persisted per-model latency samples path (None = LATENCY_STORE_FILE under
+    /// the drip home). Tests point this at their temp dir so a run never reads
+    /// or writes the operator's real latency memory.
+    pub latency_store: Option<PathBuf>,
 }
 
 /// Bridge for the model caller's `onUsage` / `onRetryWait` / `getIteration`
@@ -2222,6 +2282,12 @@ pub struct HarnessRun {
     pub stall_limit: i64,
     pub task_loop_limit: i64,
     pub review_waiver_lines: Option<usize>,
+    /// BASH/VERIFY command texts that hung (timed out) this run; an identical
+    /// re-run is refused instead of hanging again.
+    pub hung_commands: Vec<String>,
+    /// The last BASH/VERIFY command shape and how many times in a row it ran
+    /// with no workspace edit in between (see repeated_command_nudge).
+    pub repeated_command: Option<(String, u32)>,
     pub plan_mode: PlanMode,
     pub max_task_reopens: i64,
     pub system_prompt: String,
@@ -2739,10 +2805,10 @@ impl HarnessRun {
                 reasoning_effort: options.reasoning_effort.clone(),
                 request_timeout_ms: options.request_timeout_ms,
                 hedge_floor_ms: None,
-                latency_store: Some(
+                latency_store: Some(options.latency_store.clone().unwrap_or_else(|| {
                     PathBuf::from(crate::core::home::resolve_drip_home_root())
-                        .join(crate::harness::model_call::LATENCY_STORE_FILE),
-                ),
+                        .join(crate::harness::model_call::LATENCY_STORE_FILE)
+                })),
                 signal: options.signal.clone(),
                 sleep_impl: options.sleep_impl.clone(),
                 tool_route: options.tool_route.clone(),
@@ -2773,6 +2839,8 @@ impl HarnessRun {
             stall_limit,
             task_loop_limit,
             review_waiver_lines,
+            hung_commands: Vec::new(),
+            repeated_command: None,
             plan_mode,
             max_task_reopens,
             system_prompt,
@@ -3201,6 +3269,8 @@ impl HarnessRun {
                 .or_else(|| {
                     (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
                         .then(|| extract_bash_command(&raw_input)).flatten()
+                        // An echoed marker is not a check that ran (see parse_verify_output).
+                        .filter(|command| !crate::tools::builtin::verify::marker_is_fabricated(command))
                 });
             if let Some(verification_command) = verification_command.clone() {
                 let truncated_command = truncate_text(&verification_command, 200);
@@ -3578,6 +3648,17 @@ impl HarnessRun {
                 ),
             };
         }
+        let command = matches!(tool_name, "BASH" | "VERIFY").then(|| extract_bash_command(raw_input)).flatten();
+        if let Some(command) = command.as_deref().filter(|command| self.hung_commands.iter().any(|hung| hung == command)) {
+            let text = hung_command_refusal(tool_name, command);
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                detail: format!("refused re-run of a hung {tool_name} command: {}", truncate_text(command, 120)),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+            return WorkspaceToolExecution { dispatched: false, failed: true, tool_content: text };
+        }
         let dispatched = tool.is_some();
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
@@ -3605,7 +3686,28 @@ impl HarnessRun {
             .any(|block| matches!(block, ChatMessageBlock::ToolCall(block) if block.status == ToolCallStatus::Failed));
         // The one choke point every consumer shares: context injection,
         // telemetry, transcript events, and the NDJSON stream all read this.
-        let tool_content = (self.redact)(&executed.tool_content);
+        let mut tool_content = (self.redact)(&executed.tool_content);
+        if let Some(command) = command.as_ref().filter(|_| failed && output_reports_hang(&tool_content)) {
+            self.hung_commands.push(command.clone());
+        }
+        // Flailing detector: the same command shape run again and again with
+        // nothing edited in between is not going to change its result.
+        if tool_name == "PATCH" {
+            // An edit may have fixed the hang: both memories reset.
+            self.repeated_command = None;
+            self.hung_commands.clear();
+        } else if let Some(command) = command.as_deref() {
+            let shape = normalize_command_shape(command);
+            let count = match self.repeated_command.take() {
+                Some((last, count)) if last == shape => count + 1,
+                _ => 1,
+            };
+            self.repeated_command = Some((shape, count));
+            if count >= REPEATED_COMMAND_NUDGE_AT {
+                tool_content.push_str("\n\n");
+                tool_content.push_str(&repeated_command_nudge(count));
+            }
+        }
         self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
         // drip-specific: memory-bank writes (remember/forget) get their own
         // event, but harness ops dispatch in dispatch_tool_calls and never
@@ -6687,6 +6789,70 @@ mod role_inference_tests {
         HarnessRun::new(options).await.unwrap()
     }
 
+
+    #[test]
+    fn command_shape_ignores_timeout_wrappers_filters_and_verbosity() {
+        let base = "python3 -m unittest discover -s tests";
+        for variant in [
+            "python3 -m unittest discover -s tests -q 2>&1 | tail -20",
+            "timeout 60 python3 -m unittest discover -s tests -v 2>&1 | tail -50; echo \"exit=$?\"",
+            "timeout 90s python3 -m unittest discover -s tests 2>&1 | tail -60 | head -5",
+        ] {
+            assert_eq!(normalize_command_shape(variant), base, "{variant}");
+        }
+        assert_ne!(normalize_command_shape("python3 -m unittest tests.test_server"), base);
+    }
+
+    #[tokio::test]
+    async fn repeated_command_shape_gets_a_nudge_until_an_edit_resets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            ..SolidStateHarnessOptions::default()
+        };
+        let mut run = HarnessRun::new(options).await.unwrap();
+        let first = run.execute_workspace_tool("c1", r#"{"command":"false 2>&1 | tail -3"}"#, None, "BASH");
+        let second = run.execute_workspace_tool("c2", r#"{"command":"timeout 5 false -v"}"#, None, "BASH");
+        assert!(!first.tool_content.contains("[harness] this command shape") && !second.tool_content.contains("[harness] this command shape"));
+        let third = run.execute_workspace_tool("c3", r#"{"command":"false; echo \"exit=$?\""}"#, None, "BASH");
+        assert!(third.tool_content.contains("has now run 3 times in a row"), "{}", third.tool_content);
+        std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+        let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        let after_edit = run.execute_workspace_tool("c5", r#"{"command":"false"}"#, None, "BASH");
+        assert!(!after_edit.tool_content.contains("[harness] this command shape"), "{}", after_edit.tool_content);
+    }
+
+    #[tokio::test]
+    async fn hung_command_is_refused_on_an_identical_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            ..SolidStateHarnessOptions::default()
+        };
+        let mut run = HarnessRun::new(options).await.unwrap();
+        // A BASH that hits its timeout is remembered as hung …
+        let hung = run.execute_workspace_tool("c1", r#"{"command":"sleep 5","timeoutMs":1000}"#, None, "BASH");
+        assert!(hung.failed, "{}", hung.tool_content);
+        assert!(output_reports_hang(&hung.tool_content), "{}", hung.tool_content);
+        assert_eq!(run.hung_commands, vec!["sleep 5".to_string()]);
+        // … and the identical command is refused without running.
+        let again = run.execute_workspace_tool("c2", r#"{"command":"sleep 5","timeoutMs":1000}"#, None, "BASH");
+        assert!(!again.dispatched && again.failed);
+        assert!(again.tool_content.contains("already hung"), "{}", again.tool_content);
+        // A changed command runs normally.
+        let changed = run.execute_workspace_tool("c3", r#"{"command":"timeout 1 sleep 5; true"}"#, None, "BASH");
+        assert!(changed.dispatched, "{}", changed.tool_content);
+        // After an edit the fix may have landed: the original command runs again.
+        std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+        let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        assert!(run.hung_commands.is_empty());
+    }
 
     fn usage(completion: i64) -> Option<crate::harness::model_call::OpenAICompatibleResponseUsage> {
         Some(crate::harness::model_call::OpenAICompatibleResponseUsage {

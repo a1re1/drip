@@ -1199,6 +1199,16 @@ the base bound); a call that blows that bound is retried at once and the retry
 gets the full bound, so a stalled upstream costs about a minute rather than
 four while a legitimately long completion still lands.
 
+The latency tail is hedged as well. Across two twelve-run benches, calls over
+15s were 55% of all inference time while the median call took 2s, and those
+slow calls produced 3-14 tokens/s against the usual 59: queueing, not
+generation. So once a model has three completed calls, a first attempt that
+runs past four times its median latency (never under 8s) is raced against a
+second identical request; the first answer wins and the other is dropped.
+The `hedged model request` event marks each race; the duplicate is billed but
+only the winner's usage is recorded. One-shot helper calls (session names,
+terminal titles, bash distillation) do not hedge.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

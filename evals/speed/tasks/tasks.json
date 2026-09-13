@@ -34,5 +34,11 @@
     "size": "XL",
     "goal": "Add an HTTP API to kvstore. Create kvstore/server.py exposing make_server(store, host, port) that returns a standard-library http.server.ThreadingHTTPServer (so .serve_forever(), .shutdown(), .server_close() and .server_address work) serving JSON: GET /keys (optional ?prefix=) returns a JSON array of keys; GET /kv/<key> returns {\"key\": ..., \"value\": ...} or 404 with {\"error\": \"not found\"}; PUT /kv/<key> with a JSON body {\"value\": ...} stores it and returns {\"ok\": true} (400 with {\"error\": ...} if the body is not a JSON object with a \"value\" key); DELETE /kv/<key> returns {\"deleted\": true|false}; any other path is 404 with {\"error\": \"not found\"}. All responses are application/json. Add a `serve` subcommand to kvstore/cli.py (--host default 127.0.0.1, --port default 8080) that runs the server until interrupted. Add tests in tests/test_server.py that start the server on port 0 in a thread and exercise every endpoint with urllib; every test must bind port 0 (never a fixed port such as 8080, other test runs share this machine). Run `python3 -m unittest discover -s tests -q` to confirm everything passes.",
     "hidden": "http_serve_test.py"
+  },
+  {
+    "id": "big-file",
+    "size": "M",
+    "goal": "kvstore/textutil.py is a large module of text helpers. truncate_middle(text, width) in it is documented as returning exactly `width` characters, but for even widths it returns width+1 (truncate_middle('abcdefghij', 6) gives 'abc…hij', 7 chars). Fix it so the result is always exactly `width` characters with the ellipsis in the middle; when the two halves cannot be equal, the left half is the longer one (width 6 → 'abc…ij'). Do not change any other function. Add a unit test in tests/test_textutil.py covering odd and even widths. Run `python3 -m unittest discover -s tests -q` to confirm everything passes.",
+    "hidden": "big_file_test.py"
   }
 ]

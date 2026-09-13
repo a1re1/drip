@@ -707,6 +707,26 @@ pub fn covering_external_record<'a>(
     })
 }
 
+/// Does `name` refer to `expectation`? Exact id or subject (case-insensitive),
+/// or the shapes small models produce: "e2: subject", "e2 (subject)", or the
+/// subject with extra words around it.
+pub fn expectation_named(expectation: &crate::core::types::HarnessExpectation, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    if name.eq_ignore_ascii_case(&expectation.id) || name.eq_ignore_ascii_case(&expectation.subject) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    let id = expectation.id.to_ascii_lowercase();
+    if lower.starts_with(&id) && lower[id.len()..].starts_with(|c: char| c == ':' || c == ' ' || c == '(' || c == '-' || c == '—') {
+        return true;
+    }
+    let subject = expectation.subject.trim().to_ascii_lowercase();
+    subject.len() >= 8 && lower.contains(&subject)
+}
+
 /// A harness-minted support-gap anomaly (an unsupported value revision), as
 /// opposed to a mismatch the model declared on purpose.
 pub fn is_support_gap(anomaly: &crate::core::types::HarnessAnomaly) -> bool {
@@ -945,10 +965,7 @@ pub fn record_observations_with_watermark(
     for observation in observations {
         let Some(index) = expectations
             .iter()
-            .position(|expectation| {
-                expectation.subject.eq_ignore_ascii_case(&observation.subject)
-                    || expectation.id == observation.subject
-            })
+            .position(|expectation| expectation_named(expectation, &observation.subject))
         else {
             return Err(format!(
                 "observation names '{}', which is not a registered expectation; register it with plan_tasks.expectations first (registered: {})",
@@ -1220,6 +1237,92 @@ pub struct HarnessToolResult {
 /// is done) and sends the original back to the queue, or blocks it once its
 /// review-round budget is exhausted so the run escalates to the user instead
 /// of ping-ponging forever.
+/// Spawn the one review task that covers every completed task awaiting
+/// review, if any. Returns the review task id and the covered task ids.
+/// The review task's review_of points at the most recently finished task
+/// (the rework target on rejection); the others are named in its title and
+/// notes so the reviewer verifies all of them.
+pub fn spawn_deferred_review(
+    state: &mut crate::core::types::HarnessState,
+    gate: &HarnessRoleGate,
+) -> Option<(String, String)> {
+    use crate::core::types::HarnessTaskStatus;
+    let awaiting: Vec<(String, String, String, Vec<String>)> = state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Completed && task.awaiting_review_by.is_some())
+        .map(|task| {
+            (
+                task.id.clone(),
+                task.title.clone(),
+                task.awaiting_review_by.clone().unwrap_or_default(),
+                task.footprint.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let (last_id, _, verifier, _) = awaiting.last()?.clone();
+    if !gate.roles.contains_key(&verifier) {
+        for task in state.tasks.iter_mut() {
+            task.awaiting_review_by = None;
+        }
+        return None;
+    }
+    let ids: Vec<&str> = awaiting.iter().map(|(id, _, _, _)| id.as_str()).collect();
+    let covered = ids.join(", ");
+    let title = if awaiting.len() == 1 {
+        let (id, task_title, _, _) = &awaiting[0];
+        format!(
+            "Review {id} (\"{task_title}\"): independently verify the completed work with your own tools, then finish_task completed to confirm it, or blocked with what is wrong to send it back."
+        )
+    } else {
+        let titles = awaiting
+            .iter()
+            .map(|(id, task_title, _, _)| format!("{id} (\"{}\")", crate::harness::telemetry::truncate_text(task_title, 80)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Review {covered} as one change — {titles}: independently verify all of the completed work with your own tools, then finish_task completed to confirm it, or blocked naming which task is wrong to send it back."
+        )
+    };
+    let entries = vec![core_state::HarnessTaskInput {
+        depends_on: None,
+        review_of: Some(last_id.clone()),
+        role: Some(verifier.clone()),
+        title,
+    }];
+    let added = core_state::add_tasks(state, entries, core_state::HarnessTaskPlacement::Next);
+    let review_task_id = added.first().map(|task| task.id.clone()).unwrap_or_default();
+    let blind = gate.roles.get(&verifier).is_some_and(|spec| spec.blind);
+    if !blind {
+        let notes: Vec<String> = awaiting
+            .iter()
+            .filter(|(_, _, _, footprint)| !footprint.is_empty())
+            .map(|(id, _, _, footprint)| format!("{id}: {}", footprint.join("; ")))
+            .collect();
+        if !notes.is_empty() {
+            if let Some(review_task) = core_state::get_task_by_id_mut(state, &review_task_id) {
+                crate::core::state::append_task_note(
+                    review_task,
+                    &format!("author evidence (harness-recorded): {}", notes.join(" | ")),
+                );
+            }
+        }
+    }
+    for task in state.tasks.iter_mut() {
+        task.awaiting_review_by = None;
+    }
+    Some((review_task_id, covered))
+}
+
+/// True while author work (a task that is not itself a review) is pending
+/// or in progress; a deferred review is due once this is false.
+pub fn author_work_remains(state: &crate::core::types::HarnessState) -> bool {
+    state.tasks.iter().any(|task| {
+        task.review_of.is_none()
+            && matches!(task.status, crate::core::types::HarnessTaskStatus::Pending | crate::core::types::HarnessTaskStatus::InProgress)
+    })
+}
+
 pub fn apply_review_verdict(
     state: &mut crate::core::types::HarnessState,
     review_task: &crate::core::types::HarnessTask,
@@ -2107,6 +2210,28 @@ pub fn apply_harness_op(
             // harness_tools::HarnessTaskInput -> core_state::HarnessTaskInput            // Operator review opt-out: reviewer work (title starting with
             // "Review" in any casing, or an explicit reviewer role) is refused
             // BEFORE any ledger mutation, so a batch is never partially added.
+            // With a verified_by chain active the harness schedules the one
+            // deferred review itself, so planner-authored review tasks would
+            // only duplicate it: they are dropped from the batch with a note.
+            let harness_reviews = ctx
+                .gate
+                .as_ref()
+                .is_some_and(|gate| gate.roles.values().any(|spec| spec.verified_by.is_some()));
+            let mut skipped_reviews: Vec<String> = Vec::new();
+            let entries: Vec<HarnessTaskInput> = if !ctx.review_opt_out && harness_reviews {
+                entries
+                    .into_iter()
+                    .filter(|entry| {
+                        let is_review = is_reviewer_task_title(&entry.title, entry.role.as_deref());
+                        if is_review {
+                            skipped_reviews.push(entry.title.trim().to_string());
+                        }
+                        !is_review
+                    })
+                    .collect()
+            } else {
+                entries
+            };
             if ctx.review_opt_out {
                 let blocked: Vec<String> = entries
                     .iter()
@@ -2146,7 +2271,14 @@ pub fn apply_harness_op(
 
             if added.is_empty() {
                 return HarnessOpOutcome {
-                    text: "No tasks were added. Provide a non-empty tasks array of task titles.".to_string(),
+                    text: if skipped_reviews.is_empty() {
+                        "No tasks were added. Provide a non-empty tasks array of task titles.".to_string()
+                    } else {
+                        format!(
+                            "No tasks were added: the harness schedules one review task itself once the author work is done, so reviewer work ({}) is not planned by hand. Plan only the author work.",
+                            skipped_reviews.join(", ")
+                        )
+                    },
                     state_changed: false,
                     task_finished: false,
                     ended_loop: false,
@@ -2179,9 +2311,18 @@ pub fn apply_harness_op(
                 .collect::<Vec<_>>()
                 .join("; ");
 
+            let skipped_review_note = if skipped_reviews.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Reviewer work ({}) was not added: the harness schedules one review task itself once the author work is done.",
+                    skipped_reviews.join(", ")
+                )
+            };
+
             HarnessOpOutcome {
                 text: format!(
-                    "Added {} task(s){}: {}.{}{}",
+                    "Added {} task(s){}: {}.{}{}{}",
                     added.len(),
                     if placement == core_state::HarnessTaskPlacement::Next {
                         " ahead of the pending queue"
@@ -2190,7 +2331,8 @@ pub fn apply_harness_op(
                     },
                     list,
                     unknown_role_note,
-                    expectation_note
+                    expectation_note,
+                    skipped_review_note
                 ),
                 state_changed: true,
                 task_finished: false,
@@ -2234,7 +2376,14 @@ pub fn apply_harness_op(
             // working finishes that loop
             let was_current_task = existing_status == crate::core::types::HarnessTaskStatus::InProgress;
 
-            let dropped_task = core_state::drop_task(state, &task_id, &reason);
+            let dropped_task = core_state::drop_task(state, &task_id, &reason).cloned();
+            // Dropping the last piece of author work makes a deferred
+            // review due: spawn it now so the goal cannot complete unreviewed.
+            if let Some(gate) = ctx.gate.as_ref() {
+                if dropped_task.is_some() && !ctx.review_opt_out && !author_work_remains(state) {
+                    spawn_deferred_review(state, gate);
+                }
+            }
 
             let Some(dropped_task) = dropped_task else {
                 return HarnessOpOutcome {
@@ -2826,17 +2975,16 @@ pub fn apply_harness_op(
                 // expectations whose own observations say the value matched.
                 // Those "anomalies" describe no mismatch, so they are dropped;
                 // with nothing left to reconcile the finish is a completion.
-                if status == FinishTaskStatus::Unreconciled && support_gaps.is_empty() {
+                if support_gaps.is_empty() {
                     let before = anomalies.len();
                     anomalies.retain(|anomaly| {
                         !staged.iter().any(|expectation| {
-                            (expectation.subject.eq_ignore_ascii_case(&anomaly.subject)
-                                || expectation.id.eq_ignore_ascii_case(&anomaly.subject))
+                            expectation_named(expectation, &anomaly.subject)
                                 && expectation.observations.last().is_some_and(|observation| observation.matches)
                         })
                     });
                     let dropped = before - anomalies.len();
-                    if dropped > 0 && anomalies.is_empty() {
+                    if dropped > 0 && anomalies.is_empty() && status == FinishTaskStatus::Unreconciled {
                         status = FinishTaskStatus::Completed;
                         normalized_note = format!(
                             " ({dropped} declared anomaly(ies) named expectations whose observations match, so nothing is unreconciled; recorded as completed.)"
@@ -2860,7 +3008,7 @@ pub fn apply_harness_op(
                 FinishTaskStatus::Completed | FinishTaskStatus::Unreconciled => HarnessTaskStatus::Completed,
                 FinishTaskStatus::Blocked => HarnessTaskStatus::Blocked,
             };
-            let (finished_id, finished_title, finished_role, finished_status_label) =
+            let (finished_id, _finished_title, finished_role, finished_status_label) =
                 match core_state::finish_task(
                     state,
                     core_state::HarnessFinishArgs {
@@ -2916,51 +3064,32 @@ pub fn apply_harness_op(
 
                     if let Some(verifier) = verifier {
                         if gate.roles.contains_key(&verifier) && !has_open_review {
-                            let entries = vec![core_state::HarnessTaskInput {
-                                depends_on: None,
-                                review_of: Some(finished_id.clone()),
-                                role: Some(verifier.clone()),
-                                title: format!(
-                                    "Review {finished_id} (\"{finished_title}\"): independently verify the completed work with your own tools, then finish_task completed to confirm it, or blocked with what is wrong to send it back."
-                                ),
-                            }];
-                            let added = core_state::add_tasks(
-                                state,
-                                entries,
-                                core_state::HarnessTaskPlacement::Next,
-                            );
-                            let review_task_id = added
-                                .first()
-                                .map(|task| task.id.clone())
-                                .unwrap_or_default();
-
-                            // The reviewer starts a fresh transcript: hand
-                            // over the author's recorded footprint so
-                            // verification starts from the actual changes,
-                            // not a re-derivation of them.
-                            // A blind reviewer sees the goal and the artifact,
-                            // not the derivation: independence bought by
-                            // construction, where a prompt could only ask for it.
-                            let blind = gate.roles.get(&verifier).is_some_and(|spec| spec.blind);
-                            let footprint = if blind { Vec::new() } else { target_footprint.unwrap_or_default() };
-                            if !footprint.is_empty() {
-                                if let Some(review_task) =
-                                    core_state::get_task_by_id_mut(state, &review_task_id)
-                                {
-                                    crate::core::state::append_task_note(
-                                        review_task,
-                                        &format!(
-                                            "author evidence (harness-recorded): {}",
-                                            footprint.join("; ")
-                                        ),
-                                    );
-                                }
+                            // Deferred review: the task is marked as awaiting
+                            // review and one review task is spawned only once
+                            // no other author work remains, so a run with N
+                            // tasks pays for one reviewer loop instead of N.
+                            if let Some(task) = core_state::get_task_by_id_mut(state, &finished_id) {
+                                task.awaiting_review_by = Some(verifier.clone());
                             }
-
+                            if author_work_remains(state) {
+                                return HarnessOpOutcome {
+                                    text: format!(
+                                        "Task {finished_id} marked completed. Its review is deferred: one review task under role {verifier} will cover every finished task once the remaining work is done."
+                                    ),
+                                    state_changed: true,
+                                    task_finished: ends_loop,
+                                    ended_loop: ends_loop,
+                                    direct_response: None,
+                                };
+                            }
+                            let spawned = spawn_deferred_review(state, gate);
                             return HarnessOpOutcome {
-                                text: format!(
-                                    "Task {finished_id} marked completed. Review task {review_task_id} (role {verifier}) was created — the goal cannot complete until the review confirms the work."
-                                ),
+                                text: match spawned {
+                                    Some((review_task_id, covered)) => format!(
+                                        "Task {finished_id} marked completed. Review task {review_task_id} (role {verifier}) was created covering {covered} — the goal cannot complete until the review confirms the work."
+                                    ),
+                                    None => format!("Task {finished_id} marked completed."),
+                                },
                                 state_changed: true,
                                 task_finished: ends_loop,
                                 ended_loop: ends_loop,
@@ -3584,6 +3713,42 @@ mod apply_harness_op_tests {
         assert!(confused.text.contains("nothing is unreconciled"), "{}", confused.text);
         assert!(state.anomalies.is_empty(), "{:?}", state.anomalies);
         assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
+    /// Observations and anomalies name expectations the way small models
+    /// write them: by id, by subject, "id: subject", "id (subject)", or the
+    /// subject inside a longer phrase.
+    #[test]
+    fn expectations_are_matched_by_id_prefix_and_subject_substring() {
+        let expectation = crate::core::types::HarnessExpectation {
+            id: "e2".into(),
+            subject: "Palette follow-up final test gate".into(),
+            expected: "green".into(),
+            registered_at_iteration: 1,
+            observations: Vec::new(),
+        };
+        for name in ["e2", "E2", "e2: Palette follow-up final test gate", "e2 (Palette follow-up final test gate)", "palette follow-up final test gate", "the Palette follow-up final test gate after rerun"] {
+            assert!(expectation_named(&expectation, name), "{name}");
+        }
+        for name in ["e21", "e1", "final test", ""] {
+            assert!(!expectation_named(&expectation, name), "{name}");
+        }
+    }
+
+    /// A completed finish that lists an "anomaly" for an expectation it
+    /// observed as matching records no anomaly: the run stays completed.
+    #[test]
+    fn completed_with_matching_declared_anomalies_records_none() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let finished = finish(
+            &mut state,
+            &ctx,
+            r#"{"status":"completed","summary":"done","observations":[{"subject":"total","observed":"100","matches":true}],"anomalies":[{"subject":"total","expected":"about 100","observed":"100","note":"recording the observation"}]}"#,
+        );
+        assert!(finished.task_finished, "{}", finished.text);
+        assert!(state.anomalies.is_empty(), "{:?}", state.anomalies);
     }
 
     /// A mismatch the author declared on purpose stays on record, and the
@@ -5261,6 +5426,101 @@ mod review_opt_out_enforcement_tests {
             "no verified_by review task may be spawned under opt-out"
         );
         assert!(state.tasks.iter().all(|task| task.review_of.is_none()));
+    }
+
+    /// With several author tasks the review is deferred: finishing the
+    /// first marks it awaiting review and spawns nothing; finishing the last
+    /// spawns one review task that covers both, with review_of on the last
+    /// and both footprints in its note.
+    #[test]
+    fn deferred_review_covers_every_finished_task_in_one_review_loop() {
+        let mut state = create_harness_state("gate-on goal");
+        apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Record the parser notes", "role": "author"}, {"title": "Record the printer notes", "role": "author"}]}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        let finish_raw = |id: &str| format!(r#"{{"status": "completed", "summary": "done", "taskId": "{id}", "anchor": "none", "anchorNote": "fixture: no external anchor"}}"#);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[0].footprint = Some(vec!["read parser.rs".into()]);
+        let first = apply_harness_op(&mut state, parse_op("finish_task", &finish_raw("task-1")), &review_gate_ctx(false));
+        assert!(first.task_finished, "{}", first.text);
+        assert!(first.text.contains("review is deferred"), "{}", first.text);
+        assert_eq!(state.tasks.len(), 2, "no review task yet: {:?}", state.tasks.iter().map(|t| &t.title).collect::<Vec<_>>());
+        assert_eq!(state.tasks[0].awaiting_review_by.as_deref(), Some("reviewer"));
+
+        state.tasks[1].status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks[1].footprint = Some(vec!["read printer.rs".into()]);
+        let last = apply_harness_op(&mut state, parse_op("finish_task", &finish_raw("task-2")), &review_gate_ctx(false));
+        assert!(last.task_finished, "{}", last.text);
+        assert!(last.text.contains("covering task-1, task-2"), "{}", last.text);
+        assert_eq!(state.tasks.len(), 3);
+        let review = &state.tasks[2];
+        assert_eq!(review.review_of.as_deref(), Some("task-2"));
+        assert_eq!(review.role.as_deref(), Some("reviewer"));
+        assert!(review.title.contains("task-1") && review.title.contains("task-2"), "{}", review.title);
+        assert!(review.notes.iter().any(|note| note.contains("task-1: read parser.rs") && note.contains("task-2: read printer.rs")), "{:?}", review.notes);
+        assert!(state.tasks.iter().all(|task| task.awaiting_review_by.is_none()));
+    }
+
+    /// Dropping the last piece of author work also makes the deferred
+    /// review due, so a finished-then-pruned plan cannot complete unreviewed.
+    #[test]
+    fn dropping_the_last_author_task_spawns_the_deferred_review() {
+        let mut state = create_harness_state("gate-on goal");
+        apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Record the parser notes", "role": "author"}, {"title": "Record the printer notes", "role": "author"}]}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let first = apply_harness_op(
+            &mut state,
+            parse_op("finish_task", r#"{"status": "completed", "summary": "done", "taskId": "task-1", "anchor": "none", "anchorNote": "fixture: no external anchor"}"#),
+            &review_gate_ctx(false),
+        );
+        assert!(first.text.contains("review is deferred"), "{}", first.text);
+        let dropped = apply_harness_op(
+            &mut state,
+            parse_op("drop_task", r#"{"taskId": "task-2", "reason": "not needed"}"#),
+            &review_gate_ctx(false),
+        );
+        assert!(dropped.state_changed, "{}", dropped.text);
+        let review = state.tasks.iter().find(|task| task.review_of.is_some()).expect("deferred review spawned on drop");
+        assert_eq!(review.review_of.as_deref(), Some("task-1"));
+        assert!(!crate::core::state::is_goal_complete(&state), "the pending review keeps the goal open");
+    }
+
+    /// With a verified_by chain the harness schedules the review itself, so
+    /// a planner-authored review task is dropped from the batch and named.
+    #[test]
+    fn planner_review_tasks_are_skipped_when_the_harness_reviews() {
+        let mut state = create_harness_state("gate-on goal");
+        let outcome = apply_harness_op(
+            &mut state,
+            parse_op(
+                "plan_tasks",
+                r#"{"tasks": [{"title": "Write the parser", "role": "author"}, {"title": "Review the parser change", "role": "reviewer"}]}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        assert!(outcome.state_changed, "{}", outcome.text);
+        assert_eq!(state.tasks.len(), 1, "{}", outcome.text);
+        assert!(outcome.text.contains("Reviewer work (Review the parser change) was not added"), "{}", outcome.text);
+        let only_review = apply_harness_op(
+            &mut state,
+            parse_op("plan_tasks", r#"{"tasks": [{"title": "Review task-1", "role": "reviewer"}]}"#),
+            &review_gate_ctx(false),
+        );
+        assert!(!only_review.state_changed);
+        assert!(only_review.text.contains("schedules one review task itself"), "{}", only_review.text);
+        assert_eq!(state.tasks.len(), 1);
     }
 
     #[test]

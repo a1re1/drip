@@ -125,6 +125,113 @@ fn message_text(message: &TransportRequestMessage) -> &str {
 /// covering at most `hot_tool_results` unfolded tool results and
 /// MAX_CARRYOVER_CHARS, with the loop's own user/system messages left out.
 /// Empty when the loop made no tool calls.
+#[cfg(test)]
+mod review_brief_tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@e").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// The brief diffs against the run-start HEAD (so a commit made during
+    /// the run stays visible), lists untracked files, and carries the run's
+    /// verification records.
+    #[test]
+    fn review_brief_shows_the_change_set_since_run_start() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        let cwd = dir.path().to_string_lossy().to_string();
+        let head = git_head(&cwd).expect("head");
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        git(dir.path(), &["commit", "-q", "-am", "during the run"]);
+        std::fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
+        let mut state = crate::core::state::create_harness_state("goal");
+        state.verifications = Some(vec![crate::core::types::HarnessVerificationRecord {
+            at_iteration: 2,
+            command: "python3 -m unittest -q".into(),
+            failed: false,
+            output_tail: "".into(),
+            ran_no_tests: None,
+            evidence: Some(crate::tools::builtin::verify::verification_evidence("python3 -m unittest -q", "Ran 5 tests\n\nOK")),
+            id: Some("v1".into()),
+        }]);
+        let brief = build_review_brief(&cwd, Some(&head), &state);
+        assert!(brief.starts_with(REVIEW_BRIEF_PREFIX), "{brief}");
+        assert!(brief.contains("+two"), "committed change is in the diff: {brief}");
+        assert!(brief.contains("untracked files") && brief.contains("new.txt"), "{brief}");
+        assert!(brief.contains("v1 passed — python3 -m unittest -q"), "{brief}");
+        let outside = build_review_brief(&std::env::temp_dir().to_string_lossy(), None, &state);
+        assert!(outside.contains("diff: none"), "{outside}");
+    }
+}
+
+pub const REVIEW_BRIEF_PREFIX: &str = "review brief (harness-captured)";
+/// Diff text kept in a review brief; the reviewer can READ a file for more.
+pub const REVIEW_BRIEF_MAX_DIFF_CHARS: usize = 16_000;
+
+fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn git_head(cwd: &str) -> Option<String> {
+    git_output(cwd, &["rev-parse", "HEAD"]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
+}
+
+/// The reviewer's opening note: the run's change set (diff against the
+/// run-start HEAD, plus untracked files) and its verification records.
+pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &HarnessState) -> String {
+    let mut sections = vec![REVIEW_BRIEF_PREFIX.to_string()];
+    let base = run_start_head.unwrap_or("HEAD");
+    if let Some(stat) = git_output(cwd, &["diff", "--stat", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
+        sections.push(format!("changed since run start ({}):\n{stat}", &base[..base.len().min(12)]));
+    }
+    if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
+        sections.push(format!("untracked files (READ them; not in the diff):\n{untracked}"));
+    }
+    match git_output(cwd, &["diff", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
+        Some(diff) if diff.chars().count() <= REVIEW_BRIEF_MAX_DIFF_CHARS => sections.push(format!("diff:\n{diff}")),
+        Some(diff) => sections.push(format!(
+            "diff (first {REVIEW_BRIEF_MAX_DIFF_CHARS} chars; READ the files for the rest):\n{}",
+            diff.chars().take(REVIEW_BRIEF_MAX_DIFF_CHARS).collect::<String>()
+        )),
+        None => sections.push("diff: none (no git repository, or nothing changed since run start)".to_string()),
+    }
+    let records: Vec<String> = state
+        .verifications
+        .iter()
+        .flatten()
+        .rev()
+        .take(6)
+        .map(|record| {
+            format!(
+                "{} {} — {}{}",
+                record.id.as_deref().unwrap_or("v?"),
+                if record.failed { "FAILED" } else { "passed" },
+                truncate_text(&record.command, 120),
+                crate::core::state::describe_verification_evidence(record.evidence.as_ref())
+            )
+        })
+        .collect();
+    if !records.is_empty() {
+        sections.push(format!("verification records this run (newest first):\n{}", records.join("\n")));
+    }
+    sections.push("Judge the diff against the goal and the task contracts. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it.".to_string());
+    sections.join("\n\n")
+}
+
 pub fn extract_loop_carryover(messages: &[TransportRequestMessage], hot_tool_results: usize) -> Vec<TransportRequestMessage> {
     // Blocks: an assistant message plus every tool result that follows it.
     let mut blocks: Vec<Vec<&TransportRequestMessage>> = Vec::new();
@@ -1751,6 +1858,10 @@ pub struct HarnessRun {
     pub url: String,
     pub model: String,
     pub cwd: String,
+    /// `git rev-parse HEAD` at run start (None outside a git repo): the base
+    /// the reviewer's brief is diffed against, so the review sees the run's
+    /// whole change set even when the author committed along the way.
+    pub run_start_head: Option<String>,
     /// `Number.POSITIVE_INFINITY` when unset → `i64::MAX`.
     pub max_iterations: i64,
     /// `i64::MAX` when unset.
@@ -1999,6 +2110,32 @@ impl HarnessRun {
     /// Resolve options into run-scoped config, load or create the state,
     /// build the role map / harness tool specs / transport tools, and create
     /// the model caller.
+    /// A deferred review becomes due when no author work remains (the last
+    /// task finished, was dropped by the model, or was dropped as exhausted
+    /// by stall recovery): spawn the one review task covering everything
+    /// that awaits review before the completion check can see a finished
+    /// ledger.
+    fn spawn_due_deferred_review(&mut self) {
+        if self.state.review_opt_out.unwrap_or(false) {
+            return;
+        }
+        let Some(gate) = self.role_gate.clone() else { return };
+        if crate::harness::harness_tools::author_work_remains(&self.state)
+            || !self.state.tasks.iter().any(|task| task.awaiting_review_by.is_some())
+        {
+            return;
+        }
+        if let Some((review_task_id, covered)) = crate::harness::harness_tools::spawn_deferred_review(&mut self.state, &gate) {
+            self.emit(HarnessEvent {
+                data: None,
+                detail: format!("deferred review {review_task_id} spawned covering {covered}"),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+            self.persist();
+        }
+    }
+
     pub async fn new(mut options: SolidStateHarnessOptions) -> Result<HarnessRun, String> {
         let now: NowFn = options.now.clone().unwrap_or_else(|| Arc::new(chrono::Utc::now));
         let emit_fn: EmitFn = options.on_event.clone().unwrap_or_else(|| Arc::new(|_event| {}));
@@ -2036,6 +2173,7 @@ impl HarnessRun {
         });
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
         let max_loops = options.max_loops.unwrap_or(i64::MAX);
+        let run_start_head = git_head(&cwd);
 
         // DEFAULT_LOOP_CONFIG overlaid with options.loop; maxToolRoundsPerCycle
         // falls back to maxToolRoundsPerIteration when the loop block does not
@@ -2230,6 +2368,7 @@ impl HarnessRun {
             now,
             emit_fn,
             run_started_at_ms,
+            run_start_head,
             abort_requested_at_ms: None,
             run_usage,
             redact,
@@ -2863,6 +3002,7 @@ impl HarnessRun {
                 break;
             }
 
+            self.spawn_due_deferred_review();
             if core_state::is_goal_complete(&self.state) {
                 break;
             }
@@ -3021,6 +3161,19 @@ impl HarnessRun {
                     task.status = HarnessTaskStatus::InProgress;
                 }
                 task.activations = Some(task.activations.unwrap_or(0) + 1);
+            }
+            // A review loop opens with the change set in hand: the diff since
+            // run start plus the run's verification records, so the reviewer
+            // judges the artifact instead of spending rounds re-reading files
+            // and re-running checks the author already ran.
+            let wants_brief = core_state::get_task_by_id(&self.state, task_id).is_some_and(|task| {
+                task.review_of.is_some() && !task.notes.iter().any(|note| note.starts_with(REVIEW_BRIEF_PREFIX))
+            });
+            if wants_brief {
+                let brief = build_review_brief(&self.cwd, self.run_start_head.as_deref(), &self.state);
+                if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, task_id) {
+                    crate::core::state::append_task_note(task, &brief);
+                }
             }
         }
 
@@ -5100,6 +5253,17 @@ impl HarnessRun {
         }
 
         // Facts are best-effort; the summary still runs without them.
+        // A small completed run already has its summary: each finish_task
+        // carried one, and a reviewer confirmed it. Composing those beats a
+        // model call that restates them (typically 3-10s on a fast model,
+        // 5-10% of a one-task run).
+        if reason == HarnessRunReason::Completed && self.options.summarize_run.is_none() {
+            if let Some(text) = crate::harness::prompt::build_composed_run_summary(&self.state, 2) {
+                self.record_run_summary(reason, text);
+                return;
+            }
+        }
+
         let workspace_changes = self
             .options
             .collect_run_facts

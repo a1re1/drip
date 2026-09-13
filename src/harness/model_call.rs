@@ -47,6 +47,11 @@ pub const RATE_LIMIT_BACKOFF_SECONDS: [u64; 9] = [1, 1, 2, 3, 5, 8, 13, 21, 34];
 // long reasoning completion while still catching a stall well inside the
 // budget of a bounded child run such as a --review file reviewer.
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 240_000;
+/// Total wall-clock patience for one model call across unreachable /
+/// timed-out attempts. Ten 240s timeouts plus backoff once cost a run 40
+/// minutes on a single turn; past this bound the call fails and the run
+/// ends resumable instead of burning its budget on a dead endpoint.
+pub const MAX_UNREACHABLE_WALL_MS: u64 = 600_000;
 
 /// The request outgrew the model's context window — recoverable by folding.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1009,10 +1014,18 @@ impl ModelCaller {
             attempt: u32,
             max_attempts: u32,
             message: &str,
+            call_started_at: Instant,
         ) -> Result<(), ModelCallError> {
             if attempt >= max_attempts {
                 return Err(ModelCallError::Message(format!(
                     "The inference endpoint could not be reached after {max_attempts} attempts: {message}"
+                )));
+            }
+            let elapsed_ms = call_started_at.elapsed().as_millis() as u64;
+            if elapsed_ms >= MAX_UNREACHABLE_WALL_MS {
+                return Err(ModelCallError::Message(format!(
+                    "The inference endpoint could not be reached within {}s ({attempt} attempts): {message}",
+                    MAX_UNREACHABLE_WALL_MS / 1000
                 )));
             }
 
@@ -1093,7 +1106,7 @@ impl ModelCaller {
                         return Err(ModelCallError::Message(message));
                     }
 
-                    wait_out_unreachable(self, attempt, max_attempts, &message).await?;
+                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at).await?;
                     attempt += 1;
                     continue;
                 }
@@ -1104,6 +1117,7 @@ impl ModelCaller {
                         attempt,
                         max_attempts,
                         &request_timeout_message(self.request_timeout_ms),
+                        call_started_at,
                     )
                     .await?;
                     attempt += 1;

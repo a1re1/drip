@@ -822,6 +822,85 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
     ]
 }
 
+#[cfg(test)]
+mod composed_summary_tests {
+    use super::*;
+    use crate::core::state::create_harness_state;
+
+    fn task(id: &str, summary: Option<&str>, review_of: Option<&str>, status: HarnessTaskStatus) -> HarnessTask {
+        let mut task: HarnessTask = serde_json::from_value(serde_json::json!({
+            "activations": 1, "createdAtIteration": 0, "id": id, "notes": [], "stallCount": 0,
+            "status": "pending", "title": format!("do {id}")
+        }))
+        .unwrap();
+        task.status = status;
+        task.summary = summary.map(str::to_string);
+        task.review_of = review_of.map(str::to_string);
+        task
+    }
+
+    #[test]
+    fn small_completed_runs_compose_their_summary_from_task_summaries() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![
+            task("task-1", Some("fixed the offset"), None, HarnessTaskStatus::Completed),
+            task("task-2", Some("suite green, confirmed"), Some("task-1"), HarnessTaskStatus::Completed),
+        ];
+        let text = build_composed_run_summary(&state, 2).expect("composed");
+        assert!(text.starts_with("Completed 1 task(s), confirmed by 1 review(s)."), "{text}");
+        assert!(text.contains("task-1: do task-1 — fixed the offset"), "{text}");
+        assert!(text.contains("task-2 (review of task-1): suite green, confirmed"), "{text}");
+
+        // Too many author tasks, a missing summary, or open work: the model writes it.
+        state.tasks.push(task("task-3", Some("x"), None, HarnessTaskStatus::Completed));
+        state.tasks.push(task("task-4", Some("y"), None, HarnessTaskStatus::Completed));
+        assert!(build_composed_run_summary(&state, 2).is_none());
+        state.tasks.truncate(2);
+        state.tasks[0].summary = None;
+        assert!(build_composed_run_summary(&state, 2).is_none());
+        state.tasks[0].summary = Some("fixed".into());
+        state.tasks.push(task("task-5", None, None, HarnessTaskStatus::Pending));
+        assert!(build_composed_run_summary(&state, 2).is_none());
+    }
+}
+
+/// A run summary composed from the tasks' own finish_task summaries, for a
+/// completed run with at most `max_tasks` author tasks that each carry a
+/// non-empty summary. None when the run is bigger or a summary is missing,
+/// so the model-written summary still covers the runs that need one.
+pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Option<String> {
+    let completed: Vec<&HarnessTask> =
+        state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Completed).collect();
+    if completed.is_empty() || state.tasks.iter().any(|task| task.status != HarnessTaskStatus::Completed && task.status != HarnessTaskStatus::Dropped) {
+        return None;
+    }
+    let (reviews, authored): (Vec<&HarnessTask>, Vec<&HarnessTask>) =
+        completed.iter().partition(|task| task.review_of.is_some());
+    if authored.is_empty() || authored.len() > max_tasks {
+        return None;
+    }
+    if authored.iter().any(|task| task.summary.as_deref().map_or(true, |summary| summary.trim().is_empty())) {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "Completed {} task(s){}.",
+        authored.len(),
+        if reviews.is_empty() { String::new() } else { format!(", confirmed by {} review(s)", reviews.len()) }
+    )];
+    for task in &authored {
+        lines.push(format!("- {}: {} — {}", task.id, task.title, task.summary.as_deref().unwrap_or_default().trim()));
+    }
+    for review in &reviews {
+        if let Some(summary) = review.summary.as_deref().filter(|summary| !summary.trim().is_empty()) {
+            lines.push(format!("- {} (review of {}): {}", review.id, review.review_of.as_deref().unwrap_or_default(), summary.trim()));
+        }
+    }
+    if !state.anomalies.is_empty() {
+        return None;
+    }
+    Some(lines.join("\n"))
+}
+
 pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason) -> String {
     if state.tasks.is_empty() {
         return format!(

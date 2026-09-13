@@ -100,7 +100,7 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         ]);
         let result = run_solid_state_harness(SolidStateHarnessOptions {
             cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a verified artifact".into(),
-            max_iterations: Some(6), model: Some("mock".into()), url: Some(url),
+            max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
             tools,
             on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
             state_path: Some(dir.path().join("state.json")),
@@ -157,7 +157,7 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
     let state_path = dir.path().join("session").join("state.json");
     let result = run_solid_state_harness(SolidStateHarnessOptions {
         cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a measured artifact".into(),
-        max_iterations: Some(6), model: Some("mock".into()), url: Some(url),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
         tools: drip::tools::pack::builtin_tool_pack(Default::default()),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(state_path.clone()),
@@ -223,6 +223,7 @@ async fn plan_finish_summary_completes_the_run() {
         goal: "write the file".to_string(),
         max_iterations: Some(4),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(state_path.clone()),
         tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
@@ -307,6 +308,7 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
         goal: "do two things".to_string(),
         max_loops: Some(2),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         state_path: Some(temp.join("state.json")),
         tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
             cwd: Some(temp.clone()),
@@ -356,6 +358,7 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
         cwd: Some(temp.to_string_lossy().to_string()),
         goal: "restore the data".to_string(),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(state_path.clone()),
         tool_services: Some(services()),
@@ -380,6 +383,7 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
         goal: "restore the data".to_string(),
         initial_state: Some(result.state.clone()),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         state_path: Some(state_path.clone()),
         tool_services: Some(services()),
         url: Some(url_idle),
@@ -413,6 +417,7 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
         goal: "restore the data".to_string(),
         initial_state: Some(answered),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         state_path: Some(state_path),
         tool_services: Some(services()),
         url: Some(url_reply),
@@ -457,6 +462,7 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
         cwd: Some(temp.to_string_lossy().to_string()),
         goal: "fix the thing".to_string(),
         model: Some("mock".to_string()),
+        summarize_run: Some(true),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         role_bindings: Some(drip::harness::roles::HarnessRoleBindings {
             planning: Some("planner".to_string()),

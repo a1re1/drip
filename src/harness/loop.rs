@@ -792,6 +792,65 @@ pub fn is_writing_shell_command(command: &str) -> bool {
 }
 
 /// The BASH command text from a raw tool input, or None.
+/// Identical anomaly-family bounces of a finish before the harness re-applies
+/// it as unreconciled (see HarnessRun::auto_unreconcile_repeated_bounce).
+pub const FINISH_BOUNCE_AUTO_UNRECONCILE_AT: u32 = 2;
+
+/// The anomaly family a finish bounce belongs to, if any: only bounces whose
+/// remedy is "finish unreconciled with the anomalies" qualify. Evidence and
+/// verification bounces have a different remedy (run a check) and never do.
+pub fn finish_bounce_family(text: &str) -> Option<&'static str> {
+    if !text.starts_with("harness: not accepted yet") {
+        return None;
+    }
+    if text.contains("support-gap anomal") {
+        Some("support gap")
+    } else if text.contains("mismatched (expected") {
+        Some("expectation mismatch")
+    } else if text.contains("have no observation") {
+        Some("unobserved expectation")
+    } else {
+        None
+    }
+}
+
+/// The original finish_task input re-shaped as an unreconciled finish: the
+/// status flips, the summary carries the harness note, and the anomalies
+/// list is filled from the state's recorded anomalies plus every expectation
+/// whose latest observation mismatched or that was never observed.
+pub fn unreconciled_finish_input(raw_input: &str, state: &HarnessState, count: u32, bounce: &str) -> Option<String> {
+    let mut input: serde_json::Value = serde_json::from_str(raw_input).ok()?;
+    let object = input.as_object_mut()?;
+    let mut anomalies: Vec<serde_json::Value> = state
+        .anomalies
+        .iter()
+        .map(|anomaly| serde_json::json!({ "subject": anomaly.subject, "expected": anomaly.expected, "observed": anomaly.observed, "note": anomaly.note }))
+        .collect();
+    for expectation in &state.expectations {
+        let latest = expectation.observations.last();
+        let unresolved = latest.map_or(true, |observation| !observation.matches);
+        if unresolved && !anomalies.iter().any(|item| item.get("subject").and_then(|value| value.as_str()) == Some(expectation.subject.as_str())) {
+            anomalies.push(serde_json::json!({
+                "subject": expectation.subject,
+                "expected": expectation.expected,
+                "observed": latest.map(|observation| observation.observed.clone()).unwrap_or_else(|| "never observed".to_string()),
+                "note": format!("recorded by the harness after {count} identical finish bounces")
+            }));
+        }
+    }
+    if anomalies.is_empty() {
+        return None;
+    }
+    let summary = object.get("summary").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    object.insert("status".to_string(), serde_json::json!("unreconciled"));
+    object.insert("anomalies".to_string(), serde_json::json!(anomalies));
+    object.insert(
+        "summary".to_string(),
+        serde_json::json!(format!("{summary} [harness: finished unreconciled after {count} identical bounces — {}]", truncate_text(bounce, 160)).trim().to_string()),
+    );
+    Some(input.to_string())
+}
+
 /// A native runner run through BASH is the project suite whichever tool
 /// carried it: recorded runs ran `cargo test` via BASH, finished, were
 /// bounced for missing evidence, and re-ran the same suite as VERIFY. The
@@ -2676,6 +2735,9 @@ pub struct LoopScope {
     /// The harness ran the goal-declared check on the agent's behalf once
     /// this loop; a second bounce is the model's to handle.
     pub goal_check_used: bool,
+    /// Consecutive finish_task bounces of one anomaly family this loop
+    /// (family key, count); see auto_unreconcile_repeated_bounce.
+    pub finish_bounce: Option<(&'static str, u32)>,
     pub cycles_run: i64,
     pub digest_actions: Vec<String>,
 }
@@ -3783,6 +3845,67 @@ impl HarnessRun {
         Some((how, command))
     }
 
+    /// A finish bounced twice in a row for the same anomaly-family reason
+    /// (support gaps, an expectation mismatch, an unobserved expectation) is
+    /// re-applied as `unreconciled` with the anomalies on record: the bounce
+    /// text already tells the agent to do exactly that, and recorded runs
+    /// instead re-sent `completed` until the iteration cap. The run still
+    /// ends unreconciled — the state is visible, not hidden.
+    pub fn auto_unreconcile_repeated_bounce(
+        &mut self,
+        scope: &mut LoopScope,
+        tool_name: &str,
+        raw_input: &str,
+        op_context: &crate::harness::harness_tools::HarnessOpContext,
+        outcome: crate::harness::harness_tools::HarnessOpOutcome,
+    ) -> crate::harness::harness_tools::HarnessOpOutcome {
+        if tool_name != "finish_task" {
+            return outcome;
+        }
+        let Some(family) = finish_bounce_family(&outcome.text) else {
+            if outcome.task_finished || !outcome.text.starts_with("harness: not accepted yet") {
+                scope.finish_bounce = None;
+            }
+            return outcome;
+        };
+        let count = match scope.finish_bounce {
+            Some((seen, count)) if seen == family => count + 1,
+            _ => 1,
+        };
+        scope.finish_bounce = Some((family, count));
+        if count < FINISH_BOUNCE_AUTO_UNRECONCILE_AT {
+            return outcome;
+        }
+        let Some(input) = unreconciled_finish_input(raw_input, &self.state, count, &outcome.text) else {
+            return outcome;
+        };
+        let op = match parse_harness_op_with_gate(tool_name, &input, self.role_gate.as_ref()) {
+            Ok(op) => op,
+            Err(_) => return outcome,
+        };
+        let reapplied = apply_harness_op(&mut self.state, op, op_context);
+        if !reapplied.task_finished {
+            return outcome;
+        }
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+            detail: format!(
+                "finish auto-downgraded to unreconciled after {count} identical bounces ({family}) — the anomalies stay on record: {}",
+                truncate_text(&outcome.text, 160)
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.finish_bounce = None;
+        crate::harness::harness_tools::HarnessOpOutcome {
+            text: format!(
+                "{}\n[harness] this finish was re-applied as status=\"unreconciled\" after {count} identical bounces; the anomalies are recorded with the task.",
+                reapplied.text
+            ),
+            ..reapplied
+        }
+    }
+
     pub fn auto_reverify_stale_finish(
         &mut self,
         scope: &mut LoopScope,
@@ -4621,6 +4744,7 @@ impl HarnessRun {
             planned_and_yielded: false,
             plan_yield_requested: false,
             goal_check_used: false,
+            finish_bounce: None,
             cycles_run: 0,
             digest_actions: Vec::new(),
             progress_this_cycle: false,
@@ -5728,6 +5852,7 @@ impl HarnessRun {
                             scope.digest_actions.push("review waived: harness-verified small change".to_string());
                         }
                         let outcome = self.auto_reverify_stale_finish(scope, &tool_name, &raw_input, &call_id, &op_context, outcome);
+                        let outcome = self.auto_unreconcile_repeated_bounce(scope, &tool_name, &raw_input, &op_context, outcome);
                         // ask_user accepted: expose the survey as a question
                         // event (the blocking answers.jsonl wait and the
                         // awaiting-input timeout land with the lifecycle task).
@@ -7289,6 +7414,36 @@ mod role_inference_tests {
         run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
         run.state.mutations_since_verification = Some(1);
         assert!(run.verified_after_last_edit(None).is_none(), "an edit after the check unsettles it");
+    }
+
+    #[test]
+    fn repeated_anomaly_bounces_reshape_the_finish_as_unreconciled() {
+        assert_eq!(finish_bounce_family("harness: not accepted yet — 2 support-gap anomaly(ies) on record: x"), Some("support gap"));
+        assert_eq!(finish_bounce_family("harness: not accepted yet — unresolved support-gap anomalies prevent a clean review verdict"), Some("support gap"));
+        assert_eq!(finish_bounce_family("harness: not accepted yet — expectation 'exit' mismatched (expected 0, observed 1)"), Some("expectation mismatch"));
+        assert_eq!(finish_bounce_family("harness: not accepted yet — registered expectation(s) have no observation: e1"), Some("unobserved expectation"));
+        assert_eq!(finish_bounce_family("harness: not accepted yet — no correctness-class evidence"), None);
+        assert_eq!(finish_bounce_family("Task task-1 marked completed."), None);
+
+        let mut state = crate::core::state::create_harness_state("goal");
+        state.anomalies.push(crate::core::types::HarnessAnomaly { subject: "exit code".into(), expected: "0".into(), observed: "1".into(), note: "support gap: unsupported revision".into() });
+        state.expectations = vec![serde_json::from_value(serde_json::json!({
+            "id": "e2", "subject": "files changed", "expected": "two", "registeredAtIteration": 1,
+            "observations": [{"atIteration": 3, "observed": "three", "matches": false}]
+        })).unwrap()];
+        let raw = r#"{"status": "completed", "summary": "done", "taskId": "task-1"}"#;
+        let input = unreconciled_finish_input(raw, &state, 2, "harness: not accepted yet — expectation 'files changed' mismatched (expected two)").expect("reshaped");
+        let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(value["status"], "unreconciled");
+        assert_eq!(value["taskId"], "task-1");
+        assert!(value["summary"].as_str().unwrap().starts_with("done [harness: finished unreconciled after 2 identical bounces"), "{}", value["summary"]);
+        let anomalies = value["anomalies"].as_array().unwrap();
+        assert_eq!(anomalies.len(), 2, "{anomalies:?}");
+        assert_eq!(anomalies[1]["subject"], "files changed");
+        assert_eq!(anomalies[1]["observed"], "three");
+        // Nothing on record and nothing unresolved: no reshape.
+        let empty = crate::core::state::create_harness_state("goal");
+        assert!(unreconciled_finish_input(raw, &empty, 2, "x").is_none());
     }
 
     #[test]

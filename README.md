@@ -1315,6 +1315,14 @@ suite run through BASH instead of VERIFY is recorded as a verification too
 (the result text says `recorded as verification record v<n>`), so a finish
 after `cargo test` via BASH is not bounced into re-running it as VERIFY.
 
+A finish bounced twice in a row for the same anomaly-family reason (a
+support gap, an expectation mismatch, an unobserved expectation) is
+re-applied by the harness as `unreconciled` with the anomalies on record —
+the bounce text already asks for exactly that, and recorded runs instead
+re-sent `completed` until the iteration cap. The event `finish
+auto-downgraded to unreconciled` marks it; evidence bounces (run a check)
+are never downgraded this way.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

@@ -356,6 +356,13 @@ def print_summary_runs(label, rows):
           f"{s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7} {s.get('nudges', 0):>4}")
 
 
+def show_tasks(tasks):
+    """Print one line per task: id, size, and the first 80 characters of the goal."""
+    for t in tasks:
+        print(f"{t['id']:18} {t.get('size', ''):3} {t['goal'][:80]}")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", help="results label (results/<label>.json)")
@@ -369,9 +376,12 @@ def main(argv=None):
     ap.add_argument("--root", default=None, help="workspace root (default: temp dir)")
     ap.add_argument("--keep", action="store_true", help="keep workspaces after grading")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"), help="compare two labels and exit")
+    ap.add_argument("--show-tasks", action="store_true", help="print one line per task (id, size, goal excerpt) and exit")
     ap.add_argument("--show", metavar="LABEL", help="print a label's table and exit")
     ap.add_argument("--summary", metavar="LABEL", help="print per-task median/min/max summary for a label and exit")
     opts = ap.parse_args(argv)
+    if opts.show_tasks:
+        return show_tasks(load_tasks(opts.tasks))
     if opts.compare:
         return compare(*opts.compare)
     if opts.summary:

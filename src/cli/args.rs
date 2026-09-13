@@ -37,6 +37,8 @@ pub struct ParsedCliArgs {
     pub max_iterations: Option<i64>,
     /// --max-loops: cap on task loops (each is at least one model call).
     pub max_loops: Option<i64>,
+    /// --task-loop-limit: cap on task loop cycles per task (each is at least one model call).
+    pub task_loop_limit: Option<i64>,
     pub profile: Option<String>,
     pub resume: bool,
     pub resume_id: Option<String>,
@@ -209,6 +211,7 @@ impl Default for ParsedCliArgs {
             list: false,
             max_iterations: None,
             max_loops: None,
+            task_loop_limit: None,
             profile: None,
             resume: false,
             resume_id: None,
@@ -786,6 +789,19 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--task-loop-limit" => {
+                if let Some(raw) = take_required_value(argv, index, "--task-loop-limit", &mut parsed.errors) {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.task_loop_limit = Some(value),
+                        None => parsed.errors.push(format!(
+                            "--task-loop-limit needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
             "--marketplace-list" => {
                 parsed.marketplace_list = true;
             }
@@ -1328,6 +1344,22 @@ mod tests {
         );
         assert!(!parse(&["--max-loops", "abc"]).errors.is_empty());
         assert!(!parse(&["--max-loops"]).errors.is_empty());
+    }
+
+    #[test]
+    fn task_loop_limit_parses_a_positive_integer_and_rejects_the_rest() {
+        assert_eq!(
+            parse(&["do it", "--task-loop-limit", "3"]).task_loop_limit,
+            Some(3)
+        );
+        assert_eq!(parse(&["do it"]).task_loop_limit, None);
+        assert_eq!(
+            parse(&["--task-loop-limit", "0"]).errors,
+            vec!["--task-loop-limit needs a positive integer, got \"0\".".to_string()]
+        );
+        assert!(!parse(&["--task-loop-limit", "-2"]).errors.is_empty());
+        assert!(!parse(&["--task-loop-limit", "abc"]).errors.is_empty());
+        assert!(!parse(&["--task-loop-limit"]).errors.is_empty());
     }
 
     #[test]

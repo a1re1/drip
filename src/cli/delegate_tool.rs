@@ -133,6 +133,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     inference: wiring.inference.clone(),
                     max_iterations: Some(max_iterations),
                     max_loops: None,
+                    task_loop_limit: None,
                     mentions: None,
                     new_goal: false,
                     no_repo_memory: false,

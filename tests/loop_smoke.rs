@@ -85,7 +85,6 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
         let (url, server) = spawn_scripted_server(vec![
             tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"]})),
-            text_response("planned"),
             tool_call_response("w", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
             tool_call_response("v", "VERIFY", serde_json::json!({"command":"true"})),
             tool_call_response("f1", "finish_task", serde_json::json!({"status":"completed","summary":"done"})),
@@ -112,17 +111,187 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         server.join().unwrap();
         assert_eq!(result.reason, HarnessRunReason::Completed, "{route}");
         let records = result.state.verifications.as_ref().unwrap();
-        assert_eq!(records.len(), 3, "{route}");
+        // v1 the no-op check, v2 the assertion, v3 the harness's own re-run of
+        // the assertion after the corrupting write (it fails, so the stale
+        // finish is refused with the failure instead of a bare bounce), v4
+        // the fresh passing assertion.
+        assert_eq!(records.len(), 4, "{route}");
         assert!(!records[0].evidence.as_ref().unwrap().verifies_work());
         assert!(records[1].evidence.as_ref().unwrap().verifies_work());
         assert_eq!(records[1].evidence.as_ref().unwrap().executed, 1);
-        assert!(records[2].evidence.as_ref().unwrap().verifies_work());
-        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.contains("not accepted yet — this task edited")).count(), 3);
+        assert!(records[2].failed, "the harness re-run sees the corrupt artifact: {route}");
+        assert!(records[3].evidence.as_ref().unwrap().verifies_work());
+        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.contains("not accepted yet — this task edited")).count(), 2, "{route}");
+        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.starts_with("harness re-ran the last check after workspace edits")).count(), 1, "{route}");
         assert_eq!(std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(), "correct\n");
         let anchor = result.state.completion_anchor.as_ref().expect("completion anchor recorded");
         assert_eq!(anchor.kind, drip::core::types::CompletionAnchorKind::None, "{route}");
         assert_eq!(anchor.claimed_confidence, Some(drip::core::types::ClaimedConfidence::High), "{route}");
     }
+}
+
+/// A finish that bounces only because an edit landed after the last check
+/// is re-verified by the harness itself: the same assertion runs again,
+/// passes, and the finish is accepted in the same round — no extra model
+/// call, no bounce message for the model to act on.
+#[tokio::test]
+async fn stale_finish_is_reverified_by_the_harness_without_another_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"]})),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"draft\n"})),
+        tool_call_response("a", "VERIFY", serde_json::json!({"command":"true"})),
+        // Edit after the check, then finish: stale, so the harness re-runs
+        // the assertion itself and accepts the finish in this round.
+        tool_call_response("w2", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+        tool_call_response("a2", "VERIFY", serde_json::json!({"command":assertion})),
+        tool_call_response("w3", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"done","anchor":"none","anchorNote":"self-authored assertion only"})),
+        text_response("Artifact verified."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a verified artifact".into(),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let records = result.state.verifications.as_ref().unwrap();
+    assert_eq!(records.len(), 3, "true, the assertion, and the harness re-run of the assertion");
+    assert!(!records[2].failed);
+    assert_eq!(records[2].command, records[1].command);
+    let events = events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
+    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness re-ran the last check after workspace edits")).count(), 1);
+    assert!(events.iter().any(|event| event.detail.starts_with("finish_task: harness re-ran the last check after your edits")), "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.starts_with("finish_task")).collect::<Vec<_>>());
+}
+
+/// A finish with no check run at all: the harness runs the check the goal
+/// declares in backticks on the model's behalf, records it as an external
+/// (task-provided) anchor, and accepts the finish in the same round.
+#[tokio::test]
+async fn unchecked_finish_runs_the_goal_declared_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        text_response("Test added."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let records = result.state.verifications.as_ref().unwrap();
+    assert_eq!(records.len(), 1, "only the harness-run goal check");
+    assert!(!records[0].failed);
+    assert_eq!(records[0].command, "python3 -m unittest discover -s tests -q");
+    let anchor = records[0].evidence.as_ref().unwrap().anchor.clone().expect("anchor recorded");
+    assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::External);
+    let events = events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
+    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 1);
+}
+
+/// A stale finish whose last check cannot be re-run (the record keeps only a
+/// 200-char truncation) falls back to the goal-declared check.
+#[tokio::test]
+async fn stale_finish_with_unrerunnable_check_falls_back_to_the_goal_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let long_check = format!("python3 - <<'EOF'\n# {}\nprint('ok')\nEOF", "x".repeat(220));
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
+        tool_call_response("v", "VERIFY", serde_json::json!({"command":long_check})),
+        tool_call_response("w2", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(2 + 2, 4)\n"})),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"self-authored probe only"})),
+        text_response("Test added."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let records = result.state.verifications.as_ref().unwrap();
+    assert_eq!(records.len(), 2, "the long probe and the harness-run goal check");
+    assert_eq!(records[1].command, "python3 -m unittest discover -s tests -q");
+    let events = events.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
+}
+
+/// A task that keeps editing but never calls finish_task is bounded by the
+/// task loop budget: the prompt warns on the last loop and the harness
+/// blocks the task when that loop ends without finish_task.
+#[tokio::test]
+async fn task_loop_budget_blocks_a_task_that_never_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["never done"]})),
+        tool_call_response("w1", "PATCH", serde_json::json!({"path":"a.txt","content":"one\n"})),
+        text_response("still going"),
+        tool_call_response("w2", "PATCH", serde_json::json!({"path":"a.txt","content":"two\n"})),
+        text_response("still going"),
+        text_response("Budget spent."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()), goal: "never finish".into(),
+        max_iterations: Some(10), max_loops: Some(3), task_loop_limit: Some(2),
+        model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        r#loop: Some(drip::harness::roles::PartialHarnessLoopConfig { max_cycles: Some(1), ..Default::default() }),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    let bodies = server.join().unwrap();
+    let task = &result.state.tasks[0];
+    assert_eq!(task.loops_run, Some(2));
+    assert_eq!(task.status, drip::core::types::HarnessTaskStatus::Blocked, "{:?}", task.summary);
+    assert!(task.summary.as_deref().unwrap_or_default().contains("budget 2"));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.detail.contains("auto-blocked after 2 task loops (task loop budget 2)")));
+    let texts: Vec<String> = bodies.iter().map(|b| b.to_string()).collect();
+    assert!(texts.iter().any(|t| t.contains("task loop budget: this is task loop 2 of 2")), "last-loop warning reaches the model");
 }
 
 /// The expectation gate end to end: an "external" anchor on a check that
@@ -140,7 +309,6 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
             "tasks":["produce artifact"],
             "expectations":[{"subject":"artifact sign","expected":"positive"}]
         })),
-        text_response("planned"),
         tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
         tool_call_response("v", "VERIFY", serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact.txt fixture"}})),
         tool_call_response("f1", "finish_task", serde_json::json!({
@@ -209,7 +377,6 @@ async fn plan_finish_summary_completes_the_run() {
     let (url, server) = spawn_scripted_server(vec![
         // Loop 1 (planning): plan_tasks, then a text turn ends the loop.
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["work on the file"]})),
-        text_response("planned"),
         // Loop 2 (task-1): finish_task ends the loop and completes the goal.
         tool_call_response("call-2", "finish_task", serde_json::json!({"status": "completed", "summary": "wrote it"})),
         // Run summary (text-only call).
@@ -245,19 +412,18 @@ async fn plan_finish_summary_completes_the_run() {
     assert_eq!(result.state.tasks[0].status, HarnessTaskStatus::Completed);
     assert_eq!(result.state.tasks[0].summary.as_deref(), Some("wrote it"));
     assert_eq!(result.state.run_summary.as_ref().map(|s| s.text.as_str()), Some("All done: the file was written."));
-    assert_eq!(result.usage.calls, 4);
-    assert_eq!(result.usage.prompt_tokens, 26);
+    assert_eq!(result.usage.calls, 3);
     assert!(state_path.exists(), "state persisted");
 
-    // Requests: planning call advertises tools; the summary call sends none.
-    assert_eq!(bodies.len(), 4);
+    // Requests: planning call advertises tools; the planning loop yields as
+    // soon as plan_tasks lands (no narration round); the summary call sends
+    // no tools.
+    assert_eq!(bodies.len(), 3);
     assert!(bodies[0]["tools"].as_array().map_or(false, |t| t.iter().any(|t| t["function"]["name"] == "plan_tasks")));
-    assert!(bodies[3]["tools"].is_null() || bodies[3]["tools"].as_array().map_or(true, |t| t.is_empty()));
-    // Round 2 of loop 1 replays the assistant tool call and the tool result.
-    assert_eq!(bodies[1]["messages"].as_array().unwrap().len(), bodies[0]["messages"].as_array().unwrap().len() + 2);
-    assert_eq!(bodies[1]["messages"][2]["role"], "assistant");
-    assert_eq!(bodies[1]["messages"][3]["role"], "tool");
-    assert_eq!(bodies[1]["messages"][3]["tool_call_id"], "call-1");
+    assert!(bodies[2]["tools"].is_null() || bodies[2]["tools"].as_array().map_or(true, |t| t.is_empty()));
+    // Loop 2 opens on its own fresh snapshot (a harness-only planning
+    // exchange carries nothing over).
+    assert_eq!(bodies[1]["messages"][0]["role"], "system");
     assert_eq!(bodies[0]["messages"][0]["role"], "system");
     assert!(bodies[0]["messages"][1]["content"].as_str().unwrap().contains("goal: write the file"));
 
@@ -268,7 +434,7 @@ async fn plan_finish_summary_completes_the_run() {
         .map(|event| serde_json::to_value(&event.r#type).unwrap().as_str().unwrap().to_string())
         .collect();
     let expected = [
-        "loop-start", "iteration-start", "inference", "harness-op", "inference", "model-text",
+        "loop-start", "iteration-start", "inference", "harness-op",
         "loop-start", "iteration-start", "inference", "task-finished",
         // The summary call reports usage too, so it emits its own inference event.
         "inference", "run-summary", "run-complete",
@@ -299,7 +465,6 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
     let temp = temp_dir.path().to_path_buf();
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["first", "second"]})),
-        text_response("planned"),
         tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
         text_response("Loop budget spent."),
     ]);
@@ -324,7 +489,7 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
     assert_eq!(result.reason, HarnessRunReason::MaxLoops, "{:?}", result.error_message);
     assert_eq!(result.r#loops, 2);
     assert_eq!(result.state.tasks[1].status, HarnessTaskStatus::Pending);
-    assert_eq!(result.usage.calls, 4, "no third loop was started");
+    assert_eq!(result.usage.calls, 3, "no third loop was started (plan, blocked finish, summary)");
 }
 
 /// A task blocked on operator input is a terminal state: with nothing else
@@ -347,7 +512,6 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
 
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["restore the chunks"]})),
-        text_response("planned"),
         tool_call_response("b", "finish_task", serde_json::json!({
             "status": "blocked", "blockedOn": "operator", "confidence": "low",
             "summary": "need the original copies of chunks 3 and 7"
@@ -445,7 +609,6 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
     let (url, server) = spawn_scripted_server(vec![
         // Loop 1 (planning → planner).
         tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["fix the thing"]})),
-        text_response("planned"),
         // Loop 2 (task-1 → author) blocks.
         tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
         // Loop 3 (replanning → replanner) only takes notes: no workable ledger.

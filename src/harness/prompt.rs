@@ -27,6 +27,7 @@ pub const DEFAULT_HARNESS_SYSTEM_PROMPT: &str = concat!(
     " Make file edits with PATCH rather than shell in-place editing (sed -i, or inline scripts that rewrite files) — PATCH validates the edit, journals an undo entry, and reports an honest per-edit result; shell edits bypass all three.",
     " Checks are either correctness-class (compared against something the agent did not author — a pre-existing project test, a task-provided fixture, a published constant, or an invariant independent of the implementation) or consistency-class (compared only against the agent's own derivation); completion needs at least one correctness-class check or an explicit anchor=none declaration saying why no external anchor exists for the claim. Declare the anchor on every VERIFY call (anchor.kind external or self; a check that names a file you edited is downgraded to self), state your confidence (low, medium, high) on every finish_task, and when a revision changes a reported output, cite evidence outside the fix that the new value is closer to truth.",
     " When a goal produces a measurable output (a number, count, shape, sign, unit, latency, row count), register the expected value from the domain via plan_tasks.expectations BEFORE computing it, and treat a later mismatch as a defect in the model — finish with status unreconciled and record the anomaly rather than explaining the value away.",
+    " Verification economy: make the edits first, then run ONE correctness-class check — the goal's declared acceptance command or the project's own test runner — and finish_task as soon as it passes. Do not stack extra ad-hoc probes, subprocess scripts, or repeated VERIFY calls after the project suite passes on the final edit, and do not spend rounds on observe/remember for facts a passing check or your finish_task summary already records.",
     " Prefer small tasks that one loop can finish. Do not narrate; act through tool calls."
 );
 
@@ -159,6 +160,7 @@ mod anchoring_render_tests {
             repo_memory_index: None,
             run_budget: None,
             stall_limit: None,
+            task_loop_limit: None,
             workspace: None,
         }
     }
@@ -221,6 +223,7 @@ pub struct IterationUserMessageArgs<'a> {
     pub repo_memory_index: Option<&'a str>,
     pub run_budget: Option<HarnessRunBudget>,
     pub stall_limit: Option<i64>,
+    pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
 }
 
@@ -236,6 +239,7 @@ pub struct IterationMessagesArgs<'a> {
     pub run_budget: Option<HarnessRunBudget>,
     pub stall_limit: Option<i64>,
     pub system_prompt: &'a str,
+    pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
 }
 
@@ -394,6 +398,22 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             "{} the previous {} task loop(s) recorded no progress. After {} more loop(s) without progress this task will be AUTO-BLOCKED. Progress = editing files (PATCH) or persisting findings (note_task, observe, remember, finish_task). Start by persisting what you already know, then edit — do not re-read files warm_context already shows.",
             STALL_WARNING_PREFIX, stall_count, remaining
         ));
+    }
+
+    if let Some(task) = args.current_task {
+        let used = task.loops_run.unwrap_or(0);
+        let limit = args.task_loop_limit.unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT);
+        if used >= limit {
+            sections.push(format!(
+                "{} this is task loop {used} of {limit} for this task — the LAST one. Finish it in this loop: finish_task completed once the check passes, otherwise finish_task blocked stating exactly what remains and why. If this loop ends without finish_task the harness blocks the task itself.",
+                TASK_LOOP_BUDGET_PREFIX
+            ));
+        } else if used >= 2 {
+            sections.push(format!(
+                "{} this task has used {used} of {limit} task loops. Do not re-read what earlier loops already covered (see last_activation and notes); make the remaining edits and run the check.",
+                TASK_LOOP_BUDGET_PREFIX
+            ));
+        }
     }
 
     // The verification story travels to every loop, not just the end-of-run
@@ -568,6 +588,8 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 /// which code or tools were tried — so the planner resolves existing task ids
 /// with changed evidence instead of re-deriving identical work. None when the
 /// task has no recovery history (e.g. fresh planning runs).
+pub const TASK_LOOP_BUDGET_PREFIX: &str = "task loop budget:";
+
 fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
     let history = task.recovery_history.as_ref()?;
     let last = history.last()?;
@@ -610,6 +632,7 @@ pub fn build_iteration_messages(state: &HarnessState, args: &IterationMessagesAr
             repo_memory_index: args.repo_memory_index,
             run_budget: args.run_budget.clone(),
             stall_limit: args.stall_limit,
+            task_loop_limit: args.task_loop_limit,
             workspace: args.workspace,
         },
     );

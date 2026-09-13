@@ -212,6 +212,7 @@ pub fn add_tasks(
 			review_round: None,
 			awaiting_review_by: None,
 			role: entry.role.clone(),
+			loops_run: None,
 			stall_count: 0,
 			status: HarnessTaskStatus::Pending,
 			summary: None,

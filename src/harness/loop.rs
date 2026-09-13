@@ -126,6 +126,34 @@ fn message_text(message: &TransportRequestMessage) -> &str {
 /// MAX_CARRYOVER_CHARS, with the loop's own user/system messages left out.
 /// Empty when the loop made no tool calls.
 #[cfg(test)]
+mod goal_check_tests {
+    use super::goal_declared_check_commands;
+
+    #[test]
+    fn goal_declared_check_commands_keeps_backticked_test_runners_only() {
+        let goal = "Add a `--count` flag to `kvstore`. Acceptance: `python3 -m unittest discover -s tests -q` must pass and `cargo test` too. Do not touch `README.md`.";
+        assert_eq!(
+            goal_declared_check_commands(goal),
+            vec!["python3 -m unittest discover -s tests -q".to_string(), "cargo test".to_string()]
+        );
+        assert!(goal_declared_check_commands("Fix the bug in `page`; run `ls -la` first").is_empty());
+        assert!(goal_declared_check_commands("no backticks: python3 -m unittest").is_empty());
+    }
+
+    #[test]
+    fn goal_declared_checks_stay_external_when_they_name_edited_files() {
+        let edited = vec!["tests/test_new.py".to_string()];
+        let plain = r#"{"command":"python3 -m unittest tests/test_new.py","anchor":{"kind":"external","source":"suite"}}"#;
+        let downgraded = super::declared_verification_anchor(plain, &edited).unwrap();
+        assert_eq!(downgraded.kind, crate::core::types::VerificationAnchorKind::SelfAuthored);
+        let marked = r#"{"command":"python3 -m unittest tests/test_new.py","anchor":{"kind":"external","source":"goal"},"harnessGoalDeclaredCheck":true}"#;
+        let kept = super::declared_verification_anchor(marked, &edited).unwrap();
+        assert_eq!(kept.kind, crate::core::types::VerificationAnchorKind::External);
+        assert!(kept.downgraded_reason.is_none());
+    }
+}
+
+#[cfg(test)]
 mod review_brief_tests {
     use super::*;
 
@@ -660,7 +688,15 @@ fn verification_pattern_matches(command: &str) -> bool {
         if paired("cargo", &["test", "check"])
             || paired("go", &["test", "vet"])
             || paired("make", &["test", "check", "lint"])
-            || ["pytest", "vitest", "jest", "tsc"]
+            || paired("bun", &["test"])
+            || paired("deno", &["test", "check", "lint"])
+            || paired("mix", &["test"])
+            || paired("dotnet", &["test", "build"])
+            || paired("swift", &["test", "build"])
+            || paired("zig", &["test", "build"])
+            || paired("gradle", &["test", "check", "build"])
+            || paired("mvn", &["test", "verify"])
+            || ["pytest", "vitest", "jest", "tsc", "unittest", "mocha", "rspec", "phpunit", "tox", "nox"]
                 .iter()
                 .any(|word| word_at(bytes, start, end, word))
         {
@@ -790,12 +826,19 @@ pub fn record_edited_path(edited_paths: &mut Vec<String>, path: &str) {
 /// The anchor a VERIFY call declared, downgraded to self-authored when the
 /// command names a file this run edited: a check the agent wrote only shows
 /// the artifact agrees with the agent's own derivation.
+/// Marker the harness sets on the VERIFY input when it runs the goal's own
+/// acceptance command: that check is task-provided, so it stays external
+/// even when its command names a file this run edited (the goal told us to
+/// run it against those files).
+pub const GOAL_DECLARED_CHECK_MARKER: &str = "harnessGoalDeclaredCheck";
+
 pub fn declared_verification_anchor(
     raw_input: &str,
     edited_paths: &[String],
 ) -> Option<crate::core::types::VerificationAnchor> {
     use crate::core::types::{VerificationAnchor, VerificationAnchorKind};
     let input: serde_json::Value = serde_json::from_str(raw_input).ok()?;
+    let goal_declared = input.get(GOAL_DECLARED_CHECK_MARKER).and_then(|value| value.as_bool()).unwrap_or(false);
     let anchor = input.get("anchor")?;
     let source = anchor
         .get("source")
@@ -841,7 +884,7 @@ pub fn declared_verification_anchor(
     // checks, and the free-text source must be allowed to mention that file
     // honestly without turning the whole run's evidence self-authored.
     let command = input.get("command").and_then(|value| value.as_str()).unwrap_or_default();
-    let named = edited_paths.iter().find(|path| command_names_path(command, path));
+    let named = if goal_declared { None } else { edited_paths.iter().find(|path| command_names_path(command, path)) };
     match named {
         Some(path) => Some(VerificationAnchor {
             kind: VerificationAnchorKind::SelfAuthored,
@@ -1095,6 +1138,23 @@ fn collapse_whitespace(text: &str) -> String {
 pub fn is_goal_declared_verification(goal: &str, command: &str) -> bool {
     let collapsed = collapse_whitespace(&strip_heredoc_bodies(command));
     collapsed.chars().count() >= 8 && collapsed.contains(' ') && collapse_whitespace(goal).contains(&collapsed)
+}
+
+/// Check commands the goal itself declares in backticks (`python3 -m unittest
+/// discover -s tests -q`, `cargo test`, `npm test`): task-provided acceptance
+/// checks the harness may run on the agent's behalf.
+pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for span in goal.split('`').skip(1).step_by(2) {
+        let candidate = collapse_whitespace(span.trim());
+        if candidate.chars().count() < 8 || candidate.chars().count() > 200 || !candidate.contains(' ') || candidate.contains('\n') {
+            continue;
+        }
+        if verification_pattern_matches(&candidate) && !commands.contains(&candidate) {
+            commands.push(candidate);
+        }
+    }
+    commands
 }
 
 pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<String> {
@@ -1800,6 +1860,9 @@ pub struct SolidStateHarnessOptions {
     /// Session answers.jsonl path for ask_user surveys (None = no ask_user).
     pub answers_path: Option<PathBuf>,
     pub stall_limit: Option<i64>,
+    /// Task loops one task may consume before the harness blocks it
+    /// (default DEFAULT_TASK_LOOP_LIMIT).
+    pub task_loop_limit: Option<i64>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
     /// Draft mode (--lite): single author lane; terminal reason "draft",
@@ -1868,6 +1931,7 @@ pub struct HarnessRun {
     pub max_loops: i64,
     pub loop_config: HarnessLoopConfig,
     pub stall_limit: i64,
+    pub task_loop_limit: i64,
     pub max_task_reopens: i64,
     pub system_prompt: String,
     pub telemetry_config: HarnessTelemetryConfig,
@@ -1945,6 +2009,13 @@ pub struct LoopScope {
     pub overflow_retried_this_loop: bool,
     pub concluded_naturally: bool,
     pub planned_and_yielded: bool,
+    /// Set when a planning loop's plan_tasks landed work: the round loop
+    /// ends after this dispatch instead of paying for one more model call
+    /// that can only narrate the plan.
+    pub plan_yield_requested: bool,
+    /// The harness ran the goal-declared check on the agent's behalf once
+    /// this loop; a second bounce is the model's to handle.
+    pub goal_check_used: bool,
     pub cycles_run: i64,
     pub digest_actions: Vec<String>,
 }
@@ -2203,6 +2274,10 @@ impl HarnessRun {
             clamp_loop_value(loop_config.max_tool_result_chars, 1, defaults.max_tool_result_chars);
 
         let stall_limit = options.stall_limit.unwrap_or(3);
+        let task_loop_limit = options
+            .task_loop_limit
+            .unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT)
+            .max(1);
         let max_task_reopens = options.max_task_reopens.unwrap_or(2);
         let mut system_prompt = options
             .system_prompt
@@ -2379,6 +2454,7 @@ impl HarnessRun {
             max_loops,
             loop_config,
             stall_limit,
+            task_loop_limit,
             max_task_reopens,
             system_prompt,
             telemetry_config,
@@ -2766,6 +2842,274 @@ impl HarnessRun {
 
     /// run one workspace tool through the tool framework
     /// (`execute_tool_call`), redacting the model-facing text.
+    /// Record a tool execution as verification evidence when the call was a
+    /// check (VERIFY/CHECK, or a BASH command that ran a known runner or
+    /// emitted DRIP_VERIFY counts): the record, the last-verification pointer,
+    /// the mutation watermark, and the stuck-failure streak.
+    pub fn record_verification_outcome(
+        &mut self,
+        scope: &mut LoopScope,
+        tool_name: &str,
+        raw_input: &str,
+        execution: &mut WorkspaceToolExecution,
+    ) -> Option<String> {
+        let tool_name = tool_name.to_string();
+        let raw_input = raw_input.to_string();
+            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
+                .or_else(|| {
+                    (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
+                        .then(|| extract_bash_command(&raw_input)).flatten()
+                });
+            if let Some(verification_command) = verification_command.clone() {
+                let truncated_command = truncate_text(&verification_command, 200);
+                let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
+                let ran_no_tests =
+                    !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
+                let evidence = if tool_name == "CHECK" {
+                    crate::core::types::VerificationEvidence {
+                        anchor: None,
+                        kind: crate::core::types::VerificationEvidenceKind::Typecheck,
+                        executed: 0, passed: 0, failed: i64::from(execution.failed), skipped: None,
+                        detail: Some("Compiler diagnostics for the requested scope; no tests executed.".into()),
+                    }
+                } else {
+                    let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
+                    if tool_name == "VERIFY" {
+                        evidence.anchor = declared_verification_anchor(&raw_input, &self.state.edited_paths);
+                        // The tool built its result text before the harness
+                        // attached the declared anchor, so it reads
+                        // "anchor: undeclared" for every call; a model that
+                        // sees that re-declares the same anchor round after
+                        // round. Print the anchor the record actually carries.
+                        if evidence.anchor.is_some() {
+                            execution.tool_content = execution.tool_content.replacen(
+                                "; anchor: undeclared",
+                                &format!("; anchor: {}", crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())),
+                                1,
+                            );
+                        }
+                        if let Some(reason) = evidence.anchor.as_ref().and_then(|anchor| anchor.downgraded_reason.clone()) {
+                            self.emit(HarnessEvent {
+                                data: None,
+                                detail: format!("verification anchor downgraded to self-authored: {reason}"),
+                                iteration: self.state.iteration,
+                                r#type: HarnessEventType::RunWarning,
+                            });
+                        }
+                    }
+                    evidence
+                };
+                execution.failed |= evidence.failed > 0;
+                let verification_record = HarnessVerificationRecord {
+                    at_iteration: self.state.iteration,
+                    command: truncated_command.clone(),
+                    failed: execution.failed,
+                    output_tail: output_tail.clone(),
+                    ran_no_tests: ran_no_tests.then_some(true),
+                    evidence: Some(evidence),
+                    id: Some(next_verification_record_id(&self.state.verifications)),
+                };
+
+                if ran_no_tests {
+                    self.emit(HarnessEvent {
+                        data: None,
+                        detail: format!(
+                            "verification passed without executing any test: {truncated_command} — it does not count as evidence until a run executes tests"
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::RunWarning,
+                    });
+                }
+
+                // The record ref is how the model cites this evidence later
+                // (finish_task evidence on a value revision), so it must be
+                // visible in the tool result itself, not only in state.
+                let record_ref = verification_record.id.clone();
+                if tool_name == "VERIFY" {
+                    if let Some(record_id) = record_ref.as_deref() {
+                        execution.tool_content = format!(
+                            "{}\nverification record: {record_id}",
+                            execution.tool_content
+                        );
+                    }
+                }
+                self.state.last_verification = Some(verification_record.clone());
+                self.state.verifications = {
+                    let mut timeline = self.state.verifications.clone().unwrap_or_default();
+                    timeline.push(verification_record);
+                    if timeline.len() > MAX_VERIFICATION_TIMELINE {
+                        let excess = timeline.len() - MAX_VERIFICATION_TIMELINE;
+                        timeline.drain(0..excess);
+                    }
+                    Some(timeline)
+                };
+                self.state.mutations_since_verification = Some(0);
+
+                if execution.failed {
+                    let failure_hash = hash_text(&output_tail);
+                    let prior = self.state.verification_streak.take();
+                    let streak = match prior {
+                        Some(prior) if prior.command == truncated_command && prior.output_tail_hash == failure_hash => {
+                            HarnessVerificationStreak {
+                                command: truncated_command,
+                                consecutive_failures: prior.consecutive_failures + 1,
+                                output_tail_hash: failure_hash,
+                            }
+                        }
+                        _ => HarnessVerificationStreak {
+                            command: truncated_command,
+                            consecutive_failures: 1,
+                            output_tail_hash: failure_hash,
+                        },
+                    };
+                    self.state.verification_streak = Some(streak);
+                    if self.state.verification_streak.as_ref().map(|s| s.consecutive_failures).unwrap_or(0) >= VERIFICATION_STUCK_THRESHOLD as i64 {
+                        scope.verification_stuck_this_loop = true;
+                    }
+                } else {
+                    self.state.verification_streak = None;
+                }
+            }
+
+        verification_command
+    }
+
+    /// finish_task bounced only because edits landed after the last check:
+    /// the harness re-runs that same check itself (the agent already ran it
+    /// once, so it is policy-vetted) and, when it passes, re-applies the
+    /// finish. One model round and a rejection message saved per stale
+    /// finish; a failing re-run surfaces the failure tail instead.
+    pub fn auto_reverify_stale_finish(
+        &mut self,
+        scope: &mut LoopScope,
+        tool_name: &str,
+        raw_input: &str,
+        call_id: &str,
+        op_context: &crate::harness::harness_tools::HarnessOpContext,
+        outcome: crate::harness::harness_tools::HarnessOpOutcome,
+    ) -> crate::harness::harness_tools::HarnessOpOutcome {
+        if tool_name != "finish_task" {
+            return outcome;
+        }
+        let stale = outcome.text.contains("workspace edit(s) landed after the last verification")
+            && self.state.mutations_since_verification.unwrap_or(0) > 0;
+        let unchecked = outcome.text.contains("no verification command (test/build/typecheck) has run")
+            || outcome.text.contains("no correctness-class evidence");
+        // Stale finish: re-run the record the agent already made. Unchecked
+        // finish (nothing ran, or nothing external passed): run the check the
+        // goal itself declares, once per loop, as task-provided evidence.
+        // Records keep a 200-char truncation of the command; a cut command
+        // (or a CHECK alias) cannot be re-run faithfully, so a stale finish
+        // whose last check is unusable falls back to the goal-declared one.
+        let rerunnable = self
+            .state
+            .last_verification
+            .clone()
+            .filter(|record| record.command.chars().count() < 200 && !record.command.starts_with("CHECK "));
+        let (record, goal_declared) = if stale && rerunnable.is_some() {
+            (rerunnable.unwrap(), false)
+        } else if (unchecked || stale) && !scope.goal_check_used {
+            let Some(command) = goal_declared_check_commands(&self.state.goal).into_iter().next() else { return outcome };
+            scope.goal_check_used = true;
+            (
+                HarnessVerificationRecord {
+                    at_iteration: self.state.iteration,
+                    command,
+                    failed: false,
+                    output_tail: String::new(),
+                    ran_no_tests: None,
+                    evidence: None,
+                    id: None,
+                },
+                true,
+            )
+        } else {
+            return outcome;
+        };
+        let mut input = serde_json::json!({ "command": record.command });
+        if goal_declared {
+            input["anchor"] = serde_json::json!({
+                "kind": "external",
+                "source": "goal-declared acceptance check, run by the harness",
+                "coverage": "reportedClaim"
+            });
+            input[GOAL_DECLARED_CHECK_MARKER] = serde_json::json!(true);
+        }
+        if let Some(anchor) = record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref()) {
+            let kind = match anchor.kind {
+                crate::core::types::VerificationAnchorKind::External => "external",
+                crate::core::types::VerificationAnchorKind::SelfAuthored => "self",
+                crate::core::types::VerificationAnchorKind::Undeclared => "",
+            };
+            if !kind.is_empty() {
+                input["anchor"] = serde_json::json!({ "kind": kind, "source": anchor.source.clone().unwrap_or_default() });
+                if let Some(coverage) = &anchor.coverage {
+                    input["anchor"]["coverage"] = serde_json::json!(match coverage {
+                        crate::core::types::CoverageGranularity::ReportedClaim => "reportedClaim",
+                        crate::core::types::CoverageGranularity::InputOrComponent => "inputOrComponent",
+                    });
+                }
+                if let Some(subject) = &anchor.expectation_subject {
+                    input["anchor"]["expectationSubject"] = serde_json::json!(subject);
+                }
+            }
+        }
+        let verify_input = input.to_string();
+        let reverify_id = format!("{call_id}-reverify");
+        let mut execution = self.execute_workspace_tool(&reverify_id, &verify_input, Some(&scope.loop_tool_indexes), "VERIFY");
+        self.record_verification_outcome(scope, "VERIFY", &verify_input, &mut execution);
+        let verdict = match &self.state.last_verification {
+            Some(latest) => core_state::describe_verification_outcome(latest.failed, latest.ran_no_tests, latest.evidence.as_ref()),
+            None => core_state::describe_verification_outcome(execution.failed, None, None),
+        };
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                ..Default::default()
+            }),
+            detail: if goal_declared {
+                format!("harness ran the goal-declared check for the finish: {} -> {verdict}", truncate_text(&record.command, 120))
+            } else {
+                format!("harness re-ran the last check after workspace edits: {} -> {verdict}", truncate_text(&record.command, 120))
+            },
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.digest_actions.push(format!("harness ran {} -> {verdict}", truncate_text(&record.command, 80)));
+        if execution.failed {
+            return crate::harness::harness_tools::HarnessOpOutcome {
+                text: format!(
+                    "harness: not accepted yet — the harness ran the {} ({}) and it FAILED. Fix the failure, then finish_task.\n{}",
+                    if goal_declared { "goal-declared check" } else { "last check again after your edits" },
+                    truncate_text(&record.command, 120),
+                    truncate_text_keeping_ends(&execution.tool_content, 1200)
+                ),
+                state_changed: true,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            };
+        }
+        let op = match parse_harness_op_with_gate(tool_name, raw_input, self.role_gate.as_ref()) {
+            Ok(op) => op,
+            Err(_) => return outcome,
+        };
+        let reapplied = apply_harness_op(&mut self.state, op, op_context);
+        crate::harness::harness_tools::HarnessOpOutcome {
+            text: format!(
+                "harness {} {} -> {verdict}. {}",
+                if goal_declared { "ran the goal-declared check:" } else { "re-ran the last check after your edits:" },
+                truncate_text(&record.command, 120),
+                reapplied.text
+            ),
+            state_changed: true,
+            task_finished: reapplied.task_finished,
+            ended_loop: reapplied.ended_loop,
+            direct_response: reapplied.direct_response,
+        }
+    }
+
     pub fn execute_workspace_tool(
         &mut self,
         call_id: &str,
@@ -3161,6 +3505,7 @@ impl HarnessRun {
                     task.status = HarnessTaskStatus::InProgress;
                 }
                 task.activations = Some(task.activations.unwrap_or(0) + 1);
+                task.loops_run = Some(task.loops_run.unwrap_or(0) + 1);
             }
             // A review loop opens with the change set in hand: the diff since
             // run start plus the run's verification records, so the reviewer
@@ -3338,6 +3683,8 @@ impl HarnessRun {
             overflow_retried_this_loop: false,
             concluded_naturally: false,
             planned_and_yielded: false,
+            plan_yield_requested: false,
+            goal_check_used: false,
             cycles_run: 0,
             digest_actions: Vec::new(),
         }
@@ -3678,6 +4025,7 @@ impl HarnessRun {
                     run_budget,
                     stall_limit: Some(self.stall_limit),
                     system_prompt: &loop_system_prompt,
+                    task_loop_limit: Some(self.task_loop_limit),
                     workspace: Some(&self.cwd),
                 },
             );
@@ -4165,6 +4513,10 @@ impl HarnessRun {
         if self.ask_user_awaiting {
             return RoundOutcome::Break;
         }
+        if scope.plan_yield_requested {
+            scope.digest_actions.push("plan landed; the planning loop yields to the first task without another round".to_string());
+            return RoundOutcome::Break;
+        }
 
         RoundOutcome::Continue
     }
@@ -4305,6 +4657,7 @@ impl HarnessRun {
                             crate::harness::harness_tools::HarnessOp::AskUser { .. }
                         );
                         let outcome = apply_harness_op(&mut self.state, op, &op_context);
+                        let outcome = self.auto_reverify_stale_finish(scope, &tool_name, &raw_input, &call_id, &op_context, outcome);
                         // ask_user accepted: expose the survey as a question
                         // event (the blocking answers.jsonl wait and the
                         // awaiting-input timeout land with the lifecycle task).
@@ -4388,6 +4741,13 @@ impl HarnessRun {
                     },
                 });
                 scope.task_finished = scope.task_finished || outcome.task_finished;
+                if tool_name == "plan_tasks"
+                    && outcome.state_changed
+                    && scope.current_task_id.is_none()
+                    && self.state.tasks.iter().any(|task| matches!(task.status, HarnessTaskStatus::Pending | HarnessTaskStatus::InProgress))
+                {
+                    scope.plan_yield_requested = true;
+                }
                 scope.made_progress = scope.made_progress || outcome.state_changed;
                 scope.persisted_this_loop = scope.persisted_this_loop || outcome.state_changed;
                 // drip-specific: memory-bank writes (remember/forget) get their
@@ -4464,121 +4824,7 @@ impl HarnessRun {
                 }
             }
 
-            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
-                .or_else(|| {
-                    (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
-                        .then(|| extract_bash_command(&raw_input)).flatten()
-                });
-            if let Some(verification_command) = verification_command.clone() {
-                let truncated_command = truncate_text(&verification_command, 200);
-                let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
-                let ran_no_tests =
-                    !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
-                let evidence = if tool_name == "CHECK" {
-                    crate::core::types::VerificationEvidence {
-                        anchor: None,
-                        kind: crate::core::types::VerificationEvidenceKind::Typecheck,
-                        executed: 0, passed: 0, failed: i64::from(execution.failed), skipped: None,
-                        detail: Some("Compiler diagnostics for the requested scope; no tests executed.".into()),
-                    }
-                } else {
-                    let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
-                    if tool_name == "VERIFY" {
-                        evidence.anchor = declared_verification_anchor(&raw_input, &self.state.edited_paths);
-                        // The tool built its result text before the harness
-                        // attached the declared anchor, so it reads
-                        // "anchor: undeclared" for every call; a model that
-                        // sees that re-declares the same anchor round after
-                        // round. Print the anchor the record actually carries.
-                        if evidence.anchor.is_some() {
-                            execution.tool_content = execution.tool_content.replacen(
-                                "; anchor: undeclared",
-                                &format!("; anchor: {}", crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())),
-                                1,
-                            );
-                        }
-                        if let Some(reason) = evidence.anchor.as_ref().and_then(|anchor| anchor.downgraded_reason.clone()) {
-                            self.emit(HarnessEvent {
-                                data: None,
-                                detail: format!("verification anchor downgraded to self-authored: {reason}"),
-                                iteration: self.state.iteration,
-                                r#type: HarnessEventType::RunWarning,
-                            });
-                        }
-                    }
-                    evidence
-                };
-                execution.failed |= evidence.failed > 0;
-                let verification_record = HarnessVerificationRecord {
-                    at_iteration: self.state.iteration,
-                    command: truncated_command.clone(),
-                    failed: execution.failed,
-                    output_tail: output_tail.clone(),
-                    ran_no_tests: ran_no_tests.then_some(true),
-                    evidence: Some(evidence),
-                    id: Some(next_verification_record_id(&self.state.verifications)),
-                };
-
-                if ran_no_tests {
-                    self.emit(HarnessEvent {
-                        data: None,
-                        detail: format!(
-                            "verification passed without executing any test: {truncated_command} — it does not count as evidence until a run executes tests"
-                        ),
-                        iteration: self.state.iteration,
-                        r#type: HarnessEventType::RunWarning,
-                    });
-                }
-
-                // The record ref is how the model cites this evidence later
-                // (finish_task evidence on a value revision), so it must be
-                // visible in the tool result itself, not only in state.
-                let record_ref = verification_record.id.clone();
-                if tool_name == "VERIFY" {
-                    if let Some(record_id) = record_ref.as_deref() {
-                        execution.tool_content = format!(
-                            "{}\nverification record: {record_id}",
-                            execution.tool_content
-                        );
-                    }
-                }
-                self.state.last_verification = Some(verification_record.clone());
-                self.state.verifications = {
-                    let mut timeline = self.state.verifications.clone().unwrap_or_default();
-                    timeline.push(verification_record);
-                    if timeline.len() > MAX_VERIFICATION_TIMELINE {
-                        let excess = timeline.len() - MAX_VERIFICATION_TIMELINE;
-                        timeline.drain(0..excess);
-                    }
-                    Some(timeline)
-                };
-                self.state.mutations_since_verification = Some(0);
-
-                if execution.failed {
-                    let failure_hash = hash_text(&output_tail);
-                    let prior = self.state.verification_streak.take();
-                    let streak = match prior {
-                        Some(prior) if prior.command == truncated_command && prior.output_tail_hash == failure_hash => {
-                            HarnessVerificationStreak {
-                                command: truncated_command,
-                                consecutive_failures: prior.consecutive_failures + 1,
-                                output_tail_hash: failure_hash,
-                            }
-                        }
-                        _ => HarnessVerificationStreak {
-                            command: truncated_command,
-                            consecutive_failures: 1,
-                            output_tail_hash: failure_hash,
-                        },
-                    };
-                    self.state.verification_streak = Some(streak);
-                    if self.state.verification_streak.as_ref().map(|s| s.consecutive_failures).unwrap_or(0) >= VERIFICATION_STUCK_THRESHOLD as i64 {
-                        scope.verification_stuck_this_loop = true;
-                    }
-                } else {
-                    self.state.verification_streak = None;
-                }
-            }
+            let verification_command = self.record_verification_outcome(scope, &tool_name, &raw_input, &mut execution);
 
             let mut tool_content = truncate_text_keeping_ends(
                 &execution.tool_content,
@@ -4863,8 +5109,15 @@ impl HarnessRun {
             // not count toward auto-blocking the task it was working.
             if !scope.task_finished && !self.aborted && !budget_truncated {
                 let mut auto_block_stalls: Option<i64> = None;
+                let mut auto_block_budget: Option<i64> = None;
 
                 if let Some(task) = crate::core::state::get_task_by_id_mut(&mut self.state, &task_id) {
+                    // Loop budget: a task that keeps editing but never
+                    // finishes is bounded here, independent of stalls.
+                    let loops_run = task.loops_run.unwrap_or(0);
+                    if loops_run >= self.task_loop_limit && task.status == HarnessTaskStatus::InProgress {
+                        auto_block_budget = Some(loops_run);
+                    }
                     // Edits made while the same verification keeps failing
                     // identically are churn: the stall counter must see
                     // through them or a model can PATCH forever without ever
@@ -4878,6 +5131,35 @@ impl HarnessRun {
                             auto_block_stalls = Some(task.stall_count);
                         }
                     }
+                }
+
+                if let Some(loops_run) = auto_block_budget.filter(|_| auto_block_stalls.is_none()) {
+                    let summary = format!(
+                        "Auto-blocked: {loops_run} task loops (budget {}) without finish_task. Needs a smaller decomposition or operator guidance.",
+                        self.task_loop_limit
+                    );
+                    crate::core::state::finish_task(
+                        &mut self.state,
+                        crate::core::state::HarnessFinishArgs {
+                            status: crate::core::types::HarnessTaskStatus::Blocked,
+                            summary: &summary,
+                            task_id: Some(&task_id),
+                            confidence: None,
+                        },
+                    );
+                    self.emit(crate::core::types::HarnessEvent {
+                        data: Some(crate::core::types::HarnessEventData {
+                            status: Some("blocked".to_string()),
+                            task_id: Some(task_id.clone()),
+                            ..Default::default()
+                        }),
+                        detail: format!(
+                            "{task_id} auto-blocked after {loops_run} task loops (task loop budget {})",
+                            self.task_loop_limit
+                        ),
+                        iteration: self.state.iteration,
+                        r#type: crate::core::types::HarnessEventType::TaskFinished,
+                    });
                 }
 
                 if let Some(stall_count) = auto_block_stalls {
@@ -5258,7 +5540,7 @@ impl HarnessRun {
         // model call that restates them (typically 3-10s on a fast model,
         // 5-10% of a one-task run).
         if reason == HarnessRunReason::Completed && self.options.summarize_run.is_none() {
-            if let Some(text) = crate::harness::prompt::build_composed_run_summary(&self.state, 2) {
+            if let Some(text) = crate::harness::prompt::build_composed_run_summary(&self.state, 6) {
                 self.record_run_summary(reason, text);
                 return;
             }

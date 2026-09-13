@@ -318,6 +318,20 @@ Failed mutating calls also invalidate earlier checks because they may have
 changed files before failing. Repeating `finish_task completed` does not waive missing, failed or stale checks;
 use `blocked` when the necessary evidence cannot be obtained.
 
+A finish that is stale only because edits landed after the last check is
+re-verified by the harness itself: it re-runs that same check (the agent
+already ran it, so it is policy-vetted), records the result, and accepts the
+finish in the same round when it passes; a failing re-run refuses the finish
+with the failure tail. This saves a model round per stale finish.
+
+A finish with no check run at all (or only self-authored passes) gets the
+same treatment when the goal itself names a check in backticks, such as
+`` `python3 -m unittest discover -s tests -q` `` or `` `cargo test` ``: the
+harness runs that goal-declared command once per loop as an external,
+task-provided anchor and accepts the finish if it passes; because the goal
+itself designated that command, it stays external even when it names files
+the run edited. Put the acceptance command in the goal text to enable this.
+
 For a custom checker, emit exactly one line after executing its assertions:
 
 ```text
@@ -1156,6 +1170,14 @@ reply). History is capped at 8 events per task with the oldest evicted, and
 every text field is clamped to 200 characters on Unicode char boundaries, so
 state growth stays bounded and older state files without recovery history
 load unchanged.
+
+Every task also carries a **task loop budget** (`--task-loop-limit <n>`, default 6
+task loops): the prompt counts loops from the third one, warns on the last,
+and if that loop ends without `finish_task` the harness blocks the task
+itself ("Auto-blocked: N task loops (budget 6) without finish_task"). Stall
+accounting only sees loops with no progress; the budget bounds tasks that
+keep editing but never finish — the single biggest source of 10-17-loop tasks
+in recorded sessions.
 
 The loop uses this history to keep retries bounded and honest:
 

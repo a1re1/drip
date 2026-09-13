@@ -117,7 +117,7 @@ fn iteration_user_message_matches() {
         repo_memory_dir: Some("/repo/.drip/memory"),
         repo_memory_index: Some("- parser.md: parser notes\n- tests.md: test notes"),
         run_budget: Some(HarnessRunBudget { total: 10, used: 7 }),
-        stall_limit: Some(3),
+        stall_limit: Some(3), task_loop_limit: None,
         workspace: Some("/repo"),
     };
     check("rich_full", &build_iteration_user_message(&rich, &full), &expect_str(&fx, &["buildIterationUserMessage", "rich_full"]));
@@ -163,7 +163,7 @@ fn iteration_messages_match() {
             repo_memory_dir: Some("/repo/.drip/memory"),
             repo_memory_index: Some("- parser.md"),
             run_budget: Some(HarnessRunBudget { total: 10, used: 7 }),
-            stall_limit: Some(3),
+            stall_limit: Some(3), task_loop_limit: None,
             system_prompt: "SYS",
             workspace: Some("/repo"),
         },

@@ -227,6 +227,40 @@ def compare(a, b):
         print(f"  {key:14} {va:>8.2f} -> {vb:>8.2f}  ({rel})")
 
 
+def summarize_runs(runs):
+    """Aggregate raw run dicts into one summary row per task.
+
+    Pure: does not mutate or retain the input. Each row has task, runs,
+    wall_s_median/min/max, inferences_median, hidden_pass_rate, rejections.
+    """
+    by_task = {}
+    for r in runs:
+        by_task.setdefault(r["task"], []).append(r)
+    rows = []
+    for task in sorted(by_task):
+        rs = by_task[task]
+        walls = [r["wall_s"] for r in rs]
+        rows.append(dict(
+            task=task,
+            runs=len(rs),
+            wall_s_median=statistics.median(walls),
+            wall_s_min=min(walls),
+            wall_s_max=max(walls),
+            inferences_median=statistics.median([r.get("inferences") or 0 for r in rs]),
+            hidden_pass_rate=sum(1 for r in rs if r["hidden_pass"]) / len(rs),
+            rejections=sum(r.get("rejections") or 0 for r in rs),
+        ))
+    return rows
+
+
+def print_summary_runs(label, rows):
+    print(f"\n== summary {label}")
+    print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4}")
+    for s in rows:
+        print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
+              f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--label", help="results label (results/<label>.json)")
@@ -241,9 +275,12 @@ def main(argv=None):
     ap.add_argument("--keep", action="store_true", help="keep workspaces after grading")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"), help="compare two labels and exit")
     ap.add_argument("--show", metavar="LABEL", help="print a label's table and exit")
+    ap.add_argument("--summary", metavar="LABEL", help="print per-task median/min/max summary for a label and exit")
     opts = ap.parse_args(argv)
     if opts.compare:
         return compare(*opts.compare)
+    if opts.summary:
+        return print_summary_runs(opts.summary, summarize_runs(load(opts.summary)))
     if opts.show:
         return print_table(opts.show, load(opts.show))
     if not opts.label:

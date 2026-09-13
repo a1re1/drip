@@ -165,7 +165,6 @@ async fn successful_remember_fires_memory_write_exactly_once() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["remember a fact"]})),
-        text_response("planned"),
         tool_call_response("call-2", "remember", serde_json::json!({"note": "the fixture note alpha-xyz"})),
         tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "remembered"})),
         text_response("done"),
@@ -211,7 +210,6 @@ async fn failed_remember_fires_no_memory_write() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["remember a fact"]})),
-        text_response("planned"),
         // Malformed: `note` is required, so apply_harness_op rejects the op
         // (parse failure keeps the run alive) and state_changed stays false.
         tool_call_response("call-2", "remember", serde_json::json!({"scope": "session"})),
@@ -257,7 +255,6 @@ async fn pre_tool_use_exit_two_blocks_the_tool_call() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
-        text_response("planned"),
         tool_call_response(
             "call-2",
             "BASH",
@@ -279,9 +276,9 @@ async fn pre_tool_use_exit_two_blocks_the_tool_call() {
         event_kinds(&events)
     );
 
-    // bodies[3] replays loop 2 round 1: the assistant tool call and the tool
+    // bodies[2] replays loop 2 round 1: the assistant tool call and the tool
     // result — which must be the veto message carrying the hook's stderr.
-    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -322,7 +319,6 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
-        text_response("planned"),
         tool_call_response(
             "call-2",
             "BASH",
@@ -347,7 +343,7 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
         "events: {:?}",
         event_kinds(&events)
     );
-    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -416,7 +412,6 @@ const PUBLISH_COMMAND: &str = "git push origin feat/hooks";
 fn publish_script() -> Vec<String> {
     vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["publish the branch"]})),
-        text_response("planned"),
         tool_call_response(
             "call-2",
             "BASH",
@@ -530,7 +525,7 @@ async fn vetoed_publish_fires_no_pr_ready() {
         event_kinds(&events)
     );
     // The veto still blocks the publish tool...
-    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -647,7 +642,6 @@ async fn successful_forget_fires_memory_write_exactly_once() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["note then forget"]})),
-        text_response("planned"),
         tool_call_response(
             "call-2",
             "remember",
@@ -671,7 +665,7 @@ async fn successful_forget_fires_memory_write_exactly_once() {
 
     // The forget actually removed the note this run created. Its tool result
     // appears in the 5th request (after the forget response is consumed).
-    let replay = bodies[4]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -733,7 +727,6 @@ async fn pre_tool_use_exit_two_with_empty_stderr_reports_no_stderr_output() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
         tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
-        text_response("planned"),
         tool_call_response("call-2", "BASH", serde_json::json!({"command": "echo touched-ok"})),
         tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
         text_response("done"),
@@ -751,7 +744,7 @@ async fn pre_tool_use_exit_two_with_empty_stderr_reports_no_stderr_output() {
         event_kinds(&events)
     );
 
-    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")

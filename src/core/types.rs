@@ -85,6 +85,10 @@ pub struct HarnessTask {
 	/// Role (capability profile) whose loop works this task; unset tasks use the run's task binding.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub role: Option<String>,
+	/// Task loops this task has consumed (every pickup, finished or not).
+	/// At DEFAULT_TASK_LOOP_LIMIT without finish_task the harness blocks it.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub loops_run: Option<i64>,
 	pub stall_count: i64,
 	pub status: HarnessTaskStatus,
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -710,6 +714,12 @@ pub struct HarnessLoopConfig {
 /// and the next loop re-read everything; 42% of loops ended without
 /// finish_task. Eight rounds per cycle keeps one task's work in one
 /// transcript; ten hot results keeps the reads of that longer cycle unfolded.
+/// Task loops one task may consume before the harness blocks it. In the
+/// longest recorded sessions single tasks ran 10-17 loops (each loop
+/// re-reading the workspace) without ever finishing; the stall counter did
+/// not fire because every loop edited something.
+pub const DEFAULT_TASK_LOOP_LIMIT: i64 = 6;
+
 pub const DEFAULT_LOOP_CONFIG: HarnessLoopConfig = HarnessLoopConfig {
 	hot_tool_results: 10,
 	max_cycles: 3,
@@ -1051,6 +1061,7 @@ mod tests {
 			review_round: None,
 			awaiting_review_by: None,
 			role: None,
+			loops_run: None,
 			stall_count: 0,
 			status: HarnessTaskStatus::InProgress,
 			summary: None,

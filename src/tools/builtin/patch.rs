@@ -334,6 +334,8 @@ pub struct PatchToolInput {
     pub find: Option<String>,
     pub replace: Option<String>,
     pub expected_occurrences: Option<i64>,
+    /// The call carried both content and a find/replace pair; the pair was applied.
+    pub stray_content: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +373,16 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             // an overwrite request (an actual empty overwrite has no find).
             let placeholder_content = has_find && entry.get("content").and_then(Value::as_str) == Some("");
             let has_content = !placeholder_content && entry.get("content").map_or(false, Value::is_string);
+
+            // A non-empty content beside a real find + replace pair is a stray
+            // field (small models echo the snippet they are inserting); apply
+            // the pair and say so rather than costing a round on the error.
+            // Content beside an empty or missing find is still ambiguous.
+            let stray_content = has_content
+                && has_find
+                && has_replace
+                && !entry.get("find").and_then(Value::as_str).unwrap_or("").is_empty();
+            let has_content = has_content && !stray_content;
 
             if has_content && (has_find || has_replace) {
                 return Err(anyhow!(
@@ -433,7 +445,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 content: entry
                     .get("content")
                     .and_then(Value::as_str)
-                    .filter(|text| !(text.is_empty() && has_find))
+                    .filter(|text| !(text.is_empty() && has_find) && !stray_content)
                     .map(str::to_string),
             });
         }
@@ -452,6 +464,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 find: None,
                 replace: None,
                 expected_occurrences: None,
+                stray_content: false,
             },
         });
     }
@@ -478,6 +491,11 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
         }
     }
 
+    // A non-empty find beside content is a targeted edit with a stray content
+    // field (small models echo the snippet they are inserting); apply the
+    // find + replace and say so rather than costing a round on the error.
+    let stray_content = content.is_some() && find.as_deref().map_or(false, |text| !text.is_empty()) && replace.is_some();
+    let content = if stray_content { None } else { content };
     if content.is_some() && (find.is_some() || replace.is_some()) {
         return Err(anyhow!(
             "Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file."
@@ -512,6 +530,8 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             display_path,
             count_lines(content)
         )
+    } else if stray_content {
+        format!("{} (replace; stray content ignored)", display_path)
     } else {
         format!("{} (replace)", display_path)
     };
@@ -528,6 +548,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             find,
             replace,
             expected_occurrences: expected_occurrences.map(|n| n as i64),
+            stray_content,
         },
     })
 }
@@ -1239,6 +1260,11 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         display_path,
         crlf_note
     );
+    let summary = if prepared.input.stray_content {
+        format!("{summary} The stray \"content\" field was ignored — send only find + replace for a targeted edit.")
+    } else {
+        summary
+    };
 
     Ok(PatchToolExecution {
         data: PatchToolResult {
@@ -1902,14 +1928,36 @@ mod prepare_tests {
     }
 
     #[test]
-    fn content_plus_find_replace_is_rejected_with_actionable_guidance() {
-        let err = prepare(
+    fn multi_file_stray_content_beside_find_replace_applies_the_pair() {
+        let prepared = prepare(
             &json!({
                 "files": [
                     {
                         "path": "a.txt",
                         "content": "hello\n",
                         "find": "x",
+                        "replace": "y"
+                    }
+                ]
+            }),
+            &test_ctx(),
+        )
+        .unwrap();
+        assert_eq!(prepared.input.files.len(), 1);
+        assert_eq!(prepared.input.files[0].content, None, "the stray content is dropped");
+        assert_eq!(prepared.input.files[0].find.as_deref(), Some("x"));
+        assert_eq!(prepared.input.files[0].replace.as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn content_plus_empty_find_is_rejected_with_actionable_guidance() {
+        let err = prepare(
+            &json!({
+                "files": [
+                    {
+                        "path": "a.txt",
+                        "content": "hello\n",
+                        "find": "",
                         "replace": "y"
                     }
                 ]
@@ -1925,8 +1973,8 @@ mod prepare_tests {
     }
 
     #[test]
-    fn single_file_content_plus_find_replace_names_both_recovery_paths() {
-        let err = prepare(
+    fn single_file_content_plus_find_replace_applies_the_pair() {
+        let prepared = prepare(
             &json!({
                 "path": "a.txt",
                 "content": "x",
@@ -1935,11 +1983,20 @@ mod prepare_tests {
             }),
             &test_ctx(),
         )
-        .unwrap_err();
+        .unwrap();
+        assert!(prepared.input.stray_content, "stray content is flagged");
+        assert_eq!(prepared.input.content, None, "the stray content is dropped");
+        assert_eq!(prepared.input.find.as_deref(), Some("x"));
+        assert!(prepared.display_input.ends_with("(replace; stray content ignored)"), "{}", prepared.display_input);
+    }
 
-        assert_eq!(
-            err.to_string(),
-            "Pass either content, or find + replace — not both. Re-send with only find + replace to make the targeted edit, or only content to write the whole file."
-        );
+    #[test]
+    fn single_file_content_plus_empty_find_is_still_rejected() {
+        let err = prepare(
+            &json!({ "path": "a.txt", "content": "x", "find": "", "replace": "y" }),
+            &test_ctx(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().starts_with("Pass either content, or find + replace"), "{err}");
     }
 }

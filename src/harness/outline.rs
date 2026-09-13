@@ -16,6 +16,121 @@ pub const OUTLINE_MAX_FILES: usize = 4;
 /// Longest signature kept per entry.
 const OUTLINE_ENTRY_CHARS: usize = 90;
 
+/// Identifiers named in a goal that get a pre-run `git grep` (first-mentioned first).
+pub const SYMBOL_HITS_MAX_SYMBOLS: usize = 8;
+/// Hits listed per identifier before the line says "+N more".
+pub const SYMBOL_HITS_MAX_PER_SYMBOL: usize = 6;
+/// Total budget for the symbol-hits block.
+pub const SYMBOL_HITS_MAX_CHARS: usize = 6_000;
+/// Wall-clock budget for the greps behind one block; later symbols are dropped.
+const SYMBOL_HITS_TIME_BUDGET_MS: u128 = 400;
+const SYMBOL_HIT_LINE_CHARS: usize = 110;
+
+fn is_symbol_token(token: &str) -> bool {
+    if token.len() < 4 || token.len() > 60 {
+        return false;
+    }
+    let bytes = token.as_bytes();
+    if !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+        return false;
+    }
+    let has_underscore_inside = token[1..token.len() - 1].contains('_');
+    let camel = token.chars().zip(token.chars().skip(1)).any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase());
+    let all_caps = token.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    (has_underscore_inside || camel) && !all_caps
+}
+
+/// Identifiers worth a pre-run grep: snake_case and CamelCase names in `texts`
+/// (qualified names split on `::` and `.`), skipping file paths, ALL_CAPS
+/// words and plain prose; first-mentioned first, at most SYMBOL_HITS_MAX_SYMBOLS.
+pub fn extract_goal_symbols(texts: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for text in texts {
+        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c)) {
+            if raw.contains('/') || raw.is_empty() {
+                continue;
+            }
+            for part in raw.split('.') {
+                let part = part.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+                if part.contains('-') {
+                    continue;
+                }
+                if is_symbol_token(part) && !out.iter().any(|seen| seen == part) {
+                    out.push(part.to_string());
+                    if out.len() >= SYMBOL_HITS_MAX_SYMBOLS {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn git_grep_hits(cwd: &str, symbol: &str) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["grep", "-n", "-w", "-F", "--untracked", "-I", "-e", symbol, "--", ".", ":!*.lock", ":!*.min.*"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    // Exit 1 is "no match"; anything else (not a repo, no git) is unusable.
+    if !output.status.success() && output.status.code() != Some(1) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
+}
+
+/// `git grep -nw` hits for the identifiers `texts` name, one line per
+/// identifier, so the first rounds of a task start from the call sites and
+/// definitions instead of GREPping for them. None outside git or when
+/// nothing qualifies.
+pub fn symbol_hits_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
+    let symbols = extract_goal_symbols(texts);
+    if symbols.is_empty() {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let mut lines: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for symbol in &symbols {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS {
+            break;
+        }
+        let hits = git_grep_hits(cwd, symbol)?;
+        let line = if hits.is_empty() {
+            format!("{symbol}: no hits")
+        } else {
+            let shown: Vec<String> = hits
+                .iter()
+                .take(SYMBOL_HITS_MAX_PER_SYMBOL)
+                .map(|hit| {
+                    let hit = hit.trim();
+                    // "path:line:text" — keep the locator, tighten the text.
+                    let mut parts = hit.splitn(3, ':');
+                    let (path, num, text) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());
+                    let text: String = text.chars().take(SYMBOL_HIT_LINE_CHARS).collect();
+                    format!("{path}:{num} {text}")
+                })
+                .collect();
+            let mut line = format!("{symbol}: {}", shown.join(" | "));
+            if hits.len() > shown.len() {
+                line.push_str(&format!(" | +{} more", hits.len() - shown.len()));
+            }
+            line
+        };
+        total += line.len() + 1;
+        if total > SYMBOL_HITS_MAX_CHARS {
+            break;
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!("symbol hits (git grep -nw, first {SYMBOL_HITS_MAX_PER_SYMBOL} per name):\n{}", lines.join("\n")))
+    }
+}
+
 fn is_definition(ext: &str, line: &str) -> bool {
     let indent = line.len() - line.trim_start().len();
     let body = line.trim_start();
@@ -184,6 +299,38 @@ mod tests {
         let got = outlines_for_texts(&cwd, &["tidy src/tiny.rs and src/run.rs", "src/run.rs again"]).expect("outline");
         assert_eq!(got.matches("src/run.rs (").count(), 1, "one outline per file: {got}");
         assert!(outlines_for_texts(&cwd, &["src/missing.rs"]).is_none());
+    }
+
+    #[test]
+    fn goal_symbols_pick_identifiers_not_prose_or_paths() {
+        let goal = "Add counters `hedges_fired` and hedges_won to RoleInferenceTotals and HarnessRun.role_inference in src/harness/loop.rs; serialise them in the `roleInference` map. Run `cargo test --lib harness`. PATCH the README.";
+        let symbols = extract_goal_symbols(&[goal]);
+        assert_eq!(
+            symbols,
+            vec!["hedges_fired", "hedges_won", "RoleInferenceTotals", "HarnessRun", "role_inference", "roleInference"],
+            "{symbols:?}"
+        );
+        assert!(extract_goal_symbols(&["fix the bug in the parser"]).is_empty());
+        let many: Vec<String> = (0..20).map(|i| format!("sym_{i}")).collect();
+        assert_eq!(extract_goal_symbols(&[&many.join(" ")]).len(), SYMBOL_HITS_MAX_SYMBOLS);
+    }
+
+    #[test]
+    fn symbol_hits_come_from_git_grep() {
+        let dir = std::env::temp_dir().join(format!("drip-symbol-hits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(symbol_hits_for_texts(&cwd, &["touch role_totals"]).is_none(), "not a repo");
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "src/a.rs", "pub struct RoleTotals {}\nfn use_role_totals(x: RoleTotals) {}\n");
+        write(&dir, "src/b.rs", "// RoleTotalsX is not a whole-word hit\n");
+        let hits = symbol_hits_for_texts(&cwd, &["extend RoleTotals and missing_name"]).unwrap();
+        assert!(hits.starts_with("symbol hits (git grep -nw"), "{hits}");
+        assert!(hits.contains("RoleTotals: src/a.rs:1 pub struct RoleTotals {} | src/a.rs:2 fn use_role_totals(x: RoleTotals) {}"), "{hits}");
+        assert!(!hits.contains("src/b.rs"), "{hits}");
+        assert!(hits.contains("missing_name: no hits"), "{hits}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

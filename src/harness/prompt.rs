@@ -546,7 +546,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
     if let Some(outlines) = args.file_outlines.filter(|text| !text.trim().is_empty()) {
         sections.push(format!(
-            "{FILE_OUTLINE_PREFIX} (harness-generated: line-numbered definitions of the files this task names — READ the specific line ranges you need instead of paging through whole files):\n{outlines}"
+            "{FILE_OUTLINE_PREFIX} (harness-generated: line-numbered definitions of the files this task names, and git-grep hits for the identifiers it names — start from these locations; READ the specific line ranges you need instead of paging through whole files or GREPping for these names again):\n{outlines}"
         ));
     }
 

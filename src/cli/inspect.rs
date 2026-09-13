@@ -613,6 +613,7 @@ mod tests {
 					retries: 1,
 					wall_ms: 300000,
 				},
+				role_inference: std::collections::BTreeMap::new(),
 			},
 		});
 		save_run_record(&result_path, &record).unwrap();

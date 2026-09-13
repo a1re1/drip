@@ -21,7 +21,11 @@ use crate::harness::transport::{TransportContent, TransportRequestMessage};
 
 // Placeholder marker so the append below lands after the existing helpers.
 pub const DEFAULT_DYNAMIC_TOOL_NAMES: [&str; 1] = ["DIR"];
-pub const MAX_DIGEST_ACTIONS: usize = 12;
+/// Digest lines carried into the next loop's last_activation. Every tool
+/// call the loop made gets one (see `compact_tool_input`), so a loop that
+/// explored 20-30 files hands the next loop the list instead of losing it
+/// at the transcript reset; 40 keeps a three-cycle loop's calls in view.
+pub const MAX_DIGEST_ACTIONS: usize = 40;
 pub const MAX_DIGEST_ACTION_CHARS: usize = 200;
 pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
@@ -141,6 +145,14 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn compact_tool_input_names_what_the_call_touched() {
+        assert_eq!(super::compact_tool_input(r#"{"command":"grep -n   foo\n src/ | head"}"#, 90), "grep -n foo src/ | head");
+        assert_eq!(super::compact_tool_input(r#"{"path":"src/a.rs","content":"..."}"#, 90), "src/a.rs");
+        assert_eq!(super::compact_tool_input("not json", 90), "not json");
+        assert!(super::compact_tool_input(&format!(r#"{{"command":"{}"}}"#, "x".repeat(300)), 90).chars().count() <= 91);
+    }
+
+    #[test]
     fn goal_declared_checks_stay_external_when_they_name_edited_files() {
         let edited = vec!["tests/test_new.py".to_string()];
         let plain = r#"{"command":"python3 -m unittest tests/test_new.py","anchor":{"kind":"external","source":"suite"}}"#;
@@ -256,7 +268,7 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
     if !records.is_empty() {
         sections.push(format!("verification records this run (newest first):\n{}", records.join("\n")));
     }
-    sections.push("Judge the diff against the goal and the task contracts. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it.".to_string());
+    sections.push("Judge the diff against the goal and the task contracts. One VERIFY of the project's own check is enough to confirm the records above; spend rounds on what the diff shows, not on re-deriving it. Defects in code the diff did not touch are pre-existing and out of scope: mention them in a note_task, do not raise them as anomalies or block on them.".to_string());
     sections.join("\n\n")
 }
 
@@ -1157,6 +1169,21 @@ pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
     commands
 }
 
+/// One-line summary of a tool call's input for the activation digest: the
+/// field that identifies what the call touched (command, path, pattern,
+/// find, query, url), whitespace-collapsed and cut to `limit` chars.
+pub fn compact_tool_input(raw_input: &str, limit: usize) -> String {
+    let text = serde_json::from_str::<serde_json::Value>(raw_input)
+        .ok()
+        .and_then(|value| {
+            ["command", "path", "pattern", "find", "query", "url", "title", "name"]
+                .iter()
+                .find_map(|key| value.get(key).and_then(|field| field.as_str()).map(str::to_string))
+        })
+        .unwrap_or_else(|| raw_input.to_string());
+    truncate_text(&collapse_whitespace(text.trim()), limit)
+}
+
 pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<String> {
     extract_verification_command_for_goal(tool_name, raw_input, "")
 }
@@ -1702,7 +1729,7 @@ use crate::harness::harness_tools::{
     apply_harness_op, is_harness_tool, parse_harness_op_with_gate, HarnessRoleGate, RepoMemoryConfig,
 };
 use crate::harness::telemetry::{
-    canonicalize_tool_input, record_tool_telemetry, tool_telemetry_key, truncate_text_keeping_ends,
+    record_tool_telemetry, tool_telemetry_key, truncate_text_keeping_ends,
 };
 use crate::core::types::{HarnessVerificationRecord, HarnessVerificationStreak};
 use crate::harness::model_call::{
@@ -1907,9 +1934,18 @@ pub struct UsageInbox {
     pub iteration: std::sync::atomic::AtomicI64,
 }
 
+/// Per-role inference accounting: one bucket per loop role ("default" when
+/// the loop has no role), summed from every model-call usage record.
+pub use crate::core::types::RoleInferenceTotals;
+
 /// Run-scoped state: options, config, state, usage, and the model caller.
 pub struct HarnessRun {
     pub usage_inbox: Arc<UsageInbox>,
+    /// Current loop role name; set in begin_loop, taken for accounting.
+    pub active_role: Option<String>,
+    /// Accumulated per-role inference totals (calls / latency / completion
+    /// tokens), keyed by loop role name; "default" for roleless loops.
+    pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
     pub options: SolidStateHarnessOptions,
     pub now: NowFn,
     pub emit_fn: EmitFn,
@@ -2178,6 +2214,9 @@ fn clamp_loop_value(value: i64, minimum: i64, fallback: i64) -> i64 {
 }
 
 impl HarnessRun {
+    /// Minimal in-memory run for unit tests of accounting-only paths. Built
+    /// from a real HarnessRun whose heavy collaborators were reset: avoids
+    /// enumerating 39 fields that only `new` initialises.
     /// Resolve options into run-scoped config, load or create the state,
     /// build the role map / harness tool specs / transport tools, and create
     /// the model caller.
@@ -2439,6 +2478,8 @@ impl HarnessRun {
         let run_answers_path = options.answers_path.clone();
         Ok(HarnessRun {
             usage_inbox,
+            active_role: None,
+            role_inference: Default::default(),
             options,
             now,
             emit_fn,
@@ -2505,6 +2546,20 @@ impl HarnessRun {
         // Treat an empty string like an absent value.
         let task_id = call.task_id.clone().filter(|task_id| !task_id.is_empty());
         let provider = call.provider.clone().filter(|provider| !provider.is_empty());
+        // Per-role inference accounting: bucket this call under its loop role
+        // (falls back to "default" when usage arrives outside a role loop).
+        let role_key = self.active_role.clone().unwrap_or_else(|| "default".to_string());
+        let role_bucket = self
+            .role_inference
+            .entry(role_key)
+            .or_insert_with(RoleInferenceTotals::default);
+        role_bucket.calls += 1;
+        role_bucket.latency_ms += call.latency_ms.max(0) as u64;
+        role_bucket.completion_tokens +=
+            usage
+                .and_then(|usage| usage.completion_tokens)
+                .unwrap_or(0)
+                .max(0) as u64;
 
         let prompt_tokens = usage.and_then(|usage| usage.prompt_tokens).unwrap_or(0);
         let completion_tokens = usage.and_then(|usage| usage.completion_tokens).unwrap_or(0);
@@ -2661,6 +2716,7 @@ impl HarnessRun {
             state: self.state.clone(),
             usage: self.finalize_usage(),
             stop_latency_ms: self.stop_latency_ms(),
+            role_inference: self.role_inference.clone(),
         }
     }
 
@@ -2837,6 +2893,7 @@ impl HarnessRun {
             state: self.state.clone(),
             usage: self.finalize_usage(),
             stop_latency_ms: self.stop_latency_ms(),
+            role_inference: self.role_inference.clone(),
         }
     }
 
@@ -3581,6 +3638,9 @@ impl HarnessRun {
             };
         let loop_system_prompt =
             crate::harness::roles::compose_role_system_prompt(&self.system_prompt, role.as_ref());
+        // Per-role inference accounting keys off this for every model call in
+        // the loop; roleless loops fall back to "default" at accumulation.
+        self.active_role = role.as_ref().map(|role| role.name.clone());
         // role loop budget clamps.
         let loop_budget = match role.as_ref().and_then(|r| r.r#loop.as_ref()) {
             Some(role_loop) => HarnessLoopConfig {
@@ -4939,11 +4999,14 @@ impl HarnessRun {
                 }
             }
 
+            // One digest line per workspace call — what it touched and how
+            // it came out — so the next loop sees what was already read,
+            // grepped, or edited instead of re-exploring.
             scope.digest_actions.push(format!(
-                "{} {}{}",
-                tool_name,
-                truncate_text(&canonicalize_tool_input(&raw_input), MAX_DIGEST_ACTION_CHARS),
-                if execution.failed { " (failed)" } else { "" }
+                "{tool_name} {}{} → {}",
+                compact_tool_input(&raw_input, 90),
+                if execution.failed { " (failed)" } else { "" },
+                truncate_text(&collapse_whitespace(execution.tool_content.trim()), 90)
             ));
 
             if let Some(task_id) = scope.current_task_id.clone() {
@@ -5019,7 +5082,6 @@ impl HarnessRun {
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::ToolResult,
             });
-
             // drip-specific: PRReady fires only after a publish-matching tool
             // call actually succeeded (git commit/push, `gh pr create`). The
             // veto and failure paths return failed:true above, so they stay
@@ -5501,6 +5563,7 @@ impl HarnessRun {
             state: self.state.clone(),
             usage: self.finalize_usage(),
             stop_latency_ms: self.stop_latency_ms(),
+            role_inference: self.role_inference.clone(),
         }
     }
 }
@@ -6056,6 +6119,87 @@ mod ask_user_survey_tests {
             "injected summary must render the question and the chosen answer, got: {}",
             messages[0].text
         );
+    }
+}
+
+#[cfg(test)]
+mod role_inference_tests {
+    use super::*;
+
+    /// Minimal run for unit tests of accounting-only paths: real HarnessRun
+    /// via `test_run_in`'s temp-state construction.
+    async fn role_inference_test_run() -> HarnessRun {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::mem::forget(dir); // keep backing dir alive for the run's duration
+        let mut options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(path),
+            ..SolidStateHarnessOptions::default()
+        };
+        HarnessRun::new(options).await.unwrap()
+    }
+
+
+    fn usage(completion: i64) -> Option<crate::harness::model_call::OpenAICompatibleResponseUsage> {
+        Some(crate::harness::model_call::OpenAICompatibleResponseUsage {
+            completion_tokens: Some(completion),
+            ..Default::default()
+        })
+    }
+
+    fn call(latency_ms: i64) -> ModelCallRecord {
+        ModelCallRecord { latency_ms, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn repeated_role_sums_calls_latency_and_tokens() {
+        let mut run = role_inference_test_run().await;
+        run.active_role = Some("author".to_string());
+        run.record_model_usage(usage(10).as_ref(), &call(100));
+        run.record_model_usage(usage(5).as_ref(), &call(50));
+        let totals = run.role_inference.get("author").unwrap();
+        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (2, 150, 15));
+    }
+
+    #[tokio::test]
+    async fn distinct_roles_stay_separate() {
+        let mut run = role_inference_test_run().await;
+        run.active_role = Some("author".to_string());
+        run.record_model_usage(usage(10).as_ref(), &call(100));
+        run.active_role = Some("reviewer".to_string());
+        run.record_model_usage(usage(3).as_ref(), &call(30));
+        assert_eq!(run.role_inference.get("author").unwrap().completion_tokens, 10);
+        assert_eq!(run.role_inference.get("reviewer").unwrap().completion_tokens, 3);
+        assert_eq!(run.role_inference.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_role_buckets_under_default() {
+        let mut run = role_inference_test_run().await;
+        run.record_model_usage(usage(7).as_ref(), &call(20));
+        let totals = run.role_inference.get("default").unwrap();
+        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (1, 20, 7));
+    }
+
+    #[tokio::test]
+    async fn missing_usage_adds_zero_tokens_but_counts_call() {
+        let mut run = role_inference_test_run().await;
+        run.record_model_usage(None, &call(40));
+        let totals = run.role_inference.get("default").unwrap();
+        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (1, 40, 0));
+    }
+
+    #[tokio::test]
+    async fn role_inference_serialises_camel_case() {
+        let mut run = role_inference_test_run().await;
+        run.active_role = Some("planner".to_string());
+        run.record_model_usage(usage(9).as_ref(), &call(120));
+        let json = serde_json::to_value(&run.role_inference).unwrap();
+        let entry = json.get("planner").unwrap();
+        assert!(entry.get("latencyMs").is_some(), "camelCase latencyMs expected: {json}");
+        assert!(entry.get("completionTokens").is_some(), "camelCase completionTokens expected: {json}");
+        assert!(entry.get("calls").is_some());
     }
 }
 

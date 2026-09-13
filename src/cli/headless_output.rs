@@ -251,6 +251,7 @@ mod tests {
             task_stats: TaskStats::default(),
             completion_anchor: None,
             anomalies: None,
+            role_inference: Default::default(),
         }
     }
 

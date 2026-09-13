@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::types::{
 	HarnessLeakedJob, HarnessRunReason, HarnessRunResult, HarnessRunUsage, HarnessState,
-	HarnessTask, HarnessTaskStatus, TaskStats, VerificationSummary,
+	HarnessTask, HarnessTaskStatus, RoleInferenceTotals, TaskStats, VerificationSummary,
 };
 
 // The persisted outcome of a session's most recent run. The headless result
@@ -54,6 +54,10 @@ pub struct RunRecord {
 	/// Token/latency economics of the run; null on records from older versions.
 	/// (Declared before taskStats so serde emits the canonical key order.)
 	pub usage: Option<HarnessRunUsage>,
+	/// Per-role model-call totals (calls / latencyMs / completionTokens),
+	/// keyed by loop role name; omitted when the run recorded none.
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
 	pub task_stats: TaskStats,
 	/// How the last completion was anchored (external check vs declared none) and the claimed confidence.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +113,7 @@ pub fn build_run_record(args: &BuildRunRecordArgs) -> RunRecord {
 			.map(|note| note.text.clone()),
 		task_stats: count_task_stats(tasks),
 		usage: Some(args.result.usage.clone()),
+		role_inference: args.result.role_inference.clone(),
 		completion_anchor: args.result.state.completion_anchor.clone(),
 		// An empty anomaly list is dropped, same as a missing one.
 		anomalies: Some(args.result.state.anomalies.clone()).filter(|anomalies| !anomalies.is_empty()),
@@ -212,6 +217,7 @@ mod tests {
 			notes: vec![],
 			reopen_count: None,
 			review_of: None,
+			reviews: None,
 			review_round: None,
 			awaiting_review_by: None,
 			role: None,
@@ -280,8 +286,45 @@ mod tests {
 					retries: 0,
 					wall_ms: 1500,
 				},
+				role_inference: std::collections::BTreeMap::new(),
 			},
 		})
+	}
+
+	#[test]
+	fn serialises_role_inference_with_two_roles_and_omits_empty_map() {
+		let mut record = make_record();
+		// Empty map: the key is dropped from the JSON entirely.
+		let json = serde_json::to_string(&record).unwrap();
+		assert!(!json.contains("roleInference"), "{json}");
+
+		record.role_inference.insert(
+			"author".into(),
+			RoleInferenceTotals {
+				calls: 12,
+				latency_ms: 4800,
+				completion_tokens: 910,
+			},
+		);
+		record.role_inference.insert(
+			"planner".into(),
+			RoleInferenceTotals {
+				calls: 3,
+				latency_ms: 1200,
+				completion_tokens: 210,
+			},
+		);
+
+		let json = serde_json::to_string(&record).unwrap();
+		let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+		assert_eq!(
+			parsed["roleInference"],
+			serde_json::json!({
+				"author": { "calls": 12, "latencyMs": 4800, "completionTokens": 910 },
+				"planner": { "calls": 3, "latencyMs": 1200, "completionTokens": 210 },
+			}),
+			"{json}"
+		);
 	}
 
 	#[test]

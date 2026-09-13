@@ -1313,6 +1313,10 @@ pub fn spawn_deferred_review(
     }];
     let added = core_state::add_tasks(state, entries, core_state::HarnessTaskPlacement::Next);
     let review_task_id = added.first().map(|task| task.id.clone()).unwrap_or_default();
+    let covered_ids: Vec<String> = awaiting.iter().map(|(id, _, _, _)| id.clone()).collect();
+    if let Some(review_task) = core_state::get_task_by_id_mut(state, &review_task_id) {
+        review_task.reviews = Some(covered_ids);
+    }
     let blind = gate.roles.get(&verifier).is_some_and(|spec| spec.blind);
     if !blind {
         let notes: Vec<String> = awaiting
@@ -1358,9 +1362,16 @@ pub fn apply_review_verdict(
     };
     use crate::core::types::HarnessTaskStatus;
 
+    let covered_ids: Vec<String> = match &review_task.reviews {
+        Some(reviews) if !reviews.is_empty() => reviews.clone(),
+        _ => review_task.review_of.clone().into_iter().collect(),
+    };
+    // Rejections reopen review_of (the last task the batch covered, as
+    // before); the covered list only widens the confirmation.
     let original = review_task
         .review_of
         .as_deref()
+        .or_else(|| covered_ids.first().map(String::as_str))
         .and_then(|id| get_task_by_id(state, id))
         .map(|task| (task.id.clone(), task.status, task.review_round));
 
@@ -1376,18 +1387,19 @@ pub fn apply_review_verdict(
         );
 
         let review_task_id = &review_task.id;
-        if let Some((original_id, _, _)) = &original {
-            if let Some(task) = get_task_by_id_mut(state, original_id) {
+        for covered_id in &covered_ids {
+            if let Some(task) = get_task_by_id_mut(state, covered_id) {
                 append_task_note(task, &format!("Review {review_task_id} confirmed this task: {summary}"));
             }
         }
 
+        let confirmed_list = if covered_ids.is_empty() {
+            review_task.review_of.as_deref().unwrap_or_default().to_string()
+        } else {
+            covered_ids.join(", ")
+        };
         return HarnessToolResult {
-            result_text: format!(
-                "Review {} confirmed {}.",
-                review_task.id,
-                original.as_ref().map(|(id, _, _)| id.as_str()).unwrap_or_else(|| review_task.review_of.as_deref().unwrap_or_default())
-            ),
+            result_text: format!("Review {} confirmed {}.", review_task.id, confirmed_list),
             state_changed: true,
             task_finished: true,
         };
@@ -1590,10 +1602,29 @@ pub fn parse_harness_op_with_gate(
                     return Err("The confidence field must be exactly \"low\", \"medium\", or \"high\".".to_string());
                 }
             };
-            let anchor = string_or_none(&input, "anchor").map(|word| normalize_enum_word(&word));
+            // The anchor may arrive as the VERIFY-style object ({"kind": ...})
+            // or as a loose synonym ("self", "internal"); both normalise
+            // rather than costing a round.
+            let anchor = input
+                .get("anchor")
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| value.get("kind").and_then(|kind| kind.as_str()).map(str::to_string))
+                })
+                .map(|word| normalize_enum_word(&word))
+                .filter(|word| !word.is_empty())
+                .map(|word| match word.as_str() {
+                    "external" | "ext" | "correctness" | "correctness-class" => "external".to_string(),
+                    "none" | "no" | "null" | "n/a" | "self" | "self-authored" | "selfauthored" | "internal" | "consistency" | "consistency-class" => {
+                        "none".to_string()
+                    }
+                    other => other.to_string(),
+                });
             if let Some(anchor) = anchor.as_deref() {
                 if anchor != "external" && anchor != "none" {
-                    return Err("The anchor field must be exactly \"external\" or \"none\".".to_string());
+                    return Err(format!("The anchor field must be exactly \"external\" or \"none\" (got \"{anchor}\")."));
                 }
             }
             let blocked_on = match input.get("blockedOn").and_then(|v| v.as_str()).map(str::trim) {
@@ -1608,7 +1639,17 @@ pub fn parse_harness_op_with_gate(
             }
             let mut observations = Vec::new();
             for item in input.get("observations").and_then(|value| value.as_array()).into_iter().flatten() {
-                let Some(matches) = item.get("matches").and_then(|v| v.as_bool()) else {
+                // `matches` as a bool, a "true"/"false" string, or under a
+                // sibling name ("match", "matched", "satisfied").
+                let matches_value = ["matches", "match", "matched", "satisfied"].iter().find_map(|key| item.get(*key));
+                let matches = matches_value.and_then(|value| {
+                    value.as_bool().or_else(|| match value.as_str().map(|text| text.trim().to_ascii_lowercase()).as_deref() {
+                        Some("true") | Some("yes") | Some("y") => Some(true),
+                        Some("false") | Some("no") | Some("n") => Some(false),
+                        _ => None,
+                    })
+                });
+                let Some(matches) = matches else {
                     return Err("Each observation needs a boolean matches field (true when the observed value satisfies the expectation).".to_string());
                 };
                 observations.push(FinishObservationInput {
@@ -3612,6 +3653,24 @@ mod apply_harness_op_tests {
     }
 
     #[test]
+    fn finish_task_anchor_and_matches_accept_loose_spellings() {
+        let parsed = parse_harness_op(
+            "finish_task",
+            r#"{"status":"completed","summary":"done","anchor":{"kind":"self","source":"own probe"},"observations":[{"subject":"count","observed":"3","matches":"true"}]}"#,
+        )
+        .expect("parses");
+        match parsed {
+            HarnessOp::FinishTask { anchor, observations, .. } => {
+                assert_eq!(anchor.as_deref(), Some("none"));
+                assert!(observations[0].matches);
+            }
+            other => panic!("{other:?}"),
+        }
+        let error = parse_harness_op("finish_task", r#"{"status":"completed","summary":"done","anchor":"maybe"}"#).expect_err("refused");
+        assert!(error.contains("got \"maybe\""), "{error}");
+    }
+
+    #[test]
     fn finish_task_without_a_status_is_a_completion_claim() {
         let parsed = parse_harness_op("finish_task", r#"{"summary":"done","confidence":"high"}"#).expect("parses");
         assert!(matches!(parsed, HarnessOp::FinishTask { status: FinishTaskStatus::Completed, .. }));
@@ -4624,7 +4683,7 @@ mod apply_harness_op_tests {
     /// full model round).
     #[test]
     fn finish_task_parse_rejects_unknown_enum_spellings() {
-        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5","matches":"true"}]}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5","matches":"maybe"}]}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5"}]}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"partial","summary":"x"}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"certain"}"#).is_err());
@@ -5384,6 +5443,7 @@ mod apply_harness_op_tests {
 mod review_opt_out_enforcement_tests {
     use super::*;
     use crate::core::state::create_harness_state;
+    use crate::core::types::HarnessTask;
 
     fn ctx_opted_out() -> HarnessOpContext {
         HarnessOpContext {
@@ -5606,7 +5666,66 @@ mod review_opt_out_enforcement_tests {
         assert_eq!(review.role.as_deref(), Some("reviewer"));
         assert!(review.title.contains("task-1") && review.title.contains("task-2"), "{}", review.title);
         assert!(review.notes.iter().any(|note| note.contains("task-1: read parser.rs") && note.contains("task-2: read printer.rs")), "{:?}", review.notes);
+        assert_eq!(review.reviews.as_deref(), Some(["task-1".as_ref(), "task-2"].map(str::to_string).as_slice()), "coverage metadata lists every covered id in original title order");
         assert!(state.tasks.iter().all(|task| task.awaiting_review_by.is_none()));
+
+        // The confirmation notes every covered task and names them all.
+        let confirmed = apply_harness_op(
+            &mut state,
+            parse_op(
+                "finish_task",
+                r#"{"status": "completed", "summary": "both notes read clean", "taskId": "task-3", "anchor": "none", "anchorNote": "fixture: no external anchor"}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        assert!(confirmed.task_finished, "{}", confirmed.text);
+        assert!(confirmed.text.contains("Review task-3 confirmed task-1, task-2."), "{}", confirmed.text);
+        for (index, covered) in ["task-1", "task-2"].iter().enumerate() {
+            let task = &state.tasks[index];
+            assert_eq!(task.id, *covered);
+            assert!(
+                task.notes.iter().any(|note| note.contains(&format!("Review task-3 confirmed this task: both notes read clean"))),
+                "{covered} missing the confirmation note: {:?}",
+                task.notes
+            );
+        }
+
+        // Legacy fallback: a reviews=None review still confirms its single review_of.
+        let legacy_author = HarnessTask {
+            id: "legacy-author".to_string(),
+            role: Some("author".to_string()),
+            ..serde_json::from_str::<HarnessTask>(
+                r#"{"id":"","createdAtIteration":1,"notes":[],"stallCount":0,"status":"pending","title":""}"#,
+            )
+            .unwrap()
+        };
+        state.tasks.push(legacy_author);
+        let legacy_id = state.tasks.last().unwrap().id.clone();
+        state.tasks.last_mut().unwrap().status = crate::core::types::HarnessTaskStatus::Completed;
+        let mut legacy_review = HarnessTask {
+            id: "legacy-review".to_string(),
+            role: Some("reviewer".to_string()),
+            ..serde_json::from_str::<HarnessTask>(
+                r#"{"id":"","createdAtIteration":1,"notes":[],"stallCount":0,"status":"pending","title":""}"#,
+            )
+            .unwrap()
+        };
+        legacy_review.review_of = Some(legacy_id.clone());
+        state.tasks.push(legacy_review);
+        let legacy_confirmed = apply_harness_op(
+            &mut state,
+            parse_op(
+                "finish_task",
+                r#"{"status": "completed", "summary": "single-task confirmation", "taskId": "legacy-review", "anchor": "none", "anchorNote": "fixture: no external anchor"}"#,
+            ),
+            &review_gate_ctx(false),
+        );
+        assert!(legacy_confirmed.task_finished, "{}", legacy_confirmed.text);
+        assert!(
+            legacy_confirmed.text.contains(&format!("Review legacy-review confirmed {legacy_id}.")),
+            "{}",
+            legacy_confirmed.text
+        );
     }
 
     /// Dropping the last piece of author work also makes the deferred

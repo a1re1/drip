@@ -209,6 +209,7 @@ pub fn add_tasks(
 			notes: Vec::new(),
 			reopen_count: None,
 			review_of: entry.review_of.clone(),
+			reviews: None,
 			review_round: None,
 			awaiting_review_by: None,
 			role: entry.role.clone(),

@@ -1231,6 +1231,11 @@ folded as the transcript grows anyway, longer cycles are the cheaper way to
 keep context bounded. The multi-cycle bench tasks ran 11-29% faster at
 sixteen rounds in a three-repeat A/B.
 
+The review brief a reviewer loop opens with carries small new files in full
+(up to four files of at most 200 lines) next to the diff, and tells the
+reviewer not to READ files it was already handed; bench reviewers spent two of
+their four rounds re-reading changed files before verifying.
+
 A run ends `unreconciled` only for a blocking anomaly: an unresolved support
 gap, or one whose expectation's latest observation mismatched, or whose own
 observed text reports a failure. Anomalies that call themselves informational,

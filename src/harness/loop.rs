@@ -584,6 +584,11 @@ pub fn next_verification_record_id(records: &Option<Vec<crate::core::types::Harn
 }
 
 /// One-shot corrective push for narration-only replies (exported for tests).
+/// Output cap on the retry after a truncated, tool-less reply: enough for
+/// a sentence plus a few hundred lines of PATCH, far below the 16k-token
+/// runaway that the first attempt produced.
+pub const TRUNCATION_RETRY_MAX_TOKENS: u64 = 6_000;
+
 pub const TRUNCATION_NUDGE_MESSAGE: &str = "harness: that reply was cut off at the provider's output-token limit before any tool call, so nothing was done. Reply again with far less text: one sentence at most, then the tool call. If you are writing a large file, split it into two or three PATCH calls of a few hundred lines each.";
 pub const NARRATION_NUDGE_MESSAGE: &str = "harness: that reply was narration, not work — it was recorded as a task note. Act through tool calls now (BASH/READ/PATCH/...), or call finish_task if the task is genuinely done; a second text-only reply ends this loop.";
 
@@ -724,9 +729,12 @@ pub fn declared_verification_anchor(
             expectation_subject: expectation_subject.clone(),
         });
     }
+    // Only the command decides the downgrade: a suite run that happens to
+    // include a test file this run touched is still mostly pre-existing
+    // checks, and the free-text source must be allowed to mention that file
+    // honestly without turning the whole run's evidence self-authored.
     let command = input.get("command").and_then(|value| value.as_str()).unwrap_or_default();
-    let haystack = format!("{command} {}", source.as_deref().unwrap_or_default());
-    let named = edited_paths.iter().find(|path| command_names_path(&haystack, path));
+    let named = edited_paths.iter().find(|path| command_names_path(command, path));
     match named {
         Some(path) => Some(VerificationAnchor {
             kind: VerificationAnchorKind::SelfAuthored,
@@ -1387,8 +1395,16 @@ mod loop_helpers_tests {
         assert!(downgraded.downgraded_reason.as_deref().unwrap_or_default().contains("tests/test_totals.py"));
         assert_eq!(downgraded.source.as_deref(), Some("project suite"));
 
-        let by_basename = declared_verification_anchor(
+        // The source text naming an edited file is not a downgrade on its
+        // own: only the command decides what the check exercises.
+        let by_source_only = declared_verification_anchor(
             r#"{"command":"pytest -k totals","anchor":{"kind":"external","source":"test_totals.py fixture"}}"#,
+            &edited,
+        )
+        .expect("anchor declared");
+        assert_eq!(by_source_only.kind, VerificationAnchorKind::External);
+        let by_basename = declared_verification_anchor(
+            r#"{"command":"pytest test_totals.py","anchor":{"kind":"external","source":"project suite"}}"#,
             &edited,
         )
         .expect("anchor declared");
@@ -1810,6 +1826,10 @@ pub struct LoopScope {
     pub verification_stuck_this_loop: bool,
     pub narration_nudge_used: bool,
     pub truncation_nudge_used: bool,
+    /// Set by the truncation nudge: the next model call forces a tool call
+    /// (tool_choice "required") under a tight output cap, so the retry
+    /// cannot run away into another multi-minute narration.
+    pub force_tool_call_next_round: bool,
     pub tool_calls_this_loop: i64,
     pub overflow_retried_this_loop: bool,
     pub concluded_naturally: bool,
@@ -3160,6 +3180,7 @@ impl HarnessRun {
             verification_stuck_this_loop: false,
             narration_nudge_used: false,
             truncation_nudge_used: false,
+            force_tool_call_next_round: false,
             tool_calls_this_loop: 0,
             overflow_retried_this_loop: false,
             concluded_naturally: false,
@@ -3708,6 +3729,7 @@ impl HarnessRun {
         let task_id = scope.current_task_id.clone();
 
         // The retry call reuses the same options; build them once.
+        let forced_tool_call = std::mem::take(&mut scope.force_tool_call_next_round);
         let call_options = ModelCallOptions {
             include_tools: None,
             route: scope
@@ -3717,6 +3739,8 @@ impl HarnessRun {
                 .map(model_route_from_role_route),
             transport_tools: Some(scope.loop_transport_tools.clone()),
             usage_task_id: task_id.clone(),
+            max_tokens: forced_tool_call.then_some(TRUNCATION_RETRY_MAX_TOKENS),
+            tool_choice: forced_tool_call.then(|| "required".to_string()),
         };
 
         let response = match self
@@ -3849,6 +3873,7 @@ impl HarnessRun {
 
             if can_nudge {
                 scope.truncation_nudge_used = true;
+                scope.force_tool_call_next_round = true;
                 scope.transport_messages.push(TransportRequestMessage {
                     anthropic_content: response_message
                         .and_then(|message| message.anthropic_content.clone()),
@@ -4307,6 +4332,18 @@ impl HarnessRun {
                     let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
                     if tool_name == "VERIFY" {
                         evidence.anchor = declared_verification_anchor(&raw_input, &self.state.edited_paths);
+                        // The tool built its result text before the harness
+                        // attached the declared anchor, so it reads
+                        // "anchor: undeclared" for every call; a model that
+                        // sees that re-declares the same anchor round after
+                        // round. Print the anchor the record actually carries.
+                        if evidence.anchor.is_some() {
+                            execution.tool_content = execution.tool_content.replacen(
+                                "; anchor: undeclared",
+                                &format!("; anchor: {}", crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())),
+                                1,
+                            );
+                        }
                         if let Some(reason) = evidence.anchor.as_ref().and_then(|anchor| anchor.downgraded_reason.clone()) {
                             self.emit(HarnessEvent {
                                 data: None,

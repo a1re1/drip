@@ -173,6 +173,11 @@ pub struct TransportRequestPayload {
     pub prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Output cap for this call. None leaves the provider default in place;
+    /// the harness sets it on a truncation retry so a second runaway reply
+    /// cannot burn minutes producing prose no tool call follows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
     pub stream: bool, // always false
 }
 
@@ -366,15 +371,21 @@ pub struct BuildTransportRequestPayloadArgs {
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
     pub tools: Option<Vec<OpenAICompatibleRequestTool>>,
+    /// Output cap for the call (None: provider default).
+    pub max_tokens: Option<u64>,
+    /// tool_choice when tools are present ("auto" unless overridden, e.g.
+    /// "required" to force the reply to act instead of narrate).
+    pub tool_choice: Option<String>,
 }
 
 pub fn build_transport_request_payload(
     args: BuildTransportRequestPayloadArgs,
 ) -> TransportRequestPayload {
     let (tool_choice, tools) = match &args.tools {
-        Some(tools) if !tools.is_empty() => {
-            (Some("auto".to_string()), Some(tools.clone()))
-        }
+        Some(tools) if !tools.is_empty() => (
+            Some(args.tool_choice.clone().unwrap_or_else(|| "auto".to_string())),
+            Some(tools.clone()),
+        ),
         _ => (None, None),
     };
 
@@ -402,6 +413,7 @@ pub fn build_transport_request_payload(
             .reasoning_effort
             .map(|effort| effort.trim().to_string())
             .filter(|effort| !effort.is_empty()),
+        max_tokens: args.max_tokens,
         stream: false,
     }
 }
@@ -432,6 +444,8 @@ pub fn create_transport_request_preview(
         prompt_cache_key: None,
         reasoning_effort: args.reasoning_effort,
         tools: args.tools,
+        max_tokens: None,
+        tool_choice: None,
     })
 }
 
@@ -566,7 +580,9 @@ mod tests {
             prompt_cache_key: Some("key".to_string()),
             reasoning_effort: Some("  high  ".to_string()),
             tools: None,
-        });
+        max_tokens: None,
+        tool_choice: None,
+    });
 
         let json = serde_json::to_value(&payload).unwrap();
 
@@ -587,7 +603,9 @@ mod tests {
             prompt_cache_key: Some(String::new()),
             reasoning_effort: Some("   ".to_string()),
             tools: None,
-        });
+        max_tokens: None,
+        tool_choice: None,
+    });
 
         let json = serde_json::to_value(&payload).unwrap();
 
@@ -607,11 +625,27 @@ mod tests {
                 "read a file",
                 serde_json::json!({"type": "object"}),
             )]),
+            max_tokens: None,
+            tool_choice: None,
         });
 
         let json = serde_json::to_value(&payload).unwrap();
 
         assert_eq!(json["tool_choice"], "auto");
+        assert!(json.get("max_tokens").is_none());
+
+        let forced = build_transport_request_payload(BuildTransportRequestPayloadArgs {
+            messages: Vec::new(),
+            model: "m".to_string(),
+            prompt_cache_key: None,
+            reasoning_effort: None,
+            tools: Some(vec![create_request_tool("READ", "read a file", serde_json::json!({"type": "object"}))]),
+            max_tokens: Some(6000),
+            tool_choice: Some("required".to_string()),
+        });
+        let forced = serde_json::to_value(&forced).unwrap();
+        assert_eq!(forced["tool_choice"], "required");
+        assert_eq!(forced["max_tokens"], 6000);
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "READ");
     }
@@ -624,7 +658,9 @@ mod tests {
             prompt_cache_key: None,
             reasoning_effort: None,
             tools: None,
-        });
+        max_tokens: None,
+        tool_choice: None,
+    });
 
         let serialized = serde_json::to_string(&payload).unwrap();
         let expected =

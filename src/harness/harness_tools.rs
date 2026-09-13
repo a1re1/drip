@@ -685,6 +685,43 @@ pub fn register_expectations(
 /// covered by a passing external reported-claim check bound to it via the
 /// record's expectation_subject — a single unrelated external check does not
 /// anchor expectations it never covered.
+/// The most recent passing external, claim-level verification record that
+/// covers `expectation`: one bound to it, or an unbound (goal-level) one.
+pub fn covering_external_record<'a>(
+    state: &'a HarnessState,
+    expectation: &crate::core::types::HarnessExpectation,
+) -> Option<&'a crate::core::types::HarnessVerificationRecord> {
+    state.verifications.iter().flatten().rev().find(|record| {
+        if record.failed || record.ran_no_tests == Some(true) {
+            return false;
+        }
+        let Some(anchor) = record.evidence.as_ref().filter(|evidence| evidence.verifies_work()).and_then(|evidence| evidence.anchor.as_ref()) else {
+            return false;
+        };
+        anchor.kind == crate::core::types::VerificationAnchorKind::External
+            && anchor.coverage != Some(crate::core::types::CoverageGranularity::InputOrComponent)
+            && anchor
+                .expectation_subject
+                .as_deref()
+                .is_none_or(|bound| bound == expectation.id || bound.eq_ignore_ascii_case(&expectation.subject))
+    })
+}
+
+/// A harness-minted support-gap anomaly (an unsupported value revision), as
+/// opposed to a mismatch the model declared on purpose.
+pub fn is_support_gap(anomaly: &crate::core::types::HarnessAnomaly) -> bool {
+    anomaly.note.starts_with("support gap:")
+}
+
+/// Lower-case, trimmed, quotes and trailing punctuation stripped: the shape a
+/// loosely spelled enum word ("Completed.", " DONE ") normalises to.
+pub fn normalize_enum_word(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '!' || c == '`')
+        .trim()
+        .to_ascii_lowercase()
+}
+
 pub fn has_external_anchor(state: &HarnessState) -> bool {
     let eligible = |record: &crate::core::types::HarnessVerificationRecord| {
         !record.failed
@@ -693,7 +730,12 @@ pub fn has_external_anchor(state: &HarnessState) -> bool {
                 evidence.verifies_work()
                     && evidence.anchor.as_ref().is_some_and(|anchor| {
                         anchor.kind == crate::core::types::VerificationAnchorKind::External
-                            && anchor.coverage == Some(crate::core::types::CoverageGranularity::ReportedClaim)
+                            // Undeclared coverage on an external check counts
+                            // as claim-level: a pre-existing suite the agent
+                            // ran is correctness evidence whether or not the
+                            // model remembered the coverage field. Only an
+                            // explicit inputOrComponent declaration opts out.
+                            && anchor.coverage != Some(crate::core::types::CoverageGranularity::InputOrComponent)
                     })
             })
     };
@@ -708,7 +750,19 @@ pub fn has_external_anchor(state: &HarnessState) -> bool {
                 bound == expectation.id.as_str() || bound.eq_ignore_ascii_case(&expectation.subject)
             })
     };
-    if state.expectations.is_empty() {
+    // A goal-level external check (bound to no expectation) anchors the
+    // whole claim; binding is only needed when every eligible record was
+    // scoped to a particular expectation, in which case each registered
+    // expectation needs its own bound record.
+    let unbound = |record: &crate::core::types::HarnessVerificationRecord| {
+        record
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.anchor.as_ref())
+            .and_then(|anchor| anchor.expectation_subject.as_deref())
+            .is_none()
+    };
+    if state.expectations.is_empty() || state.verifications.iter().flatten().any(|record| eligible(record) && unbound(record)) {
         state.verifications.iter().flatten().any(&eligible)
     } else {
         state.expectations.iter().all(|expectation| {
@@ -917,7 +971,14 @@ pub fn record_observations_with_watermark(
             .map(|(_, planned)| planned)
             .or_else(|| expectations[index].observations.last());
         if let Some(previous) = previous {
-            if previous.observed != observation.observed {
+            // A restatement is not a revision: when the prior observation and
+            // this one both report the expectation as met, the verdict the
+            // operator relies on has not changed, only its wording. Small
+            // models rephrase their observed text on every finish_task
+            // attempt, and treating each rewording as an unsupported value
+            // change buried whole runs under support-gap anomalies.
+            let restatement = previous.matches && observation.matches;
+            if previous.observed != observation.observed && !restatement {
                 if !revision_evidence_is_eligible(
                     record_support.records,
                     &expectations[index].id,
@@ -1361,24 +1422,40 @@ pub fn parse_harness_op_with_gate(
             title: string_or_default(&input, "title", ""),
         }),
         "finish_task" => {
-            let status = match input.get("status").and_then(|v| v.as_str()) {
-                Some("blocked") => FinishTaskStatus::Blocked,
-                Some("completed") => FinishTaskStatus::Completed,
-                Some("unreconciled") => FinishTaskStatus::Unreconciled,
+            // Small models spell the enums loosely ("Completed", "done",
+            // "COMPLETE"); every bounce here costs a full model round, so
+            // the obvious synonyms normalise instead of failing closed.
+            let status = match input.get("status").and_then(|v| v.as_str()).map(normalize_enum_word) {
+                Some(word) if matches!(word.as_str(), "blocked" | "block" | "stuck") => FinishTaskStatus::Blocked,
+                Some(word)
+                    if matches!(
+                        word.as_str(),
+                        "completed" | "complete" | "done" | "finished" | "success" | "succeeded" | "ok"
+                    ) =>
+                {
+                    FinishTaskStatus::Completed
+                }
+                Some(word) if matches!(word.as_str(), "unreconciled" | "anomalous" | "mismatch") => {
+                    FinishTaskStatus::Unreconciled
+                }
                 _ => {
                     return Err("The status field must be exactly \"completed\", \"blocked\", or \"unreconciled\".".to_string());
                 }
             };
-            let confidence = match input.get("confidence").and_then(|v| v.as_str()) {
+            let confidence = match input.get("confidence").and_then(|v| v.as_str()).map(normalize_enum_word) {
                 None => None,
-                Some("low") => Some(crate::core::types::ClaimedConfidence::Low),
-                Some("medium") => Some(crate::core::types::ClaimedConfidence::Medium),
-                Some("high") => Some(crate::core::types::ClaimedConfidence::High),
+                Some(word) if matches!(word.as_str(), "low" | "lo") => Some(crate::core::types::ClaimedConfidence::Low),
+                Some(word) if matches!(word.as_str(), "medium" | "med" | "mid" | "moderate") => {
+                    Some(crate::core::types::ClaimedConfidence::Medium)
+                }
+                Some(word) if matches!(word.as_str(), "high" | "hi" | "very high") => {
+                    Some(crate::core::types::ClaimedConfidence::High)
+                }
                 Some(_) => {
                     return Err("The confidence field must be exactly \"low\", \"medium\", or \"high\".".to_string());
                 }
             };
-            let anchor = string_or_none(&input, "anchor");
+            let anchor = string_or_none(&input, "anchor").map(|word| normalize_enum_word(&word));
             if let Some(anchor) = anchor.as_deref() {
                 if anchor != "external" && anchor != "none" {
                     return Err("The anchor field must be exactly \"external\" or \"none\".".to_string());
@@ -2285,6 +2362,9 @@ pub fn apply_harness_op(
             }
         }
             HarnessOp::FinishTask { status, summary, task_id, confidence, anchor, anchor_note, observations, anomalies, blocked_on } => {
+                let mut status = status;
+                let mut anomalies = anomalies;
+                let mut normalized_note = String::new();
         use crate::core::types::HarnessTaskStatus;
 
             // Task-terminal calls are refused once the loop has ended (a
@@ -2436,7 +2516,7 @@ pub fn apply_harness_op(
             // loop — otherwise the worker whose output is under review can
             // confirm itself by naming the review task's id.
             if has_review_of {
-                if status == FinishTaskStatus::Completed && !state.anomalies.is_empty() {
+                if status == FinishTaskStatus::Completed && state.anomalies.iter().any(is_support_gap) {
                     return HarnessOpOutcome {
                         text: "harness: not accepted yet — unresolved support-gap anomalies prevent a clean review verdict; resolve them or explicitly finish unreconciled with the anomalies.".into(),
                         state_changed: mutated,
@@ -2652,8 +2732,32 @@ pub fn apply_harness_op(
                     };
                 }
 
-                let staged = staged
+                let mut staged = staged
                     .expect("finish path stages observations before its gates");
+                // An expectation the model forgot to observe but that a
+                // passing external check already covers (bound to it, or a
+                // goal-level check) is observed by that record: the harness
+                // fills the observation in rather than bouncing the finish
+                // for a form the evidence already answers.
+                let mut auto_observed: Vec<String> = Vec::new();
+                for expectation in staged.iter_mut().filter(|expectation| expectation.observations.is_empty()) {
+                    let Some(record) = covering_external_record(state, expectation) else { continue };
+                    let record_ref = record.id.clone().unwrap_or_else(|| "verification".to_string());
+                    expectation.observations.push(crate::core::types::HarnessExpectationObservation {
+                        at_iteration: state.iteration.max(0) as u64,
+                        observed: format!("covered by passing external check {record_ref} ({})", record.command),
+                        matches: true,
+                        evidence: Some(record_ref.clone()),
+                        observed_after_records: Some(state.verifications.as_ref().map_or(0u64, |records| records.len() as u64)),
+                    });
+                    auto_observed.push(format!("{} \"{}\" via {record_ref}", expectation.id, expectation.subject));
+                }
+                if !auto_observed.is_empty() {
+                    normalized_note.push_str(&format!(
+                        " (harness observed {} from passing external checks.)",
+                        auto_observed.join(", ")
+                    ));
+                }
                 let unresolved: Vec<String> = staged
                     .iter()
                     .filter(|expectation| expectation.observations.is_empty())
@@ -2699,18 +2803,18 @@ pub fn apply_harness_op(
                 // erase it. Only fresh eligible claim-level evidence (which
                 // resolves the gap above) or an explicit unreconciled finish
                 // moves past this.
-                if status == FinishTaskStatus::Completed && !state.anomalies.is_empty() {
-                    let gaps_text = state
-                        .anomalies
-                        .iter()
-                        .map(|gap| gap.note.as_str())
-                        .collect::<Vec<_>>()
-                        .join("; ");
+                let support_gaps: Vec<&str> = state
+                    .anomalies
+                    .iter()
+                    .filter(|gap| is_support_gap(gap))
+                    .map(|gap| gap.note.as_str())
+                    .collect();
+                if status == FinishTaskStatus::Completed && !support_gaps.is_empty() {
                     return HarnessOpOutcome {
                         text: format!(
                             "harness: not accepted yet — {} support-gap anomaly(ies) on record: {}. Resolve each with fresh eligible claim-level evidence (VERIFY anchor kind=external, coverage=reportedClaim, expectationSubject), or finish with status=\"unreconciled\" listing them.",
-                            state.anomalies.len(),
-                            gaps_text
+                            support_gaps.len(),
+                            support_gaps.join("; ")
                         ),
                         state_changed: mutated,
                         task_finished: false,
@@ -2718,7 +2822,31 @@ pub fn apply_harness_op(
                         direct_response: None,
                     };
                 }
-
+                // A confused unreconciled: the model declared anomalies for
+                // expectations whose own observations say the value matched.
+                // Those "anomalies" describe no mismatch, so they are dropped;
+                // with nothing left to reconcile the finish is a completion.
+                if status == FinishTaskStatus::Unreconciled && support_gaps.is_empty() {
+                    let before = anomalies.len();
+                    anomalies.retain(|anomaly| {
+                        !staged.iter().any(|expectation| {
+                            (expectation.subject.eq_ignore_ascii_case(&anomaly.subject)
+                                || expectation.id.eq_ignore_ascii_case(&anomaly.subject))
+                                && expectation.observations.last().is_some_and(|observation| observation.matches)
+                        })
+                    });
+                    let dropped = before - anomalies.len();
+                    if dropped > 0 && anomalies.is_empty() {
+                        status = FinishTaskStatus::Completed;
+                        normalized_note = format!(
+                            " ({dropped} declared anomaly(ies) named expectations whose observations match, so nothing is unreconciled; recorded as completed.)"
+                        );
+                    } else if dropped > 0 {
+                        normalized_note = format!(
+                            " ({dropped} declared anomaly(ies) named expectations whose observations match and were dropped.)"
+                        );
+                    }
+                }
                 state.expectations = staged;
                 state.anomalies.extend(anomalies.iter().cloned());
                 state.completion_anchor = Some(crate::core::types::CompletionAnchor {
@@ -2848,7 +2976,7 @@ pub fn apply_harness_op(
             // planning loop) ends this loop.
             HarnessOpOutcome {
                 text: format!(
-                    "Task {finished_id} marked {finished_status_label}.{}{}",
+                    "Task {finished_id} marked {finished_status_label}.{normalized_note}{}{}",
                     if blocked_on.is_some() && core_status == HarnessTaskStatus::Blocked {
                         " Blocked on operator input: it will not be reopened, and the run ends blocked-on-input once nothing else is workable."
                     } else {
@@ -3437,6 +3565,68 @@ mod apply_harness_op_tests {
         apply_harness_op(state, op, ctx)
     }
 
+    /// An unreconciled finish whose declared anomalies all name expectations
+    /// that the same call observed as matching describes no mismatch: the
+    /// anomalies are dropped and the task completes cleanly, so a confused
+    /// small model does not turn a green run into an unreconciled one.
+    #[test]
+    fn unreconciled_with_only_matching_declared_anomalies_completes_cleanly() {
+        let (mut state, ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let confused = finish(
+            &mut state,
+            &ctx,
+            r#"{"status":"unreconciled","summary":"done","observations":[{"subject":"total","observed":"100","matches":true}],"anomalies":[{"subject":"total","expected":"about 100","observed":"100","note":"observed as stated; no discrepancy"}]}"#,
+        );
+        assert!(confused.task_finished, "{}", confused.text);
+        assert!(confused.text.contains("marked completed"), "{}", confused.text);
+        assert!(confused.text.contains("nothing is unreconciled"), "{}", confused.text);
+        assert!(state.anomalies.is_empty(), "{:?}", state.anomalies);
+        assert_eq!(state.tasks[0].status, crate::core::types::HarnessTaskStatus::Completed);
+    }
+
+    /// A mismatch the author declared on purpose stays on record, and the
+    /// reviewer confirming that work with a clean verdict is not bounced by
+    /// it: only harness-minted support gaps block a review verdict.
+    #[test]
+    fn declared_mismatch_anomalies_do_not_block_a_clean_review_verdict() {
+        let (mut state, mut ctx) = anchoring_fixture(Some("external"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let honest = finish(
+            &mut state,
+            &ctx,
+            r#"{"status":"unreconciled","summary":"off","observations":[{"subject":"total","observed":"140","matches":false}],"anomalies":[{"subject":"total","expected":"about 100","observed":"140","note":"the model overshoots"}]}"#,
+        );
+        assert!(honest.task_finished, "{}", honest.text);
+        assert_eq!(state.anomalies.len(), 1);
+        let mut review_task = state.tasks[0].clone();
+        review_task.id = "review-1".into();
+        review_task.review_of = Some("task-1".into());
+        review_task.status = crate::core::types::HarnessTaskStatus::InProgress;
+        state.tasks.push(review_task);
+        ctx.current_task_id = Some("review-1".into());
+        let verdict = finish(&mut state, &ctx, r#"{"taskId":"review-1","status":"completed","summary":"the work is what was asked; the declared mismatch stands"}"#);
+        assert!(verdict.task_finished, "{}", verdict.text);
+        assert_eq!(state.anomalies.len(), 1, "the declared anomaly stays on record: {:?}", state.anomalies);
+    }
+
+    /// Rewording an observation that still reports the expectation as met
+    /// is a restatement, not a value revision: no support gap is minted.
+    #[test]
+    fn matching_restatements_do_not_mint_support_gaps() {
+        let (mut state, ctx) = anchoring_fixture(Some("self"));
+        let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"total","expected":"about 100"}]}"#).unwrap();
+        apply_harness_op(&mut state, register, &HarnessOpContext::default());
+        let first = finish(&mut state, &ctx, r#"{"status":"completed","summary":"x","observations":[{"subject":"total","observed":"100 (suite green)","matches":true}]}"#);
+        assert!(!first.task_finished, "self-anchored evidence bounces: {}", first.text);
+        let second = finish(&mut state, &ctx, r#"{"status":"completed","summary":"x","observations":[{"subject":"total","observed":"total is 100, all 6 tests pass","matches":true}]}"#);
+        assert!(!second.task_finished, "{}", second.text);
+        assert!(!state.anomalies.iter().any(is_support_gap), "{:?}", state.anomalies);
+        assert!(second.text.contains("no correctness-class evidence"), "{}", second.text);
+    }
+
     /// Consistency-class evidence alone cannot complete edited work: the
     /// finish bounces until an external check passes or anchor=none is
     /// declared with a reason. The declaration is recorded on state.
@@ -3599,18 +3789,18 @@ mod apply_harness_op_tests {
         };
         let finish_both = r#"{"status":"completed","summary":"done","observations":[{"subject":"total","observed":"100","matches":true},{"subject":"sign","observed":"positive","matches":true}]}"#;
 
-        // A goal-level external check bound to no expectation covers neither
-        // expectation, so the anchoring gate refuses `completed` even though
-        // both observations were supplied.
+        // A goal-level external check bound to no expectation anchors the
+        // whole claim: both observations were supplied, so `completed` is
+        // accepted without per-expectation binding.
         let goal_only = anchored_record("v1", None);
-        state.last_verification = Some(goal_only.clone());
-        state.verifications = Some(vec![goal_only]);
-        let bounced = finish(&mut state, &ctx, finish_both);
-        assert!(!bounced.task_finished, "{}", bounced.text);
-        assert!(bounced.text.contains("no correctness-class evidence"), "{}", bounced.text);
+        let mut goal_state = state.clone();
+        goal_state.last_verification = Some(goal_only.clone());
+        goal_state.verifications = Some(vec![goal_only]);
+        let accepted = finish(&mut goal_state, &ctx, finish_both);
+        assert!(accepted.task_finished, "{}", accepted.text);
 
         // One bound check covers only its own expectation: "total" is covered,
-        // "sign" is not, and the check still refuses.
+        // "sign" is not, and with no goal-level record the check refuses.
         let e1_record = anchored_record("v2", Some("e1"));
         state.last_verification = Some(e1_record.clone());
         state.verifications = Some(vec![e1_record]);
@@ -3680,9 +3870,21 @@ mod apply_harness_op_tests {
         let register = parse_harness_op("plan_tasks", r#"{"tasks":[],"expectations":[{"subject":"output sign","expected":"positive"}]}"#).unwrap();
         apply_harness_op(&mut state, register, &ctx);
 
-        let unobserved = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high"}"#);
-        assert!(!unobserved.task_finished);
+        // A passing external check covering the expectation observes it on
+        // the model's behalf, so the bounce only fires when no such check
+        // exists: park the fixture record on another subject for that call.
+        let covering = state.verifications.clone();
+        state.verifications.as_mut().unwrap()[0].evidence.as_mut().unwrap().anchor.as_mut().unwrap().expectation_subject = Some("e9".into());
+        let unobserved = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","anchor":"none","anchorNote":"no external check exists"}"#);
+        assert!(!unobserved.task_finished, "{}", unobserved.text);
         assert!(unobserved.text.contains("have no observation: e1 \"output sign\""), "{}", unobserved.text);
+        state.verifications = covering;
+        let mut auto = state.clone();
+        let observed_by_harness = finish(&mut auto, &ctx, r#"{"status":"completed","summary":"done","confidence":"high"}"#);
+        assert!(observed_by_harness.task_finished, "{}", observed_by_harness.text);
+        assert!(observed_by_harness.text.contains("harness observed e1"), "{}", observed_by_harness.text);
+        assert_eq!(auto.expectations[0].observations.len(), 1);
+        assert!(auto.expectations[0].observations[0].matches);
 
         let unknown = finish(&mut state, &ctx, r#"{"status":"completed","summary":"done","confidence":"high","observations":[{"subject":"latency","observed":"3ms","matches":true}]}"#);
         assert!(!unknown.task_finished);
@@ -4109,13 +4311,30 @@ mod apply_harness_op_tests {
     }
 
     /// finish_task parsing rejects unknown status/confidence/anchor spellings
-    /// and a missing or non-boolean matches instead of silently coercing them.
+    /// and a missing or non-boolean matches instead of silently coercing them,
+    /// while the obvious synonyms and casings normalise (each bounce costs a
+    /// full model round).
     #[test]
     fn finish_task_parse_rejects_unknown_enum_spellings() {
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5","matches":"true"}]}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"high","observations":[{"subject":"total","observed":"5"}]}"#).is_err());
-        assert!(parse_harness_op("finish_task", r#"{"status":"done","summary":"x"}"#).is_err());
+        assert!(parse_harness_op("finish_task", r#"{"status":"partial","summary":"x"}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","confidence":"certain"}"#).is_err());
+        for (raw, expected) in [
+            ("done", FinishTaskStatus::Completed),
+            ("Completed.", FinishTaskStatus::Completed),
+            ("COMPLETE", FinishTaskStatus::Completed),
+            (" blocked ", FinishTaskStatus::Blocked),
+            ("Unreconciled", FinishTaskStatus::Unreconciled),
+        ] {
+            match parse_harness_op("finish_task", &format!(r#"{{"status":"{raw}","summary":"x","confidence":"Medium"}}"#)) {
+                Ok(HarnessOp::FinishTask { status, confidence, .. }) => {
+                    assert_eq!(status, expected, "{raw}");
+                    assert_eq!(confidence, Some(crate::core::types::ClaimedConfidence::Medium), "{raw}");
+                }
+                other => panic!("{raw}: {other:?}"),
+            }
+        }
         assert!(parse_harness_op("finish_task", r#"{"status":"completed","summary":"x","anchor":"fixture"}"#).is_err());
         assert!(parse_harness_op("finish_task", r#"{"status":"unreconciled","summary":"x","confidence":"low"}"#).is_ok());
     }

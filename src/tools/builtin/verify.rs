@@ -50,7 +50,7 @@ pub fn definition() -> Value {
     json!({
         "type": "function",
         "function": {
-            "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared. Every VERIFY call is recorded as a verification record and the result text reports its stable record ref (\"verification record: v<n>\"); cite that ref as evidence when revising an observed expectation value.",
+            "description": "Run a verification command. Reports executed test/assertion counts separately from build/typecheck evidence. Unknown exit-zero scripts and zero-test runs are UNVERIFIED. For custom assertions emit exactly one line: DRIP_VERIFY {\"executed\":N,\"passed\":P,\"failed\":F}, with nonnegative integers and N=P+F. Counts must come from executed checks, not hardcoded expectations; they do not prove the checks use the correct specification. The marker must be printed by the script or runner that ran the checks — a command that merely echoes DRIP_VERIFY, with no real check &&-chained before it, is rejected as fabricated. Optionally declare how the check is anchored: anchor={\"kind\":\"external\",\"source\":\"...\"} means the check was not authored by you — a pre-existing project test suite, a task-provided fixture, a published constant, or an invariant independent of the implementation — and source names where it came from; anchor={\"kind\":\"self\",\"source\":\"...\"} means the check derives from your own implementation or reasoning. Omitting anchor marks the evidence undeclared. Every VERIFY call is recorded as a verification record and the result text reports its stable record ref (\"verification record: v<n>\"); cite that ref as evidence when revising an observed expectation value.",
             "name": "VERIFY",
             "parameters": {
                 "additionalProperties": false,
@@ -571,7 +571,12 @@ mod evidence_tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = super::super::ToolCtx { cwd: dir.path().to_path_buf(), ..Default::default() };
         for (command, failed) in [
-            ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", false),
+            ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", true),
+            ("echo 'DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}'", true),
+            ("test 1 = 1 && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", false),
+            ("echo start; test 1 = 1 && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", false),
+            ("true; echo 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}'", true),
+            ("printf 'DRIP_VERIFY %s\\n' '{\"executed\":1,\"passed\":1,\"failed\":0}'", true),
             ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":0,\"failed\":1}\\n'", true),
             ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'; exit 7", true),
             ("(printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'; exit 7) | cat", true),
@@ -581,6 +586,7 @@ mod evidence_tests {
         }
         let timeout = execute(&json!({"command":"sleep 2", "timeout":20}), &ctx);
         assert!(timeout.failed);
+        assert!(timeout.text.contains("HUNG: the command did not finish within"), "{}", timeout.text);
     }
 }
 
@@ -593,6 +599,15 @@ pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
     let records: Vec<_> = output.lines().filter_map(|line| line.strip_prefix(CUSTOM_RESULT_PREFIX)).collect();
     if records.is_empty() {
         return native;
+    }
+    // A marker written into the command line itself (echo/printf of
+    // DRIP_VERIFY) is the agent asserting its own result, not a check that
+    // ran; recorded sessions used it to satisfy the verify-after-edit gate.
+    if marker_is_fabricated(command) {
+        return VerifyParsed {
+            runner: "custom-fabricated".into(), passed: 0, failed: native.failed.max(1), skipped: 0,
+            first_failures: vec!["Fabricated DRIP_VERIFY result: the marker must be printed by the check that ran (a script or runner), not written into the VERIFY command itself. Run the real check.".into()],
+        };
     }
     let counts = (|| {
         if records.len() != 1 { return None; }
@@ -616,6 +631,31 @@ pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
             first_failures: vec!["Invalid DRIP_VERIFY result: emit exactly one JSON record with nonnegative integer executed/passed/failed counts and executed = passed + failed.".into()],
         },
     }
+}
+
+/// True when the command writes the DRIP_VERIFY marker itself with echo or
+/// printf without a real check `&&`-chained before it in the same chain
+/// (`test ... && printf 'DRIP_VERIFY ...'` is a check; `echo 'DRIP_VERIFY ...'`
+/// is the agent asserting its own result).
+pub fn marker_is_fabricated(command: &str) -> bool {
+    let marker = CUSTOM_RESULT_PREFIX.trim_end();
+    if !command.contains(marker) {
+        return false;
+    }
+    for chain in command.split(|c| c == ';' || c == '\n' || c == '|') {
+        let mut real_before = false;
+        for segment in chain.split("&&") {
+            let first = segment.trim().trim_start_matches(['(', '{', ' ']).split_whitespace().next().unwrap_or("");
+            let is_echo = matches!(first, "echo" | "printf");
+            if is_echo && segment.contains(marker) && !real_before {
+                return true;
+            }
+            if !first.is_empty() && !is_echo {
+                real_before = true;
+            }
+        }
+    }
+    false
 }
 
 /// Recognize actual compiler/build invocations, not mentions in echo commands
@@ -785,6 +825,12 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
     );
     let mut body_lines: Vec<String> = vec![verdict_line.clone()];
     body_lines.push(crate::core::state::describe_verification_evidence(Some(&evidence)));
+    if verdict.timed_out {
+        body_lines.push(format!(
+            "HUNG: the command did not finish within {}ms and was killed; nothing it printed counts as a check. A test that starts a server and never returns, an interactive prompt or a blocking read hangs the same way every run — do not re-run it unchanged. Run a narrower target (one module or -k pattern), fix the hang (shut the server down in tearDown, bind port 0, add socket timeouts), or pass a shorter timeout.",
+            prepared.input.timeout_ms
+        ));
+    }
 
     if !verdict.first_failures.is_empty() {
         body_lines.push(String::new());

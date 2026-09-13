@@ -239,7 +239,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "plan_tasks",
-                "description": "Add new tasks to the shared todo list. Use small, concrete tasks that a single task loop can finish. When the goal produces a measurable output, register its expected shape in expectations before computing it.",
+                "description": "Add new tasks to the shared todo list. Use the fewest concrete tasks that cover the goal: one task per coherent change even across several files; a single task loop can finish dozens of rounds of work, and every extra task costs a loop of re-orientation. When the goal produces a measurable output, register its expected shape in expectations before computing it.",
                 "parameters": {
                     "properties": {
                         "expectations": {

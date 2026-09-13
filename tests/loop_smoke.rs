@@ -511,6 +511,10 @@ async fn plan_finish_summary_completes_the_run() {
             jobs_root: Some(temp.join("jobs")),
         })),
         url: Some(url),
+        // Keep latency memory off the operator's real ~/.drip/latency.json:
+        // a non-empty store emits a harness-op seed event before loop-start,
+        // which would break the event-kind assertion below.
+        latency_store: Some(temp.join("latency.json")),
         ..Default::default()
     };
 

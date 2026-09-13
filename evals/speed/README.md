@@ -52,6 +52,7 @@ python3 evals/speed/bench.py --label NAME [options]
 | `--root` | temp dir | Workspace root directory. |
 | `--keep` | off | Keep workspaces after grading (for debugging). |
 | `--compare A B` | — | Print a two-label comparison table and exit. |
+| `--show-tasks` | off | Print one line per task from `tasks/tasks.json` (id, size, first 80 characters of the goal) and exit. |
 | `--show LABEL` | — | Print a label's per-run table and exit. |
 | `--summary LABEL` | — | Print a per-task median/min/max summary and exit. |
 

@@ -13,6 +13,38 @@ bench = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bench)
 
 
+class ShowTasksTest(unittest.TestCase):
+    def test_show_tasks_one_line_per_task_with_goal_excerpt(self):
+        tasks = [
+            {"id": "alpha", "size": "S", "goal": "x" * 200},
+            {"id": "beta", "size": "L", "goal": "short goal"},
+        ]
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = bench.show_tasks(tasks)
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("alpha"))
+        self.assertIn("S", lines[0])
+        self.assertTrue(lines[0].rstrip().endswith("x" * 80))
+        self.assertTrue(lines[1].startswith("beta"))
+
+    def test_show_tasks_truncates_goal_to_80_chars(self):
+        tasks = [{"id": "t1", "size": "M", "goal": "g" * 300}]
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bench.show_tasks(tasks)
+        line = buf.getvalue().rstrip("\n")
+        excerpt = line.split("M", 1)[1].lstrip()
+        self.assertEqual(len(excerpt), 80)
+        self.assertEqual(set(excerpt), {"g"})
+
+
 def run(task, wall_s, inferences, hidden_pass, rejections):
     return dict(task=task, wall_s=wall_s, inferences=inferences,
                 hidden_pass=hidden_pass, rejections=rejections)

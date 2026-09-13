@@ -1027,6 +1027,10 @@ pub struct RoleInferenceTotals {
 	pub calls: u64,
 	pub latency_ms: u64,
 	pub completion_tokens: u64,
+	/// Calls that raced a second (hedged) request.
+	pub hedges_fired: u64,
+	/// Hedged calls where the second request answered first.
+	pub hedges_won: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

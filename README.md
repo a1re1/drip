@@ -1254,7 +1254,7 @@ their four rounds re-reading changed files before verifying.
 
 A single-task run whose goal-declared check the harness ran after the last
 edit, and which passed, skips the reviewer loop when the whole change (tracked
-diff plus new files) is at most sixty lines: the finish reads `Review waived:
+diff plus new files) is at most a hundred lines: the finish reads `Review waived:
 …` and a `review waived` event records the check and the line count. Any task
 still awaiting review, or any remaining author work, keeps the review gate;
 so does a goal without a backticked check, since then the harness never ran

@@ -286,6 +286,10 @@ pub struct ModelCallRecord {
     pub model: String,
     pub provider: Option<String>,
     pub task_id: Option<String>,
+    /// The call raced a second request (a hedge was fired).
+    pub hedged: bool,
+    /// The second (hedged) request answered first.
+    pub hedge_won: bool,
 }
 
 /// A 429 that means "the account is out of credits" never resolves by waiting.
@@ -663,7 +667,13 @@ impl ModelCaller {
     /// Races a second identical request once the first has run `delay_ms`
     /// without answering; the first outcome of either wins and the loser is
     /// dropped (its connection closes with the future).
-    async fn run_hedged_request<F, Fut>(&self, build: F, delay_ms: u64, timeout_ms: u64, model: &str) -> RequestOutcome
+    async fn run_hedged_request<F, Fut>(
+        &self,
+        build: F,
+        delay_ms: u64,
+        timeout_ms: u64,
+        model: &str,
+    ) -> (RequestOutcome, bool)
     where
         F: Fn() -> Fut,
         Fut: Future<Output = RawResponse>,
@@ -675,7 +685,7 @@ impl ModelCaller {
         let delay = tokio::time::sleep(Duration::from_millis(delay_ms));
         tokio::pin!(delay);
         tokio::select! {
-            outcome = &mut primary => return outcome,
+            outcome = &mut primary => return (outcome, false),
             () = &mut delay => {}
         }
         self.emit(
@@ -689,9 +699,9 @@ impl ModelCaller {
         );
         let hedge = run_bounded_request(build(), timeout_ms, signal);
         tokio::pin!(hedge);
-        let (winner, outcome) = tokio::select! {
-            outcome = &mut primary => ("first request", outcome),
-            outcome = &mut hedge => ("second request", outcome),
+        let (winner, outcome, hedge_won) = tokio::select! {
+            outcome = &mut primary => ("first request", outcome, false),
+            outcome = &mut hedge => ("second request", outcome, true),
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.emit(
@@ -699,7 +709,7 @@ impl ModelCaller {
             format!("hedge resolved: the {winner} {} after {elapsed_ms}ms", outcome.describe()),
             None,
         );
-        outcome
+        (outcome, hedge_won)
     }
 
     fn record_latency(&self, model: &str, latency_ms: i64) {
@@ -974,6 +984,7 @@ impl ModelCaller {
                         model,
                         provider: Some("codex".to_string()),
                         task_id: call_options.usage_task_id.clone(),
+                        ..Default::default()
                     },
                 );
 
@@ -1233,15 +1244,26 @@ impl ModelCaller {
                     Ok((status, headers, body))
                 }
             };
-            let outcome = match self.hedge_delay_for(&model, attempt, attempt_timeout_ms) {
-                Some(delay_ms) => self.run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model).await,
-                None => run_bounded_request(build_request(), attempt_timeout_ms, self.deps.signal.as_ref()).await,
-            };
+            let (outcome, call_hedged, call_hedge_won) =
+                match self.hedge_delay_for(&model, attempt, attempt_timeout_ms) {
+                    Some(delay_ms) => {
+                        let (outcome, hedge_won) = self
+                            .run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model)
+                            .await;
+                        (outcome, true, hedge_won)
+                    }
+                    None => (
+                        run_bounded_request(build_request(), attempt_timeout_ms, self.deps.signal.as_ref()).await,
+                        false,
+                        false,
+                    ),
+                };
 
             match outcome {
                 RequestOutcome::Stopped => {
                     return Err(ModelCallError::Message("The run was stopped.".to_string()));
                 }
+
                 RequestOutcome::Failed(error) => {
                     if self
                         .deps
@@ -1491,6 +1513,8 @@ impl ModelCaller {
                             model,
                             provider,
                             task_id: call_options.usage_task_id.clone(),
+                            hedged: call_hedged,
+                            hedge_won: call_hedge_won,
                         },
                     );
 

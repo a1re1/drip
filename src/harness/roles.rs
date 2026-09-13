@@ -205,7 +205,14 @@ pub fn filter_tools_for_role<T: NamedTool>(tools: Vec<T>, role: Option<&HarnessR
 		return tools;
 	};
 
-	let allowed: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
+	let mut allowed: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
+	// A role that may start background jobs must be able to wait for and
+	// read them; without ASYNC_WAIT/ASYNC_TAIL models fall back to
+	// "sleep N; cat log" probes, one model round each.
+	if allowed.contains("BASH_ASYNC") {
+		allowed.insert("ASYNC_WAIT");
+		allowed.insert("ASYNC_TAIL");
+	}
 
 	tools.into_iter().filter(|tool| allowed.contains(tool.name())).collect()
 }
@@ -349,6 +356,20 @@ mod tests {
 		sandbox.tool_names = Some(vec![]);
 		assert!(compose_role_system_prompt("base", Some(&sandbox))
 			.contains("(none — harness ops only); do not claim abilities outside it."));
+	}
+
+	#[test]
+	fn bash_async_roles_always_get_the_wait_and_tail_helpers() {
+		let tools = vec![
+			Tool { name: "BASH_ASYNC".to_string() },
+			Tool { name: "ASYNC_WAIT".to_string() },
+			Tool { name: "ASYNC_TAIL".to_string() },
+			Tool { name: "PATCH".to_string() },
+		];
+		let mut role = role("reviewer");
+		role.tool_names = Some(vec!["BASH_ASYNC".to_string()]);
+		let kept: Vec<String> = filter_tools_for_role(tools, Some(&role)).into_iter().map(|tool| tool.name).collect();
+		assert_eq!(kept, vec!["BASH_ASYNC", "ASYNC_WAIT", "ASYNC_TAIL"]);
 	}
 
 	#[test]

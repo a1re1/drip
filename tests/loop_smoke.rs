@@ -462,7 +462,7 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
 
     let record = drip::cli::run_record::build_run_record(&drip::cli::run_record::BuildRunRecordArgs {
         ended_at: "2026-01-01T00:00:00.000Z", goal: "produce a measured artifact", goal_id: "g1",
-        max_iterations: Some(6), max_loops: None, pending_operator_messages: 0, result: &result,
+        max_iterations: Some(6), max_loops: None, pending_operator_messages: 0, plan_mode: None, result: &result,
     });
     assert_eq!(record.reason, "unreconciled");
     assert_eq!(record.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));

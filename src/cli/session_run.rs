@@ -326,6 +326,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         max_iterations: args.max_iterations,
         max_loops: args.max_loops,
         pending_operator_messages,
+        plan_mode: args.plan_mode.as_deref(),
         result: &result,
     });
 

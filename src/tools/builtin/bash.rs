@@ -328,7 +328,7 @@ pub fn async_definition() -> Value {
         "type": "function",
         "function": {
             "name": "BASH_ASYNC",
-            "description": "Run a bash command in a detached tmux session so it can keep running in the background while you inspect it with ASYNC_TAIL or attach manually.",
+            "description": "Run a bash command in a detached tmux session. The call waits up to waitMs (default 15s) and returns the output inline if the command finishes in time; otherwise it keeps running in the background — use ASYNC_WAIT (blocks until done) or ASYNC_TAIL (peek) with the session name, never sleep-and-poll.",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
@@ -347,6 +347,10 @@ pub fn async_definition() -> Value {
                     "title": {
                         "description": "Optional display title for the background job. Defaults to the session name and a shortened command preview.",
                         "type": "string"
+                    },
+                    "waitMs": {
+                        "description": "How long to wait for the command to finish before returning while it keeps running (0-60000, default 15000). Finished commands return their output inline.",
+                        "type": "number"
                     }
                 },
                 "required": ["command"],

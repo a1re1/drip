@@ -304,7 +304,6 @@ pub fn format_state_summary(state_path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::core::types::HarnessState;
-    use std::io::Write;
     use tempfile::TempDir;
 
     fn make_temp_root() -> TempDir {

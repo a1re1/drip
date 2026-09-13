@@ -135,7 +135,7 @@ pub fn symbol_hits_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
     }
 }
 
-fn is_definition(ext: &str, line: &str) -> bool {
+pub fn is_definition(ext: &str, line: &str) -> bool {
     let indent = line.len() - line.trim_start().len();
     let body = line.trim_start();
     let starts_with_any = |words: &[&str]| words.iter().any(|w| body.starts_with(w));
@@ -200,7 +200,7 @@ fn signature(line: &str) -> String {
 
 /// The bare name of a definition line: the first identifier after its
 /// keywords (`pub async fn merged_env(` -> `merged_env`, `impl TuiApp {` -> `TuiApp`).
-fn short_name(line: &str) -> String {
+pub fn short_name(line: &str) -> String {
     const KEYWORDS: &[&str] = &[
         "pub", "pub(crate)", "async", "fn", "struct", "enum", "trait", "impl", "mod", "const", "static", "type", "def", "class",
         "function", "export", "default", "func", "interface", "public", "private", "protected", "override", "internal", "open",
@@ -218,6 +218,27 @@ fn short_name(line: &str) -> String {
         }
     }
     body.chars().take(20).collect()
+}
+
+/// The name of the definition enclosing `index` (0-based line), from the
+/// nearest preceding definition line: `Some("merged_env")` for a line inside
+/// `fn merged_env`. Used by GREP to say which function a hit sits in, so
+/// orientation needs fewer READs. Rust: a method's enclosing `impl` block is
+/// skipped in favour of the method; lines before any definition get None.
+pub fn enclosing_definition(ext: &str, lines: &[&str], index: usize) -> Option<String> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut cursor = index.min(lines.len().saturating_sub(1));
+    let target_indent = indent(lines[cursor]);
+    loop {
+        let line = lines[cursor];
+        if is_definition(ext, line) && (cursor == index || indent(line) < target_indent || target_indent == 0) {
+            return Some(short_name(line));
+        }
+        if cursor == 0 {
+            return None;
+        }
+        cursor -= 1;
+    }
 }
 
 /// The outline of one file: "<display> (N lines): 12 pub fn a; 40 struct B; …",
@@ -371,6 +392,20 @@ mod tests {
         assert!(!hits.contains("src/b.rs"), "{hits}");
         assert!(hits.contains("missing_name: no hits"), "{hits}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enclosing_definition_names_the_nearest_definition_above() {
+        let text = "use std::io;\n\nimpl Run {\n    pub fn new() -> Run {\n        Run { x: 0 }\n    }\n\n    fn helper(&self) {\n        let y = 1;\n    }\n}\n\nfn main() {\n    println!();\n}\n";
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(enclosing_definition("rs", &lines, 0), None, "before any definition");
+        assert_eq!(enclosing_definition("rs", &lines, 4).as_deref(), Some("new"));
+        assert_eq!(enclosing_definition("rs", &lines, 8).as_deref(), Some("helper"));
+        assert_eq!(enclosing_definition("rs", &lines, 13).as_deref(), Some("main"));
+        assert_eq!(enclosing_definition("rs", &lines, 3).as_deref(), Some("new"), "the definition line itself");
+        let py: Vec<&str> = "class A:\n    def f(self):\n        return 1\n\n\ndef g():\n    pass\n".split('\n').collect();
+        assert_eq!(enclosing_definition("py", &py, 2).as_deref(), Some("f"));
+        assert_eq!(enclosing_definition("py", &py, 6).as_deref(), Some("g"));
     }
 
     #[test]

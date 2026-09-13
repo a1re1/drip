@@ -86,6 +86,13 @@ fn escape_regex(s: &str) -> String {
 
 /// Render matches with context windows, `>` markers and `--` separators.
 fn render_with_context(lines: &[&str], match_indices: &[usize], context_lines: usize) -> Vec<String> {
+    render_with_context_in(lines, match_indices, context_lines, "")
+}
+
+/// Rendering with each match line suffixed by the definition it sits in
+/// (`[in merged_env]`), when the file's language has outlines. Recorded runs
+/// followed most GREPs with a READ just to learn which function a hit was in.
+fn render_with_context_in(lines: &[&str], match_indices: &[usize], context_lines: usize, ext: &str) -> Vec<String> {
     if match_indices.is_empty() {
         return vec![];
     }
@@ -123,8 +130,14 @@ fn render_with_context(lines: &[&str], match_indices: &[usize], context_lines: u
         }
         for i in group.start..=group.end {
             let line_num = i + 1;
-            let marker = if group.match_set.contains(&i) { ">" } else { " " };
-            rendered.push(format!("{} {}: {}", marker, line_num, lines[i]));
+            let is_match = group.match_set.contains(&i);
+            let marker = if is_match { ">" } else { " " };
+            let enclosing = if is_match && !ext.is_empty() && !crate::harness::outline::is_definition(ext, lines[i]) {
+                crate::harness::outline::enclosing_definition(ext, lines, i).map(|name| format!("  [in {name}]")).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            rendered.push(format!("{} {}: {}{}", marker, line_num, lines[i], enclosing));
         }
     }
 
@@ -508,7 +521,8 @@ fn execute_prepared(input: &GrepToolInput) -> (GrepToolResult, String) {
             if let Ok(buf) = fs::read(file_path) {
                 let text = String::from_utf8_lossy(&buf).into_owned();
                 let file_lines: Vec<&str> = text.split('\n').collect();
-                let rendered = render_with_context(&file_lines, match_indices, input.context);
+                let ext = std::path::Path::new(file_path).extension().and_then(|ext| ext.to_str()).unwrap_or("");
+                let rendered = render_with_context_in(&file_lines, match_indices, input.context, ext);
                 let display_path = format_tool_path(&input.cwd, file_path);
                 parts.push(format!("{display_path}:"));
                 parts.extend(rendered);
@@ -659,6 +673,22 @@ mod tests {
             "output_text={output_text} tool_content={tool_content}");
         assert!(tool_content.contains("foo.ts:1: const hello = 'world';"),
             "tool_content={tool_content}");
+    }
+
+    #[test]
+    fn match_lines_name_their_enclosing_definition() {
+        let text = "fn alpha() {\n    let x = 1;\n}\n\nfn beta() {\n    let x = 2;\n}\n";
+        let lines: Vec<&str> = text.split('\n').collect();
+        let rendered = render_with_context_in(&lines, &[1, 5], 1, "rs");
+        assert!(rendered.iter().any(|line| line == "> 2:     let x = 1;  [in alpha]"), "{rendered:?}");
+        assert!(rendered.iter().any(|line| line == "> 6:     let x = 2;  [in beta]"), "{rendered:?}");
+        // Context lines and definition lines themselves carry no suffix.
+        assert!(rendered.iter().any(|line| line == "  1: fn alpha() {"), "{rendered:?}");
+        let on_definition = render_with_context_in(&lines, &[4], 0, "rs");
+        assert_eq!(on_definition, vec!["> 5: fn beta() {".to_string()]);
+        // Unknown extension: plain rendering.
+        let plain = render_with_context_in(&lines, &[1], 0, "");
+        assert_eq!(plain, vec!["> 2:     let x = 1;".to_string()]);
     }
 
     #[test]

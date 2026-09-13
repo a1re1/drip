@@ -792,6 +792,21 @@ pub fn is_writing_shell_command(command: &str) -> bool {
 }
 
 /// The BASH command text from a raw tool input, or None.
+/// A native runner run through BASH is the project suite whichever tool
+/// carried it: recorded runs ran `cargo test` via BASH, finished, were
+/// bounced for missing evidence, and re-ran the same suite as VERIFY. The
+/// command must name a runner and its output must parse as an executed test
+/// result; the record's anchor is then promoted like any native-runner suite.
+pub fn bash_native_runner_verification(tool_name: &str, raw_input: &str, output: &str) -> Option<String> {
+    if tool_name != "BASH" {
+        return None;
+    }
+    let command = extract_bash_command(raw_input)?;
+    native_runner_name(&command)?;
+    let evidence = crate::tools::builtin::verify::verification_evidence(&command, output);
+    (evidence.kind == crate::core::types::VerificationEvidenceKind::Tests && evidence.executed > 0).then_some(command)
+}
+
 pub fn extract_bash_command(raw_input: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(raw_input).ok()?;
     parsed.get("command").and_then(Value::as_str).map(str::to_string)
@@ -3558,7 +3573,8 @@ impl HarnessRun {
                         .then(|| extract_bash_command(&raw_input)).flatten()
                         // An echoed marker is not a check that ran (see parse_verify_output).
                         .filter(|command| !crate::tools::builtin::verify::marker_is_fabricated(command))
-                });
+                })
+                .or_else(|| bash_native_runner_verification(&tool_name, &raw_input, &execution.tool_content));
             if let Some(verification_command) = verification_command.clone() {
                 let truncated_command = truncate_text(&verification_command, 200);
                 let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
@@ -3573,7 +3589,10 @@ impl HarnessRun {
                     }
                 } else {
                     let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
-                    if tool_name == "VERIFY" {
+                    if tool_name == "VERIFY" || tool_name == "BASH" {
+                        // BASH input carries no anchor field: the declared
+                        // anchor is None and only the native-runner
+                        // promotion below can make it external.
                         evidence.anchor = declared_verification_anchor_for_goal(&raw_input, &self.state.edited_paths, &self.state.goal);
                         let before = evidence.anchor.as_ref().map(|anchor| anchor.kind.clone());
                         evidence.anchor = promote_native_runner_anchor(evidence.anchor.take(), &verification_command, &evidence, &self.state.edited_paths);
@@ -3641,6 +3660,16 @@ impl HarnessRun {
                         execution.tool_content = format!(
                             "{}\nverification record: {record_id}",
                             execution.tool_content
+                        );
+                    }
+                } else if tool_name == "BASH" {
+                    if let (Some(record_id), Some(evidence)) = (record_ref.as_deref(), verification_record.evidence.as_ref()) {
+                        execution.tool_content = format!(
+                            "{}\n[harness] recorded as verification record {record_id}: {} executed, {} failed; anchor: {} — no separate VERIFY of the same suite is needed before finish_task",
+                            execution.tool_content,
+                            evidence.executed,
+                            evidence.failed,
+                            crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())
                         );
                     }
                 }
@@ -7260,6 +7289,19 @@ mod role_inference_tests {
         run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
         run.state.mutations_since_verification = Some(1);
         assert!(run.verified_after_last_edit(None).is_none(), "an edit after the check unsettles it");
+    }
+
+    #[test]
+    fn a_native_runner_run_through_bash_counts_as_a_verification() {
+        let cargo = r#"{"command": "cargo test -q --lib 2>&1 | tail -3"}"#;
+        let output = "Bash command output from . — exit code 0.\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        assert_eq!(bash_native_runner_verification("BASH", cargo, output).as_deref(), Some("cargo test -q --lib 2>&1 | tail -3"));
+        // Not BASH, no runner, or output that is not a test result: nothing.
+        assert!(bash_native_runner_verification("VERIFY", cargo, output).is_none());
+        assert!(bash_native_runner_verification("BASH", r#"{"command": "ls -la"}"#, output).is_none());
+        assert!(bash_native_runner_verification("BASH", cargo, "Bash command output — exit code 101.\n\nerror[E0425]: cannot find value").is_none());
+        let unittest = r#"{"command": "python3 -m unittest discover -s tests -q"}"#;
+        assert!(bash_native_runner_verification("BASH", unittest, "----\nRan 5 tests in 0.01s\n\nOK\n").is_some());
     }
 
     #[tokio::test]

@@ -1176,6 +1176,14 @@ every text field is clamped to 200 characters on Unicode char boundaries, so
 state growth stays bounded and older state files without recovery history
 load unchanged.
 
+A run ends `unreconciled` only for a blocking anomaly: an unresolved support
+gap, or one whose expectation's latest observation mismatched, or whose own
+observed text reports a failure. Anomalies that call themselves informational,
+whose observation matched, or whose observed text reports success (exit 0,
+0 failures) become task notes and the run completes. "Process" expectations
+(an exit status, a merge outcome, a check result) are observed by any passing
+verification record, without anchor bookkeeping.
+
 `--plan-mode auto|always|direct` decides how a run gets its first task list.
 `auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that declares its own backticked
 acceptance check: one direct task is seeded from the goal text and the author

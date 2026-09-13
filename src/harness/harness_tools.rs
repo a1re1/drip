@@ -687,13 +687,62 @@ pub fn register_expectations(
 /// anchor expectations it never covered.
 /// The most recent passing external, claim-level verification record that
 /// covers `expectation`: one bound to it, or an unbound (goal-level) one.
+/// A "process" expectation names a step outcome rather than a domain value:
+/// an exit status, a merge outcome, a porcelain count, a check result.
+/// Planners register these freely ("bun run typecheck exit status"); any
+/// passing verification record observes them, no anchor bookkeeping needed.
+pub fn is_process_expectation(subject: &str) -> bool {
+    let subject = subject.to_ascii_lowercase();
+    ["exit status", "exit code", "outcome", "result", "status", "count", "check", "porcelain", "ancestry", "state", "typecheck", "lint", "build"]
+        .iter()
+        .any(|marker| subject.contains(marker))
+}
+
+/// Does this anomaly stand in the way of a completed run? Support gaps do.
+/// Otherwise an anomaly is benign when it calls itself informational, when
+/// the expectation it names has a matching latest observation, or when its
+/// own observed text reports success (0 failures, exit 0). Two real
+/// sessions ended `unreconciled` on green work because of such anomalies.
+pub fn anomaly_blocks_completion(state: &HarnessState, anomaly: &crate::core::types::HarnessAnomaly) -> bool {
+    if is_support_gap(anomaly) {
+        return true;
+    }
+    let text = format!("{} {} {}", anomaly.subject, anomaly.note, anomaly.expected).to_ascii_lowercase();
+    if ["informational", "non-blocking", "nonblocking", "fyi", "adjacent", "cosmetic", "not blocking"].iter().any(|word| text.contains(word)) {
+        return false;
+    }
+    // Green observed text wins even over a model-declared mismatch: the
+    // real sessions that ended unreconciled carried "exit 0; 83 pass /
+    // 0 fail" as the anomaly's own observation.
+    let observed = anomaly.observed.to_ascii_lowercase();
+    let failing = ["fail:", "failed (", "error:", "traceback", "exit 1", "exit code 1", "non-zero", "nonzero", "panicked"]
+        .iter()
+        .any(|marker| observed.contains(marker));
+    let passing = ["0 fail", "exit 0", "exit code 0", "0 failures", "0 errors", "all pass", "all tests pass", " ok"]
+        .iter()
+        .any(|marker| observed.contains(marker));
+    if passing && !failing {
+        return false;
+    }
+    if let Some(expectation) = state.expectations.iter().find(|expectation| expectation_named(expectation, &anomaly.subject)) {
+        if let Some(last) = expectation.observations.last() {
+            return !last.matches;
+        }
+    }
+    true
+}
+
 pub fn covering_external_record<'a>(
     state: &'a HarnessState,
     expectation: &crate::core::types::HarnessExpectation,
 ) -> Option<&'a crate::core::types::HarnessVerificationRecord> {
+    let process = is_process_expectation(&expectation.subject);
     state.verifications.iter().flatten().rev().find(|record| {
         if record.failed || record.ran_no_tests == Some(true) {
             return false;
+        }
+        if process && u64::try_from(record.at_iteration).unwrap_or(0) >= expectation.registered_at_iteration {
+            return true;
         }
         let Some(anchor) = record.evidence.as_ref().filter(|evidence| evidence.verifies_work()).and_then(|evidence| evidence.anchor.as_ref()) else {
             return false;
@@ -3644,6 +3693,33 @@ mod apply_harness_op_tests {
 
     /// The empty-tasks array path returns the refusal text and changes no
     /// state.
+    #[test]
+    fn benign_anomalies_do_not_block_completion() {
+        use crate::core::types::HarnessAnomaly;
+        let mut state = create_harness_state("ship it");
+        let mk = |subject: &str, observed: &str, note: &str| HarnessAnomaly { subject: subject.into(), expected: "all pass".into(), observed: observed.into(), note: note.into() };
+        assert!(!anomaly_blocks_completion(&state, &mk("bun test result", "exit 0; 83 pass / 0 fail across 6 files", "")));
+        assert!(!anomaly_blocks_completion(&state, &mk("Test-count drift (informational)", "85 pass / 0 fail", "adjacent to e1")));
+        assert!(anomaly_blocks_completion(&state, &mk("bun test result", "FAIL: 2 of 83; exit 1", "")));
+        assert!(anomaly_blocks_completion(&state, &mk("output sign", "negative", "cannot reconcile")));
+        assert!(anomaly_blocks_completion(&state, &mk("x", "exit 0", "support gap: attempted revision")));
+        // A matching latest observation on the named expectation clears it.
+        state.expectations.push(crate::core::types::HarnessExpectation {
+            id: "e1".into(), subject: "row count".into(), expected: "10".into(), registered_at_iteration: 1,
+            observations: vec![crate::core::types::HarnessExpectationObservation { at_iteration: 2, observed: "10".into(), matches: true, observed_after_records: Some(0), evidence: None }],
+        });
+        assert!(!anomaly_blocks_completion(&state, &mk("row count", "10", "")));
+        state.expectations[0].observations[0].matches = false;
+        assert!(anomaly_blocks_completion(&state, &mk("row count", "9", "")));
+    }
+
+    #[test]
+    fn process_expectations_are_observed_by_any_passing_record() {
+        assert!(is_process_expectation("bun run typecheck exit status"));
+        assert!(is_process_expectation("git merge origin/main outcome"));
+        assert!(!is_process_expectation("row sum of the ledger"));
+    }
+
     #[test]
     fn plan_tasks_from_a_task_loop_skips_entries_that_restate_the_current_task() {
         let mut state = create_harness_state("ttl support");

@@ -726,6 +726,7 @@ impl ReviewContext<'_> {
             max_iterations: Some(max_iterations),
             max_loops: None,
             task_loop_limit: None,
+            review_waiver_lines: None,
             plan_mode: None,
             mentions: None,
             new_goal: false,

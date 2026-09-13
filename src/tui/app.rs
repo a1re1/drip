@@ -86,6 +86,7 @@ pub struct TuiBootstrap {
     pub max_iterations: Option<i64>,
     pub max_loops: Option<i64>,
     pub task_loop_limit: Option<i64>,
+    pub review_waiver_lines: Option<usize>,
     pub plan_mode: Option<String>,
     pub no_repo_memory: bool,
     pub project: DripProject,
@@ -2328,6 +2329,7 @@ impl TuiApp {
         let max_iterations = self.bootstrap.max_iterations;
         let max_loops = self.bootstrap.max_loops;
         let task_loop_limit = self.bootstrap.task_loop_limit;
+        let review_waiver_lines = self.bootstrap.review_waiver_lines;
         let plan_mode = self.bootstrap.plan_mode.clone();
         let no_repo_memory = self.bootstrap.no_repo_memory;
         let ask_user_enabled = self.bootstrap.ask;
@@ -2369,6 +2371,7 @@ impl TuiApp {
                 max_iterations,
                 max_loops,
                 task_loop_limit,
+            review_waiver_lines,
                 plan_mode,
                 mentions: Some(mentions),
                 new_goal: false,
@@ -3490,6 +3493,7 @@ mod rename_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+        review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: false,
             project,
@@ -3889,6 +3893,7 @@ mod skill_activation_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+        review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: true,
             project: drip_project,
@@ -4432,6 +4437,7 @@ mod prompt_history_wiring_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+        review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: true,
             project: drip_project,

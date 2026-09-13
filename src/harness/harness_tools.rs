@@ -2259,6 +2259,11 @@ pub struct HarnessOpContext {
     /// verified_by reviewer chain is spawned and Review*/reviewer task work is
     /// rejected at every ledger boundary.
     pub review_opt_out: bool,
+    /// Set by the harness when the finish it is re-dispatching was verified
+    /// by the harness itself (the goal-declared check passed after the last
+    /// edit) and the whole change is small: the reviewer loop is waived for a
+    /// single-task run. The text says why (lines changed, check run).
+    pub review_waived: Option<String>,
 }
 
 /// Whether a task title demands reviewer work: it starts with "Review" (a
@@ -3243,6 +3248,33 @@ pub fn apply_harness_op(
             // next. The operator review opt-out completes the task directly:
             // no verified_by reviewer task is spawned (the gate itself is
             // untouched for gate-on runs).
+            // Review waiver: the harness ran the goal's own check after the
+            // last edit and it passed, the change is small, and this is the
+            // run's only author work — a reviewer loop would re-read a
+            // handful of lines to confirm what the harness already
+            // established. Only a single-task run qualifies: any task still
+            // awaiting review, or any remaining author work, keeps the gate.
+            let waived = match (&ctx.review_waived, status.finishes_work(), ctx.review_opt_out) {
+                (Some(reason), true, false)
+                    if !author_work_remains(state)
+                        && !state.tasks.iter().any(|task| {
+                            task.id != finished_id && (task.awaiting_review_by.is_some() || task.review_of.is_some())
+                        }) =>
+                {
+                    Some(reason.clone())
+                }
+                _ => None,
+            };
+            if let Some(reason) = waived {
+                return HarnessOpOutcome {
+                    text: format!("Task {finished_id} marked completed. Review waived: {reason}."),
+                    state_changed: true,
+                    task_finished: ends_loop,
+                    ended_loop: ends_loop,
+                    direct_response: None,
+                };
+            }
+
             if status.finishes_work() && !ctx.review_opt_out {
                 if let Some(gate) = ctx.gate.as_ref() {
                     let role_name = finished_role.clone().or_else(|| gate.default_task_role.clone());
@@ -5688,6 +5720,48 @@ mod review_opt_out_enforcement_tests {
         assert!(outcome.text.contains("operator disabled review"));
         assert_eq!(state.tasks[0].title, "Write the parser", "title unchanged");
         assert!(!outcome.state_changed);
+    }
+
+    #[test]
+    fn a_harness_verified_small_single_task_finish_waives_the_review() {
+        let mut state = create_harness_state("waiver goal");
+        let ctx = review_gate_ctx(false);
+        let added = apply_harness_op(
+            &mut state,
+            parse_op("plan_tasks", r#"{"tasks": [{"title": "Record the plan notes", "role": "author"}]}"#),
+            &ctx,
+        );
+        assert!(added.state_changed);
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let waiving = HarnessOpContext { review_waived: Some("the harness ran the goal-declared check (passed) and the change is 12 lines".into()), ..ctx.clone() };
+        let finish = apply_harness_op(
+            &mut state,
+            parse_op(
+                "finish_task",
+                r#"{"status": "completed", "summary": "done", "taskId": "task-1", "anchor": "none", "anchorNote": "fixture"}"#,
+            ),
+            &waiving,
+        );
+        assert!(finish.task_finished, "{}", finish.text);
+        assert!(finish.text.contains("Review waived: the harness ran the goal-declared check"), "{}", finish.text);
+        assert_eq!(state.tasks.len(), 1, "no review task under a waiver: {:?}", state.tasks.iter().map(|t| &t.title).collect::<Vec<_>>());
+        assert!(state.tasks[0].awaiting_review_by.is_none());
+
+        // A second author task still pending keeps the gate: the waiver is for single-task runs.
+        let mut state = create_harness_state("two tasks");
+        apply_harness_op(
+            &mut state,
+            parse_op("plan_tasks", r#"{"tasks": [{"title": "First", "role": "author"}, {"title": "Second", "role": "author"}]}"#),
+            &ctx,
+        );
+        state.tasks[0].status = crate::core::types::HarnessTaskStatus::InProgress;
+        let finish = apply_harness_op(
+            &mut state,
+            parse_op("finish_task", r#"{"status": "completed", "summary": "done", "taskId": "task-1", "anchor": "none", "anchorNote": "fixture"}"#),
+            &waiving,
+        );
+        assert!(!finish.text.contains("Review waived"), "{}", finish.text);
+        assert!(state.tasks[0].awaiting_review_by.is_some(), "the deferred review still covers it");
     }
 
     #[test]

@@ -150,6 +150,8 @@ OPTIONS
 	                              call; a replanning loop is exactly one planner call)
 	--task-loop-limit N           Task loops one task may consume before the harness blocks it
 	                              (default 6; each loop is at least one model call)
+	--review-waiver-lines N       Override the small-change review waiver bound (default 60; 0
+	                              disables the waiver)
 	--plan-mode always|auto|direct  How a run gets its first task list; auto skips the planner
 	                              for small goals that declare their own check
 	--no-repo-memory              Disable the repo memory bank (~/.drip/projects/<slug>/memory) for this run:
@@ -346,6 +348,7 @@ mod tests {
             "--max-iterations",
             "--max-loops",
             "--task-loop-limit",
+            "--review-waiver-lines",
             "--plan-mode",
             "--lite",
             "--no-review",

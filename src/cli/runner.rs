@@ -41,6 +41,7 @@ pub struct CliGoalRunArgs {
     pub max_iterations: Option<i64>,
     pub max_loops: Option<i64>,
     pub task_loop_limit: Option<i64>,
+    pub review_waiver_lines: Option<usize>,
     pub plan_mode: Option<String>,
     pub on_event: EmitFn,
     /// Archive an unfinished ledger and replan instead of continuing it.
@@ -392,6 +393,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         max_iterations: args.max_iterations,
         max_loops: args.max_loops,
         task_loop_limit: args.task_loop_limit,
+        review_waiver_lines: args.review_waiver_lines,
         plan_mode: args.plan_mode.clone(),
         request_timeout_ms: args.request_timeout_ms,
         model: Some(args.inference.model.clone()),

@@ -32,6 +32,10 @@ pub const MAX_DIGEST_ACTION_CHARS: usize = 200;
 /// productive work is not reset (transcript discarded, workspace re-read)
 /// just because its fixed budget ran out. Loops that only read never extend.
 pub const MAX_CYCLE_EXTENSIONS: i64 = 2;
+/// A single-task run whose goal-declared check the harness ran and passed
+/// after the last edit skips the reviewer loop when the whole change (tracked
+/// diff plus new files) is at most this many lines.
+pub const REVIEW_WAIVER_MAX_LINES: usize = 60;
 /// Output lines carried in a harness report of a settled background job.
 pub const BACKGROUND_REPORT_TAIL_LINES: i64 = 40;
 pub const BACKGROUND_REPORT_MAX_CHARS: usize = 4_000;
@@ -237,6 +241,54 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_self_labelled_goal_declared_check_is_upgraded_to_external() {
+        use crate::core::types::VerificationAnchorKind;
+        let goal = "Fix the bug. Run `python3 -m unittest discover -s tests -q` to confirm.";
+        let edited = vec!["tests/test_store.py".to_string()];
+        let upgraded = declared_verification_anchor_for_goal(
+            r#"{"command":"python3 -m unittest discover -s tests -q","anchor":{"kind":"self","source":"project suite"}}"#,
+            &edited,
+            goal,
+        )
+        .unwrap();
+        assert_eq!(upgraded.kind, VerificationAnchorKind::External);
+        assert!(upgraded.source.unwrap().starts_with("goal-declared acceptance check: python3 -m unittest"));
+        let other = declared_verification_anchor_for_goal(
+            r#"{"command":"python3 -m unittest tests.test_store","anchor":{"kind":"self","source":"my test"}}"#,
+            &edited,
+            goal,
+        )
+        .unwrap();
+        assert_eq!(other.kind, VerificationAnchorKind::SelfAuthored, "a different command stays self");
+        let no_check = declared_verification_anchor_for_goal(
+            r#"{"command":"python3 -m unittest discover -s tests -q","anchor":{"kind":"self"}}"#,
+            &edited,
+            "Fix the bug.",
+        )
+        .unwrap();
+        assert_eq!(no_check.kind, VerificationAnchorKind::SelfAuthored, "no declared check, no upgrade");
+    }
+
+    #[test]
+    fn workspace_changed_lines_counts_tracked_hunks_and_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "base"]);
+        let cwd = dir.path().to_string_lossy().to_string();
+        let head = git_head(&cwd).expect("head");
+        assert_eq!(workspace_changed_lines(&cwd, &head), Some(0));
+        std::fs::write(dir.path().join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+        std::fs::write(dir.path().join("new.txt"), "x\ny\n").unwrap();
+        std::fs::write(dir.path().join("blob.bin"), [0u8, 159, 146, 150, 255]).unwrap();
+        std::fs::create_dir_all(dir.path().join(".dripdata/sessions")).unwrap();
+        std::fs::write(dir.path().join(".dripdata/sessions/state.json"), "{}\n".repeat(500)).unwrap();
+        assert_eq!(workspace_changed_lines(&cwd, &head), Some(1 + 2 + 2), "one deleted, two added, two untracked; the binary blob and the dot-directory count nothing");
+        assert_eq!(workspace_changed_lines(&std::env::temp_dir().to_string_lossy(), "HEAD"), None);
+    }
+
+    #[test]
     fn review_brief_shows_the_change_set_since_run_start() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
@@ -286,6 +338,38 @@ fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Lines changed in the workspace since `base`: added + deleted lines of the
+/// tracked diff plus every line of each untracked file. None outside git.
+pub fn workspace_changed_lines(cwd: &str, base: &str) -> Option<usize> {
+    let numstat = git_output(cwd, &["diff", "--numstat", base])?;
+    let mut lines = 0usize;
+    for row in numstat.lines() {
+        let mut cols = row.split('\t');
+        let added = cols.next().and_then(|v| v.trim().parse::<usize>().ok());
+        let deleted = cols.next().and_then(|v| v.trim().parse::<usize>().ok());
+        // Binary rows show "-": a reviewer could not read them either, and
+        // in practice they are build artefacts (a tracked __pycache__), so
+        // they do not count toward the bound.
+        if let (Some(a), Some(d)) = (added, deleted) {
+            lines += a + d;
+        }
+    }
+    if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]) {
+        for path in untracked.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            // Dot-directories and dotfiles (a `.dripdata/` project dir inside
+            // the workspace, a `.venv`) are tooling state, not the change.
+            if path.split('/').any(|component| component.starts_with('.')) {
+                continue;
+            }
+            // An unreadable (binary) new file counts nothing, like a binary hunk.
+            lines += std::fs::read_to_string(std::path::Path::new(cwd).join(path))
+                .map(|text| text.lines().count())
+                .unwrap_or(0);
+        }
+    }
+    Some(lines)
 }
 
 pub fn git_head(cwd: &str) -> Option<String> {
@@ -925,6 +1009,32 @@ pub fn record_edited_path(edited_paths: &mut Vec<String>, path: &str) {
 /// even when its command names a file this run edited (the goal told us to
 /// run it against those files).
 pub const GOAL_DECLARED_CHECK_MARKER: &str = "harnessGoalDeclaredCheck";
+
+/// `declared_verification_anchor` plus one upgrade: a check the agent
+/// labelled "self" whose command is one of the goal's own declared checks
+/// is external evidence — the operator declared it, the agent only ran it.
+/// Weak models label the goal's suite "self" because they added a test to
+/// it; the harness then bounced the finish and re-ran the very same
+/// command itself, one round and one suite run for nothing.
+pub fn declared_verification_anchor_for_goal(
+    raw_input: &str,
+    edited_paths: &[String],
+    goal: &str,
+) -> Option<crate::core::types::VerificationAnchor> {
+    let mut anchor = declared_verification_anchor(raw_input, edited_paths)?;
+    if anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored && anchor.downgraded_reason.is_none() {
+        let command = serde_json::from_str::<serde_json::Value>(raw_input)
+            .ok()
+            .and_then(|input| input.get("command").and_then(|value| value.as_str()).map(str::to_string))
+            .unwrap_or_default();
+        let declared = goal_declared_check_commands(goal);
+        if let Some(check) = declared.iter().find(|check| command.contains(check.trim())) {
+            anchor.kind = crate::core::types::VerificationAnchorKind::External;
+            anchor.source = Some(format!("goal-declared acceptance check: {check} (declared self by the agent; the goal declares this command)"));
+        }
+    }
+    Some(anchor)
+}
 
 pub fn declared_verification_anchor(
     raw_input: &str,
@@ -2027,6 +2137,8 @@ pub struct SolidStateHarnessOptions {
     /// Task loops one task may consume before the harness blocks it
     /// (default DEFAULT_TASK_LOOP_LIMIT).
     pub task_loop_limit: Option<i64>,
+    /// Override for REVIEW_WAIVER_MAX_LINES (None = default; 0 disables the waiver).
+    pub review_waiver_lines: Option<usize>,
     /// Planning mode: "auto" (default) seeds a direct task for small goals
     /// that declare their own check; "always" runs the planner first;
     /// "direct" always seeds one (see PlanMode).
@@ -2109,6 +2221,7 @@ pub struct HarnessRun {
     pub loop_config: HarnessLoopConfig,
     pub stall_limit: i64,
     pub task_loop_limit: i64,
+    pub review_waiver_lines: Option<usize>,
     pub plan_mode: PlanMode,
     pub max_task_reopens: i64,
     pub system_prompt: String,
@@ -2474,6 +2587,7 @@ impl HarnessRun {
             .task_loop_limit
             .unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT)
             .max(1);
+        let review_waiver_lines = options.review_waiver_lines;
         let max_task_reopens = options.max_task_reopens.unwrap_or(2);
         let mut system_prompt = options
             .system_prompt
@@ -2654,6 +2768,7 @@ impl HarnessRun {
             loop_config,
             stall_limit,
             task_loop_limit,
+            review_waiver_lines,
             plan_mode,
             max_task_reopens,
             system_prompt,
@@ -3092,7 +3207,7 @@ impl HarnessRun {
                 } else {
                     let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
                     if tool_name == "VERIFY" {
-                        evidence.anchor = declared_verification_anchor(&raw_input, &self.state.edited_paths);
+                        evidence.anchor = declared_verification_anchor_for_goal(&raw_input, &self.state.edited_paths, &self.state.goal);
                         // The tool built its result text before the harness
                         // attached the declared anchor, so it reads
                         // "anchor: undeclared" for every call; a model that
@@ -3198,6 +3313,45 @@ impl HarnessRun {
     /// once, so it is policy-vetted) and, when it passes, re-applies the
     /// finish. One model round and a rejection message saved per stale
     /// finish; a failing re-run surfaces the failure tail instead.
+    /// Why this finish may skip its reviewer loop, or None. Two ways to earn
+    /// it: the harness itself just ran the goal-declared check on the
+    /// finished workspace (`harness_ran`), or the agent's own last VERIFY was
+    /// one of the goal's declared checks, passed, and nothing was edited
+    /// since. Either way the whole change must fit REVIEW_WAIVER_MAX_LINES;
+    /// harness_tools adds the task-shape conditions (single-task run).
+    pub fn review_waiver_reason(&self, harness_ran: Option<&str>) -> Option<String> {
+        let base = self.run_start_head.as_deref()?;
+        let (how, command) = match harness_ran {
+            Some(command) => ("the harness ran the goal-declared check", command.to_string()),
+            None => {
+                let record = self.state.last_verification.as_ref()?;
+                if record.failed || record.ran_no_tests == Some(true) || self.state.mutations_since_verification.unwrap_or(0) > 0 {
+                    return None;
+                }
+                if record
+                    .evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.anchor.as_ref())
+                    .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored)
+                {
+                    return None;
+                }
+                let declared = goal_declared_check_commands(&self.state.goal);
+                let command = record.command.trim().to_string();
+                if !declared.iter().any(|check| command.contains(check.trim())) {
+                    return None;
+                }
+                ("the last VERIFY was the goal-declared check", command)
+            }
+        };
+        let bound = self.review_waiver_lines.unwrap_or(REVIEW_WAIVER_MAX_LINES);
+        let lines = workspace_changed_lines(&self.cwd, base).filter(|lines| *lines <= bound)?;
+        Some(format!(
+            "{how} ({}) after the last edit and it passed, and the whole change is {lines} line(s) (waiver bound {bound})",
+            truncate_text(&command, 80)
+        ))
+    }
+
     pub fn auto_reverify_stale_finish(
         &mut self,
         scope: &mut LoopScope,
@@ -3314,7 +3468,23 @@ impl HarnessRun {
             Ok(op) => op,
             Err(_) => return outcome,
         };
-        let reapplied = apply_harness_op(&mut self.state, op, op_context);
+        // The harness just established the goal's own check passes on the
+        // finished workspace; a small single-task change needs no reviewer
+        // loop on top of that (harness_tools decides the task-shape part).
+        let mut op_context = op_context.clone();
+        if goal_declared {
+            op_context.review_waived = self.review_waiver_reason(Some(&record.command));
+        }
+        let reapplied = apply_harness_op(&mut self.state, op, &op_context);
+        if reapplied.text.contains("Review waived:") {
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                detail: format!("review waived — {}", op_context.review_waived.clone().unwrap_or_default()),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+            scope.digest_actions.push("review waived: harness-verified small change".to_string());
+        }
         crate::harness::harness_tools::HarnessOpOutcome {
             text: format!(
                 "harness {} {} -> {verdict}. {}",
@@ -5008,6 +5178,7 @@ impl HarnessRun {
                     // phrase, operator message, --no-review, --lite); also
                     // rejects delayed Review*/reviewer task work mid-run.
                     review_opt_out: self.state.review_opt_out == Some(true),
+                    review_waived: if tool_name == "finish_task" { self.review_waiver_reason(None) } else { None },
                 };
                 let outcome = match op {
                     Ok(op) => {

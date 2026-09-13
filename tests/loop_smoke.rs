@@ -194,6 +194,7 @@ async fn unchecked_finish_runs_the_goal_declared_check() {
     let result = run_solid_state_harness(SolidStateHarnessOptions {
         cwd: Some(dir.path().to_string_lossy().into()),
         goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("always".into()),
         max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
         tools,
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
@@ -236,6 +237,7 @@ async fn stale_finish_with_unrerunnable_check_falls_back_to_the_goal_check() {
     let result = run_solid_state_harness(SolidStateHarnessOptions {
         cwd: Some(dir.path().to_string_lossy().into()),
         goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("always".into()),
         max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
         tools,
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
@@ -312,6 +314,7 @@ async fn a_cycle_that_edits_extends_the_loop_by_one_cycle() {
     let result = run_solid_state_harness(SolidStateHarnessOptions {
         cwd: Some(dir.path().to_string_lossy().into()),
         goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("always".into()),
         max_iterations: Some(8), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
         r#loop: Some(drip::harness::roles::PartialHarnessLoopConfig { max_cycles: Some(1), max_tool_rounds_per_cycle: Some(1), ..Default::default() }),
         tools: drip::tools::pack::builtin_tool_pack(Default::default()),
@@ -327,6 +330,41 @@ async fn a_cycle_that_edits_extends_the_loop_by_one_cycle() {
     assert_eq!(result.r#loops, 2, "planning loop + one extended task loop");
     let events = events.lock().unwrap();
     assert!(events.iter().any(|event| event.detail.starts_with("cycle budget extended to 2")), "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.contains("cycle")).collect::<Vec<_>>());
+}
+
+/// Plan mode auto: a small goal that declares its own check gets one direct
+/// task and no planner loop — the first model call is already the author's.
+#[tokio::test]
+async fn plan_mode_auto_seeds_a_direct_task_for_a_small_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        text_response("Test added."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add tests/test_ok.py with one passing test. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("auto".into()),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    let bodies = server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(result.r#loops, 1, "no planning loop");
+    assert_eq!(result.state.tasks.len(), 1);
+    assert!(result.state.tasks[0].notes.iter().any(|note| note.starts_with("direct task: the planner was skipped")));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.detail.starts_with("direct task seeded, planner skipped (plan mode Auto)")));
+    assert!(bodies[0].to_string().contains("tests/test_ok.py"), "the first call already carries the task");
 }
 
 /// The expectation gate end to end: an "external" anchor on a check that

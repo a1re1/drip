@@ -64,6 +64,9 @@ pub struct HeadlessResultPayload {
     /// Expectations the run could not reconcile (reason "unreconciled", exit 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anomalies: Option<Vec<crate::core::types::HarnessAnomaly>>,
+    /// Per-role model-call totals (calls / latencyMs / completionTokens); omitted when empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_inference: std::collections::BTreeMap<String, crate::core::types::RoleInferenceTotals>,
 }
 
 pub fn headless_event_line(event: &HarnessEvent, json: bool) -> Option<String> {
@@ -196,6 +199,7 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
             })
         },
         anomalies: record.anomalies.clone().filter(|items| !items.is_empty()),
+        role_inference: record.role_inference.clone(),
         last_verification: record.last_verification.clone(),
         pending_operator_messages: record.pending_operator_messages,
         task_stats: record.task_stats,

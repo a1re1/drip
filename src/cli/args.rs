@@ -39,6 +39,7 @@ pub struct ParsedCliArgs {
     pub max_loops: Option<i64>,
     /// --task-loop-limit: cap on task loop cycles per task (each is at least one model call).
     pub task_loop_limit: Option<i64>,
+    pub plan_mode: Option<String>,
     pub profile: Option<String>,
     pub resume: bool,
     pub resume_id: Option<String>,
@@ -212,6 +213,7 @@ impl Default for ParsedCliArgs {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
+            plan_mode: None,
             profile: None,
             resume: false,
             resume_id: None,
@@ -789,6 +791,17 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     index += 1;
                 }
             }
+            "--plan-mode" => {
+                if let Some(raw) = take_required_value(argv, index, "--plan-mode", &mut parsed.errors) {
+                    let value = raw.trim().to_ascii_lowercase();
+                    if matches!(value.as_str(), "always" | "auto" | "direct") {
+                        parsed.plan_mode = Some(value);
+                    } else {
+                        parsed.errors.push(format!("--plan-mode must be always, auto, or direct, got \"{raw}\"."));
+                    }
+                    index += 1;
+                }
+            }
             "--task-loop-limit" => {
                 if let Some(raw) = take_required_value(argv, index, "--task-loop-limit", &mut parsed.errors) {
                     match parse_positive_int(&raw) {
@@ -1344,6 +1357,14 @@ mod tests {
         );
         assert!(!parse(&["--max-loops", "abc"]).errors.is_empty());
         assert!(!parse(&["--max-loops"]).errors.is_empty());
+    }
+
+    #[test]
+    fn plan_flag_accepts_the_three_modes_only() {
+        assert_eq!(parse(&["do it", "--plan-mode", "auto"]).plan_mode.as_deref(), Some("auto"));
+        assert_eq!(parse(&["do it", "--plan-mode", "Direct"]).plan_mode.as_deref(), Some("direct"));
+        assert_eq!(parse(&["do it"]).plan_mode, None);
+        assert!(!parse(&["--plan-mode", "sometimes"]).errors.is_empty());
     }
 
     #[test]

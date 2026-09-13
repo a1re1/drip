@@ -80,6 +80,7 @@ pub struct SessionGoalArgs<'a> {
     pub max_iterations: Option<i64>,
     pub max_loops: Option<i64>,
     pub task_loop_limit: Option<i64>,
+    pub plan_mode: Option<String>,
     /// Run-level MCP gate (`--mcp` / `--no-mcp`), threaded into the harness options.
     pub mcp_servers: Option<Vec<String>>,
     /// `@name` mentions extracted from the goal, recorded on the transcript goal entry.
@@ -270,6 +271,7 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         max_iterations: args.max_iterations,
         max_loops: args.max_loops,
         task_loop_limit: args.task_loop_limit,
+        plan_mode: args.plan_mode.clone(),
         new_goal: args.new_goal,
         on_event,
         repo_memory: Some(RepoMemoryConfig {

@@ -68,7 +68,7 @@ def transcript_metrics(path):
     m = dict(inferences=0, inference_ms=0, tool_calls=0, tool_ms=0, loops=0, cycles=0,
              rejections=0, read_only_nudges=0, output_cutoffs=0, patches=0, verifies=0,
              context_expired=0, tasks_finished=0, prompt_tokens=0, completion_tokens=0,
-             cache_read_tokens=0, rejection_reasons=[], bash_ms=0)
+             cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0)
     for line in open(path, errors="ignore"):
         try:
             d = json.loads(line)
@@ -103,6 +103,10 @@ def transcript_metrics(path):
             m["tasks_finished"] += 1
         elif kind == "context-expired":
             m["context_expired"] += 1
+        elif kind == "harness-op" and detail.startswith("hedged model request"):
+            m["hedges"] += 1
+        elif kind == "rate-limited" and "typical latency" in detail:
+            m["stall_timeouts"] += 1
         elif kind == "harness-op" and detail.startswith("finish_task: harness: not accepted"):
             m["rejections"] += 1
             m["rejection_reasons"].append(detail[len("finish_task: harness: not accepted yet — "):][:120])
@@ -243,16 +247,29 @@ def print_table(label, records):
 
 
 def compare(a, b):
+    """Print one row per task comparing two result labels.
+
+    Columns: task, A wall median, B wall median, delta %, A inf median,
+    B inf median, A pass rate, B pass rate. Missing tasks print "-" for
+    the absent side.
+    """
     ra, rb = load(a), load(b)
-    print_table(a, ra)
-    print_table(b, rb)
-    pa, ta = summarize(ra)
-    pb, tb = summarize(rb)
-    print(f"\n== delta {b} vs {a}")
-    for key in ("pass_rate", "wall_s", "cycles", "inferences", "rejections", "sum_wall_min"):
-        va, vb = ta[key], tb[key]
-        rel = f"{(vb - va) / va:+.0%}" if va else "n/a"
-        print(f"  {key:14} {va:>8.2f} -> {vb:>8.2f}  ({rel})")
+    rows_a = {r["task"]: r for r in summarize_runs(ra)}
+    rows_b = {r["task"]: r for r in summarize_runs(rb)}
+    print(f"\n== compare {a} vs {b}")
+    print(f"{'task':18} {'A_wall':>9} {'B_wall':>9} {'delta%':>8} {'A_inf':>8} {'B_inf':>8} "
+          f"{'A_pass':>7} {'B_pass':>7}")
+    for task in sorted(set(rows_a) | set(rows_b)):
+        ta, tb = rows_a.get(task), rows_b.get(task)
+        if ta and tb:
+            delta = f"{(tb['wall_s_median'] - ta['wall_s_median']) / ta['wall_s_median']:+.1%}"
+        else:
+            delta = "-"
+        fmt_wall = lambda s: f"{s['wall_s_median']:>9.1f}" if s else f"{'-':>9}"
+        fmt_inf = lambda s: f"{s['inferences_median']:>8.1f}" if s else f"{'-':>8}"
+        fmt_pass = lambda s: f"{s['hidden_pass_rate']:>7.0%}" if s else f"{'-':>7}"
+        print(f"{task:18} {fmt_wall(ta)} {fmt_wall(tb)} {delta:>8} {fmt_inf(ta)} {fmt_inf(tb)} "
+              f"{fmt_pass(ta)} {fmt_pass(tb)}")
 
 
 def summarize_runs(runs):
@@ -280,6 +297,8 @@ def summarize_runs(runs):
             plan_s_median=statistics.median([r.get("plan_s") or 0 for r in rs]),
             author_s_median=statistics.median([r.get("author_s") or 0 for r in rs]),
             review_s_median=statistics.median([r.get("review_s") or 0 for r in rs]),
+            hedges=sum(r.get("hedges") or 0 for r in rs),
+            inference_s_max=max(((r.get("inference_ms") or 0) / 1000.0) for r in rs),
         ))
     return rows
 
@@ -287,11 +306,11 @@ def summarize_runs(runs):
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
     print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
-          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9}")
+          f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'hedges':>6}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
               f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
-              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f}")
+              f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('hedges', 0):>6}")
 
 
 def main(argv=None):

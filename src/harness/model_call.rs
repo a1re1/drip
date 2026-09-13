@@ -66,6 +66,29 @@ pub const STALL_TIMEOUT_MIN_SAMPLES: usize = 3;
 pub const STALL_TIMEOUT_FLOOR_MS: u64 = 45_000;
 pub const STALL_LATENCY_SAMPLES: usize = 8;
 
+// The latency tail is where the wall goes: across two 12-run benches, GLM
+// calls over 15s were 55% of all inference time (891s of 1621s) while the
+// median call took 2.2s, and those slow calls produced 3-14 tokens/s against
+// the usual 59 — queueing, not generation. A hedge (Dean & Barroso, "The Tail
+// at Scale") races a second identical request once the first has run past a
+// multiple of the model's median; whichever answers first wins and the other
+// is dropped. Costs a duplicate request on the slow few percent of calls.
+pub const HEDGE_MULTIPLIER: u64 = 4;
+pub const HEDGE_FLOOR_MS: u64 = 8_000;
+
+/// When to hedge a first attempt for a model with `samples` recent latencies:
+/// HEDGE_MULTIPLIER × median clamped to [floor, timeout/2]; None until enough
+/// samples exist or when hedging is disabled (floor 0).
+pub fn hedge_delay_ms(samples: &[u64], floor_ms: u64, timeout_ms: u64) -> Option<u64> {
+    if floor_ms == 0 || samples.len() < STALL_TIMEOUT_MIN_SAMPLES {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    Some(median.saturating_mul(HEDGE_MULTIPLIER).max(floor_ms).min(timeout_ms / 2))
+}
+
 /// The first-attempt bound for a model with `samples` recent successful
 /// latencies (ms): STALL_TIMEOUT_MULTIPLIER × median, clamped to
 /// [STALL_TIMEOUT_FLOOR_MS, base]; `base` until enough samples exist.
@@ -443,6 +466,9 @@ pub struct ModelCallerDeps {
     pub reasoning_effort: Option<String>,
     /// Per-attempt wall-clock cap on one HTTP request (default DEFAULT_REQUEST_TIMEOUT_MS); a timed-out attempt retries on the network ladder.
     pub request_timeout_ms: Option<u64>,
+    /// Earliest point (ms) at which a slow first attempt is hedged with a second identical request
+    /// (default HEDGE_FLOOR_MS; Some(0) disables hedging — used by one-shot helper callers).
+    pub hedge_floor_ms: Option<u64>,
     pub signal: Option<AbortSignal>,
     pub sleep_impl: Option<SleepFn>,
     pub tool_route: Option<ModelRoute>,
@@ -459,6 +485,7 @@ pub struct ModelCaller {
     deps: ModelCallerDeps,
     http_client: reqwest::Client,
     request_timeout_ms: u64,
+    hedge_floor_ms: u64,
     sleep: SleepFn,
     /// Recent successful latencies per model, for the stall-aware first-attempt bound.
     latency_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
@@ -474,6 +501,7 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         Some(timeout_ms) if timeout_ms > 0 => timeout_ms,
         _ => DEFAULT_REQUEST_TIMEOUT_MS,
     };
+    let hedge_floor_ms = deps.hedge_floor_ms.unwrap_or(HEDGE_FLOOR_MS);
     let http_client = deps
         .http_client
         .clone()
@@ -487,6 +515,7 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         deps,
         http_client,
         request_timeout_ms,
+        hedge_floor_ms,
         sleep,
         latency_samples: std::sync::Mutex::new(std::collections::HashMap::new()),
         codex_tool_lane: tokio::sync::Mutex::new(None),
@@ -607,6 +636,50 @@ impl ModelCaller {
         match samples.get(model) {
             Some(recent) => stall_timeout_ms(&recent.iter().copied().collect::<Vec<_>>(), self.request_timeout_ms),
             None => self.request_timeout_ms,
+        }
+    }
+
+    /// The hedge point for this call's first attempt, if the model has enough history.
+    fn hedge_delay_for(&self, model: &str, attempt: u32, timeout_ms: u64) -> Option<u64> {
+        if attempt > 1 {
+            return None;
+        }
+        let samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let recent: Vec<u64> = samples.get(model).map(|r| r.iter().copied().collect()).unwrap_or_default();
+        hedge_delay_ms(&recent, self.hedge_floor_ms, timeout_ms)
+    }
+
+    /// Races a second identical request once the first has run `delay_ms`
+    /// without answering; the first outcome of either wins and the loser is
+    /// dropped (its connection closes with the future).
+    async fn run_hedged_request<F, Fut>(&self, build: F, delay_ms: u64, timeout_ms: u64, model: &str) -> RequestOutcome
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = RawResponse>,
+    {
+        let signal = self.deps.signal.as_ref();
+        let primary = run_bounded_request(build(), timeout_ms, signal);
+        tokio::pin!(primary);
+        let delay = tokio::time::sleep(Duration::from_millis(delay_ms));
+        tokio::pin!(delay);
+        tokio::select! {
+            outcome = &mut primary => return outcome,
+            () = &mut delay => {}
+        }
+        self.emit(
+            HarnessEventType::HarnessOp,
+            format!(
+                "hedged model request: {model} has not answered after {:.1}s ({}× its typical latency) — racing a second request",
+                delay_ms as f64 / 1000.0,
+                HEDGE_MULTIPLIER
+            ),
+            None,
+        );
+        let hedge = run_bounded_request(build(), timeout_ms, signal);
+        tokio::pin!(hedge);
+        tokio::select! {
+            outcome = &mut primary => outcome,
+            outcome = &mut hedge => outcome,
         }
     }
 
@@ -1123,7 +1196,7 @@ impl ModelCaller {
 
         loop {
             let attempt_timeout_ms = self.attempt_timeout_ms(&model, attempt);
-            let request_fut = {
+            let build_request = || {
                 let client = self.http_client.clone();
                 let url = url.clone();
                 let header_map = header_map.clone();
@@ -1141,8 +1214,12 @@ impl ModelCaller {
                     Ok((status, headers, body))
                 }
             };
+            let outcome = match self.hedge_delay_for(&model, attempt, attempt_timeout_ms) {
+                Some(delay_ms) => self.run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model).await,
+                None => run_bounded_request(build_request(), attempt_timeout_ms, self.deps.signal.as_ref()).await,
+            };
 
-            match run_bounded_request(request_fut, attempt_timeout_ms, self.deps.signal.as_ref()).await {
+            match outcome {
                 RequestOutcome::Stopped => {
                     return Err(ModelCallError::Message("The run was stopped.".to_string()));
                 }
@@ -1601,12 +1678,115 @@ mod tests {
             prompt_cache_key: None,
             reasoning_effort: None,
             request_timeout_ms: None,
+            hedge_floor_ms: None,
             signal: None,
             sleep_impl: None,
             tool_route: None,
             url,
             http_client: None,
         }
+    }
+
+    /// A mock that answers each connection on its own thread after the
+    /// matching delay, so a slow first request does not block the second.
+    fn spawn_delayed_mock_server(delays_ms: Vec<u64>, response_body: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served_in_thread = served.clone();
+        std::thread::spawn(move || {
+            for delay_ms in delays_ms {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let served = served_in_thread.clone();
+                std::thread::spawn(move || {
+                    let mut data: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let read = stream.read(&mut chunk).unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        data.extend_from_slice(&chunk[..read]);
+                        if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
+                            let content_length = head
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                                .unwrap_or(0);
+                            if data.len() >= pos + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(delay_ms));
+                    let response = format!(
+                        "HTTP/1.1 200 Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    );
+                    if stream.write_all(response.as_bytes()).is_ok() {
+                        served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/v1/chat/completions"), served)
+    }
+
+    #[tokio::test]
+    async fn a_slow_first_attempt_is_hedged_and_the_faster_answer_wins() {
+        let (url, _served) = spawn_delayed_mock_server(
+            vec![3_000, 0],
+            r#"{"choices":[{"message":{"content":"hedged"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        );
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut deps = test_deps(url);
+        deps.hedge_floor_ms = Some(200);
+        deps.emit = Arc::new(move |event| sink.lock().unwrap().push(event.detail));
+        let caller = create_model_caller(deps);
+        for _ in 0..STALL_TIMEOUT_MIN_SAMPLES {
+            caller.record_latency("test-model", 20);
+        }
+        let started = Instant::now();
+        let response = caller.call_model(vec![user_message("hello")], None).await.unwrap();
+        assert!(started.elapsed() < Duration::from_millis(2_500), "the hedge should answer long before the 3s primary: {:?}", started.elapsed());
+        assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("hedged")));
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|detail| detail.starts_with("hedged model request: test-model has not answered after 0.2s")), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn hedging_waits_for_history_and_a_prompt_answer_never_hedges() {
+        let (url, served) = spawn_delayed_mock_server(
+            vec![0, 0],
+            r#"{"choices":[{"message":{"content":"fast"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+        );
+        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut deps = test_deps(url);
+        deps.hedge_floor_ms = Some(200);
+        deps.emit = Arc::new(move |event| sink.lock().unwrap().push(event.detail));
+        let caller = create_model_caller(deps);
+        assert_eq!(caller.hedge_delay_for("test-model", 1, 240_000), None, "no history, no hedge");
+        for _ in 0..STALL_TIMEOUT_MIN_SAMPLES {
+            caller.record_latency("test-model", 20);
+        }
+        assert_eq!(caller.hedge_delay_for("test-model", 1, 240_000), Some(200));
+        assert_eq!(caller.hedge_delay_for("test-model", 2, 240_000), None, "retries are never hedged");
+        caller.call_model(vec![user_message("hello")], None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1, "a prompt answer sends one request");
+        assert!(events.lock().unwrap().is_empty(), "{:?}", events.lock().unwrap());
+    }
+
+    #[test]
+    fn hedge_delay_clamps_and_respects_the_off_switch() {
+        assert_eq!(hedge_delay_ms(&[2_000, 2_000], 8_000, 240_000), None, "too few samples");
+        assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 8_000, 240_000), Some(8_000), "floor");
+        assert_eq!(hedge_delay_ms(&[5_000, 4_000, 6_000], 8_000, 240_000), Some(20_000), "4× median");
+        assert_eq!(hedge_delay_ms(&[50_000, 50_000, 50_000], 8_000, 100_000), Some(50_000), "half the timeout");
+        assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 0, 240_000), None, "floor 0 disables");
     }
 
     fn user_message(text: &str) -> TransportRequestMessage {

@@ -117,6 +117,7 @@ pub async fn generate_session_name(
         prompt_cache_key: None,
         reasoning_effort: route.reasoning_effort.clone(),
         request_timeout_ms: Some(timeout_ms),
+        hedge_floor_ms: Some(0),
         signal: None,
         sleep_impl: None,
         tool_route: None,

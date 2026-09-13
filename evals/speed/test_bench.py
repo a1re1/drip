@@ -18,6 +18,29 @@ def run(task, wall_s, inferences, hidden_pass, rejections):
                 hidden_pass=hidden_pass, rejections=rejections)
 
 
+def wall_delta_pct(a_row, b_row):
+    """Delta the compare() table prints for a task present on both sides."""
+    return (b_row["wall_s_median"] - a_row["wall_s_median"]) / a_row["wall_s_median"]
+
+
+class CompareDeltaTest(unittest.TestCase):
+    def test_compare_delta_between_two_labels(self):
+        runs_a = [run("t1", 10.0, 4, True, 0), run("t2", 40.0, 8, True, 1)]
+        runs_b = [run("t1", 15.0, 6, True, 0), run("t2", 30.0, 6, False, 0)]
+        ra = {r["task"]: r for r in bench.summarize_runs(runs_a)}
+        rb = {r["task"]: r for r in bench.summarize_runs(runs_b)}
+        self.assertAlmostEqual(wall_delta_pct(ra["t1"], rb["t1"]), 0.5)   # 10 -> 15
+        self.assertAlmostEqual(wall_delta_pct(ra["t2"], rb["t2"]), -0.25) # 40 -> 30
+
+    def test_compare_missing_task_is_dash(self):
+        rows_a = bench.summarize_runs([run("t1", 10.0, 4, True, 0)])
+        rows_b = bench.summarize_runs([run("t2", 20.0, 5, True, 0)])
+        tasks = sorted({r["task"] for r in rows_a} | {r["task"] for r in rows_b})
+        self.assertEqual(tasks, ["t1", "t2"])
+        self.assertIsNone({r["task"]: r for r in rows_a}.get("t2"))
+        self.assertIsNone({r["task"]: r for r in rows_b}.get("t1"))
+
+
 class SummarizeRunsTest(unittest.TestCase):
     def test_empty_input_returns_empty_list(self):
         self.assertEqual(bench.summarize_runs([]), [])

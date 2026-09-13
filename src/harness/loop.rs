@@ -2592,6 +2592,7 @@ impl HarnessRun {
                 prompt_cache_key: options.prompt_cache_key.clone(),
                 reasoning_effort: options.reasoning_effort.clone(),
                 request_timeout_ms: options.request_timeout_ms,
+                hedge_floor_ms: None,
                 signal: options.signal.clone(),
                 sleep_impl: options.sleep_impl.clone(),
                 tool_route: options.tool_route.clone(),

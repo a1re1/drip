@@ -338,14 +338,18 @@ fn parse_go_test(output: &str) -> Option<VerifyVerdict> {
         .split('\n')
         .filter(|line| pass_re.is_match(line))
         .collect();
-    let has_verdict = Regex::new(r"(?m)^(ok|FAIL)\s").unwrap().is_match(output);
+    // The verdict is a package line ("ok  \tpkg\t0.001s", "FAIL\tpkg\t0.002s",
+    // "ok  \tpkg\t(cached)"), not any line that merely starts with ok/FAIL:
+    // ad-hoc probe scripts that print "FAIL <reason>" or "ok" were being
+    // labelled "go test" in recorded runs.
+    let has_verdict = Regex::new(r"(?m)^(ok|FAIL)\s+\S+\s+(\d+(\.\d+)?s|\(cached\)|\[[^\]]*\])").unwrap().is_match(output);
 
     if !has_verdict && fail_lines.is_empty() && pass_lines.is_empty() {
         return None;
     }
 
     let passed = pass_lines.len() as i64;
-    let failed = (fail_lines.len() as i64).max(i64::from(Regex::new(r"(?m)^FAIL\s").unwrap().is_match(output)));
+    let failed = (fail_lines.len() as i64).max(i64::from(Regex::new(r"(?m)^FAIL\s+\S+\s+(\d|\[)").unwrap().is_match(output)));
     // go test doesn't report skipped count explicitly
     let skipped = 0;
 
@@ -1071,6 +1075,17 @@ mod tests {
     }
 
     // -- go test -------------------------------------------------------------
+
+    #[test]
+    fn probe_output_that_merely_says_ok_or_fail_is_not_go_test() {
+        use super::parse_go_test;
+        assert!(parse_go_test("ok\n").is_none());
+        assert!(parse_go_test("FAIL legacy get('k'): got 1, fixture behavior {'value': 1}\n").is_none());
+        assert!(parse_go_test("ok  \texample.com/math\t0.002s\n").is_some());
+        assert!(parse_go_test("ok  \texample.com/math\t(cached)\n").is_some());
+        let parsed = parse_verify_output("python3 -c 'print(1)'", "FAIL something\nok\n");
+        assert_ne!(parsed.runner, "go test", "{}", parsed.runner);
+    }
 
     #[test]
     fn parses_all_passing_go_test_output_ok_verdict() {

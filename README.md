@@ -1368,6 +1368,23 @@ The review brief a reviewer loop opens with carries small new files in full
 reviewer not to READ files it was already handed; bench reviewers spent two of
 their four rounds re-reading changed files before verifying.
 
+A finish_task call may name its own check (`check: "python3 -m unittest -q"`):
+when the task edited the workspace and nothing has passed since the last
+edit, the harness runs that command before judging the finish, exactly as it
+runs a goal-declared check, and completes the task in the same turn when it
+passes (a failure comes back with the output). 107 of 115 recorded runs ended
+with a passing VERIFY round followed by a finish round for the same command;
+naming it in the finish folds those into one model turn. A named check that
+matches a goal-declared command counts as goal-declared (review waiver
+included); any other is external evidence labelled as run by the harness, and
+the usual anchor downgrade applies when it names a file the run edited — a
+named native-runner suite (`cargo test`, `pytest`, …) that passes earns the
+same small-change review waiver as the agent's own VERIFY of it would. When
+a finish-time check fails, the next finish after an edit re-runs it (a
+re-run of a goal-declared command keeps its goal-declared standing), so a
+fix-and-finish never needs a manual VERIFY round in between. The harness
+runs at most three finish-time checks per loop.
+
 A single-task run whose goal-declared check the harness ran after the last
 edit, and which passed, skips the reviewer loop when the whole change (tracked
 diff plus new files) is at most a hundred lines: the finish reads `Review waived:

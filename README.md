@@ -1740,3 +1740,16 @@ whose script is a conventional type-check (typecheck, check-types, tsc, …) and
 credits it identically. `build` and `test` scripts are deliberately excluded: a
 build script wraps a bundler rather than a recognized compiler, and test
 assertions are read from the runner's output.
+
+### Keep the freshest read of each file visible across cycles (#120)
+
+Cold tool results fold to one-line digests past a hot window so a loop's
+transcript stays bounded. But in the hundreds-of-cycles regime that folds a
+file's contents out of view, and the model re-reads it — a transcript audit
+found one 273-round session that re-read a single unchanged file 274 times, 153
+of those in consecutive rounds with no edit between them; across the 80 highest-
+round sessions, 83% of all reads were the same file read five or more times.
+Folding now keeps the freshest READ of up to five distinct files verbatim past
+the hot window, so current file state stays visible and the re-read cycle never
+starts. A read the file has since been PATCHed past is not pinned (it would show
+stale content), and the overflow-recovery path still folds everything.

@@ -371,7 +371,15 @@ mod goal_check_tests {
         let goal = "Run python3 -m unittest discover -s tests -q and make sure it passes; then bun test, typecheck and the UI drift test stay green.";
         assert_eq!(plain_prose_check_commands(goal), vec!["python3 -m unittest discover -s tests -q".to_string(), "bun test".to_string()]);
         let goal = "every command must exit 0: cargo check --all-targets; cargo test --lib github; cargo test --lib roles";
-        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --lib github".to_string(), "cargo test --lib roles".to_string()]);
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec!["cargo check --all-targets".to_string(), "cargo test --lib github".to_string(), "cargo test --lib roles".to_string()]
+        );
+        let goal = "Verify with bun run typecheck && bun test hub/test/discovery.test.ts. Do not commit, push, or open PRs.";
+        assert_eq!(plain_prose_check_commands(goal), vec!["bun run typecheck && bun test hub/test/discovery.test.ts".to_string()]);
+        let goal = "run cargo build && cargo test --lib harness and then stop";
+        assert_eq!(plain_prose_check_commands(goal), vec!["cargo build && cargo test --lib harness".to_string()]);
+        assert_eq!(plain_prose_check_commands("cargo test --lib alpha && echo done"), vec!["cargo test --lib alpha".to_string()], "a chain onto a non-runner ends the command");
         assert_eq!(plain_prose_check_commands("then (cd drip && cargo test) green and finish_task"), vec!["cargo test".to_string()]);
         assert!(plain_prose_check_commands("Acceptance: `cargo test -q` must pass.").is_empty(), "backticked spans belong to the other scan");
         assert!(plain_prose_check_commands("a pytest-style fixture and the mycargo tester").is_empty(), "word boundaries");
@@ -404,6 +412,18 @@ mod goal_check_tests {
         assert_eq!(super::compact_tool_input(r#"{"path":"src/a.rs","content":"..."}"#, 90), "src/a.rs");
         assert_eq!(super::compact_tool_input("not json", 90), "not json");
         assert!(super::compact_tool_input(&format!(r#"{{"command":"{}"}}"#, "x".repeat(300)), 90).chars().count() <= 91);
+    }
+
+    #[test]
+    fn a_bash_run_of_the_goal_declared_check_carries_the_external_anchor() {
+        use super::declared_verification_anchor_for_goal;
+        use crate::core::types::VerificationAnchorKind;
+        let goal = "Add scopeLabel. Verify with bun run typecheck && bun test hub/test/discovery.test.ts. Do not commit.";
+        let raw = r#"{"command":"cd /w/tw-df80 && bun run typecheck && bun test hub/test/discovery.test.ts 2>&1"}"#;
+        let anchor = declared_verification_anchor_for_goal(raw, &["hub/src/discovery.ts".to_string()], goal).expect("anchored");
+        assert_eq!(anchor.kind, VerificationAnchorKind::External);
+        assert!(anchor.source.as_deref().unwrap_or("").contains("run by the agent"), "{:?}", anchor.source);
+        assert!(declared_verification_anchor_for_goal(r#"{"command":"bun test hub/test/other.test.ts"}"#, &[], goal).is_none());
     }
 
     #[test]
@@ -2055,14 +2075,30 @@ pub fn declared_verification_anchor_for_goal(
     edited_paths: &[String],
     goal: &str,
 ) -> Option<crate::core::types::VerificationAnchor> {
-    let mut anchor = declared_verification_anchor(raw_input, edited_paths)?;
+    let command = serde_json::from_str::<serde_json::Value>(raw_input)
+        .ok()
+        .and_then(|input| input.get("command").and_then(|value| value.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    let declared = goal_declared_check_commands(goal);
+    let goal_check = declared.iter().find(|check| command.contains(check.trim()));
+    let Some(mut anchor) = declared_verification_anchor(raw_input, edited_paths) else {
+        // No anchor field at all (BASH carries none): a command that runs
+        // the goal-declared check is that check whoever typed it. A
+        // recorded claude-web run ran `cd <root> && bun run typecheck &&
+        // bun test …` through BASH, the record stayed "undeclared", and
+        // the finish bounced for lack of an external anchor although the
+        // harness had just reused that very record as the goal's check.
+        let check = goal_check?;
+        return Some(crate::core::types::VerificationAnchor {
+            kind: crate::core::types::VerificationAnchorKind::External,
+            source: Some(format!("goal-declared acceptance check: {check} (run by the agent; the goal declares this command)")),
+            downgraded_reason: None,
+            coverage: None,
+            expectation_subject: None,
+        });
+    };
     if anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored && anchor.downgraded_reason.is_none() {
-        let command = serde_json::from_str::<serde_json::Value>(raw_input)
-            .ok()
-            .and_then(|input| input.get("command").and_then(|value| value.as_str()).map(str::to_string))
-            .unwrap_or_default();
-        let declared = goal_declared_check_commands(goal);
-        if let Some(check) = declared.iter().find(|check| command.contains(check.trim())) {
+        if let Some(check) = goal_check {
             anchor.kind = crate::core::types::VerificationAnchorKind::External;
             anchor.source = Some(format!("goal-declared acceptance check: {check} (declared self by the agent; the goal declares this command)"));
         }
@@ -2685,6 +2721,13 @@ const PROSE_RUNNERS: &[&str] = &[
     "python3 -m unittest", "python -m unittest", "python3 -m pytest", "python -m pytest", "cargo nextest run", "cargo nextest",
     "cargo test", "npm run test", "npm test", "pnpm test", "yarn test", "bun test", "go test", "mix test", "dotnet test",
     "mvn test", "gradle test", "pytest",
+    // Type checks, builds and lints a goal names beside its tests: a recorded
+    // claude-web goal said "Verify with bun run typecheck && bun test …" and
+    // only the bun test half was run, so a pre-existing type error never
+    // reached the finish gate.
+    "bun run typecheck", "npm run typecheck", "pnpm run typecheck", "pnpm typecheck", "yarn typecheck", "bunx tsc", "npx tsc",
+    "tsc --noEmit", "bun run lint", "npm run lint", "bun run check", "npm run check", "cargo check", "cargo clippy", "cargo build",
+    "go build", "go vet", "ruff check", "mypy",
 ];
 /// Words that end a prose command: the argument list stops where the
 /// sentence resumes.
@@ -2725,20 +2768,42 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
             if preceded_by_word || followed_by_word {
                 continue;
             }
-            let runner_words = runner.split_whitespace().count();
+            // Runner words are exempt from the stop-word rule ("bun run
+            // typecheck" keeps its "run"); a `&&` followed by another runner
+            // joins the chain into one command, so "A && B" runs as A && B.
+            let mut exempt_until = runner.split_whitespace().count();
             let mut tokens: Vec<String> = Vec::new();
+            let mut cursor = start;
+            let mut end = start;
             for (index, token) in line[start..].split_whitespace().enumerate() {
+                let token_start = line[cursor..].find(token).map(|offset| cursor + offset).unwrap_or(cursor);
+                cursor = token_start + token.len();
                 let clean = token.trim_end_matches(|c: char| ".,;:)".contains(c));
-                if clean.is_empty() || clean.starts_with('(') || clean == "&&" || clean == "||" || clean == "|" {
+                if clean == "&&" {
+                    let rest = line[cursor..].trim_start();
+                    match PROSE_RUNNERS.iter().filter(|next| rest.starts_with(*next)).max_by_key(|next| next.len()) {
+                        Some(next) if !tokens.is_empty() => {
+                            tokens.push("&&".to_string());
+                            exempt_until = index + 1 + next.split_whitespace().count();
+                            continue;
+                        }
+                        _ => break,
+                    }
+                }
+                if clean.is_empty() || clean.starts_with('(') || clean == "||" || clean == "|" {
                     break;
                 }
-                if index >= runner_words && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str()) {
+                if index >= exempt_until && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str()) {
                     break;
                 }
                 tokens.push(clean.to_string());
+                end = token_start + clean.len();
                 if clean.len() != token.len() {
                     break;
                 }
+            }
+            if end > from {
+                from = end;
             }
             let command = tokens.join(" ");
             let chars = command.chars().count();
@@ -5253,6 +5318,39 @@ impl HarnessRun {
                     iteration: self.state.iteration,
                     r#type: HarnessEventType::HarnessOp,
                 });
+                // The harness running the goal-declared check and reusing
+                // the record makes that record the goal's check: its anchor
+                // is external from here on, so the finish it serves is not
+                // bounced for "self-authored or undeclared".
+                let goal_declared = serde_json::from_str::<serde_json::Value>(raw_input)
+                    .ok()
+                    .and_then(|input| input.get(GOAL_DECLARED_CHECK_MARKER).and_then(|value| value.as_bool()))
+                    .unwrap_or(false);
+                if goal_declared {
+                    if let Some(record) = self.state.last_verification.as_mut() {
+                        if let Some(evidence) = record.evidence.as_mut() {
+                            let external = evidence.anchor.as_ref().is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External);
+                            if !external {
+                                evidence.anchor = Some(crate::core::types::VerificationAnchor {
+                                    kind: crate::core::types::VerificationAnchorKind::External,
+                                    source: Some(format!(
+                                        "goal-declared acceptance check: {} (record reused by the harness)",
+                                        truncate_text(command.as_deref().unwrap_or(""), 120)
+                                    )),
+                                    downgraded_reason: None,
+                                    coverage: None,
+                                    expectation_subject: None,
+                                });
+                                self.emit(HarnessEvent {
+                                    data: None,
+                                    detail: "verification anchor promoted to external: the reused record is the goal-declared check".to_string(),
+                                    iteration: self.state.iteration,
+                                    r#type: HarnessEventType::HarnessOp,
+                                });
+                            }
+                        }
+                    }
+                }
                 return WorkspaceToolExecution { dispatched: false, failed: false, tool_content: text };
             }
         }

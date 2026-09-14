@@ -1178,6 +1178,28 @@ read only by the next loop and the run report, so its length is pure latency.
 The reviewer's instruction asks for one sentence: the verdict and the check
 behind it.
 
+The finish can ride on the final edit. A model that knows the PATCH it is
+sending is the last one puts `finish` on it — `{"summary": …, "check":
+<the acceptance command>}` — and the harness runs the PATCH without the
+key, then a synthetic `finish_task` (status completed, that summary and
+check) right after it in the same turn: the edit lands, the finish-time
+check runs on it, and the "done" round that used to follow (a full prompt
+turn and a first-token wait for about a hundred tokens — 37 of 37 finishes
+in the 0.154 bench were their own round) is gone. The synthetic call joins
+the assistant turn's tool calls, so the transcript stays consistent for
+strict providers, and the `PATCH carried a finish` event marks it. A PATCH
+that carries a finish and nothing to edit (the model reached for the one
+tool with a `finish` field) is the finish itself, under its own id, rather
+than a failed empty edit — dogfood #75 sent exactly that and paid a bounce
+for it before this rule. The
+two-call form (finish_task after the PATCH in one response) works too, but
+GLM sent 0 of 19 finishes that way when asked; a field on the call it is
+already making is the form it takes. A completed finish that follows a
+failed PATCH or command in the same response is bounced (`finish_task:
+harness: not accepted — PATCH failed earlier in this same response…`),
+since the work it counted on is not in place; blocked and unreconciled
+finishes pass.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

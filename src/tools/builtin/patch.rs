@@ -61,6 +61,21 @@ pub fn definition() -> Value {
                         "description": "Exact text to find in the file, including whitespace. A unique match replaces one site; multiple matches require expectedOccurrences. Requires replace.",
                         "type": "string"
                     },
+                    "finish": {
+                        "description": "Finish the task on this same call when this edit is your last: the harness applies the patch, runs check (the goal's acceptance command or the project's test runner), and marks the task completed with summary — no separate finish_task round. Omit it while more edits follow; a finish on a PATCH that fails comes back with the error.",
+                        "properties": {
+                            "check": {
+                                "description": "Command the harness runs before judging the finish: the goal's acceptance command or the project's test runner.",
+                                "type": "string"
+                            },
+                            "summary": {
+                                "description": "One to three short sentences on what was done.",
+                                "type": "string"
+                            }
+                        },
+                        "required": ["summary"],
+                        "type": "object"
+                    },
                     "path": {
                         "description": "Path to the file to change, relative to the current working directory or absolute.",
                         "type": "string"

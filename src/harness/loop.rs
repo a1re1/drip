@@ -290,6 +290,12 @@ mod goal_check_tests {
         assert!(!narration_reads_as_completion("Next I will add the tests for the prefix path."));
         assert!(!narration_reads_as_completion("The server starts but the suite is still failing on port reuse."));
         assert!(!narration_reads_as_completion("ok"));
+        let edited = vec!["kvstore/cli.py".to_string()];
+        let goal = "Add a `count` subcommand to kvstore/cli.py and a unit test in tests/test_cli.py.";
+        assert!(!super::goal_named_paths_all_edited(goal, &edited));
+        let edited = vec!["kvstore/cli.py".to_string(), "tests/test_cli.py".to_string()];
+        assert!(super::goal_named_paths_all_edited(goal, &edited));
+        assert!(super::goal_named_paths_all_edited("Make the suite pass.", &[]));
         let mut state = HarnessState::default();
         assert!(!verified_after_last_edit(&state), "no edits");
         state.workspace_edits = Some(1);
@@ -1830,6 +1836,17 @@ pub fn verified_after_last_edit(state: &HarnessState) -> bool {
         .as_ref()
         .and_then(|evidence| evidence.anchor.as_ref())
         .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
+}
+
+/// Whether every path the goal names has been edited this run. A
+/// completion report that arrives with the edits ("the subcommand and its
+/// test are in place") is only trusted as the finish when the files the
+/// goal asked for were all touched: a goal that names tests/test_cli.py
+/// is not done by a source-only round, however the reply reads.
+pub fn goal_named_paths_all_edited(goal: &str, edited_paths: &[String]) -> bool {
+    crate::harness::outline::named_paths_for_texts(&[goal])
+        .iter()
+        .all(|path| edited_paths.iter().any(|edited| edited == path))
 }
 
 pub fn finish_recheck_reason(bounce: &str, mutations_since: i64) -> Option<FinishRecheck> {
@@ -6770,37 +6787,7 @@ impl HarnessRun {
                 && verified_after_last_edit(&self.state)
                 && narration_reads_as_completion(&trimmed)
             {
-                use crate::harness::transport::{normalize_openai_compatible_tool_call, OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction};
-                let raw_input = serde_json::json!({ "status": "completed", "summary": truncate_text(&trimmed, 600) }).to_string();
-                let mut call_id = format!("narration-finish-{}-{}", self.state.iteration, round);
-                while scope.used_tool_call_ids.contains(&call_id) {
-                    call_id.push('x');
-                }
-                scope.used_tool_call_ids.insert(call_id.clone());
-                let normalized = normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
-                    function: Some(OpenAICompatibleToolCallFunction { arguments: Some(raw_input.clone()), name: Some("finish_task".to_string()) }),
-                    id: Some(call_id.clone()),
-                    tool_type: Some("function".to_string()),
-                });
-                self.emit(HarnessEvent {
-                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
-                    detail: format!(
-                        "narration accepted as finish_task: the goal-declared check passed after the last edit and the reply reads as a completion report — {}",
-                        truncate_text(&trimmed, 160)
-                    ),
-                    iteration: self.state.iteration,
-                    r#type: HarnessEventType::HarnessOp,
-                });
-                scope.digest_actions.push(format!("said (accepted as finish): {}", truncate_text(&trimmed, MAX_DIGEST_ACTION_CHARS)));
-                scope.transport_messages.push(TransportRequestMessage {
-                    anthropic_content: None,
-                    content: Some(TransportContent::Text(response_text.clone())),
-                    role: ChatRoleTag::Assistant,
-                    tool_calls: Some(vec![normalized.clone()]),
-                    ..Default::default()
-                });
-                scope.tool_calls_this_loop += 1;
-                self.dispatch_tool_calls(scope, vec![NormalizedCall { call_id, normalized, raw_input, tool_name: "finish_task".to_string() }]).await;
+                self.accept_narration_as_finish(scope, round, &response_text, false).await;
                 return RoundOutcome::Continue;
             }
             // A narration-only first reply with an unfinished task gets ONE
@@ -6925,6 +6912,7 @@ impl HarnessRun {
             ..Default::default()
         });
 
+        let edits_only = !normalized_calls.is_empty() && normalized_calls.iter().all(|call| call.tool_name == "PATCH");
         self.dispatch_tool_calls(scope, normalized_calls).await;
         if self.ask_user_awaiting {
             return RoundOutcome::Break;
@@ -6932,6 +6920,44 @@ impl HarnessRun {
         if scope.plan_yield_requested {
             scope.digest_actions.push("plan landed; the planning loop yields to the first task without another round".to_string());
             return RoundOutcome::Break;
+        }
+        // A completion report sent with the edits themselves: the goal's
+        // check passed right after this round's last PATCH, every call
+        // landed, every file the goal names was touched, and the text reads
+        // as done. Recorded bench runs spent a whole round on a lone
+        // finish_task after exactly this shape (10 of 28 in one pass).
+        if edits_only
+            && !scope.task_finished
+            && !scope.review_loop
+            && scope.current_task_id.is_some()
+            && scope.failed_calls_this_response.is_empty()
+            && verified_after_last_edit(&self.state)
+        {
+            let reads_as_done = narration_reads_as_completion(&response_text);
+            let named_edited = goal_named_paths_all_edited(&self.state.goal, &self.state.edited_paths);
+            if reads_as_done && named_edited {
+                self.accept_narration_as_finish(scope, round, &response_text, true).await;
+            } else {
+                // The shape that costs a lone finish round; say why the
+                // text with the edits was not taken as the finish, so
+                // transcripts show what the model actually sent.
+                let why = if response_text.trim().is_empty() {
+                    "the response carried no text".to_string()
+                } else if !reads_as_done {
+                    format!("the text does not read as a completion report: {}", truncate_text(response_text.trim(), 160))
+                } else {
+                    format!(
+                        "a path the goal names has not been edited (edited: {})",
+                        if self.state.edited_paths.is_empty() { "none".to_string() } else { self.state.edited_paths.join(", ") }
+                    )
+                };
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    detail: format!("edits landed and the goal-declared check passed, but not taken as the finish: {why}"),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+            }
         }
 
         RoundOutcome::Continue
@@ -7056,6 +7082,60 @@ impl HarnessRun {
         });
         scope.digest_actions.push(format!("harness ran {} after the edit -> {verdict}", truncate_text(&command, 80)));
         Some(edit_check_note(&command, !execution.failed, &verdict, &truncate_text_keeping_ends(&execution.tool_content, 1200)))
+    }
+
+    /// Dispatches a synthetic finish_task whose summary is the model's own
+    /// completion report. `after_tool_calls`: the response's assistant
+    /// message (with its tool calls) is already in the transcript, so the
+    /// finish joins that message's calls instead of opening a new one.
+    pub async fn accept_narration_as_finish(&mut self, scope: &mut LoopScope, round: i64, response_text: &str, after_tool_calls: bool) {
+        use crate::harness::transport::{normalize_openai_compatible_tool_call, OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction};
+        let trimmed = response_text.trim().to_string();
+        let raw_input = serde_json::json!({ "status": "completed", "summary": truncate_text(&trimmed, 600) }).to_string();
+        let mut call_id = format!("narration-finish-{}-{}", self.state.iteration, round);
+        while scope.used_tool_call_ids.contains(&call_id) {
+            call_id.push('x');
+        }
+        scope.used_tool_call_ids.insert(call_id.clone());
+        let normalized = normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
+            function: Some(OpenAICompatibleToolCallFunction { arguments: Some(raw_input.clone()), name: Some("finish_task".to_string()) }),
+            id: Some(call_id.clone()),
+            tool_type: Some("function".to_string()),
+        });
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+            detail: format!(
+                "narration accepted as finish_task: the goal-declared check passed after the last edit and the reply reads as a completion report{} — {}",
+                if after_tool_calls { " (sent with this round's edits)" } else { "" },
+                truncate_text(&trimmed, 160)
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.digest_actions.push(format!("said (accepted as finish): {}", truncate_text(&trimmed, MAX_DIGEST_ACTION_CHARS)));
+        let joined = after_tool_calls
+            && scope
+                .transport_messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == ChatRoleTag::Assistant)
+                .map(|message| {
+                    message.tool_calls.get_or_insert_with(Vec::new).push(normalized.clone());
+                    // Native content blocks would not carry the added call.
+                    message.anthropic_content = None;
+                })
+                .is_some();
+        if !joined {
+            scope.transport_messages.push(TransportRequestMessage {
+                anthropic_content: None,
+                content: Some(TransportContent::Text(response_text.to_string())),
+                role: ChatRoleTag::Assistant,
+                tool_calls: Some(vec![normalized.clone()]),
+                ..Default::default()
+            });
+        }
+        scope.tool_calls_this_loop += 1;
+        self.dispatch_tool_calls(scope, vec![NormalizedCall { call_id, normalized, raw_input, tool_name: "finish_task".to_string() }]).await;
     }
 
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {

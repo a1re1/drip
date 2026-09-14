@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "drip"
-version = "0.167.0"
+version = "0.168.0"
 dependencies = [
  "anyhow",
  "base64",

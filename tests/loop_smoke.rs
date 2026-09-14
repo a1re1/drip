@@ -82,6 +82,14 @@ fn tool_calls_response(calls: Vec<(&str, &str, serde_json::Value)>) -> String {
     .to_string()
 }
 
+fn narrated_tool_call_response(text: &str, id: &str, name: &str, arguments: serde_json::Value) -> String {
+    serde_json::json!({
+        "choices": [{"message": {"content": text, "tool_calls": [{"id": id, "type": "function", "function": {"name": name, "arguments": arguments.to_string()}}]}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+    })
+    .to_string()
+}
+
 fn text_response(text: &str) -> String {
     serde_json::json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}).to_string()
 }
@@ -265,6 +273,48 @@ async fn verified_narration_is_accepted_as_the_finish() {
     assert_eq!(details.iter().filter(|d| d.starts_with("narration accepted as finish_task")).count(), 1, "{details:?}");
     assert!(details.iter().any(|d| d.starts_with("finish_task:") && d.contains("marked completed")), "{details:?}");
     assert_eq!(details.iter().filter(|d| d.starts_with("loop ")).count(), 1, "the task must not be re-seeded in a second loop: {details:?}");
+    assert_eq!(result.state.tasks.iter().filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed).count(), 1);
+}
+
+/// A completion report sent in the same response as the edits: the goal's
+/// check passes right after the PATCH, the goal-named file was touched, and
+/// the text reads as done, so the harness dispatches the finish in that
+/// round instead of waiting for a lone finish_task round.
+#[tokio::test]
+async fn completion_report_sent_with_the_edits_is_accepted_as_the_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let (url, server) = spawn_scripted_server(vec![
+        narrated_tool_call_response(
+            "The test file tests/test_ok.py is in place with one passing test; the task is complete.",
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"}),
+        ),
+        text_response("(should not be reached)"),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("never".into()),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let events = events.lock().unwrap();
+    let details: Vec<String> = events.iter().map(|e| e.detail.clone()).collect();
+    assert_eq!(details.iter().filter(|d| d.starts_with("narration accepted as finish_task") && d.contains("sent with this round's edits")).count(), 1, "{details:?}");
+    assert!(details.iter().any(|d| d.starts_with("finish_task:") && d.contains("marked completed")), "{details:?}");
+    assert_eq!(details.iter().filter(|d| d.starts_with("loop ")).count(), 1, "{details:?}");
     assert_eq!(result.state.tasks.iter().filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed).count(), 1);
 }
 

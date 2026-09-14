@@ -1252,6 +1252,14 @@ the finish. The check runs only when its last measured run was under 8s
 runners do not until measured), never for a command that hung this run, and
 at most three times per loop.
 
+A check the goal names in plain prose counts too. `Verify with cargo test
+--release --lib tools::builtin::patch.` reads to the end of the clause the
+same way a backticked command does, so the warm-up builds that profile, the
+finish runs that command, and the planner is skipped for the single-task
+goal. 272 of 2,522 recorded goals named their runner this way; a dogfood
+that did had paid a `cargo test -q` over the whole crate in the debug
+profile, after a warm-up that had built the wrong one.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

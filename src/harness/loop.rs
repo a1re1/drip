@@ -304,7 +304,22 @@ mod goal_check_tests {
             vec!["python3 -m unittest discover -s tests -q".to_string(), "cargo test".to_string()]
         );
         assert!(goal_declared_check_commands("Fix the bug in `page`; run `ls -la` first").is_empty());
-        assert!(goal_declared_check_commands("no backticks: python3 -m unittest").is_empty());
+        assert_eq!(goal_declared_check_commands("no backticks: python3 -m unittest"), vec!["python3 -m unittest".to_string()]);
+    }
+
+    #[test]
+    fn plain_prose_check_commands_read_to_the_end_of_the_clause() {
+        use super::plain_prose_check_commands;
+        let goal = "Add the helper. Verify with cargo test --release --lib tools::builtin::patch. Do not commit, push, or open PRs.";
+        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --release --lib tools::builtin::patch".to_string()]);
+        let goal = "Run python3 -m unittest discover -s tests -q and make sure it passes; then bun test, typecheck and the UI drift test stay green.";
+        assert_eq!(plain_prose_check_commands(goal), vec!["python3 -m unittest discover -s tests -q".to_string(), "bun test".to_string()]);
+        let goal = "every command must exit 0: cargo check --all-targets; cargo test --lib github; cargo test --lib roles";
+        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --lib github".to_string(), "cargo test --lib roles".to_string()]);
+        assert_eq!(plain_prose_check_commands("then (cd drip && cargo test) green and finish_task"), vec!["cargo test".to_string()]);
+        assert!(plain_prose_check_commands("Acceptance: `cargo test -q` must pass.").is_empty(), "backticked spans belong to the other scan");
+        assert!(plain_prose_check_commands("a pytest-style fixture and the mycargo tester").is_empty(), "word boundaries");
+        assert_eq!(plain_prose_check_commands("run pytest tests/test_cli.py -q when done"), vec!["pytest tests/test_cli.py -q".to_string()]);
     }
 
     #[test]
@@ -2546,6 +2561,82 @@ pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
         }
         if verification_pattern_matches(&candidate) && !commands.contains(&candidate) {
             commands.push(candidate);
+        }
+    }
+    for candidate in plain_prose_check_commands(goal) {
+        if !commands.contains(&candidate) {
+            commands.push(candidate);
+        }
+    }
+    commands
+}
+
+/// Runner phrases a goal may name in plain prose, longest first so
+/// `python3 -m pytest` wins over `pytest`.
+const PROSE_RUNNERS: &[&str] = &[
+    "python3 -m unittest", "python -m unittest", "python3 -m pytest", "python -m pytest", "cargo nextest run", "cargo nextest",
+    "cargo test", "npm run test", "npm test", "pnpm test", "yarn test", "bun test", "go test", "mix test", "dotnet test",
+    "mvn test", "gradle test", "pytest",
+];
+/// Words that end a prose command: the argument list stops where the
+/// sentence resumes.
+const PROSE_STOP_WORDS: &[&str] = &[
+    "the", "to", "and", "then", "must", "should", "pass", "passes", "passing", "green", "exit", "exits", "with", "for", "in",
+    "is", "are", "before", "after", "that", "so", "which", "until", "once", "stays", "stay", "clean", "cleanly", "when", "if",
+    "or", "as", "on", "at", "from", "by", "a", "an", "it", "this", "all", "again", "first", "last", "still", "also", "too",
+    "of", "succeeds", "succeed", "runs", "run", "ok", "works", "without", "verify", "verifies", "check", "checks", "there",
+    "here", "now", "finally", "please", "make", "sure", "keep", "keeps", "remains", "remain", "against",
+];
+
+/// Check commands a goal names in plain prose — `Run cargo test --release
+/// --lib patch to check.` — read from the runner word to the end of the
+/// clause: a token that ends with sentence punctuation is the last one, and
+/// an English stop word ends the argument list. Text inside backticks is
+/// left to the backticked scan. 272 of 2,522 recorded goals named a runner
+/// this way and got the detected whole-project suite instead: a targeted
+/// release module test became `cargo test -q` over everything, in the
+/// debug profile the warm-up had built.
+pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
+    let outside: String = goal.split('`').step_by(2).collect::<Vec<&str>>().join(" ");
+    let mut commands: Vec<String> = Vec::new();
+    for line in outside.lines() {
+        let mut from = 0usize;
+        loop {
+            let rest = &line[from..];
+            let Some((offset, runner)) = PROSE_RUNNERS
+                .iter()
+                .filter_map(|runner| rest.find(runner).map(|offset| (offset, *runner)))
+                .min_by_key(|(offset, runner)| (*offset, std::cmp::Reverse(runner.len())))
+            else {
+                break;
+            };
+            let start = from + offset;
+            from = start + runner.len();
+            let preceded_by_word = start > 0 && line.as_bytes()[start - 1].is_ascii_alphanumeric();
+            let followed_by_word = line.as_bytes().get(from).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
+            if preceded_by_word || followed_by_word {
+                continue;
+            }
+            let runner_words = runner.split_whitespace().count();
+            let mut tokens: Vec<String> = Vec::new();
+            for (index, token) in line[start..].split_whitespace().enumerate() {
+                let clean = token.trim_end_matches(|c: char| ".,;:)".contains(c));
+                if clean.is_empty() || clean.starts_with('(') || clean == "&&" || clean == "||" || clean == "|" {
+                    break;
+                }
+                if index >= runner_words && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str()) {
+                    break;
+                }
+                tokens.push(clean.to_string());
+                if clean.len() != token.len() {
+                    break;
+                }
+            }
+            let command = tokens.join(" ");
+            let chars = command.chars().count();
+            if tokens.len() >= 2 && chars >= 8 && chars <= 200 && verification_pattern_matches(&command) && !commands.contains(&command) {
+                commands.push(command);
+            }
         }
     }
     commands

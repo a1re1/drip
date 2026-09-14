@@ -51,6 +51,37 @@ pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
 pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
 
+/// The freshest READ of up to this many distinct files is kept unfolded past
+/// the hot window (see `fold_cold_tool_results`). Transcript audits of the
+/// hundreds-of-cycles regime show the model re-reading one unchanged file every
+/// round once its earlier read folds out of the hot window (a 273-round session
+/// re-read a single file 274 times, 153 of them in consecutive no-edit rounds):
+/// keeping current file state visible removes the whole re-read cycle.
+pub const MAX_PINNED_READ_FILES: usize = 5;
+/// A read result larger than this is not worth pinning — retaining it would
+/// spend more context than the re-read it saves — so it folds normally.
+pub const PIN_MAX_READ_CHARS: usize = 8_000;
+
+/// The file path a READ tool result names, from its
+/// `Read lines A-B of N from <path>.` header (path may contain dots; only the
+/// single trailing period is stripped).
+fn read_result_path(text: &str) -> Option<String> {
+    let first_line = text.lines().next()?;
+    let rest = first_line.strip_prefix("Read lines ")?;
+    let from = rest.rfind(" from ")?;
+    let path = rest[from + " from ".len()..].trim_end().trim_end_matches('.');
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Paths a PATCH tool result wrote, read from the `+++ b/<path>` lines of the
+/// unified diff it echoes (covers single- and multi-file patches). Used to
+/// refuse pinning a read the file has since moved past.
+fn patch_result_paths(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("+++ b/").map(str::to_string))
+        .collect()
+}
+
 // Folds tool results older than the hot window into one-line digests, so a
 // task loop's transcript cannot grow without bound across its cycles. The most
 // recent results stay verbatim ("hot"); telemetry keeps an ends-kept copy of
@@ -59,10 +90,17 @@ pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
 // Folded state is tracked structurally in foldedIndexes (messages only ever
 // append within a loop, so indexes are stable) — never inferred from content,
 // which a tool output could accidentally imitate.
+//
+// `max_pinned_reads` keeps the freshest READ of up to that many distinct files
+// unfolded even once it falls out of the hot window, so current file state
+// stays visible and the model does not re-read it every round; a read the file
+// has since been PATCHed past is never pinned (it would show stale content).
+// Pass 0 to disable (overflow-recovery and carryover paths, which must shrink).
 pub fn fold_cold_tool_results(
     messages: &mut [TransportRequestMessage],
     hot_tool_results: usize,
     folded_indexes: &mut HashSet<usize>,
+    max_pinned_reads: usize,
 ) -> usize {
     let mut unfolded_tool_indexes: Vec<usize> = Vec::new();
 
@@ -78,9 +116,43 @@ pub fn fold_cold_tool_results(
     let fold_count = unfolded_tool_indexes
         .len()
         .saturating_sub(hot_tool_results);
-    let indexes_to_fold = &unfolded_tool_indexes[..fold_count];
+    let mut indexes_to_fold: Vec<usize> = unfolded_tool_indexes[..fold_count].to_vec();
 
-    for &index in indexes_to_fold {
+    if max_pinned_reads > 0 {
+        // Latest PATCH index per path, so a read superseded by an edit is not pinned.
+        let mut patched_at: HashMap<String, usize> = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            if message.name.as_deref() == Some("PATCH") {
+                for path in patch_result_paths(message_text(message)) {
+                    patched_at.insert(path, index);
+                }
+            }
+        }
+        // Freshest still-current READ per path among the results that would fold.
+        let mut freshest_read: HashMap<String, usize> = HashMap::new();
+        for &index in &indexes_to_fold {
+            if messages[index].name.as_deref() != Some("READ") {
+                continue;
+            }
+            let text = message_text(&messages[index]);
+            if text.chars().count() > PIN_MAX_READ_CHARS {
+                continue;
+            }
+            if let Some(path) = read_result_path(text) {
+                if patched_at.get(&path).is_some_and(|&patch_index| patch_index > index) {
+                    continue; // the file moved on after this read
+                }
+                freshest_read.insert(path, index); // ascending scan keeps the latest
+            }
+        }
+        let mut pins: Vec<usize> = freshest_read.into_values().collect();
+        pins.sort_unstable_by(|a, b| b.cmp(a)); // most-recently-read first
+        pins.truncate(max_pinned_reads);
+        let pinned: HashSet<usize> = pins.into_iter().collect();
+        indexes_to_fold.retain(|index| !pinned.contains(index));
+    }
+
+    for &index in &indexes_to_fold {
         let raw = match &messages[index].content {
             Some(TransportContent::Text(text)) => text.clone(),
             _ => continue,
@@ -99,7 +171,7 @@ pub fn fold_cold_tool_results(
         folded_indexes.insert(index);
     }
 
-    fold_count
+    indexes_to_fold.len()
 }
 
 // Every task loop starts with a fresh transcript, and — transcript audits of
@@ -3187,7 +3259,7 @@ mod loop_helpers_tests {
         ];
         let mut folded = HashSet::new();
 
-        let folded_count = fold_cold_tool_results(&mut messages, 1, &mut folded);
+        let folded_count = fold_cold_tool_results(&mut messages, 1, &mut folded, 0);
 
         assert_eq!(folded_count, 2);
         assert_eq!(folded, HashSet::from([0usize, 1]));
@@ -3204,6 +3276,64 @@ mod loop_helpers_tests {
         assert_eq!(
             messages[2].content,
             Some(TransportContent::Text("hottest result".to_string()))
+        );
+    }
+
+    #[test]
+    fn fold_pins_the_freshest_read_of_each_file_past_the_hot_window() {
+        let read = |path: &str| {
+            tool_message("READ", &format!("Read lines 1-3 of 3 from {path}.\n1\tone\n2\ttwo\n3\tthree"))
+        };
+        let mut messages = vec![
+            read("src/a.rs"),                    // 0: superseded by the later read of a
+            read("src/b.rs"),                    // 1: freshest read of b -> pinned
+            read("src/a.rs"),                    // 2: freshest read of a -> pinned
+            tool_message("BASH", "test output"), // 3: hot (window of 1)
+        ];
+        let mut folded = HashSet::new();
+
+        let folded_count =
+            fold_cold_tool_results(&mut messages, 1, &mut folded, MAX_PINNED_READ_FILES);
+
+        // Only the stale earlier read of a folds; the freshest read of each file
+        // stays verbatim so the model does not re-read it next round.
+        assert_eq!(folded_count, 1);
+        assert_eq!(folded, HashSet::from([0usize]));
+        assert!(message_text(&messages[1]).starts_with("Read lines 1-3 of 3 from src/b.rs."));
+        assert!(message_text(&messages[2]).starts_with("Read lines 1-3 of 3 from src/a.rs."));
+    }
+
+    #[test]
+    fn fold_does_not_pin_a_read_the_file_was_patched_past() {
+        let mut messages = vec![
+            tool_message("READ", "Read lines 1-2 of 2 from src/c.rs.\n1\tx\n2\ty"), // 0: now stale
+            tool_message(
+                "PATCH",
+                "Applied change to src/c.rs.\n--- a/src/c.rs\n+++ b/src/c.rs\n@@ -1,1 +1,1 @@\n-x\n+z",
+            ), // 1: edits c after the read
+            tool_message("BASH", "hot"),                                            // 2: hot
+        ];
+        let mut folded = HashSet::new();
+
+        let folded_count =
+            fold_cold_tool_results(&mut messages, 1, &mut folded, MAX_PINNED_READ_FILES);
+
+        // The read is superseded by the patch, so it is not pinned and folds
+        // like the patch result — the model never sees stale file content pinned.
+        assert_eq!(folded_count, 2);
+        assert!(folded.contains(&0));
+    }
+
+    #[test]
+    fn read_result_path_reads_the_header_and_patch_paths_read_the_diff() {
+        assert_eq!(
+            super::read_result_path("Read lines 1-9 of 9 from src/web/settings.ts.\n1\tx").as_deref(),
+            Some("src/web/settings.ts")
+        );
+        assert_eq!(super::read_result_path("no header here"), None);
+        assert_eq!(
+            super::patch_result_paths("--- a/x.rs\n+++ b/x.rs\n+++ b/y.rs\n line"),
+            vec!["x.rs".to_string(), "y.rs".to_string()]
         );
     }
 
@@ -6824,6 +6954,7 @@ impl HarnessRun {
                 &mut scope.transport_messages,
                 scope.loop_budget.hot_tool_results.max(0) as usize,
                 &mut scope.folded_message_indexes,
+                MAX_PINNED_READ_FILES,
             );
 
             if folded_count > 0 {
@@ -6951,7 +7082,7 @@ impl HarnessRun {
 
         if approximate_chars > MAX_LOOP_TRANSCRIPT_CHARS {
             let folded_count =
-                fold_cold_tool_results(&mut scope.transport_messages, 0, &mut scope.folded_message_indexes);
+                fold_cold_tool_results(&mut scope.transport_messages, 0, &mut scope.folded_message_indexes, 0);
 
             if folded_count > 0 {
                 self.emit(HarnessEvent {
@@ -7007,6 +7138,7 @@ impl HarnessRun {
                     &mut scope.transport_messages,
                     0,
                     &mut scope.folded_message_indexes,
+                    0,
                 );
 
                 if scope.overflow_retried_this_loop || folded_count == 0 {

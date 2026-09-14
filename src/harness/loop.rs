@@ -1764,7 +1764,22 @@ pub fn command_names_path(haystack: &str, path: &str) -> bool {
     }
     let file_name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
     let stem = std::path::Path::new(path).file_stem().and_then(|name| name.to_str()).unwrap_or_default();
-    let test_shaped_stem = stem.len() >= 4 && (stem.contains('_') || stem.contains('-'));
+    // The stem rule exists for runner targets that are test files
+    // (`--test test_totals` ↔ tests/test_totals.rs). A source module's stem
+    // used as a runner filter (`cargo test --lib child_process` ↔
+    // src/tools/child_process.rs) runs that module's mostly pre-existing
+    // tests: a recorded run had its 36-test filtered run downgraded to
+    // self-authored on that match and then paid a full-suite re-run.
+    let test_like_path = path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.starts_with("test/")
+        || path.contains("/test/")
+        || file_name.starts_with("test")
+        || stem.ends_with("_test")
+        || stem.ends_with("_tests")
+        || stem.ends_with(".test")
+        || stem.ends_with(".spec");
+    let test_shaped_stem = test_like_path && stem.len() >= 4 && (stem.contains('_') || stem.contains('-'));
     haystack
         .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ';' | '|' | '&' | ',' | '='))
         .map(|token| token.trim_start_matches("./"))
@@ -2543,6 +2558,11 @@ mod loop_helpers_tests {
         assert!(command_names_path("pytest ./tests/test_totals.py::test_sum", "tests/test_totals.py") || command_names_path("pytest tests/test_totals.py", "tests/test_totals.py"));
         assert!(!command_names_path("pytest tests/", "tests/test_totals.py"));
         assert!(!command_names_path("cargo test --lib", "src/lib.rs"));
+        // A source module's stem as a runner filter is not the file's own test.
+        assert!(!command_names_path("cargo test --lib child_process", "src/tools/child_process.rs"));
+        assert!(!command_names_path("cargo test --lib builtin::bash", "src/tools/builtin/bash.rs"));
+        assert!(command_names_path("cargo test --test child_process_test", "tests/child_process_test.rs"));
+        assert!(command_names_path("bun test session_name.test", "hub/test/session_name.test.ts"));
 
         let mut shell_edited = Vec::new();
         for target in extract_shell_write_targets("cat > tests/test_shell.py <<'EOF'\nassert 1\nEOF\n && sed -i 's/a/b/' src/a.rs src/b.rs; echo ok | tee -a notes.txt >/dev/null; printf x 2>err.log") {
@@ -6384,6 +6404,14 @@ impl HarnessRun {
                 tool_content.push_str(&format!(
                     "\n[harness] the trailing `{filter}` was dropped: runner output is bounded here and its failure block is kept, so the summary and any panic are both visible without a re-run."
                 ));
+            }
+            // `cargo test` takes one filter; two positional filters fail before
+            // any test runs (a recorded VERIFY lost a round to it).
+            if execution.failed
+                && execution.tool_content.contains("unexpected argument")
+                && execution.tool_content.contains("Usage: cargo test")
+            {
+                tool_content.push_str("\n[harness] cargo test accepts one TESTNAME filter; run the modules as separate commands chained with && (cargo test --lib a && cargo test --lib b), or use a shared prefix.");
             }
             // A truncated runner failure keeps its panic block: the ends-kept
             // cut drops the middle, which is where the assertion lives.

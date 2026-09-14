@@ -15,6 +15,21 @@ use super::{ToolCtx, ToolOutcome};
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024; // 1MB cap for scanned files
 
+/// A GREP that finds at most this many matches carries the body of every
+/// match that is a definition line, so the READ that would otherwise follow
+/// in the next round is folded into this one.
+pub const GREP_BODY_MAX_MATCHES: usize = 3;
+/// Lines of a definition body shown after its GREP hit; longer bodies are
+/// cut with a note naming the READ that shows the rest.
+pub const GREP_BODY_MAX_LINES: usize = 80;
+/// Total characters of definition bodies one GREP result may carry.
+pub const GREP_BODY_MAX_CHARS: usize = 6_000;
+/// A `context` request is honoured only when the search matched at most
+/// this many lines: ten hits with eight lines of context each is a wall of
+/// text that the per-result cap cuts in the middle, hiding the hits the
+/// model was looking for. Broader searches get the compact list and a note.
+pub const GREP_CONTEXT_MAX_MATCHES: usize = 5;
+
 // ── internal types ────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -440,7 +455,45 @@ fn walk(
 // ── complete ──────────────────────────────────────────────────────────────────
 
 /// Format the final tool content string.
-fn complete_output(input: &GrepToolInput, result: &GrepToolResult) -> String {
+/// The lines of every file a shown match sits in, read once; files that
+/// vanished or cannot be read are absent.
+fn shown_files(matches: &[GrepMatch]) -> BTreeMap<PathBuf, Vec<String>> {
+    let mut files: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for m in matches {
+        if files.contains_key(&m.path) {
+            continue;
+        }
+        if let Ok(buf) = fs::read(&m.path) {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            files.insert(m.path.clone(), text.lines().map(str::to_string).collect());
+        }
+    }
+    files
+}
+
+fn file_ext(path: &Path) -> &str {
+    path.extension().and_then(|ext| ext.to_str()).unwrap_or("")
+}
+
+/// `  [in name]` for a match line that sits inside a definition without
+/// being one, so a hit is oriented without a READ around it.
+fn enclosing_note(path: &Path, lines: Option<&Vec<String>>, line_number: usize) -> String {
+    let ext = file_ext(path);
+    let Some(lines) = lines else { return String::new() };
+    if ext.is_empty() || line_number == 0 || line_number > lines.len() {
+        return String::new();
+    }
+    let index = line_number - 1;
+    if crate::harness::outline::is_definition(ext, &lines[index]) {
+        return String::new();
+    }
+    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+    crate::harness::outline::enclosing_definition(ext, &borrowed, index)
+        .map(|name| format!("  [in {name}]"))
+        .unwrap_or_default()
+}
+
+fn complete_output(input: &GrepToolInput, result: &GrepToolResult, files: &BTreeMap<PathBuf, Vec<String>>) -> String {
     let GrepToolResult { matches, pattern, total_matches, file_count, context: context_lines } = result;
     let showing = matches.len();
 
@@ -448,42 +501,111 @@ fn complete_output(input: &GrepToolInput, result: &GrepToolResult) -> String {
         return format!("No matches for {pattern}");
     }
 
+    let header = format!("{total_matches} match(es) in {file_count} file(s), showing {showing}");
+    if *context_lines > 0 && *total_matches > GREP_CONTEXT_MAX_MATCHES {
+        let header = format!(
+            "{header} (context of {context_lines} omitted: more than {GREP_CONTEXT_MAX_MATCHES} matches — each hit names its definition below; narrow the pattern for context windows, or READ around the hit you want)"
+        );
+        return compact_match_list(input, matches, files, header);
+    }
     if *context_lines > 0 {
-        // Group matches by file
-        let mut by_file: BTreeMap<String, Vec<&GrepMatch>> = BTreeMap::new();
+        // Group matches by file and render each with its context window.
+        let mut by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
         for m in matches {
-            by_file
-                .entry(m.path.to_string_lossy().into_owned())
-                .or_default()
-                .push(m);
+            by_file.entry(m.path.clone()).or_default().push(m.line - 1);
         }
-
-        let header = format!("{total_matches} match(es) in {file_count} file(s), showing {showing}");
         let mut parts = vec![header];
-
-        for (file_path, file_matches) in &by_file {
-            let display_path = format_tool_path(&input.cwd, Path::new(file_path));
+        for (file_path, match_indices) in &by_file {
+            let display_path = format_tool_path(&input.cwd, file_path);
             parts.push(format!("\n{display_path}:"));
-            for m in file_matches {
-                parts.push(format!("  {}: {}", m.line, m.text));
+            match files.get(file_path) {
+                Some(lines) => {
+                    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+                    parts.extend(render_with_context_in(&borrowed, match_indices, *context_lines, file_ext(file_path)));
+                }
+                None => {
+                    for m in matches.iter().filter(|m| &m.path == file_path) {
+                        parts.push(format!("  {}: {}", m.line, m.text));
+                    }
+                }
             }
         }
-
         parts.join("\n")
     } else {
-        let header = format!("{total_matches} match(es) in {file_count} file(s), showing {showing}");
-        let lines: Vec<String> = matches
-            .iter()
-            .map(|m| {
-                let display_path = format_tool_path(&input.cwd, &m.path);
-                format!("{display_path}:{}: {}", m.line, m.text)
-            })
-            .collect();
-        std::iter::once(header)
-            .chain(lines)
-            .collect::<Vec<_>>()
-            .join("\n")
+        compact_match_list(input, matches, files, header)
     }
+}
+
+/// `path:line: text  [in name]` per match under the header.
+fn compact_match_list(input: &GrepToolInput, matches: &[GrepMatch], files: &BTreeMap<PathBuf, Vec<String>>, header: String) -> String {
+    let lines: Vec<String> = matches
+        .iter()
+        .map(|m| {
+            let display_path = format_tool_path(&input.cwd, &m.path);
+            let note = enclosing_note(&m.path, files.get(&m.path), m.line);
+            format!("{display_path}:{}: {}{note}", m.line, m.text)
+        })
+        .collect();
+    std::iter::once(header)
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The bodies of the definitions a small GREP found: when the whole search
+/// matched at most `GREP_BODY_MAX_MATCHES` lines, every match that is a
+/// definition line is followed by its body (line-numbered like a READ), so
+/// the model edits from this result instead of spending the next round on
+/// the READ it would otherwise issue. None when the search matched more
+/// lines, or none of the matches is a definition.
+fn definition_bodies(cwd: &str, result: &GrepToolResult, files: &BTreeMap<PathBuf, Vec<String>>) -> Option<String> {
+    if result.total_matches == 0 || result.total_matches > GREP_BODY_MAX_MATCHES {
+        return None;
+    }
+    let mut sections: Vec<String> = vec![];
+    let mut chars = 0usize;
+    for m in &result.matches {
+        let Some(lines) = files.get(&m.path) else { continue };
+        let ext = file_ext(&m.path);
+        if m.line == 0 || m.line > lines.len() || !crate::harness::outline::is_definition(ext, &lines[m.line - 1]) {
+            continue;
+        }
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let start = m.line - 1;
+        let end = crate::harness::outline::definition_end(ext, &borrowed, start);
+        let shown_end = end.min(start + GREP_BODY_MAX_LINES - 1);
+        let display_path = format_tool_path(cwd, &m.path);
+        let name = crate::harness::outline::short_name(&lines[start]);
+        let mut section = format!("{display_path} lines {}-{} — {name}:\n", start + 1, shown_end + 1);
+        for (index, line) in borrowed.iter().enumerate().take(shown_end + 1).skip(start) {
+            section.push_str(&format!("{}\t{}\n", index + 1, line));
+        }
+        if shown_end < end {
+            section.push_str(&format!(
+                "[body continues to line {}: READ offset {} limit {} for the rest]\n",
+                end + 1,
+                shown_end + 2,
+                end - shown_end
+            ));
+        }
+        let section_chars = section.chars().count();
+        if chars + section_chars > GREP_BODY_MAX_CHARS {
+            if sections.is_empty() {
+                let cut: String = section.chars().take(GREP_BODY_MAX_CHARS).collect();
+                sections.push(format!("{cut}\n[body cut at {GREP_BODY_MAX_CHARS} chars: READ the range above for the rest]\n"));
+            }
+            break;
+        }
+        chars += section_chars;
+        sections.push(section);
+    }
+    if sections.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\nDefinition bodies (a READ of these ranges returns the same text — edit from here instead of re-reading):\n{}",
+        sections.join("\n").trim_end()
+    ))
 }
 
 // ── execute_prepared ──────────────────────────────────────────────────────────
@@ -545,12 +667,12 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "GREP",
-            "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
+            "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern. Each hit names the definition it sits in, and when the whole search matches at most 3 lines, every hit that is a definition line is followed by its body (line-numbered like a READ) — a GREP for `fn name` returns the function, so do not READ the range it just showed.",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
                     "context": {
-                        "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
+                        "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0; honoured only when the search matches at most 5 lines (a broader search returns the compact list, each hit naming its definition).",
                         "maximum": 5,
                         "minimum": 0,
                         "type": "number"
@@ -619,7 +741,11 @@ pub fn execute(args: &Value, ctx: &ToolCtx) -> ToolOutcome {
     };
 
     let (grep_result, _output_text) = execute_prepared(&input);
-    let tool_content = complete_output(&input, &grep_result);
+    let files = shown_files(&grep_result.matches);
+    let mut tool_content = complete_output(&input, &grep_result, &files);
+    if let Some(bodies) = definition_bodies(&input.cwd, &grep_result, &files) {
+        tool_content.push_str(&bodies);
+    }
 
     // No-match is not a failure
     ToolOutcome {
@@ -646,7 +772,11 @@ mod tests {
         let ctx = make_ctx(cwd);
         let input = prepare(&map, &ctx).unwrap();
         let (result, output_text) = execute_prepared(&input);
-        let tool_content = complete_output(&input, &result);
+        let files = shown_files(&result.matches);
+        let mut tool_content = complete_output(&input, &result, &files);
+        if let Some(bodies) = definition_bodies(&input.cwd, &result, &files) {
+            tool_content.push_str(&bodies);
+        }
         (output_text, tool_content)
     }
 
@@ -918,5 +1048,51 @@ mod tests {
         assert!(tc.contains("target.ts"), "tc={tc}");
         assert!(!tc.contains("other.ts"), "tc={tc}");
         assert!(tc.contains("1 match(es) in 1 file(s)"), "tc={tc}");
+    }
+
+    #[test]
+    fn small_definition_grep_carries_the_body_and_hits_name_their_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "pub fn alpha(a: u32) -> u32 {\n    if a > 1 {\n        return 2;\n    }\n    a\n}\n\nfn beta() {\n    let inner = alpha(3);\n    inner\n}\n";
+        fs::write(dir.path().join("lib.rs"), src).unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "fn alpha", "path": "lib.rs"}));
+        assert!(tc.contains("1 match(es) in 1 file(s)"), "tc={tc}");
+        assert!(tc.contains("Definition bodies"), "tc={tc}");
+        assert!(tc.contains("lib.rs lines 1-6 — alpha:\n1\tpub fn alpha(a: u32) -> u32 {\n"), "tc={tc}");
+        assert!(tc.contains("6\t}"), "tc={tc}");
+        assert!(!tc.contains("fn beta"), "tc={tc}");
+        // A hit inside a function names it; a hit that is a definition does not.
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "alpha\\(3\\)", "path": "lib.rs"}));
+        assert!(tc.contains("lib.rs:9: let inner = alpha(3);  [in beta]"), "tc={tc}");
+        assert!(!tc.contains("Definition bodies"), "tc={tc}");
+        // More matches than the body limit: hits only.
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "a", "path": "lib.rs"}));
+        assert!(!tc.contains("Definition bodies"), "tc={tc}");
+        // Context requested: the rendered window reaches the tool content.
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "inner = alpha", "path": "lib.rs", "context": 1}));
+        assert!(tc.contains("> 9:     let inner = alpha(3);  [in beta]"), "tc={tc}");
+        assert!(tc.contains("  8: fn beta() {"), "tc={tc}");
+        // Context on a broad search is dropped for the compact list.
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": ".", "path": "lib.rs", "context": 3}));
+        assert!(tc.contains("(context of 3 omitted: more than 5 matches"), "tc={tc}");
+        assert!(tc.contains("let inner = alpha(3);  [in beta]"), "tc={tc}");
+        assert!(!tc.contains("> 9:"), "tc={tc}");
+    }
+
+    #[test]
+    fn long_definition_body_is_cut_with_a_read_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::from("def big():\n");
+        for i in 0..120 {
+            src.push_str(&format!("    x{i} = {i}\n"));
+        }
+        src.push_str("    return x0\n\ndef small():\n    return 1\n");
+        fs::write(dir.path().join("mod.py"), &src).unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "^def ", "path": "mod.py"}));
+        assert!(tc.contains("mod.py lines 1-80 — big:\n"), "tc={tc}");
+        assert!(tc.contains("[body continues to line 122: READ offset 81 limit 42 for the rest]"), "tc={tc}");
+        assert!(tc.contains("mod.py lines 124-125 — small:\n124\tdef small():\n125\t    return 1"), "tc={tc}");
     }
 }

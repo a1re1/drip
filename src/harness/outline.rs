@@ -241,6 +241,68 @@ pub fn enclosing_definition(ext: &str, lines: &[&str], index: usize) -> Option<S
     }
 }
 
+/// The 0-based index of the last line of the definition that starts at
+/// `start`: for brace languages the line that closes the block opened on
+/// (or within two lines of) the definition line, for Python and Ruby the
+/// last line indented deeper than the definition (Ruby's closing `end`
+/// included). A signature-only line (`struct Unit;`, a type alias, an
+/// abstract method) ends on itself. Brace counting ignores strings and
+/// comments, which is good enough to bound a READ window.
+pub fn definition_end(ext: &str, lines: &[&str], start: usize) -> usize {
+    let last = lines.len().saturating_sub(1);
+    let start = start.min(last);
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    match ext {
+        "py" | "rb" => {
+            let base = indent(lines[start]);
+            let mut end = start;
+            for (index, line) in lines.iter().enumerate().skip(start + 1) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if indent(line) <= base {
+                    if ext == "rb" && line.trim() == "end" && indent(line) == base {
+                        return index;
+                    }
+                    return end;
+                }
+                end = index;
+            }
+            end
+        }
+        _ => {
+            let mut depth: i64 = 0;
+            let mut opened = false;
+            for (index, line) in lines.iter().enumerate().skip(start) {
+                for ch in line.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            opened = true;
+                        }
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if opened && depth <= 0 {
+                    return index;
+                }
+                if !opened && line.trim_end().ends_with(';') {
+                    return index;
+                }
+                if !opened && index >= start + 8 {
+                    return start;
+                }
+            }
+            if opened {
+                last
+            } else {
+                start
+            }
+        }
+    }
+}
+
 /// The outline of one file: "<display> (N lines): 12 pub fn a; 40 struct B; …",
 /// or None when the file is small, unreadable, or has no recognisable
 /// definitions.
@@ -426,5 +488,24 @@ mod tests {
         assert_eq!(short_name("impl TuiApp {"), "TuiApp");
         assert_eq!(short_name("    pub(crate) fn merged_env(&self) -> BTreeMap<String, String> {"), "merged_env");
         assert_eq!(short_name("export default class Foo extends Bar {"), "Foo");
+    }
+
+    #[test]
+    fn definition_end_bounds_brace_and_indent_blocks() {
+        let rs = "fn alpha(\n    a: u32,\n) -> u32 {\n    if a > 1 {\n        return 2;\n    }\n    a\n}\n\nstruct Unit;\nfn beta() {}\n";
+        let lines: Vec<&str> = rs.lines().collect();
+        assert_eq!(definition_end("rs", &lines, 0), 7);
+        assert_eq!(definition_end("rs", &lines, 9), 9);
+        assert_eq!(definition_end("rs", &lines, 10), 10);
+        let py = "def alpha(x):\n    if x:\n        return 1\n\n    return 2\n\ndef beta():\n    pass\n";
+        let lines: Vec<&str> = py.lines().collect();
+        assert_eq!(definition_end("py", &lines, 0), 4);
+        assert_eq!(definition_end("py", &lines, 6), 7);
+        let rb = "def alpha\n  1\nend\ndef beta\n  2\nend\n";
+        let lines: Vec<&str> = rb.lines().collect();
+        assert_eq!(definition_end("rb", &lines, 0), 2);
+        let unterminated = "fn open() {\n    let x = 1;\n";
+        let lines: Vec<&str> = unterminated.lines().collect();
+        assert_eq!(definition_end("rs", &lines, 0), 1);
     }
 }

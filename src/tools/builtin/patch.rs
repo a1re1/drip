@@ -342,6 +342,17 @@ const DEFINITION_MODIFIERS: &[&str] = &[
 /// call. Err names the reason when there is no such line or several.
 pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String> {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A model often names the anchor as the whole definition it reads in the
+    // file — `pub fn hovered_url<...>(...) {\n ... \n}` — not a bare name. A
+    // multi-line anchor never matches a single line, so reduce it to its first
+    // non-empty line (the signature), which the keyword logic below resolves
+    // to the definition name. A recorded pwrde dogfood pasted a full function
+    // as the `after` value and the append fell to the end of the file.
+    let name: &str = if name.contains('\n') {
+        name.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(name)
+    } else {
+        name
+    };
     // A model naming the anchor as the call it reads in the file —
     // `describe("readRegistry")`, `test('x')` — passes the whole expression,
     // not a bare identifier. Match such a line by its literal opening; a
@@ -2450,6 +2461,14 @@ mod execute_tests {
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("t.py")).unwrap();
         assert!(text.contains("        self.assertTrue(True)\n\n    def test_mid(self):\n        pass\n\n    @skip\n    def test_b(self):"), "{text}");
+        // A full multi-line definition as the anchor resolves by its first
+        // line (the signature): a model pastes the whole function it read.
+        std::fs::write(dir.join("g.rs"), "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n\npub fn two(x: u8) -> u8 {\n    x + 2\n}\n").unwrap();
+        let outcome = execute(&serde_json::json!({"path": "g.rs", "after": "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n", "append": "pub fn oneb(x: u8) -> u8 { x }\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("after `pub fn one(x: u8) -> u8 {"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("g.rs")).unwrap();
+        assert!(text.contains("    x + 1\n}\n\npub fn oneb(x: u8) -> u8 { x }\n\npub fn two"), "{text}");
         // A call-expression anchor (a describe/test block named as the model
         // reads it) matches by its literal opening, not only a bare name.
         std::fs::write(dir.join("d.test.ts"), "describe(\"a\", () => {\n  test(\"x\", () => {});\n});\n\ndescribe(\"b\", () => {\n  test(\"y\", () => {});\n});\n").unwrap();

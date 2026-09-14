@@ -39,8 +39,12 @@
       "parameters": {
         "additionalProperties": false,
         "properties": {
+          "append": {
+            "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take.",
+            "type": "string"
+          },
           "content": {
-            "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; for an existing file prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
+            "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; to add at the end of an existing file use append; otherwise prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
             "type": "string"
           },
           "expectedOccurrences": {
@@ -52,8 +56,12 @@
             "items": {
               "additionalProperties": false,
               "properties": {
+                "append": {
+                  "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file.",
+                  "type": "string"
+                },
                 "content": {
-                  "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely.",
+                  "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; to add at the end of an existing file use append.",
                   "type": "string"
                 },
                 "expectedOccurrences": {

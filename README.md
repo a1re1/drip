@@ -1269,6 +1269,16 @@ next loop re-seeded the task with a fresh first prompt — a recorded
 count-cmd run paid the whole orientation carry twice for one sentence.
 An unverified text reply still concludes the loop as before.
 
+PATCH has an `append` mode. `{"path": "tests/test_store.py", "append": "..."}`
+adds text at the end of a file (a newline first when the file lacks one;
+the file is created if missing), alone or chained after find + replace
+entries for the same file in one call. New tests and functions usually go
+at the end, and the whole-file `content` form was re-sending the rest: 39
+recorded overwrites of existing files re-emitted 59% of their lines
+unchanged, and one run re-sent a 44-line module four times. An overwrite
+that re-sends half or more of a file (20+ lines) now says so in its
+result and names the cheaper forms.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

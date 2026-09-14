@@ -474,6 +474,7 @@ mod review_brief_tests {
         assert!(brief.contains("+two"), "committed change is in the diff: {brief}");
         assert!(brief.contains("new file new.txt (1 lines, in full — do not READ it again):\n```\nfresh\n```"), "small new files ride along: {brief}");
         assert!(brief.contains("new file big.txt (READ it; not in the diff)"), "big new files are only listed: {brief}");
+        assert!(brief.contains(&format!("{REVIEW_BRIEF_EDITED_HEADER}\n== a.txt (2 lines)\n1\tone\n2\ttwo")), "edited tracked files ride along whole: {brief}");
         assert!(brief.contains("do not READ a file that appears there"), "{brief}");
         assert!(brief.contains("v1 passed — python3 -m unittest -q"), "{brief}");
         let settled = build_review_brief_with(&cwd, Some(&head), &state, Some("the harness ran the goal-declared check (cargo test --lib harness)"));
@@ -492,8 +493,12 @@ pub const REVIEW_BRIEF_MAX_DIFF_CHARS: usize = 16_000;
 /// New (untracked) files inlined in full in the review brief: at most this
 /// many files, each within these line and character bounds.
 pub const REVIEW_BRIEF_MAX_INLINE_FILES: usize = 4;
-pub const REVIEW_BRIEF_MAX_INLINE_LINES: usize = 200;
-pub const REVIEW_BRIEF_MAX_INLINE_CHARS: usize = 8_000;
+pub const REVIEW_BRIEF_MAX_INLINE_LINES: usize = 400;
+pub const REVIEW_BRIEF_MAX_INLINE_CHARS: usize = 16_000;
+/// Header of the brief section that carries the edited tracked files whole,
+/// line-numbered as READ returns them: 74 of 81 recorded reviewer loops
+/// opened with READs of the files the diff had just shown them hunks of.
+pub const REVIEW_BRIEF_EDITED_HEADER: &str = "edited files, full current text (line-numbered exactly as a READ returns it — the diff above shows what changed, this is the context; do not READ these again):";
 
 fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git").args(args).current_dir(cwd).output().ok()?;
@@ -625,6 +630,20 @@ pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &
             diff.chars().take(REVIEW_BRIEF_MAX_DIFF_CHARS).collect::<String>()
         )),
         None => sections.push("diff: none (no git repository, or nothing changed since run start)".to_string()),
+    }
+    // The edited tracked files ride along whole (the same caps as the
+    // author's named-file carry) so the reviewer starts from the text
+    // instead of paging it back in; the diff alone shows hunks, not context.
+    if let Some(edited) = git_output(cwd, &["diff", "--name-only", base]) {
+        let paths: Vec<String> = edited
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.split('/').any(|segment| segment.starts_with('.')))
+            .map(str::to_string)
+            .collect();
+        if let (Some(bodies), _) = crate::harness::outline::file_bodies_for_paths(cwd, &paths, REVIEW_BRIEF_EDITED_HEADER) {
+            sections.push(bodies);
+        }
     }
     let records: Vec<String> = state
         .verifications

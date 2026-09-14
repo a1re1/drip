@@ -1169,6 +1169,15 @@ the outer terminal window with `set -g set-titles on` (plus
 `allow-passthrough on` on tmux 3.3+ if needed). drip emits only OSC 2
 window-title escapes — no progress-bar protocols such as OSC 9;4.
 
+The `summary` a finish_task carries is asked to be one to three short
+sentences (about 300 characters): what changed and what proved it. Across the
+recorded runs on the current builds, the author's finish round was 12% of all
+inference time and the reviewer's another 7%, with median summaries of 480
+and 800 characters; the summary is generated at the very end of a task and is
+read only by the next loop and the run report, so its length is pure latency.
+The reviewer's instruction asks for one sentence: the verdict and the check
+behind it.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

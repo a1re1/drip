@@ -82,6 +82,34 @@ fn patch_result_paths(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// (message index, command text) for every mutating BASH tool call in the
+/// transcript. A file edited through the shell (`sed -i`, `> file`, `tee`)
+/// leaves no PATCH diff, so a read of that path must not be pinned if a later
+/// mutating command names it — the read would show pre-edit content.
+fn mutating_shell_commands(messages: &[TransportRequestMessage]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let Some(calls) = &message.tool_calls else { continue };
+        for call in calls {
+            let Some(function) = &call.function else { continue };
+            if function.name.as_deref() != Some("BASH") {
+                continue;
+            }
+            let command = function
+                .arguments
+                .as_deref()
+                .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
+                .and_then(|value| value.get("command").and_then(|c| c.as_str()).map(str::to_string));
+            if let Some(command) = command {
+                if !is_read_only_shell_command(&command) {
+                    out.push((index, command));
+                }
+            }
+        }
+    }
+    out
+}
+
 // Folds tool results older than the hot window into one-line digests, so a
 // task loop's transcript cannot grow without bound across its cycles. The most
 // recent results stay verbatim ("hot"); telemetry keeps an ends-kept copy of
@@ -94,7 +122,8 @@ fn patch_result_paths(text: &str) -> Vec<String> {
 // `max_pinned_reads` keeps the freshest READ of up to that many distinct files
 // unfolded even once it falls out of the hot window, so current file state
 // stays visible and the model does not re-read it every round; a read the file
-// has since been PATCHed past is never pinned (it would show stale content).
+// has since been PATCHed past — or that a later mutating shell command names —
+// is never pinned (it would show stale content).
 // Pass 0 to disable (overflow-recovery and carryover paths, which must shrink).
 pub fn fold_cold_tool_results(
     messages: &mut [TransportRequestMessage],
@@ -145,6 +174,15 @@ pub fn fold_cold_tool_results(
                 freshest_read.insert(path, index); // ascending scan keeps the latest
             }
         }
+        // Drop any read a later mutating shell command may have written: the
+        // shell leaves no PATCH diff, so this is the only signal that a pinned
+        // read would now be stale.
+        let shell_edits = mutating_shell_commands(messages);
+        freshest_read.retain(|path, read_index| {
+            !shell_edits
+                .iter()
+                .any(|(command_index, command)| *command_index > *read_index && command.contains(path.as_str()))
+        });
         let mut pins: Vec<usize> = freshest_read.into_values().collect();
         pins.sort_unstable_by(|a, b| b.cmp(a)); // most-recently-read first
         pins.truncate(max_pinned_reads);
@@ -3322,6 +3360,45 @@ mod loop_helpers_tests {
         // like the patch result — the model never sees stale file content pinned.
         assert_eq!(folded_count, 2);
         assert!(folded.contains(&0));
+    }
+
+    #[test]
+    fn fold_does_not_pin_a_read_a_later_shell_command_edited() {
+        let bash_call = |command: &str| TransportRequestMessage {
+            role: ChatRoleTag::Assistant,
+            tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
+                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
+                    arguments: Some(serde_json::json!({ "command": command }).to_string()),
+                    name: Some("BASH".to_string()),
+                }),
+                id: Some("c".to_string()),
+                tool_type: Some("function".to_string()),
+            }]),
+            ..Default::default()
+        };
+        let mut messages = vec![
+            tool_message("READ", "Read lines 1-2 of 2 from src/d.rs.\n1\tx\n2\ty"), // 0: read of d
+            bash_call("sed -i '' 's/x/z/' src/d.rs"),                              // 1: shell edit of d
+            tool_message("BASH", "done"),                                          // 2
+            tool_message("BASH", "hot"),                                           // 3: hot
+        ];
+        let mut folded = HashSet::new();
+
+        let folded_count =
+            fold_cold_tool_results(&mut messages, 1, &mut folded, MAX_PINNED_READ_FILES);
+
+        // The read (0) is not pinned — a later mutating shell command named d.rs.
+        assert!(folded.contains(&0), "stale read must fold, folded={folded:?}");
+        assert!(folded_count >= 1);
+        // A read of a DIFFERENT file the command did not name stays pinned.
+        let mut messages2 = vec![
+            tool_message("READ", "Read lines 1-2 of 2 from src/other.rs.\n1\tx\n2\ty"), // 0
+            bash_call("sed -i '' 's/x/z/' src/d.rs"),                                   // 1: edits d, not other
+            tool_message("BASH", "hot"),                                                // 2
+        ];
+        let mut folded2 = HashSet::new();
+        fold_cold_tool_results(&mut messages2, 1, &mut folded2, MAX_PINNED_READ_FILES);
+        assert!(!folded2.contains(&0), "unrelated read should stay pinned");
     }
 
     #[test]

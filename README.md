@@ -1368,6 +1368,16 @@ The review brief a reviewer loop opens with carries small new files in full
 reviewer not to READ files it was already handed; bench reviewers spent two of
 their four rounds re-reading changed files before verifying.
 
+A BASH or VERIFY command that hits its timeout is remembered two ways. The
+exact text is refused on an identical re-run (`harness: not run — this exact
+… command already hung`) until an edit lands. Its *shape* (the command with a
+leading `timeout N`, verbosity flags and tail filters stripped) is kept for
+the rest of the run, and a re-run of that shape under another spelling runs
+under a thirty-second leash instead of the default two minutes, unless the
+call sets its own timeout; the result says so. Recorded runs re-ran one
+hanging `unittest discover` eight times as `timeout 60 …`, `timeout 90 …`,
+`-v` and `| tail` variants, each for its full timeout.
+
 A finish_task call may name its own check (`check: "python3 -m unittest -q"`):
 when the task edited the workspace and nothing has passed since the last
 edit, the harness runs that command before judging the finish, exactly as it

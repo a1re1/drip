@@ -1148,6 +1148,35 @@ pub fn hung_command_refusal(tool_name: &str, command: &str) -> String {
     )
 }
 
+/// Timeout for a re-run of a command shape that already hung this run.
+/// Recorded runs re-ran a hanging `unittest discover` under `timeout 60`,
+/// `timeout 90`, `-v`, and `| tail` variants eight times in one run, each
+/// costing its full timeout; a hang that is not fixed hangs just as well in
+/// thirty seconds, and a fixed one finishes in a fraction of that.
+pub const HUNG_SHAPE_LEASH_MS: u64 = 30_000;
+
+/// The raw BASH/VERIFY input with its timeout replaced by `leash_ms`, or
+/// None when the call already sets a timeout at or below the leash.
+pub fn leash_timeout(raw_input: &str, tool_name: &str, leash_ms: u64) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(raw_input).ok()?;
+    let object = value.as_object_mut()?;
+    let key = if tool_name == "VERIFY" { "timeout" } else { "timeoutMs" };
+    if object.get(key).and_then(serde_json::Value::as_f64).is_some_and(|current| current <= leash_ms as f64) {
+        return None;
+    }
+    object.insert(key.to_string(), serde_json::json!(leash_ms));
+    Some(value.to_string())
+}
+
+/// The note appended to a result that ran under the hung-shape leash.
+pub fn hung_shape_leash_note(leash_ms: u64, hung_before: &str) -> String {
+    format!(
+        "\n[harness] this command has the same shape as one that hung earlier in this run ({}), so it ran under a {}s leash instead of the default timeout. A hang that is not fixed does not need the full timeout to prove it; if the command legitimately needs longer, pass an explicit timeout.",
+        truncate_text(hung_before, 120),
+        leash_ms / 1000
+    )
+}
+
 /// The nudge appended to a read-only result when a loop keeps reading without persisting.
 pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: i64) -> String {
     format!(
@@ -3015,6 +3044,15 @@ pub struct HarnessRun {
     /// BASH/VERIFY command texts that hung (timed out) this run; an identical
     /// re-run is refused instead of hanging again.
     pub hung_commands: Vec<String>,
+    /// Normalized shapes (see normalize_command_shape) of commands that hung
+    /// this run. A re-run of the same shape under a different spelling
+    /// (`timeout 90 …`, `-v`, another tail filter) is not refused but runs
+    /// under `hung_shape_leash_ms` instead of the default timeout, unless
+    /// the call sets its own timeout. Not cleared by edits: a fixed hang
+    /// finishes well inside the leash, a live one is cut short.
+    pub hung_shapes: Vec<(String, String)>,
+    /// Timeout applied to a re-run of a hung shape (tests shorten it).
+    pub hung_shape_leash_ms: u64,
     /// The build warm-up started at run start (see build_warmup_command); dropped (killed) with the run.
     pub warmup: Option<crate::tools::child_process::WarmupJob>,
     /// The last BASH/VERIFY command shape and how many times in a row it ran
@@ -3595,6 +3633,8 @@ impl HarnessRun {
             task_loop_limit,
             review_waiver_lines,
             hung_commands: Vec::new(),
+            hung_shapes: Vec::new(),
+            hung_shape_leash_ms: HUNG_SHAPE_LEASH_MS,
             warmup,
             repeated_command: None,
             plan_mode,
@@ -4605,6 +4645,21 @@ impl HarnessRun {
             });
             return WorkspaceToolExecution { dispatched: false, failed: true, tool_content: text };
         }
+        // Same shape as an earlier hang: run, but on a short leash.
+        let leashed: Option<(String, String)> = command.as_deref().and_then(|command| {
+            let shape = normalize_command_shape(command);
+            let hung_before = self.hung_shapes.iter().find(|(hung, _)| *hung == shape).map(|(_, command)| command.clone())?;
+            leash_timeout(raw_input, tool_name, self.hung_shape_leash_ms).map(|rewritten| (rewritten, hung_before))
+        });
+        let raw_input: &str = leashed.as_ref().map(|(rewritten, _)| rewritten.as_str()).unwrap_or(raw_input);
+        if let Some((_, hung_before)) = &leashed {
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                detail: format!("hung-shape leash: {} runs under {}s (same shape as {})", truncate_text(command.as_deref().unwrap_or(""), 100), self.hung_shape_leash_ms / 1000, truncate_text(hung_before, 80)),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+        }
         if tool_name == "VERIFY" {
             if let Some(text) = command.as_deref().and_then(|command| {
                 repeated_verify_reuse(command, self.state.last_verification.as_ref(), self.state.mutations_since_verification.unwrap_or(0))
@@ -4646,8 +4701,15 @@ impl HarnessRun {
         // The one choke point every consumer shares: context injection,
         // telemetry, transcript events, and the NDJSON stream all read this.
         let mut tool_content = (self.redact)(&executed.tool_content);
+        if let Some((_, hung_before)) = &leashed {
+            tool_content.push_str(&hung_shape_leash_note(self.hung_shape_leash_ms, hung_before));
+        }
         if let Some(command) = command.as_ref().filter(|_| failed && output_reports_hang(&tool_content)) {
             self.hung_commands.push(command.clone());
+            let shape = normalize_command_shape(command);
+            if !self.hung_shapes.iter().any(|(hung, _)| *hung == shape) {
+                self.hung_shapes.push((shape, command.clone()));
+            }
         }
         // Flailing detector: the same command shape run again and again with
         // nothing edited in between is not going to change its result.
@@ -8107,6 +8169,37 @@ mod role_inference_tests {
         std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
         let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
         assert!(run.hung_commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rerun_of_a_hung_shape_runs_under_the_leash() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            ..SolidStateHarnessOptions::default()
+        };
+        let mut run = HarnessRun::new(options).await.unwrap();
+        run.hung_shape_leash_ms = 1_000;
+        let hung = run.execute_workspace_tool("c1", r#"{"command":"sleep 4","timeoutMs":1000}"#, None, "BASH");
+        assert!(hung.failed && output_reports_hang(&hung.tool_content), "{}", hung.tool_content);
+        assert_eq!(run.hung_shapes.len(), 1);
+        // Same shape under a different spelling: not refused, but cut at the leash.
+        let started = std::time::Instant::now();
+        let again = run.execute_workspace_tool("c2", r#"{"command":"timeout 9 sleep 4 2>&1 | tail -1"}"#, None, "BASH");
+        assert!(again.dispatched, "{}", again.tool_content);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "leash did not apply: {:?}", started.elapsed());
+        assert!(again.tool_content.contains("ran under a 1s leash"), "{}", again.tool_content);
+        // An explicit timeout at or under the leash is left alone; a longer one is leashed.
+        assert!(leash_timeout(r#"{"command":"x","timeoutMs":500}"#, "BASH", 1_000).is_none());
+        assert_eq!(leash_timeout(r#"{"command":"x","timeoutMs":5000}"#, "BASH", 1_000).as_deref(), Some(r#"{"command":"x","timeoutMs":1000}"#));
+        assert_eq!(leash_timeout(r#"{"command":"x"}"#, "VERIFY", 1_000).as_deref(), Some(r#"{"command":"x","timeout":1000}"#));
+        // Edits do not clear the shape memory: the leash still applies after a PATCH.
+        std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
+        let _ = run.execute_workspace_tool("c3", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        assert!(run.hung_commands.is_empty() && run.hung_shapes.len() == 1);
     }
 
     fn usage(completion: i64) -> Option<crate::harness::model_call::OpenAICompatibleResponseUsage> {

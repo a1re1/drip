@@ -5965,6 +5965,8 @@ impl HarnessRun {
                     let named_paths = crate::harness::outline::named_paths_for_texts(&texts);
                     let mut carry_paths = named_paths.clone();
                     carry_paths.extend(crate::harness::outline::definition_files_for_texts(&self.cwd, &texts, &named_paths));
+                    let hit_files = crate::harness::outline::symbol_hit_files_for_texts(&self.cwd, &texts, &carry_paths);
+                    carry_paths.extend(hit_files);
                     let (bodies, carried) = crate::harness::outline::named_file_bodies_for_paths(&self.cwd, &carry_paths);
                     if let Some(bodies) = bodies {
                         self.emit(HarnessEvent {
@@ -5984,6 +5986,16 @@ impl HarnessRun {
                     parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &outline_paths));
                     parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
                     parts.extend(crate::harness::outline::definition_hits_for_texts(&self.cwd, &texts));
+                    if let Some(spans) = crate::harness::outline::definition_spans_for_texts(&self.cwd, &texts, &carried) {
+                        let names: Vec<&str> = spans.lines().filter_map(|line| line.strip_prefix("== ")).map(|line| line.split(' ').next().unwrap_or(line)).collect();
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            detail: format!("definition bodies carried into {}'s first prompt: {} ({} chars)", task.id, names.join(", "), spans.chars().count()),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        parts.push(spans);
+                    }
                     // A later author task of the run sees what earlier tasks
                     // changed, with outlines of those files: planned runs
                     // spent 2-3× the author time of direct runs on the same

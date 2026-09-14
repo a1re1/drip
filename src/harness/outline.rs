@@ -27,7 +27,7 @@ const OUTLINE_ENTRY_CHARS: usize = 90;
 /// many lines gets an outline instead (READ's default window is 400 lines).
 pub const NAMED_FILE_BODY_MAX_LINES: usize = 400;
 /// Named files carried whole into the first prompt, first-mentioned first.
-pub const NAMED_FILE_BODIES_MAX_FILES: usize = 3;
+pub const NAMED_FILE_BODIES_MAX_FILES: usize = 5;
 /// Total budget for the carried bodies; a file that would cross it is skipped.
 pub const NAMED_FILE_BODIES_MAX_CHARS: usize = 40_000;
 /// Longest line kept in a carried body (READ clamps at the same width).
@@ -94,7 +94,14 @@ fn git_grep_hits(cwd: &str, symbol: &str) -> Option<Vec<String>> {
     if !output.status.success() && output.status.code() != Some(1) {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
+    Some(String::from_utf8_lossy(&output.stdout).lines().filter(|hit| !hit_in_dot_directory(hit)).map(str::to_string).collect())
+}
+
+/// A grep hit under a dot-directory or dotfile (`.dripdata/sessions/…/state.json`
+/// carries the goal text itself; `.venv`, `.git` worktrees): tooling state,
+/// never the code the goal is about. `--untracked` would otherwise surface it.
+fn hit_in_dot_directory(hit: &str) -> bool {
+    hit.split(':').next().unwrap_or("").split('/').any(|component| component.starts_with('.'))
 }
 
 /// Plain words the goal quotes in backticks — `title` — that are not
@@ -151,7 +158,7 @@ fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
     if !output.status.success() && output.status.code() != Some(1) {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
+    Some(String::from_utf8_lossy(&output.stdout).lines().filter(|hit| !hit_in_dot_directory(hit)).map(str::to_string).collect())
 }
 
 pub(crate) fn test_like_path(path: &str) -> bool {
@@ -594,6 +601,124 @@ pub fn definition_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) ->
     files
 }
 
+/// Small files a goal symbol hits (git grep -nw) that nothing else carried:
+/// at most this many lines and chars, at most SYMBOL_HIT_FILES_MAX of them,
+/// carried whole. On the recorded bench the model spent a round reading
+/// kvstore/cli.py (44 lines) in every ttl run and kvstore/store.py (46
+/// lines) in every http-serve run: neither was named, both were hit.
+pub const SYMBOL_HIT_FILE_MAX_LINES: usize = 60;
+pub const SYMBOL_HIT_FILE_MAX_CHARS: usize = 2_500;
+pub const SYMBOL_HIT_FILES_MAX: usize = 2;
+
+/// Small un-carried files that a goal symbol (identifier, qualified type
+/// name or backticked word) hits, source trees before test trees, in the
+/// goal's word order.
+pub fn symbol_hit_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)).chain(extract_quoted_words(texts)) {
+        if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
+            words.push(word);
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut files: Vec<String> = Vec::new();
+    let mut rejected: Vec<String> = Vec::new();
+    for word in words.iter().take(DEFINITION_FILES_MAX_WORDS) {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS || files.len() >= SYMBOL_HIT_FILES_MAX {
+            break;
+        }
+        let Some(hits) = git_grep_hits(cwd, word) else { break };
+        let mut paths: Vec<String> = Vec::new();
+        for hit in &hits {
+            let path = hit.split(':').next().unwrap_or("").to_string();
+            if path.is_empty() || skip.iter().any(|s| *s == path) || files.contains(&path) || rejected.contains(&path) || paths.contains(&path) {
+                continue;
+            }
+            paths.push(path);
+        }
+        paths.sort_by_key(|path| test_like_path(path));
+        for path in paths {
+            if files.len() >= SYMBOL_HIT_FILES_MAX {
+                break;
+            }
+            let small = std::fs::read_to_string(Path::new(cwd).join(&path))
+                .map(|text| text.lines().count() <= SYMBOL_HIT_FILE_MAX_LINES && text.chars().count() <= SYMBOL_HIT_FILE_MAX_CHARS)
+                .unwrap_or(false);
+            if small {
+                files.push(path);
+            } else {
+                rejected.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// A goal-named symbol with exactly one definition in a file nothing
+/// carried gets that definition's body (line-numbered, capped) in the first
+/// prompt. On the recorded bench every big-file run spent its first round
+/// on `READ textutil.py offset 1605` — the outline had located
+/// `truncate_middle` in a 2,691-line file it could not carry.
+pub const DEFINITION_SPAN_MAX_LINES: usize = 60;
+pub const DEFINITION_SPANS_MAX: usize = 4;
+pub const DEFINITION_SPANS_MAX_CHARS: usize = 8_000;
+pub const DEFINITION_SPANS_HEADER: &str = "definitions the goal names, already read (line-numbered; a READ of that range returns exactly this text — edit from it with PATCH):";
+
+pub fn definition_spans_for_texts(cwd: &str, texts: &[&str], carried: &[String]) -> Option<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)) {
+        if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
+            words.push(word);
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut chars = 0usize;
+    let mut seen_spans: Vec<(String, usize)> = Vec::new();
+    for word in words.iter().take(DEFINITION_FILES_MAX_WORDS) {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS || blocks.len() >= DEFINITION_SPANS_MAX {
+            break;
+        }
+        let Some(hits) = git_grep_definitions(cwd, word) else { break };
+        let exact: Vec<(String, usize)> = hits
+            .iter()
+            .filter_map(|hit| {
+                let mut parts = hit.splitn(3, ':');
+                let (path, num, text) = (parts.next()?, parts.next()?, parts.next()?);
+                if !short_name(text).eq_ignore_ascii_case(word) {
+                    return None;
+                }
+                Some((path.to_string(), num.trim().parse::<usize>().ok()?))
+            })
+            .collect();
+        let [(path, line_number)] = exact.as_slice() else { continue };
+        if carried.iter().any(|c| c == path) || seen_spans.iter().any(|(p, l)| p == path && l == line_number) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(path)) else { continue };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() || *line_number == 0 || *line_number > lines.len() {
+            continue;
+        }
+        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let start = line_number - 1;
+        let end = definition_end(ext, &lines, start).min(start + DEFINITION_SPAN_MAX_LINES - 1).max(start);
+        let body: Vec<String> = (start..=end).map(|i| format!("{}\t{}", i + 1, lines[i].chars().take(NAMED_FILE_LINE_CHARS).collect::<String>())).collect();
+        let block = format!("== {path}:{}-{} ({} of {} lines)\n{}", start + 1, end + 1, end - start + 1, lines.len(), body.join("\n"));
+        if chars + block.len() > DEFINITION_SPANS_MAX_CHARS {
+            break;
+        }
+        chars += block.len();
+        seen_spans.push((path.clone(), *line_number));
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(format!("{DEFINITION_SPANS_HEADER}\n{}", blocks.join("\n")))
+    }
+}
+
 /// Header of the section that carries named files whole.
 pub const NAMED_FILE_BODIES_HEADER: &str = "files the goal names or that define a name it uses, already read (a READ of these paths returns exactly this text — start from PATCH, and READ one only after a PATCH changed it):";
 
@@ -872,6 +997,38 @@ mod tests {
         assert_eq!(files, vec!["kv/store.py"], "exact `class Store` and `def set` beat `StoreTest`, `store_setup` and `test_set`");
         let files = definition_files_for_texts(&cwd, &["Store.set"], &["kv/store.py".to_string()]);
         assert_eq!(files, vec!["kv/util.py", "tests/test_store.py"], "without an exact hit the containing names count, source trees first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn small_symbol_hit_files_and_lone_definition_bodies_are_carried() {
+        let dir = std::env::temp_dir().join(format!("drip-symbol-carry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "kv/cli.py", "import argparse\n\ndef build_parser():\n    p = argparse.ArgumentParser()\n    sub = p.add_subparsers()\n    sub.add_parser(\"set\")\n    return p\n");
+        let mut big = String::new();
+        for i in 0..300 {
+            if i == 150 {
+                big.push_str("def truncate_middle(text, width):\n    if len(text) <= width:\n        return text\n    half = width // 2\n    return text[:half] + '…' + text[-half:]\n");
+            } else {
+                big.push_str(&format!("x{i} = {i}\n"));
+            }
+        }
+        write(&dir, "kv/textutil.py", &big);
+        write(&dir, "tests/test_cli.py", "def test_set():\n    run(\"set\", \"k\", \"v\")\n");
+        write(&dir, ".dripdata/sessions/s1/state.json", "{\"goal\": \"Add --ttl to the `set` subcommand and fix truncate_middle\"}\n");
+        let cwd = dir.to_string_lossy().to_string();
+        let files = symbol_hit_files_for_texts(&cwd, &["Add --ttl to the `set` subcommand and fix truncate_middle"], &[]);
+        assert_eq!(files, vec!["kv/cli.py".to_string(), "tests/test_cli.py".to_string()], "small hit files, source first; textutil.py is over the size cap; the .dripdata state file that quotes the goal is never a hit");
+        let files = symbol_hit_files_for_texts(&cwd, &["the `set` subcommand"], &["kv/cli.py".to_string()]);
+        assert_eq!(files, vec!["tests/test_cli.py".to_string()], "an already carried file is skipped");
+        let spans = definition_spans_for_texts(&cwd, &["fix truncate_middle"], &[]).expect("a lone definition span");
+        assert!(spans.starts_with(DEFINITION_SPANS_HEADER), "{spans}");
+        assert!(spans.contains("== kv/textutil.py:151-155 (5 of 304 lines)\n151\tdef truncate_middle(text, width):"), "{spans}");
+        assert!(spans.contains("155\t    return text[:half]"), "{spans}");
+        assert!(definition_spans_for_texts(&cwd, &["fix truncate_middle"], &["kv/textutil.py".to_string()]).is_none(), "a carried file's definitions are not repeated");
+        assert!(definition_spans_for_texts(&cwd, &["fix build_parser and the set command"], &["kv/cli.py".to_string()]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

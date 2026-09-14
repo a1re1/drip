@@ -22,8 +22,18 @@ fn scrub_names_from_env() -> Vec<String> {
         .collect()
 }
 
+/// What a child gets when neither the parent environment nor the caller
+/// sets it. PYTHONFAULTHANDLER=1 makes a Python check dump every thread's
+/// traceback when the timeout's SIGABRT reaches it, so a hung test names
+/// itself in the result instead of dying silently (a recorded run spent
+/// 1,000s and 44 shell probes finding which cleanup deadlocked).
+pub const CHILD_ENV_DEFAULTS: [(&str, &str); 1] = [("PYTHONFAULTHANDLER", "1")];
+
 pub fn build_child_process_env(overrides: Option<&BTreeMap<String, String>>) -> ChildProcessEnv {
     let mut child_env: ChildProcessEnv = std::env::vars().collect();
+    for (key, value) in CHILD_ENV_DEFAULTS {
+        child_env.entry(key.to_string()).or_insert_with(|| value.to_string());
+    }
     if let Some(overrides) = overrides {
         for (key, value) in overrides {
             child_env.insert(key.clone(), value.clone());
@@ -67,7 +77,8 @@ mod tests {
     // otherwise see each other's env edits.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    const TOUCHED_KEYS: [&str; 4] = [
+    const TOUCHED_KEYS: [&str; 5] = [
+        "PYTHONFAULTHANDLER",
         "DRIP_SCRUB_ENV",
         "DRIP_TEST_KEEP",
         "DRIP_TEST_SECRET",
@@ -146,6 +157,19 @@ mod tests {
             child_env.get("DRIP_TEST_SECRET").map(String::as_str),
             Some("explicit-value")
         );
+    }
+
+    #[test]
+    fn the_fault_handler_defaults_on_unless_the_parent_sets_it() {
+        lock_env!(_guard);
+
+        std::env::remove_var("DRIP_SCRUB_ENV");
+        std::env::remove_var("PYTHONFAULTHANDLER");
+        assert_eq!(build_child_process_env(None).get("PYTHONFAULTHANDLER").map(String::as_str), Some("1"));
+
+        std::env::set_var("PYTHONFAULTHANDLER", "0");
+        assert_eq!(build_child_process_env(None).get("PYTHONFAULTHANDLER").map(String::as_str), Some("0"));
+        std::env::remove_var("PYTHONFAULTHANDLER");
     }
 
     #[test]

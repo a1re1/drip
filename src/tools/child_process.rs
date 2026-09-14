@@ -372,14 +372,23 @@ fn wait_with_pipes(
             if now >= timeout_at && terminate_signal_sent.is_none() && !timed_out {
                 timed_out = true;
                 terminate_signal_sent = Some(now);
-                kill_tree(child, libc::SIGTERM);
-                settle_by.get_or_insert(now + Duration::from_millis(3_000));
+                // SIGABRT first: a Python child with the fault handler on
+                // (PYTHONFAULTHANDLER=1 is a child default) writes every
+                // thread's traceback to stderr before it dies, so the hung
+                // test names itself in the captured output. Anything else
+                // dies of it as it would of the kill.
+                kill_tree(child, libc::SIGABRT);
+                settle_by.get_or_insert(now + Duration::from_millis(3_500));
             }
         }
 
         if let Some(sent_at) = terminate_signal_sent {
-            // forceKillTimeout: SIGKILL 1s after the SIGTERM.
-            if now >= sent_at + Duration::from_millis(1_000) {
+            // Escalation after a timeout's SIGABRT (or an external stop's
+            // SIGTERM): SIGTERM at 1s, SIGKILL at 2s.
+            if timed_out && now >= sent_at + Duration::from_millis(1_000) {
+                kill_tree(child, libc::SIGTERM);
+            }
+            if now >= sent_at + Duration::from_millis(if timed_out { 2_000 } else { 1_000 }) {
                 kill_tree(child, libc::SIGKILL);
             }
         }
@@ -461,6 +470,7 @@ fn signal_name(signal: i32) -> &'static str {
         libc::SIGABRT => "SIGABRT",
         libc::SIGBUS => "SIGBUS",
         libc::SIGFPE => "SIGFPE",
+        libc::SIGABRT => "SIGABRT",
         libc::SIGKILL => "SIGKILL",
         libc::SIGUSR1 => "SIGUSR1",
         libc::SIGSEGV => "SIGSEGV",
@@ -612,11 +622,11 @@ mod tests {
     #[test]
     fn timeout_sigterms_the_group_and_reports_the_reaping_signal_with_timed_out() {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // `sh` ignores TERM (and `sleep` inherits the ignore across exec), so
-        // only the SIGKILL escalation 1s after the SIGTERM reaps it. Measured
-        // (2026-09-02): { exit_code: None, signal: Some("SIGKILL"),
-        // timed_out: true } in ~1.3s — the signal reported is the one that
-        // actually reaped the child, not the one first sent.
+        // `sh` ignores TERM (and `sleep` inherits the ignore across exec); the
+        // timeout now sends SIGABRT first (so a Python child dumps its
+        // threads), which a shell does not ignore, so the abort reaps it at
+        // once. The signal reported is the one that actually reaped the
+        // child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
         let args = CapturedProcessArgs { stdin_payload: None,
             command: "/bin/sh",
@@ -628,7 +638,7 @@ mod tests {
         let result = run_captured_process(&args).expect("spawn failed");
 
         assert_eq!(result.exit_code, None);
-        assert_eq!(result.signal, Some("SIGKILL".to_string()));
+        assert_eq!(result.signal, Some("SIGABRT".to_string()));
         assert!(result.timed_out);
     }
 

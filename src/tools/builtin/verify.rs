@@ -858,10 +858,16 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
     let mut body_lines: Vec<String> = vec![verdict_line.clone()];
     body_lines.push(crate::core::state::describe_verification_evidence(Some(&evidence)));
     if verdict.timed_out {
-        body_lines.push(format!(
-            "HUNG: the command did not finish within {}ms and was killed; nothing it printed counts as a check. A test that starts a server and never returns, an interactive prompt or a blocking read hangs the same way every run — do not re-run it unchanged. Run a narrower target (one module or -k pattern), fix the hang (shut the server down in tearDown, bind port 0, add socket timeouts), or pass a shorter timeout.",
+        // The forensics come first: a long result is truncated from the
+        // middle, and the thread summary is the part worth keeping.
+        body_lines.insert(1, format!(
+            "HUNG: the command did not finish within {}ms and was killed; nothing it printed counts as a check.",
             prepared.input.timeout_ms
         ));
+        if let Some(forensics) = hang_forensics(&verdict.output) {
+            body_lines.insert(2, forensics);
+        }
+        body_lines.push("A test that starts a server and never returns, an interactive prompt or a blocking read hangs the same way every run — do not re-run it unchanged. Run a narrower target (one module or -k pattern), fix the hang (shut the server down in tearDown, bind port 0, add socket timeouts), or pass a shorter timeout.".to_string());
     }
 
     if !verdict.first_failures.is_empty() {
@@ -874,7 +880,7 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
 
     if !verdict.output.is_empty() {
         body_lines.push(String::new());
-        body_lines.push(verdict.output.clone());
+        body_lines.push(if verdict.timed_out { compact_hang_output(&verdict.output) } else { verdict.output.clone() });
     }
 
     let tool_content = body_lines.join("\n");
@@ -925,8 +931,187 @@ pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOut
 }
 
 
+/// What the captured output says about where a hung command was when the
+/// timeout's SIGABRT reached it: the last test unittest/pytest had started
+/// (a `test_x (…) ... ` line with no verdict), and the Python fault
+/// handler's per-thread tracebacks (innermost frames first, user files
+/// named). A join under unittest's cleanups while another thread sits in
+/// serve_forever gets the deterministic explanation — cleanups run LIFO —
+/// that a recorded run spent 44 shell probes not finding.
+pub fn hang_forensics(output: &str) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    // unittest -v prints "name ... " and the verdict later on the same line;
+    // the fault handler's "Fatal Python error" lands there when the kill
+    // arrives mid-test.
+    let last_started = output.lines().rev().find_map(|line| {
+        let line = line.trim_end();
+        if !line.starts_with("test") {
+            return None;
+        }
+        let idx = line.find(" ...")?;
+        let rest = line[idx + 4..].trim();
+        (rest.is_empty() || rest.starts_with("Fatal Python error")).then(|| line[..idx].trim().to_string())
+    });
+    if let Some(test) = last_started {
+        lines.push(format!("last test started, never finished: {test}"));
+    }
+    let threads = fault_handler_threads(output);
+    if !threads.is_empty() {
+        let joining_in_cleanup = threads.iter().any(|(label, frames)| {
+            label.starts_with("current")
+                && frames.iter().any(|(func, _, _)| func == "join")
+                && frames.iter().any(|(func, _, _)| func == "doCleanups" || func == "_callCleanup" || func == "tearDown")
+        });
+        let serving = threads.iter().any(|(_, frames)| frames.iter().any(|(func, _, _)| func == "serve_forever"));
+        // The diagnosis leads the thread lines: a truncated result keeps
+        // its head, and the diagnosis is the line that saves the probes.
+        if joining_in_cleanup && serving {
+            lines.push("diagnosis: the test joins its server thread while that thread is still in serve_forever — nothing shut the server down first. unittest cleanups run LIFO (last registered runs first), so addCleanup(thread.join) registered before addCleanup(server.shutdown) joins a server that was never told to stop; register shutdown last, or use tearDown with shutdown() → server_close() → join(timeout=5).".to_string());
+        }
+        lines.push("threads at the kill (fault handler, innermost frame first):".to_string());
+        for (label, frames) in &threads {
+            let shown: Vec<String> = frames.iter().take(6).map(|(func, file, line)| format!("{func} ({file}:{line})")).collect();
+            lines.push(format!("  {label}: {}", shown.join(" ← ")));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+/// A hung command's output trimmed for a tool result: the fault handler's
+/// C stack section goes entirely, and each Python thread keeps its innermost
+/// frames (the summary above already names the rest). Without this the dump
+/// of a deep unittest stack — 25 frames per thread plus binary frames on
+/// 3.14 — pushed the whole result past the per-result cap, and the middle
+/// truncation kept the outermost frames and cut the summary (probe 82).
+pub fn compact_hang_output(output: &str) -> String {
+    const FRAMES_PER_THREAD: usize = 3;
+    let mut kept: Vec<String> = Vec::new();
+    let mut frames_in_thread: Option<usize> = None;
+    let mut in_c_stack = false;
+    for line in output.lines() {
+        let trimmed = line.trim_end();
+        let body = trimmed.trim_start();
+        if trimmed.starts_with("Current thread's C stack") {
+            in_c_stack = true;
+            continue;
+        }
+        if in_c_stack {
+            if trimmed.is_empty() || body.starts_with("Binary file") || body.starts_with("<truncated") {
+                continue;
+            }
+            in_c_stack = false;
+        }
+        if trimmed.starts_with("Current thread ") || trimmed.starts_with("Thread ") {
+            frames_in_thread = Some(0);
+            kept.push(trimmed.to_string());
+            continue;
+        }
+        if body.starts_with("File \"") {
+            if let Some(count) = frames_in_thread.as_mut() {
+                *count += 1;
+                if *count == FRAMES_PER_THREAD + 1 {
+                    kept.push("  … outer frames dropped".to_string());
+                }
+                if *count > FRAMES_PER_THREAD {
+                    continue;
+                }
+            }
+        } else if trimmed.is_empty() {
+            frames_in_thread = None;
+        }
+        kept.push(trimmed.to_string());
+    }
+    kept.join("\n")
+}
+
+/// The fault handler's thread blocks: (label, frames as (function, file
+/// basename, line)), innermost first, the current thread labelled "current".
+fn fault_handler_threads(output: &str) -> Vec<(String, Vec<(String, String, String)>)> {
+    let mut threads: Vec<(String, Vec<(String, String, String)>)> = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("Current thread ") || trimmed.starts_with("Thread ") {
+            let label = if trimmed.starts_with("Current") { "current thread (the one that hung)" } else { "another thread" };
+            threads.push((label.to_string(), Vec::new()));
+            continue;
+        }
+        let Some((_, frames)) = threads.last_mut() else { continue };
+        let frame = trimmed.trim_start();
+        let Some(rest) = frame.strip_prefix("File \"") else { continue };
+        let Some((path, tail)) = rest.split_once("\", line ") else { continue };
+        let Some((line_no, func)) = tail.split_once(" in ") else { continue };
+        let file = path.rsplit('/').next().unwrap_or(path).to_string();
+        frames.push((func.trim().to_string(), file, line_no.trim().to_string()));
+    }
+    threads.retain(|(_, frames)| !frames.is_empty());
+    threads
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hang_forensics_names_the_test_and_the_lifo_cleanup_deadlock() {
+        let output = concat!(
+            "test_delete_missing (tests.test_server.TestKeys.test_delete_missing) ... ok\n",
+            "test_existing_key (tests.test_server.TestKeys.test_existing_key) ... \n",
+            "Fatal Python error: Aborted\n\n",
+            "Thread 0x000070000ce5b000 (most recent call first):\n",
+            "  File \"/usr/lib/python3.12/socketserver.py\", line 235 in serve_forever\n",
+            "  File \"/usr/lib/python3.12/threading.py\", line 1012 in run\n\n",
+            "Current thread 0x00007ff8 (most recent call first):\n",
+            "  File \"/usr/lib/python3.12/threading.py\", line 1149 in _wait_for_tstate_lock\n",
+            "  File \"/usr/lib/python3.12/threading.py\", line 1119 in join\n",
+            "  File \"/usr/lib/python3.12/unittest/case.py\", line 646 in _callCleanup\n",
+            "  File \"/usr/lib/python3.12/unittest/case.py\", line 665 in doCleanups\n",
+            "  File \"/work/tests/test_server.py\", line 31 in setUp\n",
+        );
+        let text = super::hang_forensics(output).expect("forensics");
+        assert!(text.contains("last test started, never finished: test_existing_key (tests.test_server.TestKeys.test_existing_key)"), "{text}");
+        assert!(text.contains("current thread (the one that hung): _wait_for_tstate_lock (threading.py:1149) ← join (threading.py:1119) ← _callCleanup (case.py:646) ← doCleanups (case.py:665) ← setUp (test_server.py:31)"), "{text}");
+        assert!(text.contains("another thread: serve_forever (socketserver.py:235)"), "{text}");
+        assert!(text.contains("cleanups run LIFO"), "{text}");
+        assert!(text.find("diagnosis:").unwrap() < text.find("threads at the kill").unwrap(), "{text}");
+        assert!(super::hang_forensics("ran 3 tests\nOK\n").is_none());
+        let aborted = super::hang_forensics("test_a (m.T.test_a) ... ok\ntest_b (m.T.test_b) ... Fatal Python error: Aborted\n").unwrap();
+        assert!(aborted.starts_with("last test started, never finished: test_b (m.T.test_b)"), "{aborted}");
+        let plain = super::hang_forensics("test_a (m.T.test_a) ... \n").unwrap();
+        assert!(plain.starts_with("last test started, never finished: test_a"), "{plain}");
+        assert!(!plain.contains("LIFO"));
+    }
+
+    #[test]
+    fn compact_hang_output_drops_the_c_stack_and_outer_frames() {
+        let output = concat!(
+            "test_a (m.T.test_a) ... Fatal Python error: Aborted\n\n",
+            "Thread 0x1 [Thread-1 (serve_forever)] (most recent call first):\n",
+            "  File \"/l/selectors.py\", line 398 in select\n",
+            "  File \"/l/socketserver.py\", line 235 in serve_forever\n",
+            "  File \"/l/threading.py\", line 1024 in run\n",
+            "  File \"/l/threading.py\", line 1082 in _bootstrap_inner\n",
+            "  File \"/l/threading.py\", line 1044 in _bootstrap\n\n",
+            "Current thread 0x2 (most recent call first):\n",
+            "  File \"/l/threading.py\", line 1133 in join\n",
+            "  File \"/l/unittest/case.py\", line 632 in _callCleanup\n",
+            "  File \"/l/unittest/case.py\", line 706 in doCleanups\n",
+            "  File \"/l/unittest/case.py\", line 673 in run\n",
+            "  File \"<frozen runpy>\", line 88 in _run_code\n\n",
+            "Current thread's C stack trace (most recent call first):\n",
+            "  Binary file \"/usr/lib/libsystem_kernel.dylib\", at __psynch_cvwait+0x8\n",
+            "  Binary file \"/l/Python\", at _PySemaphore_Wait+0x44\n",
+            "  <truncated rest of calls>\n",
+        );
+        let compact = super::compact_hang_output(output);
+        assert!(compact.starts_with("test_a (m.T.test_a) ... Fatal Python error: Aborted"), "{compact}");
+        assert!(compact.contains("line 1024 in run\n  … outer frames dropped\n\nCurrent thread 0x2"), "{compact}");
+        assert!(compact.contains("line 706 in doCleanups\n  … outer frames dropped"), "{compact}");
+        assert!(!compact.contains("_bootstrap") && !compact.contains("Binary file") && !compact.contains("C stack") && !compact.contains("truncated rest"), "{compact}");
+        assert_eq!(super::compact_hang_output("ran 3 tests\nOK"), "ran 3 tests\nOK");
+    }
+
     use super::parse_verify_output;
 
     // -- bun test ----------------------------------------------------------

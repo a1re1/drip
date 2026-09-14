@@ -1191,7 +1191,16 @@ strict providers, and the `PATCH carried a finish` event marks it. A PATCH
 that carries a finish and nothing to edit (the model reached for the one
 tool with a `finish` field) is the finish itself, under its own id, rather
 than a failed empty edit — dogfood #75 sent exactly that and paid a bounce
-for it before this rule. The
+for it before this rule. The same goes for the other shapes recorded models
+reach for when they only want to finish: a `finish` nested in a `files[]`
+entry is lifted out, and entries that would change nothing (identical find
+and replace, a `__noop__` path) are dropped once a finish is carried.
+
+The PATCH description asks for every edit of the task in one call — all
+files, several entries per file in order — because a second call is a
+model round: in a recorded bench 24 of 36 extra PATCH rounds edited the
+file the previous round had just patched, and the tool text at the time
+told the model to use separate calls for one file. The
 two-call form (finish_task after the PATCH in one response) works too, but
 GLM sent 0 of 19 finishes that way when asked; a field on the call it is
 already making is the form it takes. A completed finish that follows a

@@ -223,6 +223,28 @@ mod goal_check_tests {
         assert_eq!(calls.len(), 1);
         assert!(!calls[0].raw_input.contains("finish"));
 
+        // A finish nested in files[] beside a no-op entry, and an identical
+        // find/replace at the top level: both are the finish alone.
+        let (calls, expanded) = expand_patch_finishes(
+            vec![call("c4", "PATCH", r#"{"files":[{"path":"a.py","find":"same","replace":"same","finish":{"summary":"Done.","check":"cargo test -q"}}]}"#)],
+            &mut used,
+        );
+        assert_eq!(expanded, 1);
+        assert_eq!(calls.iter().map(|c| (c.tool_name.as_str(), c.call_id.as_str())).collect::<Vec<_>>(), [("finish_task", "c4")]);
+        let (calls, _) = expand_patch_finishes(
+            vec![call("c5", "PATCH", r#"{"path":"a.py","find":"x","replace":"x","finish":{"summary":"Done."}}"#)],
+            &mut used,
+        );
+        assert_eq!(calls[0].tool_name, "finish_task");
+        // A real edit beside a no-op entry keeps the edit and the finish.
+        let (calls, _) = expand_patch_finishes(
+            vec![call("c6", "PATCH", r#"{"files":[{"path":"__noop__","content":"summary text"},{"path":"a.py","find":"x","replace":"y"}],"finish":{"summary":"Done."}}"#)],
+            &mut used,
+        );
+        assert_eq!(calls.iter().map(|c| c.tool_name.as_str()).collect::<Vec<_>>(), ["PATCH", "finish_task"]);
+        let files: serde_json::Value = serde_json::from_str(&calls[0].raw_input).unwrap();
+        assert_eq!(files["files"].as_array().unwrap().len(), 1);
+
         // Nothing to edit: the PATCH is the finish, under its own id.
         let (calls, expanded) = expand_patch_finishes(vec![call("c3", "PATCH", r#"{"path":"a.py","files":[],"finish":{"summary":"Done.","check":"cargo test -q"}}"#)], &mut used);
         assert_eq!(expanded, 1);
@@ -1689,7 +1711,7 @@ pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<
             out.push(call);
             continue;
         };
-        let Some(finish) = input.as_object_mut().and_then(|object| object.remove("finish")) else {
+        let Some(finish) = lift_patch_finish(&mut input) else {
             out.push(call);
             continue;
         };
@@ -1746,6 +1768,42 @@ pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<
         expanded += 1;
     }
     (out, expanded)
+}
+
+/// Takes the `finish` out of a PATCH input: from the top level, or from
+/// the first files[] entry that carries one (recorded models nest it
+/// there). Entries that would change nothing once a finish is carried —
+/// identical find and replace, a `__noop__` path — are dropped, since they
+/// only existed to hold the finish and would fail the edit and bounce it.
+fn lift_patch_finish(input: &mut Value) -> Option<Value> {
+    let mut finish = input.as_object_mut()?.remove("finish");
+    if let Some(Value::Array(entries)) = input.get_mut("files") {
+        for entry in entries.iter_mut() {
+            if let Some(nested) = entry.as_object_mut().and_then(|fields| fields.remove("finish")) {
+                finish.get_or_insert(nested);
+            }
+        }
+        if finish.is_some() {
+            entries.retain(|entry| !patch_entry_is_a_noop(entry));
+        }
+    }
+    if finish.is_some() && patch_entry_is_a_noop(input) {
+        if let Some(object) = input.as_object_mut() {
+            for key in ["find", "replace", "content"] {
+                object.remove(key);
+            }
+        }
+    }
+    finish
+}
+
+fn patch_entry_is_a_noop(entry: &Value) -> bool {
+    let path_is_noop = entry.get("path").and_then(Value::as_str).is_some_and(|path| path.contains("__noop__"));
+    let identical = match (entry.get("find"), entry.get("replace")) {
+        (Some(Value::String(find)), Some(Value::String(replace))) => find == replace,
+        _ => false,
+    };
+    path_is_noop || identical
 }
 
 /// Whether a PATCH input has anything to write: content, or find with

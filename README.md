@@ -1209,6 +1209,21 @@ harness: not accepted — PATCH failed earlier in this same response…`),
 since the work it counted on is not in place; blocked and unreconciled
 finishes pass.
 
+Two more carries feed the first prompt from the goal's own words. A small
+file (60 lines, 2,500 characters) that a goal symbol hits under `git grep
+-nw` and that nothing else carried travels whole, at most two of them,
+source trees before test trees — on the recorded bench every ttl run spent
+a round reading `kvstore/cli.py` (44 lines, hit by `set`) and every
+http-serve run one reading `kvstore/store.py` (46 lines, hit by `Store`),
+neither of them named. And a goal-named symbol with exactly one definition
+in a file nothing carried gets that definition's body, line-numbered and
+capped at 60 lines, under `definitions the goal names, already read` — every
+big-file run had opened with `READ textutil.py offset 1605` because the
+outline located `truncate_middle` in a 2,691-line file it could not carry.
+The `definition bodies carried` event records which. Named-file carry now
+allows five files under the same 40K-character budget, so the small hit
+files ride along with the named ones.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

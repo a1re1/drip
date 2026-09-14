@@ -1233,6 +1233,12 @@ had opened with a DIR round (`tests`, `kvstore`, `.`), and the ttl and
 big-file runs with a READ of the sibling test to match its style before
 extending it; both are now already in hand.
 
+A directory the goal names (`kvstore`, `tests/`) contributes its small
+direct files too — up to four across two directories, 60 lines each —
+under the same already-read header. Both http-serve runs on 0.161 had
+opened with a READ of `kvstore/store.py`, which the goal never names but
+which sits in the package it does.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

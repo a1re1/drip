@@ -66,9 +66,54 @@ pub fn parse_tool_arguments(raw_input: &str) -> Result<serde_json::Map<String, s
         .map_err(|_| anyhow!("Tool arguments must be valid JSON."))?;
 
     match parsed_value {
-        serde_json::Value::Object(map) => Ok(map),
+        serde_json::Value::Object(map) => Ok(repair_argument_keys(map)),
         _ => Err(anyhow!("Tool arguments must be a JSON object.")),
     }
+}
+
+/// The marker some models leak into a JSON key when their native tool-call
+/// syntax (`<arg_key>name</arg_key><arg_value>…</arg_value>`) bleeds into the
+/// JSON they were asked for: `"head</arg_value><arg_key>pattern": "fn x"`.
+const LEAKED_ARG_MARKER: &str = "</arg_value><arg_key>";
+
+/// Repairs argument keys the model mangled so the call runs instead of
+/// failing on a missing required argument and costing a round:
+/// - a key carrying `</arg_value><arg_key>` keeps only the segment after the
+///   last marker (the real key; the prefix is a stray value fragment),
+///   unless that key is already present;
+/// - stray `<arg_key>` / `</arg_key>` tags around a key are stripped;
+/// - `timeout` with no `timeoutMs` becomes `timeoutMs` (a value under 1000
+///   is read as seconds, a larger one as milliseconds).
+pub fn repair_argument_keys(map: serde_json::Map<String, serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+    let mut repaired = serde_json::Map::new();
+    let mut deferred: Vec<(String, serde_json::Value)> = Vec::new();
+    for (key, value) in map {
+        let mut cleaned = key.as_str();
+        if let Some(at) = cleaned.rfind(LEAKED_ARG_MARKER) {
+            cleaned = &cleaned[at + LEAKED_ARG_MARKER.len()..];
+        }
+        let cleaned = cleaned.trim().trim_start_matches("<arg_key>").trim_end_matches("</arg_key>").trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if cleaned == key {
+            repaired.insert(key, value);
+        } else {
+            deferred.push((cleaned.to_string(), value));
+        }
+    }
+    for (key, value) in deferred {
+        repaired.entry(key).or_insert(value);
+    }
+    if !repaired.contains_key("timeoutMs") {
+        if let Some(seconds_or_ms) = repaired.get("timeout").and_then(|v| v.as_f64()) {
+            if seconds_or_ms > 0.0 {
+                let ms = if seconds_or_ms < 1000.0 { seconds_or_ms * 1000.0 } else { seconds_or_ms };
+                repaired.insert("timeoutMs".to_string(), serde_json::json!(ms));
+            }
+        }
+    }
+    repaired
 }
 
 /// Extracts a required, non-empty string argument.
@@ -417,6 +462,23 @@ mod tests {
     fn parse_tool_arguments_empty_input_returns_empty_map() {
         assert!(parse_tool_arguments("").unwrap().is_empty());
         assert!(parse_tool_arguments("   \n  ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn leaked_arg_markers_and_timeout_alias_are_repaired() {
+        let parsed = parse_tool_arguments(r#"{"glob": "*.rs", "head</arg_value><arg_key>pattern": "fn x", "timeout": 300}"#).unwrap();
+        assert_eq!(parsed.get("pattern").and_then(|v| v.as_str()), Some("fn x"));
+        assert_eq!(parsed.get("glob").and_then(|v| v.as_str()), Some("*.rs"));
+        assert!(!parsed.keys().any(|k| k.contains("arg_")), "{parsed:?}");
+        assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(300_000.0));
+        // An intact key wins over a repaired duplicate; a millisecond value stays.
+        let parsed = parse_tool_arguments(r#"{"pattern": "real", "x</arg_value><arg_key>pattern": "junk", "<arg_key>path</arg_key>": "src", "timeout": 45000}"#).unwrap();
+        assert_eq!(parsed.get("pattern").and_then(|v| v.as_str()), Some("real"));
+        assert_eq!(parsed.get("path").and_then(|v| v.as_str()), Some("src"));
+        assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(45_000.0));
+        // An explicit timeoutMs is never overridden.
+        let parsed = parse_tool_arguments(r#"{"command": "ls", "timeout": 5, "timeoutMs": 20}"#).unwrap();
+        assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(20.0));
     }
 
     #[test]

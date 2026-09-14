@@ -7460,7 +7460,13 @@ impl HarnessRun {
                     "{tool_content}\n\n[harness] Identical call #{} this run (previously in loop {}). {}",
                     prior_call_count + 1,
                     prior_loop,
-                    if output_unchanged {
+                    if execution.failed && output_unchanged {
+                        // A recorded big-file run re-sent one failing PATCH
+                        // four times in a row; the read-only wording above
+                        // ("act on the result") is the wrong advice for a
+                        // failure.
+                        "It failed the same way: re-sending it cannot succeed. Change the call — READ the region the error names and copy its exact text — or take a different route."
+                    } else if output_unchanged {
                         "The output is unchanged — re-running this again will not add information. Act on the result, or record the finding with observe/remember/finish_task."
                     } else {
                         "The output changed since the previous run."

@@ -1270,6 +1270,8 @@ count-cmd run paid the whole orientation carry twice for one sentence.
 An unverified text reply still concludes the loop as before.
 
 PATCH has an `append` mode. `{"path": "tests/test_store.py", "append": "..."}`
+
+A find text that misses because its JSON escapes arrived as literal text (`\u2026` for `…`, `\n` for a newline) is decoded and matched, with a note on the summary. When a find text is not found, the error says which line of it the file does not hold and names the closest line in the file (by shared prefix and suffix, at least 60% of the line), or that every line is present but not as one block, so the next call can copy the actual text instead of guessing again. A later entry whose find matches the file on disk but not the text the earlier entries in the same call leave is told that entries apply in order. A call repeated verbatim after failing is told that re-sending cannot succeed. An append to a Python file whose last top-level statement is the `if __name__ == "__main__":` guard goes before the guard (one blank line for an indented continuation such as a test method, two for a new definition): appended after it, a method sits inside the guard, is never collected, and the goal's check passes without running it.
 adds text at the end of a file (a newline first when the file lacks one;
 the file is created if missing), alone or chained after find + replace
 entries for the same file in one call. New tests and functions usually go

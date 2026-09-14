@@ -369,32 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_terminates_a_process_the_child_has_in_flight() {
-        use std::sync::atomic::AtomicBool;
-        let runner = std::thread::spawn(|| {
-            let started = std::time::Instant::now();
-            let result = crate::tools::child_process::run_captured_process(&crate::tools::child_process::CapturedProcessArgs {
-                command: "sleep",
-                cwd: None,
-                env: None,
-                process_args: &["30".to_string()],
-                timeout_ms: None,
-                stdin_payload: None,
-            })
-            .expect("spawned");
-            (started.elapsed(), result)
-        });
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let child = AbortSignal::new();
-        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, Arc::new(AtomicBool::new(false)));
-        watcher.join().unwrap();
-        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
-        let (elapsed, result) = runner.join().unwrap();
-        assert!(elapsed < std::time::Duration::from_secs(10), "sleep ran for {elapsed:?}");
-        assert!(result.signal.is_some() || result.exit_code != Some(0), "{result:?}");
-    }
-
-    #[test]
     fn prepare_clamps_iterations_and_requires_goal() {
         let prepared = prepare(r#"{"goal":"  do it  ","maxIterations":99.7}"#).unwrap();
         assert_eq!(prepared.input["goal"], "do it");

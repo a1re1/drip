@@ -371,6 +371,20 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn every_declared_check_runs_as_one_chain() {
+        use super::{command_is_goal_declared, goal_declared_check_chain};
+        let goal = "Fix the parser. `cargo test --lib harness` and `cargo test --test loop_smoke` must pass.";
+        assert_eq!(goal_declared_check_chain(goal).as_deref(), Some("cargo test --lib harness && cargo test --test loop_smoke"));
+        assert!(command_is_goal_declared(goal, "cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"));
+        assert!(command_is_goal_declared(goal, "cargo test --test loop_smoke"));
+        assert!(!command_is_goal_declared(goal, "cargo test"));
+        // A chain the goal spells out subsumes its own parts.
+        let spelled = "Verify with `bun run typecheck && bun test hub` (the tests alone are not enough).";
+        assert_eq!(goal_declared_check_chain(spelled).as_deref(), Some("bun run typecheck && bun test hub"));
+        assert_eq!(goal_declared_check_chain("Fix the bug in `page`."), None);
+    }
+
+    #[test]
     fn plain_prose_check_commands_read_to_the_end_of_the_clause() {
         use super::plain_prose_check_commands;
         let goal = "Add the helper. Verify with cargo test --release --lib tools::builtin::patch. Do not commit, push, or open PRs.";
@@ -2725,6 +2739,31 @@ pub fn direct_task_title(goal: &str, mode: PlanMode, project_check: bool) -> Opt
     Some(truncate_text(&collapse_whitespace(first_line), 200))
 }
 
+/// Every check the goal declares, joined as one `A && B` chain, so an
+/// edit check or an unchecked finish runs all of them in one round. 498 of
+/// 2,548 recorded goals named two or more commands (`cargo test --lib
+/// harness` and `cargo test --test loop_smoke`); only the first ever ran
+/// as the harness check, and the finish then bounced for the second.
+pub fn goal_declared_check_chain(goal: &str) -> Option<String> {
+    let mut commands = goal_declared_check_commands(goal);
+    // A command that already contains another declared one (a chain the
+    // goal spelled out) subsumes it.
+    let full: Vec<String> = commands.clone();
+    commands.retain(|command| !full.iter().any(|other| other != command && other.contains(command.as_str())));
+    if commands.is_empty() {
+        return None;
+    }
+    Some(commands.join(" && "))
+}
+
+/// Whether `command` has the shape of a goal-declared check: one declared
+/// command, or the chain of all of them.
+pub fn command_is_goal_declared(goal: &str, command: &str) -> bool {
+    let shape = normalize_command_shape(command);
+    goal_declared_check_commands(goal).iter().any(|declared| normalize_command_shape(declared) == shape)
+        || goal_declared_check_chain(goal).is_some_and(|chain| normalize_command_shape(&chain) == shape)
+}
+
 pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
     let mut commands: Vec<String> = Vec::new();
     for span in goal.split('`').skip(1).step_by(2) {
@@ -5077,9 +5116,7 @@ impl HarnessRun {
             // The finish names its own check: run it now instead of bouncing
             // the finish and paying a VERIFY round for the same command.
             let command = explicit.unwrap_or_default();
-            let declared = goal_declared_check_commands(&self.state.goal)
-                .iter()
-                .any(|declared| normalize_command_shape(declared) == normalize_command_shape(&command));
+            let declared = command_is_goal_declared(&self.state.goal, &command);
             if !declared {
                 explicit_source = Some(format!("check named in finish_task ({}), run by the harness", truncate_text(&command, 120)));
             }
@@ -5102,13 +5139,11 @@ impl HarnessRun {
             // whose harness-run check failed, then a fix, then a finish that
             // bounced for the failed record and cost a manual VERIFY round.
             let record = rerunnable.unwrap();
-            let declared = goal_declared_check_commands(&self.state.goal)
-                .iter()
-                .any(|declared| normalize_command_shape(declared) == normalize_command_shape(&record.command));
+            let declared = command_is_goal_declared(&self.state.goal, &record.command);
             scope.finish_checks_run += 1;
             (record, declared)
         } else if (unchecked || stale) && budget_left {
-            let declared = goal_declared_check_commands(&self.state.goal).into_iter().next();
+            let declared = goal_declared_check_chain(&self.state.goal);
             let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
             let Some(command) = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone())) else { return outcome };
             if let Some((_, source)) = &detected {
@@ -7194,7 +7229,7 @@ impl HarnessRun {
         if scope.edit_checks_run >= EDIT_CHECKS_MAX_PER_LOOP {
             return None;
         }
-        let declared = goal_declared_check_commands(&self.state.goal).into_iter().next();
+        let declared = goal_declared_check_chain(&self.state.goal);
         let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
         let command = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone()))?;
         if self.hung_commands.iter().any(|hung| *hung == command) {

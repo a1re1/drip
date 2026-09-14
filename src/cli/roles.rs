@@ -751,10 +751,11 @@ pub const PLANNING_DEFAULT_REASONING_EFFORT: &str = "medium";
 
 /// The effort a planning-bound role's route should switch to: only a role
 /// bound to planning/replanning, only when the role itself set no effort,
-/// and only down from the profile's "high" (a provider default or a lower
-/// setting is left alone).
+/// and only from the profile's "high" or from no setting at all (a lower
+/// setting is left alone). A planning route never goes out with no effort:
+/// the model caller would otherwise default it to "low" like a tool round.
 pub fn planning_effort_default(is_planning: bool, explicit: bool, current: Option<&str>) -> Option<&'static str> {
-	(is_planning && !explicit && current == Some("high")).then_some(PLANNING_DEFAULT_REASONING_EFFORT)
+	(is_planning && !explicit && (current == Some("high") || current.is_none())).then_some(PLANNING_DEFAULT_REASONING_EFFORT)
 }
 
 fn overlay_into(definitions: &mut indexmap::IndexMap<String, RoleDefinition>, role: RoleDefinition) {
@@ -1294,7 +1295,7 @@ mod overlay_tests {
 		assert_eq!(planning_effort_default(true, true, Some("high")), None);
 		assert_eq!(planning_effort_default(false, false, Some("high")), None);
 		assert_eq!(planning_effort_default(true, false, Some("low")), None);
-		assert_eq!(planning_effort_default(true, false, None), None);
+		assert_eq!(planning_effort_default(true, false, None), Some("medium"));
 	}
 }
 

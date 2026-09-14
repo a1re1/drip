@@ -405,6 +405,7 @@ pub async fn distill_with_model(
         refresh_headers: route.refresh_headers.clone(),
         prompt_cache_key: None,
         reasoning_effort: route.reasoning_effort.clone(),
+        reasoning_effort_defaulted: false,
         request_timeout_ms: Some(timeout_ms),
         hedge_floor_ms: Some(0),
         latency_store: None,
@@ -910,6 +911,7 @@ mod tests {
     #[test]
     fn distill_usage_copies_response_token_counts() {
         let usage = DistillUsage::from_response(&OpenAICompatibleResponseUsage {
+            completion_tokens_details: None,
             prompt_tokens: Some(12),
             completion_tokens: Some(7),
             total_tokens: Some(19),

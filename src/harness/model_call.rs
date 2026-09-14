@@ -205,6 +205,8 @@ pub struct OpenAICompatibleResponseUsage {
     pub cache_read_input_tokens: Option<i64>,
     #[serde(default, rename = "completion_tokens", skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<i64>,
+    #[serde(default, rename = "completion_tokens_details", skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<OpenAICompatibleResponseCompletionTokensDetails>,
     #[serde(default, rename = "prompt_tokens", skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<i64>,
     /// OpenAI-compatible providers with automatic caching (OpenAI, Cerebras, xAI, Gemini) report cache hits here.
@@ -218,6 +220,15 @@ pub struct OpenAICompatibleResponseUsage {
 pub struct OpenAICompatibleResponsePromptTokensDetails {
     #[serde(default, rename = "cached_tokens", skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<i64>,
+}
+
+/// OpenAI-compatible providers that expose hidden reasoning report its size
+/// here; the harness logs it on the inference event, because a reply of
+/// 8,000 tokens that ends in one small GREP call is thinking, not code.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenAICompatibleResponseCompletionTokensDetails {
+    #[serde(default, rename = "reasoning_tokens", skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -273,6 +284,7 @@ impl From<crate::harness::anthropic::AnthropicTranslatedResponse> for OpenAIComp
                     error_type: error.error_type,
                 }),
             usage: translated.usage.map(|usage| OpenAICompatibleResponseUsage {
+                completion_tokens_details: None,
                 cache_creation_input_tokens: Some(usage.cache_creation_input_tokens as i64),
                 cache_read_input_tokens: Some(usage.cache_read_input_tokens as i64),
                 completion_tokens: Some(usage.completion_tokens as i64),
@@ -373,6 +385,42 @@ fn network_error_regex() -> &'static regex::Regex {
         .unwrap()
     })
 }
+
+/// A 400 that names the reasoning-effort field: the provider does not take
+/// it, so a harness-defaulted effort is dropped for the rest of the run.
+fn reasoning_rejection_regex() -> &'static regex::Regex {
+    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
+    REGEX.get_or_init(|| regex::Regex::new(r"(?i)reasoning").unwrap())
+}
+
+impl ModelCaller {
+    /// The effort a call goes out with and whether it is the harness default
+    /// rather than a configured value: a route that sets none gets
+    /// `BASE_MODEL_DEFAULT_REASONING_EFFORT`, the base model gets the
+    /// (possibly defaulted) deps value, and once a provider has rejected the
+    /// default this run every defaulted call omits the field.
+    fn effective_reasoning_effort(&self, route: Option<&ModelRoute>) -> (Option<String>, bool) {
+        let disabled = self.reasoning_default_disabled.load(std::sync::atomic::Ordering::Relaxed);
+        match route {
+            Some(route) => match route.reasoning_effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()) {
+                Some(effort) => (Some(effort.to_string()), false),
+                None if disabled => (None, true),
+                None => (Some(BASE_MODEL_DEFAULT_REASONING_EFFORT.to_string()), true),
+            },
+            None => {
+                if self.deps.reasoning_effort_defaulted && disabled {
+                    (None, true)
+                } else {
+                    (self.deps.reasoning_effort.clone(), self.deps.reasoning_effort_defaulted)
+                }
+            }
+        }
+    }
+}
+
+/// Reasoning effort for a call whose route or profile sets none; see the
+/// README ("A base-model call whose profile sets no reasoning effort").
+pub const BASE_MODEL_DEFAULT_REASONING_EFFORT: &str = "low";
 
 fn context_overflow_regex() -> &'static regex::Regex {
     static REGEX: OnceLock<regex::Regex> = OnceLock::new();
@@ -509,6 +557,10 @@ pub struct ModelCallerDeps {
     /// Stable key sent to providers that support prompt-cache routing hints (OpenAI: prompt_cache_key body field; xAI: x-grok-conv-id header).
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// `reasoning_effort` is the harness's own default for a profile that
+    /// set none (see `BASE_MODEL_DEFAULT_REASONING_EFFORT`), so a provider
+    /// that rejects the field gets one retry without it and the run goes on.
+    pub reasoning_effort_defaulted: bool,
     /// Per-attempt wall-clock cap on one HTTP request (default DEFAULT_REQUEST_TIMEOUT_MS); a timed-out attempt retries on the network ladder.
     pub request_timeout_ms: Option<u64>,
     /// Earliest point (ms) at which a slow first attempt is hedged with a second identical request
@@ -542,6 +594,9 @@ pub struct ModelCaller {
     /// Codex lane for include_tools=false calls (run summaries), so they never
     /// interleave with the tool lane's pending tool request.
     codex_summary_lane: tokio::sync::Mutex<Option<CodexBridge>>,
+    /// Set once a provider rejected the harness-default reasoning effort;
+    /// later base-model calls omit the field.
+    reasoning_default_disabled: std::sync::atomic::AtomicBool,
 }
 
 /// A codex bridge that could not start at all (missing binary, spawn error):
@@ -589,6 +644,7 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         latency_samples: std::sync::Mutex::new(seeded),
         codex_tool_lane: tokio::sync::Mutex::new(None),
         codex_summary_lane: tokio::sync::Mutex::new(None),
+            reasoning_default_disabled: std::sync::atomic::AtomicBool::new(false),
     }
 }
 
@@ -1129,10 +1185,7 @@ impl ModelCaller {
             let model = route
                 .map(|route| route.model.clone())
                 .unwrap_or_else(|| self.deps.model.clone());
-            let reasoning_effort = match route {
-                Some(route) => route.reasoning_effort.clone(),
-                None => self.deps.reasoning_effort.clone(),
-            };
+            let (reasoning_effort, _effort_defaulted) = self.effective_reasoning_effort(route);
 
             return self
                 .attempt_codex_route(
@@ -1172,10 +1225,7 @@ impl ModelCaller {
         let model = route
             .map(|route| route.model.clone())
             .unwrap_or_else(|| self.deps.model.clone());
-        let reasoning_effort = match route {
-            Some(route) => route.reasoning_effort.clone(),
-            None => self.deps.reasoning_effort.clone(),
-        };
+        let (reasoning_effort, effort_defaulted) = self.effective_reasoning_effort(route);
         let request_body = if anthropic_native {
             serde_json::to_value(build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
                 // One-shot calls (run summaries) never re-read their prefix, so a
@@ -1541,6 +1591,23 @@ impl ModelCaller {
                             return Err(ContextOverflowError(message).into());
                         }
 
+                        // The harness-default effort on a provider that does not
+                        // take the field: drop it for the run and retry this call.
+                        if status == 400
+                            && effort_defaulted
+                            && reasoning_rejection_regex().is_match(&message)
+                            && !self.reasoning_default_disabled.swap(true, std::sync::atomic::Ordering::Relaxed)
+                        {
+                            self.emit(
+                                HarnessEventType::RunWarning,
+                                format!(
+                                    "the provider rejected the harness-default reasoning effort ({message}) — retrying without it, and omitting it for the rest of the run"
+                                ),
+                                None,
+                            );
+                            continue;
+                        }
+
                         return Err(ModelCallError::Message(message));
                     }
 
@@ -1616,6 +1683,44 @@ impl ModelCaller {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn routes_and_profiles_without_an_effort_get_the_harness_default() {
+        let mut deps = test_deps("http://127.0.0.1:1/v1/chat/completions".to_string());
+        deps.reasoning_effort = Some("low".to_string());
+        deps.reasoning_effort_defaulted = true;
+        let caller = create_model_caller(deps);
+        let route = |effort: Option<&str>| ModelRoute {
+            fallback_route: None,
+            headers: None,
+            model: "m".to_string(),
+            provider: Some("openrouter".to_string()),
+            reasoning_effort: effort.map(str::to_string),
+            refresh_headers: None,
+            url: "http://127.0.0.1:1/v1/chat/completions".to_string(),
+        };
+        assert_eq!(caller.effective_reasoning_effort(None), (Some("low".to_string()), true));
+        assert_eq!(caller.effective_reasoning_effort(Some(&route(None))), (Some("low".to_string()), true));
+        assert_eq!(caller.effective_reasoning_effort(Some(&route(Some("high")))), (Some("high".to_string()), false));
+        caller.reasoning_default_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(caller.effective_reasoning_effort(None), (None, true));
+        assert_eq!(caller.effective_reasoning_effort(Some(&route(None))), (None, true));
+        assert_eq!(caller.effective_reasoning_effort(Some(&route(Some("high")))), (Some("high".to_string()), false));
+    }
+
+    #[test]
+    fn usage_parses_reasoning_tokens_and_the_rejection_regex_is_narrow() {
+        let usage: OpenAICompatibleResponseUsage = serde_json::from_str(
+            r#"{"prompt_tokens":10,"completion_tokens":9000,"completion_tokens_details":{"reasoning_tokens":8700},"total_tokens":9010}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.completion_tokens_details.and_then(|d| d.reasoning_tokens), Some(8700));
+        let plain: OpenAICompatibleResponseUsage = serde_json::from_str(r#"{"prompt_tokens":1,"completion_tokens":1}"#).unwrap();
+        assert!(plain.completion_tokens_details.is_none());
+        assert!(reasoning_rejection_regex().is_match("Unsupported parameter: reasoning_effort"));
+        assert!(reasoning_rejection_regex().is_match("unknown field `reasoning_effort`"));
+        assert!(!reasoning_rejection_regex().is_match("maximum context length exceeded"));
+    }
     use super::*;
     use std::io::{Read, Write};
 
@@ -1810,6 +1915,7 @@ mod tests {
             refresh_headers: None,
             prompt_cache_key: None,
             reasoning_effort: None,
+            reasoning_effort_defaulted: false,
             request_timeout_ms: None,
             hedge_floor_ms: None,
             latency_store: None,

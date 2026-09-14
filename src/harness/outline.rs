@@ -20,6 +20,19 @@ pub const OUTLINE_MAX_COMPACT: usize = 300;
 /// Longest signature kept per entry.
 const OUTLINE_ENTRY_CHARS: usize = 90;
 
+/// Files the goal names that are short enough to READ whole are carried into
+/// the first prompt as their numbered text: 350 of 712 recorded runs spent
+/// their entire first round on READs of exactly those paths (one model turn
+/// each, then the round trip) before doing anything else. A file over this
+/// many lines gets an outline instead (READ's default window is 400 lines).
+pub const NAMED_FILE_BODY_MAX_LINES: usize = 400;
+/// Named files carried whole into the first prompt, first-mentioned first.
+pub const NAMED_FILE_BODIES_MAX_FILES: usize = 3;
+/// Total budget for the carried bodies; a file that would cross it is skipped.
+pub const NAMED_FILE_BODIES_MAX_CHARS: usize = 40_000;
+/// Longest line kept in a carried body (READ clamps at the same width).
+const NAMED_FILE_LINE_CHARS: usize = 2000;
+
 /// Identifiers named in a goal that get a pre-run `git grep` (first-mentioned first).
 pub const SYMBOL_HITS_MAX_SYMBOLS: usize = 8;
 /// Hits listed per identifier before the line says "+N more".
@@ -486,10 +499,8 @@ pub fn file_outline(path: &Path, display: &str) -> Option<String> {
     Some(out)
 }
 
-/// Outlines for the workspace files named in `texts` (task title, notes,
-/// goal), first-mentioned first, at most OUTLINE_MAX_FILES; None when no
-/// named file earns one.
-pub fn outlines_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
+/// Workspace-relative paths named in `texts`, first-mentioned first, deduplicated.
+pub fn named_paths_for_texts(texts: &[&str]) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     for text in texts {
         for rel in crate::harness::r#loop::extract_goal_paths(text) {
@@ -498,7 +509,142 @@ pub fn outlines_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
             }
         }
     }
-    outlines_for_paths(cwd, &paths)
+    paths
+}
+
+/// Outlines for the workspace files named in `texts` (task title, notes,
+/// goal), first-mentioned first, at most OUTLINE_MAX_FILES; None when no
+/// named file earns one.
+pub fn outlines_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
+    outlines_for_paths(cwd, &named_paths_for_texts(texts))
+}
+
+/// Names the goal uses as a qualifier — `Store` in `Store.set(...)`, `Run`
+/// in `Run::new` — even when the name alone is not an identifier token
+/// (no underscore, no inner capital). Such a name is almost always the
+/// class or type the task edits, and its file is the first READ of the run.
+pub fn qualified_type_names(texts: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for text in texts {
+        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;<>[]{}=+*!?&|#".contains(c)) {
+            if raw.contains('/') {
+                continue;
+            }
+            let Some(head) = raw.split("::").next().and_then(|part| part.split('.').next()) else { continue };
+            let qualifies = raw.len() > head.len() && (raw[head.len()..].starts_with('.') || raw[head.len()..].starts_with("::"));
+            let member = &raw[head.len()..];
+            let member_is_name = member.trim_start_matches(|c| c == '.' || c == ':').chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+            if !qualifies || !member_is_name || head.len() < 3 || head.len() > 40 {
+                continue;
+            }
+            if !head.chars().next().is_some_and(|c| c.is_ascii_uppercase()) || !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            if !out.iter().any(|seen| seen == head) {
+                out.push(head.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Words the goal names that should locate a definition file: identifier
+/// tokens, qualifier type names, and backticked words, first-mentioned first.
+pub const DEFINITION_FILES_MAX_WORDS: usize = 8;
+
+/// Workspace files that define a name the goal uses (`class Store` for
+/// `Store.set`, `def truncate_middle` for `truncate_middle(text, width)`),
+/// source trees before test-like trees, deduplicated, skipping `skip`. An
+/// exact-name definition is preferred over one that merely contains the word.
+pub fn definition_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)).chain(extract_quoted_words(texts)) {
+        if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
+            words.push(word);
+        }
+    }
+    let mut files: Vec<String> = Vec::new();
+    let started = std::time::Instant::now();
+    for word in words.iter().take(DEFINITION_FILES_MAX_WORDS) {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS {
+            break;
+        }
+        let Some(hits) = git_grep_definitions(cwd, word) else { break };
+        let mut exact: Vec<String> = Vec::new();
+        let mut partial: Vec<String> = Vec::new();
+        for hit in &hits {
+            let mut parts = hit.splitn(3, ':');
+            let (path, _, text) = (parts.next().unwrap_or(""), parts.next(), parts.next().unwrap_or(""));
+            if path.is_empty() || skip.iter().any(|s| s == path) {
+                continue;
+            }
+            let bucket = if short_name(text).eq_ignore_ascii_case(word) { &mut exact } else { &mut partial };
+            if !bucket.iter().any(|p| p == path) {
+                bucket.push(path.to_string());
+            }
+        }
+        let mut chosen = if exact.is_empty() { partial } else { exact };
+        chosen.sort_by_key(|path| test_like_path(path));
+        for path in chosen {
+            if !files.iter().any(|f| f == &path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Header of the section that carries named files whole.
+pub const NAMED_FILE_BODIES_HEADER: &str = "files the goal names or that define a name it uses, already read (a READ of these paths returns exactly this text — start from PATCH, and READ one only after a PATCH changed it):";
+
+/// The numbered text of the named files short enough to carry whole (at most
+/// NAMED_FILE_BODY_MAX_LINES lines, NAMED_FILE_BODIES_MAX_FILES files,
+/// NAMED_FILE_BODIES_MAX_CHARS in total), in the form a READ returns, plus
+/// the paths carried so the caller can skip their outlines. Missing,
+/// directory, empty, and non-UTF-8 paths are skipped.
+pub fn named_file_bodies_for_paths(cwd: &str, paths: &[String]) -> (Option<String>, Vec<String>) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut carried: Vec<String> = Vec::new();
+    let mut chars = 0usize;
+    for rel in paths {
+        let full = Path::new(cwd).join(rel);
+        if !full.is_file() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&full) else { continue };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.is_empty() || lines.len() > NAMED_FILE_BODY_MAX_LINES {
+            continue;
+        }
+        let numbered: Vec<String> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let shown: String = if line.chars().count() > NAMED_FILE_LINE_CHARS {
+                    format!("{}[line truncated: {} chars total]", line.chars().take(NAMED_FILE_LINE_CHARS).collect::<String>(), line.chars().count())
+                } else {
+                    (*line).to_string()
+                };
+                format!("{}\t{shown}", index + 1)
+            })
+            .collect();
+        let block = format!("== {rel} ({} lines)\n{}", lines.len(), numbered.join("\n"));
+        let block_chars = block.chars().count();
+        if chars + block_chars > NAMED_FILE_BODIES_MAX_CHARS {
+            continue;
+        }
+        chars += block_chars;
+        blocks.push(block);
+        carried.push(rel.clone());
+        if blocks.len() >= NAMED_FILE_BODIES_MAX_FILES {
+            break;
+        }
+    }
+    if blocks.is_empty() {
+        (None, carried)
+    } else {
+        (Some(format!("{NAMED_FILE_BODIES_HEADER}\n{}", blocks.join("\n"))), carried)
+    }
 }
 
 /// Outlines for explicit workspace-relative paths (files that do not exist or
@@ -679,6 +825,67 @@ mod tests {
         assert!(!hits.contains("let title"), "{hits}");
         assert!(test_like_path("evals/fixture/textutil.py") && test_like_path("src/foo_test.go") && !test_like_path("src/tui/app.rs"));
         assert!(definition_hits_for_texts(&cwd, &["`nothing`"]).unwrap().contains("nothing: no definition names contain it"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn short_named_files_are_carried_whole_and_long_ones_are_not() {
+        let dir = std::env::temp_dir().join(format!("drip-named-bodies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "kv/store.py", "class Store:\n    def get(self, k):\n        return self.d[k]\n");
+        let long: String = (0..(NAMED_FILE_BODY_MAX_LINES + 1)).map(|i| format!("x{i} = {i}\n")).collect();
+        write(&dir, "kv/big.py", &long);
+        write(&dir, "kv/empty.py", "");
+        let cwd = dir.to_string_lossy().to_string();
+        let paths = named_paths_for_texts(&["fix kv/store.py, kv/big.py, kv/empty.py and kv/missing.py"]);
+        assert_eq!(paths, vec!["kv/store.py", "kv/big.py", "kv/empty.py", "kv/missing.py"]);
+        let (section, carried) = named_file_bodies_for_paths(&cwd, &paths);
+        let section = section.expect("store.py is carried");
+        assert!(section.starts_with(NAMED_FILE_BODIES_HEADER), "{section}");
+        assert!(section.contains("== kv/store.py (3 lines)\n1\tclass Store:\n2\t    def get(self, k):\n3\t        return self.d[k]"), "{section}");
+        assert!(!section.contains("big.py") && !section.contains("empty.py") && !section.contains("missing.py"), "{section}");
+        assert_eq!(carried, vec!["kv/store.py"]);
+        let (none, carried) = named_file_bodies_for_paths(&cwd, &["kv/big.py".to_string()]);
+        assert!(none.is_none() && carried.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn qualifier_type_names_and_definition_files_locate_the_class_the_goal_edits() {
+        assert_eq!(qualified_type_names(&["Add TTL: Store.set(key, ttl=None); Run::new() and kv.store.Store.get, not a/b.py or 3.14"]), vec!["Store", "Run"]);
+        assert!(qualified_type_names(&["plain words. Sentence ends. store.set"]).is_empty());
+        let dir = std::env::temp_dir().join(format!("drip-def-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "kv/store.py", "class Store:\n    def set(self, k, v):\n        pass\n");
+        write(&dir, "kv/util.py", "def store_setup():\n    pass\n");
+        write(&dir, "tests/test_store.py", "class StoreTest:\n    def test_set(self):\n        pass\n");
+        let cwd = dir.to_string_lossy().to_string();
+        let files = definition_files_for_texts(&cwd, &["Add TTL to Store.set(key) and the `set` subcommand"], &[]);
+        assert_eq!(files, vec!["kv/store.py"], "exact `class Store` and `def set` beat `StoreTest`, `store_setup` and `test_set`");
+        let files = definition_files_for_texts(&cwd, &["Store.set"], &["kv/store.py".to_string()]);
+        assert_eq!(files, vec!["kv/util.py", "tests/test_store.py"], "without an exact hit the containing names count, source trees first");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn carried_bodies_stop_at_the_file_and_char_budgets() {
+        let dir = std::env::temp_dir().join(format!("drip-named-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut paths = Vec::new();
+        for i in 0..(NAMED_FILE_BODIES_MAX_FILES + 1) {
+            write(&dir, &format!("m/f{i}.py"), "a = 1\n");
+            paths.push(format!("m/f{i}.py"));
+        }
+        let cwd = dir.to_string_lossy().to_string();
+        let (_, carried) = named_file_bodies_for_paths(&cwd, &paths);
+        assert_eq!(carried.len(), NAMED_FILE_BODIES_MAX_FILES);
+        let wide: String = (0..300).map(|_| format!("{}\n", "w".repeat(200))).collect();
+        write(&dir, "m/wide.py", &wide);
+        let (section, carried) = named_file_bodies_for_paths(&cwd, &["m/wide.py".to_string(), "m/f0.py".to_string()]);
+        assert_eq!(carried, vec!["m/f0.py"], "the 60K-char file is skipped, the small one after it still carried");
+        assert!(section.unwrap().contains("== m/f0.py"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

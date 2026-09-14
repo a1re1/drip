@@ -178,7 +178,17 @@ pub struct TransportRequestPayload {
     /// cannot burn minutes producing prose no tool call follows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    pub stream: bool, // always false
+    /// Set by the model caller for OpenAI-compatible providers (see
+    /// model_call::with_stream_fields); the preview and one-shot helpers
+    /// leave it false.
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<TransportStreamOptions>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransportStreamOptions {
+    pub include_usage: bool,
 }
 
 pub const DEFAULT_CHAT_COMPLETIONS_URL: &str =
@@ -415,6 +425,7 @@ pub fn build_transport_request_payload(
             .filter(|effort| !effort.is_empty()),
         max_tokens: args.max_tokens,
         stream: false,
+        stream_options: None,
     }
 }
 

@@ -3794,7 +3794,7 @@ impl HarnessRun {
                 ..Default::default()
             }),
             detail: format!(
-                "{} — {} prompt ({} cached, {} written), {} completion{} in {}ms",
+                "{} — {} prompt ({} cached, {} written), {} completion{} in {}ms{}",
                 call.model,
                 prompt_tokens,
                 cache_read_tokens,
@@ -3804,7 +3804,11 @@ impl HarnessRun {
                     Some(reasoning) if reasoning > 0 => format!(" ({reasoning} reasoning)"),
                     _ => String::new(),
                 },
-                call.latency_ms
+                call.latency_ms,
+                match call.first_token_ms {
+                    Some(first) => format!(" (first token {first}ms)"),
+                    None => String::new(),
+                }
             ),
             iteration: self.state.iteration,
             r#type: HarnessEventType::Inference,

@@ -1328,6 +1328,22 @@ The `hedged model request` event marks each race; the duplicate is billed but
 only the winner's usage is recorded. One-shot helper calls (session names,
 terminal titles, bash distillation) do not hedge.
 
+OpenAI-compatible providers are asked to stream (`stream: true` with usage in
+the final chunk), and the chunks are folded back into one response body
+before parsing, so nothing after the transport changes. Streaming lets the
+hedge watch the reply instead of the clock: a first attempt that has sent no
+first token by twice the model's median first-token time this run (never
+under 4s, never past the wall-clock point) is raced, as is one whose stream
+goes quiet for 15s mid-reply, while a reply that is streaming normally is
+never raced however long it takes. The point rises with the median so a
+provider that is uniformly queued (first tokens at 5–10s) is not raced on
+every call. The
+inference event records the first-token time (`in 6200ms (first token
+900ms)`). A provider that answers a streaming request with a 400 naming
+streaming gets non-streaming requests for the rest of the run (the
+`rejected the streaming request` warning marks the switch); the Anthropic
+native transport does not stream.
+
 Both bounds start warm: each model's last eight latencies are written to
 `~/.drip/latency.json` (under `DRIP_HOME` when set) and seeded into the next
 run, so the stall bound and the hedge point apply from the first call rather

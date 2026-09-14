@@ -266,6 +266,46 @@ pub fn split_python_main_guard(text: &str) -> Option<(&str, &str)> {
     Some((&text[..guard_start], &text[guard_start..]))
 }
 
+/// Splits a brace-language file into the text before its trailing run of
+/// bare closers (`}`, `});`, `]`, `);` … alone on a column-0 line) and the
+/// closers. An indented append lands before them: a recorded claude-web
+/// run appended a two-space-indented `test(...)` to a bun test file and it
+/// landed after the `describe` block's `});`, outside the block the goal
+/// named; the same shape puts a Rust `#[test]` outside `mod tests`.
+pub fn split_trailing_closers(text: &str) -> Option<(&str, &str)> {
+    let is_closer = |line: &str| {
+        let trimmed = line.trim_end();
+        !trimmed.is_empty()
+            && !trimmed.starts_with(' ')
+            && !trimmed.starts_with('\t')
+            && trimmed.chars().all(|c| matches!(c, '}' | ')' | ']' | ';' | ','))
+    };
+    let body = text.trim_end_matches('\n');
+    let mut split = body.len();
+    let mut closers = 0usize;
+    for line in body.rsplit('\n') {
+        if !is_closer(line) {
+            break;
+        }
+        closers += 1;
+        split -= line.len();
+        if split > 0 {
+            split -= 1; // the '\n' before this line
+        }
+    }
+    if closers == 0 {
+        return None;
+    }
+    let head = &body[..split];
+    if head.trim().is_empty() {
+        return None;
+    }
+    Some((head, &body[split + 1..]))
+}
+
+/// Note on the append summary when the text went before trailing closers.
+pub const APPEND_BEFORE_CLOSERS_NOTE: &str = " before the file's closing brace(s)";
+
 /// Note on the append summary when the text went before the main guard.
 pub const APPEND_BEFORE_GUARD_NOTE: &str = " before the `if __name__ == \"__main__\":` block";
 
@@ -1180,15 +1220,27 @@ pub fn resolve_file_entry(
             None => None,
         };
         let is_python = std::path::Path::new(&entry.path).extension().and_then(|ext| ext.to_str()) == Some("py");
+        let indented = append.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'));
         let guard_split = if is_python { existing_text.as_deref().and_then(split_python_main_guard) } else { None };
+        let closers_split = if !is_python && indented { existing_text.as_deref().and_then(split_trailing_closers) } else { None };
         let mut placement_note = "";
-        let mut new_text = match guard_split {
-            Some((head, guard)) => {
+        let mut new_text = match (guard_split, closers_split) {
+            (None, Some((head, closers))) => {
+                // Inside the outermost block: one blank line, the text, the
+                // closers as the file had them.
+                let mut text = head.trim_end_matches('\n').to_string();
+                text.push_str("\n\n");
+                text.push_str(append.trim_matches('\n'));
+                text.push('\n');
+                text.push_str(closers);
+                placement_note = APPEND_BEFORE_CLOSERS_NOTE;
+                text
+            }
+            (Some((head, guard)), _) => {
                 // Before the guard: one blank line for an indented body
                 // continuation (a method joining the last class), two for a
                 // new top-level definition, then the guard restored after
                 // two blank lines as the file had it.
-                let indented = append.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'));
                 let mut text = head.trim_end_matches('\n').to_string();
                 text.push_str(if indented { "\n\n" } else { "\n\n\n" });
                 text.push_str(append.trim_matches('\n'));
@@ -1197,7 +1249,7 @@ pub fn resolve_file_entry(
                 placement_note = APPEND_BEFORE_GUARD_NOTE;
                 text
             }
-            None => {
+            (None, None) => {
                 let mut text = existing_text.clone().unwrap_or_default();
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
@@ -2143,6 +2195,35 @@ mod execute_tests {
         assert!(split_python_main_guard("def f():\n    if __name__ == \"__main__\":\n        pass\n").is_none());
         let outcome = execute(&serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}), &ctx);
         assert!(!outcome.failed && !outcome.text.contains("block"), "{}", outcome.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn indented_append_to_a_brace_file_goes_inside_the_outermost_block() {
+        let dir = temp_workspace("append-closers");
+        let ctx = ctx_for(&dir);
+        std::fs::create_dir_all(dir.join("test")).unwrap();
+        let ts = "import { test } from \"bun:test\";\n\ndescribe(\"bounds\", () => {\n  test(\"a\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
+        std::fs::write(dir.join("test/p.test.ts"), ts).unwrap();
+        let outcome = execute(&serde_json::json!({"path": "test/p.test.ts", "append": "\n  test(\"b\", () => {\n    expect(2).toBe(2);\n  });\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.starts_with("test/p.test.ts: appended 3 line(s) before the file's closing brace(s)"), "{}", outcome.text);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("test/p.test.ts")).unwrap(),
+            "import { test } from \"bun:test\";\n\ndescribe(\"bounds\", () => {\n  test(\"a\", () => {\n    expect(1).toBe(1);\n  });\n\n  test(\"b\", () => {\n    expect(2).toBe(2);\n  });\n});\n"
+        );
+        // Rust: a #[test] joins mod tests; a top-level (unindented) append stays at the end.
+        let rs = "fn f() -> u8 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn a() {\n        assert_eq!(f(), 1);\n    }\n}\n";
+        std::fs::write(dir.join("m.rs"), rs).unwrap();
+        let outcome = execute(&serde_json::json!({"path": "m.rs", "append": "    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("m.rs")).unwrap();
+        assert!(text.ends_with("    }\n\n    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n}\n"), "{text}");
+        let outcome = execute(&serde_json::json!({"path": "m.rs", "append": "fn g() -> u8 {\n    2\n}\n"}), &ctx);
+        assert!(!outcome.failed && !outcome.text.contains("closing brace"), "{}", outcome.text);
+        assert!(std::fs::read_to_string(dir.join("m.rs")).unwrap().ends_with("}\nfn g() -> u8 {\n    2\n}\n"));
+        assert!(split_trailing_closers("}\n").is_none());
+        assert_eq!(split_trailing_closers("a {\n  b\n});\n]\n"), Some(("a {\n  b", "});\n]")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

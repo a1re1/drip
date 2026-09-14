@@ -193,6 +193,9 @@ mod goal_check_tests {
         let unchecked = "harness: not accepted yet — this task edited the workspace but no verification command (test/build/typecheck) has run at any point in this run.";
         assert_eq!(finish_recheck_reason(unchecked, 0), Some(FinishRecheck::Unchecked));
         assert_eq!(finish_recheck_reason("Task task-1 marked completed.", 3), None);
+        let zero = "harness: not accepted yet — this task edited the workspace but the most recent verification (cargo test rect::tests 2>&1) exited green but executed zero tests — run the suite that actually covers this change.";
+        assert_eq!(finish_recheck_reason(zero, 1), Some(FinishRecheck::Stale));
+        assert_eq!(finish_recheck_reason(zero, 0), None);
     }
 
     #[test]
@@ -1854,7 +1857,14 @@ pub fn finish_recheck_reason(bounce: &str, mutations_since: i64) -> Option<Finis
         return Some(FinishRecheck::Unchecked);
     }
     let edited_since = mutations_since > 0;
-    if edited_since && (bounce.contains("workspace edit(s) landed after the last verification") || bounce.contains("FAILED and nothing has passed since")) {
+    // A green run that executed zero tests before the edit (a reviewer's
+    // `cargo test rect::tests` on a file that had no tests yet) is as stale
+    // as a failed one once the edit lands: re-run it rather than bounce.
+    if edited_since
+        && (bounce.contains("workspace edit(s) landed after the last verification")
+            || bounce.contains("FAILED and nothing has passed since")
+            || bounce.contains("exited green but executed zero tests"))
+    {
         return Some(FinishRecheck::Stale);
     }
     None

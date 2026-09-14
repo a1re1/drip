@@ -385,6 +385,23 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn an_overlapping_reread_of_an_unedited_file_is_flagged() {
+        use super::{overlapping_read_note, patched_paths, read_range_of};
+        assert_eq!(read_range_of(r#"{"path":"a.rs","offset":100,"limit":40}"#), Some(("a.rs".to_string(), (100, 140))));
+        assert_eq!(read_range_of(r#"{"path":"a.rs"}"#), Some(("a.rs".to_string(), (0, i64::MAX))));
+        assert_eq!(read_range_of(r#"{"command":"ls"}"#), None);
+        // A shifted window that overlaps an earlier read is flagged.
+        let note = overlapping_read_note(&[(100, 140)], (120, 160));
+        assert!(note.as_deref().is_some_and(|note| note.contains("lines 121-160 of this file overlaps your earlier READ of lines 101-140")), "{note:?}");
+        // Disjoint windows are not.
+        assert_eq!(overlapping_read_note(&[(100, 140)], (200, 240)), None);
+        // A whole-file read overlaps any prior range.
+        assert!(overlapping_read_note(&[(100, 140)], (0, i64::MAX)).is_some());
+        assert_eq!(patched_paths(r#"{"files":[{"path":"a.rs","find":"x","replace":"y"},{"path":"b.rs","content":"z"}]}"#), vec!["a.rs".to_string(), "b.rs".to_string()]);
+        assert_eq!(patched_paths(r#"{"path":"c.rs","append":"t"}"#), vec!["c.rs".to_string()]);
+    }
+
+    #[test]
     fn an_append_takes_the_placement_the_goal_names() {
         use super::{anchor_append_to_goal, goal_placement_anchor};
         assert_eq!(goal_placement_anchor("Add a unit test named new_case right after `old_case` in src/x.rs."), Some((true, "old_case".to_string())));
@@ -2368,6 +2385,56 @@ pub fn anchor_append_to_goal(raw_input: &str, goal: &str) -> (String, Option<Str
     (input.to_string(), Some(format!("append placed {key} `{name}` as the goal asks (pass after or before yourself to choose the place)")))
 }
 
+/// The workspace paths a PATCH input writes to (single-file and files[]).
+pub fn patched_paths(raw_input: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) else { return Vec::new() };
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |path: Option<&str>| {
+        if let Some(path) = path.filter(|path| !path.is_empty()) {
+            if !paths.iter().any(|known| known == path) {
+                paths.push(path.to_string());
+            }
+        }
+    };
+    push(value.get("path").and_then(serde_json::Value::as_str));
+    if let Some(entries) = value.get("files").and_then(serde_json::Value::as_array) {
+        for entry in entries {
+            push(entry.get("path").and_then(serde_json::Value::as_str));
+        }
+    }
+    paths
+}
+
+/// The line range a READ covers: (offset, offset+limit), or the whole file
+/// (0, i64::MAX) when it names no offset. None when the input is not a READ
+/// of a path.
+pub fn read_range_of(raw_input: &str) -> Option<(String, (i64, i64))> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_input).ok()?;
+    let path = value.get("path")?.as_str()?.to_string();
+    let range = match value.get("offset").and_then(serde_json::Value::as_i64) {
+        Some(offset) => {
+            let limit = value.get("limit").and_then(serde_json::Value::as_i64).unwrap_or(2000).max(1);
+            (offset, offset.saturating_add(limit))
+        }
+        None => (0, i64::MAX),
+    };
+    Some((path, range))
+}
+
+/// A note when `range` overlaps a range already read this run: the lines are
+/// still verbatim in the conversation, so re-reading an unedited file spends a
+/// round for nothing. None when there is no overlap.
+pub fn overlapping_read_note(seen: &[(i64, i64)], range: (i64, i64)) -> Option<String> {
+    let (lo, hi) = range;
+    let overlap = seen.iter().find(|(s, e)| lo < *e && *s < hi)?;
+    let describe = |(s, e): (i64, i64)| if e == i64::MAX { "the whole file".to_string() } else { format!("lines {}-{}", s + 1, e) };
+    Some(format!(
+        "[harness] READ: {} of this file overlaps your earlier READ of {} this run, still verbatim in the conversation above — the file has not been edited since, so those lines are unchanged. Re-reading an unedited file spends a round; READ only a region you have not seen yet, or act on the copy above.",
+        describe(range),
+        describe(*overlap)
+    ))
+}
+
 pub fn promote_read_to_whole_file(raw_input: &str, prior_windows: u32, cwd: &std::path::Path) -> (String, Option<String>) {
     if prior_windows < READ_WHOLE_FILE_AFTER {
         return (raw_input.to_string(), None);
@@ -3926,6 +3993,11 @@ pub struct LoopScope {
     /// READ windows opened on each path this loop, so the fourth window of
     /// one file returns the whole file instead of another page.
     pub read_windows: HashMap<String, u32>,
+    /// Line ranges already READ this run per path, cleared when the file is
+    /// edited. A READ overlapping one of these (without an edit since) re-sends
+    /// lines already in the conversation: 359 of 1,525 recorded READs did this
+    /// with a shifted window the identical-call check never caught.
+    pub read_ranges: HashMap<String, Vec<(i64, i64)>>,
     pub used_tool_call_ids: HashSet<String>,
     pub affordable_cycles: i64,
     /// The cycle currently running (1-based; 0 before the first begins).
@@ -6152,6 +6224,7 @@ impl HarnessRun {
             folded_message_indexes: HashSet::new(),
             hot_read_only_results: HashMap::new(),
             read_windows: HashMap::new(),
+            read_ranges: HashMap::new(),
             used_tool_call_ids: HashSet::new(),
             affordable_cycles,
             cycle: 0,
@@ -7706,11 +7779,21 @@ impl HarnessRun {
                     .ok()
                     .and_then(|value| value.get("path").and_then(|path| path.as_str()).map(str::to_string));
                 let prior = path.as_ref().and_then(|path| scope.read_windows.get(path).copied()).unwrap_or(0);
-                let promoted = promote_read_to_whole_file(&raw_input, prior, std::path::Path::new(&self.cwd));
+                let (raw_input, whole_note) = promote_read_to_whole_file(&raw_input, prior, std::path::Path::new(&self.cwd));
+                // Whole-file promotion wins the note; otherwise flag an overlap.
+                let overlap_note = if whole_note.is_none() {
+                    read_range_of(&raw_input).and_then(|(range_path, range)| {
+                        let note = scope.read_ranges.get(&range_path).and_then(|seen| overlapping_read_note(seen, range));
+                        scope.read_ranges.entry(range_path).or_default().push(range);
+                        note
+                    })
+                } else {
+                    None
+                };
                 if let Some(path) = path {
                     *scope.read_windows.entry(path).or_insert(0) += 1;
                 }
-                promoted
+                (raw_input, whole_note.or(overlap_note))
             } else {
                 (raw_input, None)
             };
@@ -7897,6 +7980,13 @@ impl HarnessRun {
                 scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
             }
 
+            if tool_name == "PATCH" && !execution.failed {
+                // The file changed: earlier reads of it are stale, so a later
+                // READ of the same region is not a redundant re-read.
+                for path in patched_paths(&raw_input) {
+                    scope.read_ranges.remove(&path);
+                }
+            }
             let read_only_bash = bash_command.as_deref().is_some_and(is_read_only_shell_command);
 
             if (deduped_tool || read_only_bash) && !execution.failed {

@@ -523,7 +523,9 @@ planner's model and prompt; replacing the whole definition used to drop the
 model silently and run the planning loop on the base model.
 
 A role bound to planning or replanning runs at medium reasoning effort when
-it sets none and its model profile says high: a same-window A/B (five tasks
+it sets none and its model profile says high or nothing (a planning route
+never goes out with no effort, which the model caller would otherwise read
+as a tool round and send at low): a same-window A/B (five tasks
 × 2, planner gpt-6-astra via codex) halved the planning call at medium
 (6.6-12.4s vs 12.6-24.6s) with the same hidden-test pass rate and the same
 plans, so planned runs finished 30-40% sooner. Set `reasoningEffort` on the
@@ -1274,6 +1276,17 @@ build directory never get read. On this repo's checkout that is 265 files
 instead of 444,000: a repo-wide GREP with no glob had been taking eight
 seconds per call, and the model in one recorded run made twelve of them.
 Outside a work tree the walker still scans the directory.
+
+A base-model call whose profile sets no reasoning effort is sent at `low`.
+A profile with no effort leaves the provider's default thinking on, and on
+GLM that was where the run's time went: in this machine's sessions of 10–12
+September, 12% of the calls emitted 4,000 or more completion tokens — almost
+all hidden reasoning ahead of one small tool call — and those calls took 51%
+of all inference time, while the same model at `low` shows none. A profile
+or role that sets an effort keeps it; a provider that answers the field with
+a 400 gets one retry without it and the rest of the run omits it. Inference
+events now also report the provider's `reasoning_tokens` when it exposes
+them, so a long reply can be told from a long thought.
 
 Model calls are bounded per attempt (240s by default). Once a model has three
 completed calls behind it, the first attempt of each call is bounded by eight

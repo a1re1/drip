@@ -193,6 +193,7 @@ pub async fn generate_chat_title(
         refresh_headers: None,
         prompt_cache_key: None,
         reasoning_effort: route.reasoning_effort.clone(),
+        reasoning_effort_defaulted: false,
         request_timeout_ms: Some(timeout_ms),
         hedge_floor_ms: Some(0),
         latency_store: None,

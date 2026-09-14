@@ -887,6 +887,7 @@ impl CodexBridge {
 
     fn map_usage(usage: CodexTokenUsage) -> OpenAICompatibleResponseUsage {
         OpenAICompatibleResponseUsage {
+            completion_tokens_details: None,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             completion_tokens: Some(usage.output_tokens),

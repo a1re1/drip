@@ -978,6 +978,24 @@ pub fn build_warmup_command(cwd: &str) -> Option<(String, Vec<String>)> {
 /// pytest configuration, or a tests/ directory. Used by the unchecked-finish
 /// re-verify so a finish with no check behind it gets the project suite run
 /// once by the harness instead of a bounce the agent answers by guessing.
+/// Reasoning effort for base-model calls whose profile sets none. A profile
+/// with no effort leaves the provider's default thinking on, and on GLM
+/// that is where the run's time went: in the sessions of 10–12 September,
+/// 12% of the calls emitted 4,000+ completion tokens — almost all hidden
+/// reasoning ahead of one small tool call — and took 51% of all inference
+/// time; the same runs at "low" show none. A profile that sets an effort
+/// keeps it; a provider that rejects the field gets one retry without it.
+pub use crate::harness::model_call::BASE_MODEL_DEFAULT_REASONING_EFFORT;
+
+/// (effort to send, whether it is the harness default rather than the
+/// profile's own setting).
+pub fn base_model_reasoning_effort(configured: Option<&str>) -> (Option<String>, bool) {
+    match configured.map(str::trim).filter(|effort| !effort.is_empty()) {
+        Some(effort) => (Some(effort.to_string()), false),
+        None => (Some(BASE_MODEL_DEFAULT_REASONING_EFFORT.to_string()), true),
+    }
+}
+
 pub fn detect_project_check_command(cwd: &str) -> Option<(String, &'static str)> {
     let root = Path::new(cwd);
     if root.join("Cargo.toml").is_file() {
@@ -3450,6 +3468,8 @@ impl HarnessRun {
         let iteration_cell = usage_inbox.clone();
         let usage_sink = usage_inbox.clone();
         let retry_sink = usage_inbox.clone();
+        let (base_reasoning_effort, base_reasoning_effort_defaulted) =
+            base_model_reasoning_effort(options.reasoning_effort.as_deref());
         let call_model = crate::harness::model_call::create_model_caller(
             crate::harness::model_call::ModelCallerDeps {
                 codex_executable: None,
@@ -3471,7 +3491,8 @@ impl HarnessRun {
                 provider: options.provider.clone(),
                 refresh_headers: options.refresh_headers.clone(),
                 prompt_cache_key: options.prompt_cache_key.clone(),
-                reasoning_effort: options.reasoning_effort.clone(),
+                reasoning_effort: base_reasoning_effort,
+                reasoning_effort_defaulted: base_reasoning_effort_defaulted,
                 request_timeout_ms: options.request_timeout_ms,
                 hedge_floor_ms: None,
                 latency_store: Some(options.latency_store.clone().unwrap_or_else(|| {
@@ -3603,6 +3624,9 @@ impl HarnessRun {
         role_bucket.prompt_tokens += prompt_tokens.max(0) as u64;
         role_bucket.cache_read_tokens += cache_read_tokens.max(0) as u64;
 
+        let reasoning_tokens = usage
+            .and_then(|usage| usage.completion_tokens_details.as_ref())
+            .and_then(|details| details.reasoning_tokens);
         self.run_usage.calls += 1;
         self.run_usage.prompt_tokens += prompt_tokens;
         self.run_usage.completion_tokens += completion_tokens;
@@ -3646,12 +3670,16 @@ impl HarnessRun {
                 ..Default::default()
             }),
             detail: format!(
-                "{} — {} prompt ({} cached, {} written), {} completion in {}ms",
+                "{} — {} prompt ({} cached, {} written), {} completion{} in {}ms",
                 call.model,
                 prompt_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
                 completion_tokens,
+                match reasoning_tokens {
+                    Some(reasoning) if reasoning > 0 => format!(" ({reasoning} reasoning)"),
+                    _ => String::new(),
+                },
                 call.latency_ms
             ),
             iteration: self.state.iteration,
@@ -7944,6 +7972,7 @@ mod role_inference_tests {
 
     fn usage(completion: i64) -> Option<crate::harness::model_call::OpenAICompatibleResponseUsage> {
         Some(crate::harness::model_call::OpenAICompatibleResponseUsage {
+            completion_tokens_details: None,
             completion_tokens: Some(completion),
             ..Default::default()
         })
@@ -8042,6 +8071,14 @@ mod role_inference_tests {
 
 #[cfg(test)]
 mod review_opt_out_tests {
+
+    #[test]
+    fn base_model_effort_defaults_to_low_only_when_the_profile_sets_none() {
+        assert_eq!(base_model_reasoning_effort(None), (Some("low".to_string()), true));
+        assert_eq!(base_model_reasoning_effort(Some("  ")), (Some("low".to_string()), true));
+        assert_eq!(base_model_reasoning_effort(Some("high")), (Some("high".to_string()), false));
+        assert_eq!(base_model_reasoning_effort(Some(" medium ")), (Some("medium".to_string()), false));
+    }
     use super::*;
     use crate::core::state::{create_harness_state, start_follow_up_goal};
 

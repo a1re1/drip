@@ -1224,6 +1224,15 @@ The `definition bodies carried` event records which. Named-file carry now
 allows five files under the same 40K-character budget, so the small hit
 files ride along with the named ones.
 
+The first prompt also carries the repository's file list — every file grouped
+by directory for a project of up to 120 files, else each top-level directory
+with its count and immediate subdirectories — and the small test files whose
+names pair with the carried sources (`tests/test_cli.py` beside
+`kvstore/cli.py`, up to two, 80 lines each). Five of 26 recorded bench runs
+had opened with a DIR round (`tests`, `kvstore`, `.`), and the ttl and
+big-file runs with a READ of the sibling test to match its style before
+extending it; both are now already in hand.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

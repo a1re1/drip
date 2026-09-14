@@ -190,16 +190,20 @@ mod goal_check_tests {
     fn direct_task_title_follows_the_plan_mode_and_goal_shape() {
         use super::{direct_task_title, PlanMode};
         let small = "Add a `count` subcommand to kvstore/cli.py. Run `python3 -m unittest discover -s tests -q`.";
-        assert_eq!(direct_task_title(small, PlanMode::Always), None);
-        assert_eq!(direct_task_title(small, PlanMode::Auto).as_deref(), Some(small));
-        assert!(direct_task_title(small, PlanMode::Direct).is_some());
+        assert_eq!(direct_task_title(small, PlanMode::Always, false), None);
+        assert_eq!(direct_task_title(small, PlanMode::Auto, false).as_deref(), Some(small));
+        assert!(direct_task_title(small, PlanMode::Direct, false).is_some());
+        // No declared check: direct only when the workspace has a detectable project suite.
+        let unchecked = "Rename the helper in kvstore/cli.py and update its callers.";
+        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, false), None);
+        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, true).as_deref(), Some(unchecked));
         // No declared check: auto plans.
-        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto), None);
+        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto, false), None);
         // Too long: auto plans.
         let long = format!("{} {}", small, "and more ".repeat(300));
-        assert_eq!(direct_task_title(&long, PlanMode::Auto), None);
-        assert!(direct_task_title(&long, PlanMode::Direct).is_some());
-        assert_eq!(direct_task_title("   ", PlanMode::Direct), None);
+        assert_eq!(direct_task_title(&long, PlanMode::Auto, true), None);
+        assert!(direct_task_title(&long, PlanMode::Direct, false).is_some());
+        assert_eq!(direct_task_title("   ", PlanMode::Direct, true), None);
     }
 
     #[test]
@@ -241,6 +245,46 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_long_bash_command_gets_a_generation_cost_note() {
+        assert!(long_bash_command_note("cargo test -q").is_none());
+        let script = "x".repeat(LONG_BASH_COMMAND_CHARS + 1);
+        let note = long_bash_command_note(&script).expect("note");
+        assert!(note.contains("1201 chars") && note.contains("separate calls"), "{note}");
+    }
+
+    #[test]
+    fn a_runner_bash_call_loses_its_trailing_tail_filter() {
+        let (input, dropped) = drop_runner_tail_filter(r#"{"command":"cargo test --lib shape 2>&1 | tail -3","timeoutMs":300000}"#);
+        assert_eq!(dropped.as_deref(), Some("| tail -3"));
+        let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(value["command"], "cargo test --lib shape 2>&1");
+        assert_eq!(value["timeoutMs"], 300000);
+        // Not a runner, or no filter: untouched.
+        let plain = r#"{"command":"ls | tail -3"}"#;
+        assert_eq!(drop_runner_tail_filter(plain), (plain.to_string(), None));
+        let bare = r#"{"command":"cargo test -q"}"#;
+        assert_eq!(drop_runner_tail_filter(bare), (bare.to_string(), None));
+    }
+
+    #[test]
+    fn a_repeated_verify_reuses_a_current_passing_record_only() {
+        use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
+        let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 1, passed: 1, failed: 0, skipped: None, detail: None };
+        let record = HarnessVerificationRecord { at_iteration: 3, command: "cargo test --lib native_runner 2>&1 | tail -20".into(), failed: false, output_tail: String::new(), ran_no_tests: None, evidence: Some(tests.clone()), id: Some("v2".into()) };
+        // Same shape (tail filter and verbosity ignored), nothing edited: reused, citing the record.
+        let text = repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 0).expect("reused");
+        assert!(text.contains("record v2") && text.contains("iteration 3"), "{text}");
+        // An edit since, a different command, a failed run, or no executed evidence: runs again.
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 1).is_none());
+        assert!(repeated_verify_reuse("cargo test --lib other", Some(&record), 0).is_none());
+        let failed = HarnessVerificationRecord { failed: true, ..record.clone() };
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&failed), 0).is_none());
+        let empty = HarnessVerificationRecord { evidence: Some(VerificationEvidence { executed: 0, passed: 0, ..tests }), ..record.clone() };
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&empty), 0).is_none());
+        assert!(repeated_verify_reuse("cargo test", None, 0).is_none());
+    }
+
+    #[test]
     fn a_native_runner_suite_naming_no_edited_file_is_promoted_to_external() {
         use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
         let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 12, passed: 12, failed: 0, skipped: None, detail: None };
@@ -263,6 +307,18 @@ mod review_brief_tests {
         assert!(promote_native_runner_anchor(None, "python3 probe.py", &tests, &[]).is_none());
         let none_ran = VerificationEvidence { executed: 0, passed: 0, kind: VerificationEvidenceKind::Unverified, ..tests.clone() };
         assert!(promote_native_runner_anchor(None, "cargo test", &none_ran, &[]).is_none());
+        // Newer runners map through native_runner_name to their short names.
+        for (command, name) in [
+            ("mix test", "mix test"),
+            ("dotnet test --logger trx", "dotnet test"),
+            ("mvn test -q", "mvn test"),
+            ("gradle test", "gradle test"),
+            ("./gradlew test --tests core.*", "gradle test"),
+        ] {
+            let promoted = promote_native_runner_anchor(None, command, &tests, &edited).expect("promoted");
+            assert_eq!(promoted.kind, VerificationAnchorKind::External);
+            assert!(promoted.source.as_deref().unwrap_or("").contains(name), "{:?}", promoted.source);
+        }
     }
 
     #[test]
@@ -983,6 +1039,18 @@ pub fn normalize_command_shape(command: &str) -> String {
     if words.len() > 2 && matches!(words[0], "timeout" | "gtimeout") && words[1].chars().all(|c| c.is_ascii_digit() || c == 's' || c == 'm') {
         words.drain(0..2);
     }
+    // Trailing `2>/dev/null` redirect.
+    if words.last() == Some(&"2>/dev/null") {
+        words.pop();
+    }
+    // Trailing `--nocapture` flag.
+    if words.last() == Some(&"--nocapture") {
+        words.pop();
+        // Drop the `--` test-harness separator that introduced it.
+        if words.last() == Some(&"--") {
+            words.pop();
+        }
+    }
     words.retain(|word| !matches!(*word, "2>&1" | "-v" | "-vv" | "-q" | "--verbose" | "--quiet"));
     words.join(" ")
 }
@@ -1425,6 +1493,86 @@ pub fn promote_native_runner_anchor(
     }
 }
 
+/// The text a VERIFY gets instead of running when it repeats the last
+/// verification record's command with no edit in between: the record is
+/// still current, so re-running proves nothing the run does not already
+/// hold (dogfood #42 re-ran a 12s `cargo test` filter it had just recorded
+/// from BASH, then finished on the duplicate). Only a passing record with
+/// executed evidence is reused; a failed, empty, or stale record lets the
+/// VERIFY run so the model sees fresh output.
+/// Prefix of the text a reused VERIFY returns; the recorder skips such a
+/// result so the current record stays instead of being replaced by an
+/// empty one parsed from this text.
+pub const VERIFY_REUSED_PREFIX: &str = "VERIFY not re-run:";
+
+pub fn repeated_verify_reuse(
+    command: &str,
+    record: Option<&crate::core::types::HarnessVerificationRecord>,
+    mutations_since: i64,
+) -> Option<String> {
+    let record = record?;
+    if record.failed || record.ran_no_tests == Some(true) || mutations_since > 0 {
+        return None;
+    }
+    let evidence = record.evidence.as_ref()?;
+    if evidence.executed == 0 {
+        return None;
+    }
+    let same = normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(command))
+        == normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(&record.command));
+    if !same {
+        return None;
+    }
+    let id = record.id.as_deref().unwrap_or("the last record");
+    Some(format!(
+        "{VERIFY_REUSED_PREFIX} the same command already passed as verification record {id} at iteration {} ({} executed, {} failed) and nothing was edited since — that record is current, so cite it in finish_task instead of re-running. Re-run only after an edit.",
+        record.at_iteration, evidence.executed, evidence.failed
+    ))
+}
+
+/// A BASH call whose command is a native test runner piped into a trailing
+/// `| tail -N` / `| head -N` gets the filter dropped, the way VERIFY does:
+/// the filter hides the failure block (a recorded run saw only "FAILED. 0
+/// passed; 1 failed" through `| tail -3` and spent the next round on
+/// `| grep -A6 panicked`), while the harness already bounds runner output
+/// and excerpts failures. Returns the rewritten input and the dropped
+/// filter text, or the input untouched.
+/// A BASH command longer than this gets a note in its result: a recorded
+/// "prepare the PR" run spent 739s of its 1202s of inference on 24 calls
+/// whose 1200-4000-token shell scripts (printf banners, a dozen sections)
+/// each waited 20-45s to be generated before running.
+pub const LONG_BASH_COMMAND_CHARS: usize = 1200;
+
+pub fn long_bash_command_note(command: &str) -> Option<String> {
+    let chars = command.chars().count();
+    (chars > LONG_BASH_COMMAND_CHARS).then(|| {
+        format!(
+            "[harness] this command was {chars} chars (~{} output tokens, ~{}s to generate before it ran). Keep BASH calls to one command or a short pipeline and put independent checks in separate calls in the same round.",
+            chars / 4,
+            chars / 4 * 13 / 1000
+        )
+    })
+}
+
+pub fn drop_runner_tail_filter(raw_input: &str) -> (String, Option<String>) {
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return (raw_input.to_string(), None);
+    };
+    let Some(command) = input.get("command").and_then(|value| value.as_str()).map(str::to_string) else {
+        return (raw_input.to_string(), None);
+    };
+    if native_runner_name(&command).is_none() {
+        return (raw_input.to_string(), None);
+    }
+    let stripped = crate::tools::builtin::verify::strip_trailing_tail_pipe(&command);
+    if stripped == command.trim() {
+        return (raw_input.to_string(), None);
+    }
+    let dropped = command.trim()[stripped.len()..].trim().to_string();
+    input["command"] = serde_json::Value::String(stripped);
+    (input.to_string(), Some(dropped))
+}
+
 pub fn native_runner_name(command: &str) -> Option<&'static str> {
     const RUNNERS: &[(&str, &str)] = &[
         ("cargo test", "cargo test"),
@@ -1440,6 +1588,11 @@ pub fn native_runner_name(command: &str) -> Option<&'static str> {
         ("pnpm test", "pnpm test"),
         ("yarn test", "yarn test"),
         ("jest", "jest"),
+        ("mix test", "mix test"),
+        ("dotnet test", "dotnet test"),
+        ("mvn test", "mvn test"),
+        ("gradle test", "gradle test"),
+        ("./gradlew test", "gradle test"),
     ];
     RUNNERS.iter().find(|(needle, _)| command.contains(needle)).map(|(_, name)| *name)
 }
@@ -1788,16 +1941,20 @@ pub const DIRECT_PLAN_MAX_PATHS: usize = 10;
 
 /// The title of the direct task a run seeds instead of planning, or None
 /// when this goal should be planned: `Always` never seeds; `Direct` always
-/// does; `Auto` seeds only for a short goal naming few paths that declares
-/// its own backticked acceptance check (so the harness can still verify).
-pub fn direct_task_title(goal: &str, mode: PlanMode) -> Option<String> {
+/// does; `Auto` seeds only for a short goal naming few paths whose change
+/// the harness can still verify — the goal declares its own backticked
+/// acceptance check, or `project_check` says the workspace has a detectable
+/// suite (see detect_project_check_command). Most real goals declare no
+/// check, and every one of them paid a 13-16s planner call for a plan of
+/// one task.
+pub fn direct_task_title(goal: &str, mode: PlanMode, project_check: bool) -> Option<String> {
     let goal = goal.trim();
     if goal.is_empty() {
         return None;
     }
     let small = goal.chars().count() <= DIRECT_PLAN_MAX_GOAL_CHARS
         && extract_goal_paths(goal).len() <= DIRECT_PLAN_MAX_PATHS
-        && !goal_declared_check_commands(goal).is_empty();
+        && (!goal_declared_check_commands(goal).is_empty() || project_check);
     let seed = match mode {
         PlanMode::Always => false,
         PlanMode::Direct => true,
@@ -3674,6 +3831,10 @@ impl HarnessRun {
     ) -> Option<String> {
         let tool_name = tool_name.to_string();
         let raw_input = raw_input.to_string();
+            // A reused VERIFY ran nothing: the record it cites stays current.
+            if tool_name == "VERIFY" && !execution.dispatched && execution.tool_content.starts_with(VERIFY_REUSED_PREFIX) {
+                return None;
+            }
             let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
                 .or_else(|| {
                     (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
@@ -4192,6 +4353,19 @@ impl HarnessRun {
             });
             return WorkspaceToolExecution { dispatched: false, failed: true, tool_content: text };
         }
+        if tool_name == "VERIFY" {
+            if let Some(text) = command.as_deref().and_then(|command| {
+                repeated_verify_reuse(command, self.state.last_verification.as_ref(), self.state.mutations_since_verification.unwrap_or(0))
+            }) {
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                    detail: format!("repeated VERIFY reused the current record instead of re-running: {}", truncate_text(command.as_deref().unwrap_or(""), 120)),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+                return WorkspaceToolExecution { dispatched: false, failed: false, tool_content: text };
+            }
+        }
         let dispatched = tool.is_some();
         let executed = execute_tool_call(ToolExecutionContext {
             call_id,
@@ -4406,7 +4580,12 @@ impl HarnessRun {
             if !self.direct_plan_checked {
                 self.direct_plan_checked = true;
                 if self.state.tasks.is_empty() {
-                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode) {
+                    let project_check = if goal_declared_check_commands(&self.state.goal).is_empty() {
+                        detect_project_check_command(&self.cwd)
+                    } else {
+                        None
+                    };
+                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode, project_check.is_some()) {
                         let added = core_state::add_tasks(
                             &mut self.state,
                             vec![core_state::HarnessTaskInput { depends_on: None, review_of: None, role: None, title }],
@@ -4419,9 +4598,13 @@ impl HarnessRun {
                             );
                         }
                         let detail = format!(
-                            "direct task seeded, planner skipped (plan mode {:?}): {}",
+                            "direct task seeded, planner skipped (plan mode {:?}): {}{}",
                             self.plan_mode,
-                            added.first().map(|task| task.id.as_str()).unwrap_or("?")
+                            added.first().map(|task| task.id.as_str()).unwrap_or("?"),
+                            project_check
+                                .as_ref()
+                                .map(|(command, source)| format!(" — the goal declares no check; the project suite {command} ({source}) verifies it"))
+                                .unwrap_or_default()
                         );
                         self.emit(HarnessEvent {
                             data: Some(HarnessEventData { task_id: added.first().map(|task| task.id.clone()), ..Default::default() }),
@@ -6038,6 +6221,7 @@ impl HarnessRun {
             let prior_loop_text = prior_record.as_ref().map(|record| record.last_used_iteration.to_string());
             let prior_output = prior_record.map(|record| record.last_output);
 
+            let (raw_input, dropped_tail_filter) = if tool_name == "BASH" { drop_runner_tail_filter(&raw_input) } else { (raw_input, None) };
             let execution_started_at_ms = (self.now)().timestamp_millis();
             let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
@@ -6084,6 +6268,28 @@ impl HarnessRun {
                 &execution.tool_content,
                 scope.loop_budget.max_tool_result_chars as usize,
             );
+            if let Some(note) = bash_command.as_deref().and_then(long_bash_command_note) {
+                tool_content.push_str("\n");
+                tool_content.push_str(&note);
+            }
+            if let Some(filter) = dropped_tail_filter.as_deref() {
+                tool_content.push_str(&format!(
+                    "\n[harness] the trailing `{filter}` was dropped: runner output is bounded here and its failure block is kept, so the summary and any panic are both visible without a re-run."
+                ));
+            }
+            // A truncated runner failure keeps its panic block: the ends-kept
+            // cut drops the middle, which is where the assertion lives.
+            if execution.failed
+                && bash_command.as_deref().or(verification_command.as_deref()).is_some_and(|command| native_runner_name(command).is_some())
+                && execution.tool_content.chars().count() > scope.loop_budget.max_tool_result_chars as usize
+            {
+                if let Some(excerpt) = crate::tools::builtin::verify::runner_failure_excerpt(&execution.tool_content) {
+                    let first = excerpt.lines().next().unwrap_or("");
+                    if !first.is_empty() && !tool_content.contains(first) {
+                        tool_content.push_str(&format!("\n\n[harness] failure excerpt from the elided middle:\n{excerpt}"));
+                    }
+                }
+            }
 
             // Oversized output spills to a file beside the state store so the
             // elided middle stays recoverable with READ/GREP.
@@ -7406,9 +7612,13 @@ mod role_inference_tests {
             "cd /tmp && python3 -m unittest discover -s tests",
             "RUST_BACKTRACE=1 python3 -m unittest discover -s tests",
             "cd crate && RUST_BACKTRACE=1 python3 -m unittest discover -s tests -v",
+            "python3 -m unittest discover -s tests 2>/dev/null",
+            "python3 -m unittest discover -s tests -- --nocapture",
         ] {
             assert_eq!(normalize_command_shape(variant), base, "{variant}");
         }
+        assert_eq!(normalize_command_shape("cargo test foo 2>/dev/null"), "cargo test foo");
+        assert_eq!(normalize_command_shape("cargo test foo -- --nocapture"), "cargo test foo");
         assert_ne!(normalize_command_shape("python3 -m unittest tests.test_server"), base);
     }
 

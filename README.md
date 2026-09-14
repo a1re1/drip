@@ -1314,6 +1314,21 @@ goals declare no check and their reviews re-ran exactly that suite. The same
 suite run through BASH instead of VERIFY is recorded as a verification too
 (the result text says `recorded as verification record v<n>`), so a finish
 after `cargo test` via BASH is not bounced into re-running it as VERIFY.
+And a VERIFY that repeats the current record's command (same shape, nothing
+edited since, the record passed with executed tests) does not run again: the
+result says `VERIFY not re-run` and names the record to cite (`mix test`,
+`dotnet test`, `mvn test` and `gradle test` count as native runners too).
+A BASH runner command piped into a trailing `| tail -N` / `| head -N` loses
+the filter the way VERIFY does (the result says so): the filter hid the panic
+block behind "FAILED. 0 passed; 1 failed" and cost the next round a
+`| grep -A6 panicked`. When a failing runner's output is long enough to be
+cut in the middle, the failure block (from the first panic / assertion / FAIL
+line) is appended as `failure excerpt from the elided middle`.
+A BASH command over 1200 chars gets a note with its generation cost: a
+recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
+calls whose 1200-4000-token shell scripts each waited 20-45s to be written
+before they ran (the system prompt now asks for one command or a short
+pipeline per call, with independent checks as separate calls in one round).
 
 When a finish arrives with no check behind it and the goal declares none,
 the harness detects the project's own suite from the workspace layout
@@ -1340,8 +1355,11 @@ whose observation matched, or whose observed text reports success (exit 0,
 verification record, without anchor bookkeeping.
 
 `--plan-mode auto|always|direct` decides how a run gets its first task list.
-`auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that declares its own backticked
-acceptance check: one direct task is seeded from the goal text and the author
+`auto` (default) skips the planner for a small goal (≤2500 chars, ≤10 named paths) that the harness can still
+verify — it declares its own backticked acceptance check, or the workspace has
+a detectable project suite (`Cargo.toml`, `go.mod`, a `package.json` test
+script, pytest config, or a `tests/` of `.py` files; the seeded event names
+it): one direct task is seeded from the goal text and the author
 starts at once — the planner cost 13-20s on every speed-bench run, half the
 wall time of a small task, while the goal already said what to do and how to
 check it, and with `auto` the bench's small and medium tasks ran 25-60% faster at

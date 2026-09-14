@@ -787,6 +787,25 @@ pub fn strip_trailing_tail_pipe(command: &str) -> String {
     re.replace(command, "").trim().to_string()
 }
 
+/// The failure block of a test runner's output — from the first panic /
+/// assertion / FAIL line, up to 40 lines — so a bounded tool result can carry
+/// it when the ends-kept truncation elided the middle. Without it a recorded
+/// run spent a round re-running `cargo test … | grep -A6 panicked` to see
+/// what a `| tail -3` had hidden.
+pub fn runner_failure_excerpt(output: &str) -> Option<String> {
+    const MAX_LINES: usize = 40;
+    let start_re = Regex::new(r"(panicked at|assertion .*failed|AssertionError|--- FAIL:|^\s*Error:|^E\s{2,}|^FAIL\b|^\s*[✗✕×] )").unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.iter().position(|line| start_re.is_match(line))?;
+    let mut end = (start + MAX_LINES).min(lines.len());
+    // Stop at the runner summary: the result already shows the tail.
+    if let Some(offset) = lines[start..end].iter().position(|line| line.starts_with("test result:") || (line.starts_with("=====") && line.contains(" in "))) {
+        end = (start + offset).max(start + 1);
+    }
+    let excerpt = lines[start..end].join("\n");
+    (!excerpt.trim().is_empty()).then_some(excerpt)
+}
+
 pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyVerdict> {
     use crate::tools::child_process::{build_combined_output, run_captured_process, CapturedProcessArgs};
     let input = &prepared.input;
@@ -1084,6 +1103,18 @@ mod tests {
     }
 
     // -- go test -------------------------------------------------------------
+
+    #[test]
+    fn runner_failure_excerpt_starts_at_the_panic_and_stops_at_the_summary() {
+        let output = "running 1 test\ntest a::b ... FAILED\n\nfailures:\n\n---- a::b stdout ----\nthread 'a::b' panicked at src/x.rs:9:5:\nassertion `left == right` failed\n  left: 1\n right: 2\n\nfailures:\n    a::b\n\ntest result: FAILED. 0 passed; 1 failed\n";
+        use super::runner_failure_excerpt;
+        let excerpt = runner_failure_excerpt(output).expect("excerpt");
+        assert!(excerpt.starts_with("thread 'a::b' panicked at"), "{excerpt}");
+        assert!(excerpt.contains(" right: 2") && !excerpt.contains("test result:"), "{excerpt}");
+        assert!(runner_failure_excerpt("running 3 tests\ntest result: ok. 3 passed\n").is_none());
+        let py = "FAILED tests/test_a.py::test_b - AssertionError: 1 != 2\n1 failed in 0.1s\n";
+        assert!(runner_failure_excerpt(py).unwrap().starts_with("FAILED tests/test_a.py"));
+    }
 
     #[test]
     fn trailing_tail_and_head_pipes_are_dropped_from_verify_commands() {

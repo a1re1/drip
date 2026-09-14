@@ -369,9 +369,19 @@ fn decode_files_string(encoded: &str) -> Option<Value> {
     if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(encoded) {
         return Some(decoded);
     }
+    // Second attempt: a path value missing one or both quotes — `"path":
+    // src/x.rs",` — as a recorded run sent in the second of two entries,
+    // which cost the whole call and a round to resend. Well-formed paths
+    // re-quote to themselves; this runs before the structural-quote repair
+    // because that repair damages quoted text inside find/replace.
+    let bare_path = regex::Regex::new(r#"("path"\s*:\s*)"?([^"\s,\}\]][^",\}\]]*)"?(\s*[,\}\]])"#).ok()?;
+    let path_fixed = bare_path.replace_all(encoded, "${1}\"${2}\"${3}").into_owned();
+    if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(&path_fixed) {
+        return Some(decoded);
+    }
     let opening = regex::Regex::new(r#"([\{\[,:]\s*)\\""#).ok()?;
     let closing = regex::Regex::new(r#"\\"(\s*[:,\}\]])"#).ok()?;
-    let opened = opening.replace_all(encoded, "${1}\"").into_owned();
+    let opened = opening.replace_all(&path_fixed, "${1}\"").into_owned();
     let repaired = closing.replace_all(&opened, "\"${1}").into_owned();
     match serde_json::from_str::<Value>(&repaired) {
         Ok(decoded @ Value::Array(_)) => Some(decoded),
@@ -388,8 +398,17 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     // run lost a round to `"files": "[{...}]"`) is decoded when it holds an
     // array; anything else falls through to the usual shape errors.
     if let Some(Value::String(encoded)) = args.get("files") {
-        if let Some(decoded) = decode_files_string(encoded) {
-            args.insert("files".to_string(), decoded);
+        match decode_files_string(encoded) {
+            Some(decoded) => {
+                args.insert("files".to_string(), decoded);
+            }
+            None if args.get("path").is_none() => {
+                let why = serde_json::from_str::<Value>(encoded).err().map(|e| e.to_string()).unwrap_or_else(|| "not a JSON array".to_string());
+                return Err(anyhow!(
+                    "\"files\" was sent as a string that is not a valid JSON array ({why}). Send \"files\" as a JSON array of objects, each with \"path\" and either \"content\" or \"find\"/\"replace\" — not as a string."
+                ));
+            }
+            None => {}
         }
     }
 
@@ -1653,6 +1672,27 @@ mod execute_tests {
         assert_eq!(entry["find"], "let a = \"x\";");
         assert_eq!(entry["replace"], "let a = 1;");
         assert!(decode_files_string("not json at all").is_none());
+        // A bare path value in one entry (recorded run: `"path": src/harness/loop.rs}`).
+        let bare = r#"[{"find": "a", "path": "src/a.rs", "replace": "b"}, {"find": "c", "path": src/harness/loop.rs, "replace": "d"}]"#;
+        let decoded = decode_files_string(bare).expect("bare path quoted");
+        assert_eq!(decoded.as_array().unwrap()[1]["path"], "src/harness/loop.rs");
+        assert_eq!(decoded.as_array().unwrap()[1]["replace"], "d");
+        // The recorded shape: only the opening quote missing, and quoted text
+        // (`, \"jest\"`) inside the find that the structural repair must not touch.
+        let half = r#"[{"find": "(\"jest\", \"jest\"),", "path": "src/a.rs", "replace": "x"}, {"find": "c", "path": src/harness/loop.rs", "replace": "d"}]"#;
+        let decoded = decode_files_string(half).expect("half-quoted path repaired");
+        assert_eq!(decoded.as_array().unwrap()[0]["find"], "(\"jest\", \"jest\"),");
+        assert_eq!(decoded.as_array().unwrap()[1]["path"], "src/harness/loop.rs");
+    }
+
+    #[test]
+    fn an_undecodable_files_string_reports_the_shape_not_a_missing_path() {
+        let workspace = temp_workspace("files-string-bad");
+        let ctx = ctx_for(&workspace);
+        let outcome = execute(&serde_json::json!({"files": "[{oops"}), &ctx);
+        assert!(outcome.failed);
+        assert!(outcome.text.contains("not a valid JSON array"), "{}", outcome.text);
+        assert!(outcome.text.contains("Send \"files\" as a JSON array"), "{}", outcome.text);
     }
 
     #[test]

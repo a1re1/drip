@@ -304,6 +304,16 @@ applies.
 |------|-------------|
 | READ | Read file contents with line-based paging |
 | PATCH | Apply targeted find/replace or full-content writes to files |
+
+PATCH repairs the argument shapes small models get wrong instead of
+spending a round on the error: a `content` sent beside `replace` with no
+`find` is the old text; `content` beside `find` is the replacement; an entry
+of `files` with no `path` edits the call's top-level `path` or the nearest
+earlier entry's file; and a `find` that misses only by indentation (copied
+from a READ window at a different depth) matches the one window of the file
+with the same lines, with the replacement shifted by the same indentation
+and the summary saying so. Two windows, or a tab-versus-space mix, still
+report "not found".
 | DIR | Show project structure as a tree view |
 | BASH | Run a bash command and wait for it to finish |
 | BASH_ASYNC | Run a bash command in a detached tmux session (background) |

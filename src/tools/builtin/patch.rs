@@ -123,11 +123,71 @@ pub struct ResolvedEntry {
 // ---------------------------------------------------------------------------
 
 /// Count of non-overlapping matches of `find` in `text`.
+/// Note appended to a PATCH summary when the find matched only with its
+/// indentation ignored.
+pub const INDENT_MATCH_NOTE: &str = " (the find text matched only with its indentation ignored; the replacement was re-indented to the file's — check the diff)";
+
 pub fn count_occurrences(text: &str, find: &str) -> usize {
     if find.is_empty() {
         return 0;
     }
     text.matches(find).count()
+}
+
+/// Leading whitespace of a line.
+fn leading_ws(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// A find that misses only by indentation (a recorded run copied a block
+/// at four spaces from a READ window whose file kept it at eight, and lost
+/// the round to "not found"): when exactly one window of the file has the
+/// same lines once leading and trailing whitespace is ignored, returns the
+/// file's own text for that window and the replacement shifted by the same
+/// indentation delta (added when the file is deeper, stripped when it is
+/// shallower; a tab-vs-space mix leaves the replacement as sent).
+pub fn indentation_tolerant_match(existing: &str, find: &str, replace: &str) -> Option<(String, String)> {
+    let trailing_newline = find.ends_with('\n');
+    let body = if trailing_newline { &find[..find.len() - 1] } else { find };
+    let find_lines: Vec<&str> = body.split('\n').collect();
+    if !find_lines.iter().any(|line| line.trim().chars().count() >= 3) {
+        return None;
+    }
+    let file_lines: Vec<&str> = existing.split('\n').collect();
+    if file_lines.len() < find_lines.len() {
+        return None;
+    }
+    let same = |a: &str, b: &str| a.trim() == b.trim();
+    let starts: Vec<usize> = (0..=file_lines.len() - find_lines.len())
+        .filter(|&start| find_lines.iter().enumerate().all(|(j, line)| same(file_lines[start + j], line)))
+        .collect();
+    if starts.len() != 1 {
+        return None;
+    }
+    let start = starts[0];
+    let mut actual = file_lines[start..start + find_lines.len()].join("\n");
+    if trailing_newline && existing[..].contains(&format!("{actual}\n")) {
+        actual.push('\n');
+    }
+    if actual == find || count_occurrences(existing, &actual) != 1 {
+        return None;
+    }
+    let anchor = find_lines.iter().position(|line| !line.trim().is_empty()).unwrap_or(0);
+    let (file_indent, find_indent) = (leading_ws(file_lines[start + anchor]), leading_ws(find_lines[anchor]));
+    let reindent = |line: &str| -> String {
+        if line.trim().is_empty() {
+            return line.to_string();
+        }
+        if let Some(extra) = file_indent.strip_prefix(find_indent) {
+            format!("{extra}{line}")
+        } else if let Some(surplus) = find_indent.strip_prefix(file_indent) {
+            line.strip_prefix(surplus).map(str::to_string).unwrap_or_else(|| line.to_string())
+        } else {
+            line.to_string()
+        }
+    };
+    let replaced: Vec<String> = replace.split('\n').map(reindent).collect();
+    Some((actual, replaced.join("\n")))
 }
 
 /// 1-based line numbers where the find text starts, for honest summaries
@@ -389,6 +449,33 @@ fn decode_files_string(encoded: &str) -> Option<Value> {
     }
 }
 
+/// Argument-shape repairs for one PATCH entry (a files[] object or the
+/// call's own top-level fields): a missing path inherits `top_path`, else
+/// `previous_path`; a non-empty "content" beside a "replace" and no "find"
+/// becomes the "find" (the model named the old text "content").
+pub fn repair_patch_entry(entry: &mut serde_json::Map<String, Value>, top_path: Option<&str>, previous_path: Option<&str>) {
+    let path_missing = entry.get("path").and_then(Value::as_str).map_or(true, str::is_empty);
+    if path_missing {
+        if let Some(path) = top_path.or(previous_path) {
+            entry.insert("path".to_string(), Value::String(path.to_string()));
+        }
+    }
+    // Only when no "find" key was sent at all: an empty find beside content
+    // is a placeholder for a whole-file write, not a misnamed pair.
+    let content_nonempty = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+    let find_missing = entry.get("find").is_none();
+    let replace_present = entry.get("replace").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+    if content_nonempty && find_missing && replace_present {
+        // content echoed as replace (a recorded run sent a whole file under
+        // both names) is a whole-file write, not a no-op pair.
+        if entry.get("content") == entry.get("replace") {
+            entry.remove("replace");
+        } else if let Some(content) = entry.remove("content") {
+            entry.insert("find".to_string(), content);
+        }
+    }
+}
+
 pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     use anyhow::anyhow;
     let mut args = tool_arguments(args)?;
@@ -412,22 +499,29 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
         }
     }
 
-    // Tolerance: a top-level "path" beside a files[] whose entries carry no
-    // path means every entry edits that one file (a recorded run sent three
-    // find/replace entries that way and lost a round to "Missing path").
-    if let (Some(Value::String(path)), Some(Value::Array(entries))) = (args.get("path").cloned(), args.get("files").cloned()) {
-        if !entries.is_empty() && entries.iter().all(|entry| entry.get("path").is_none()) {
-            let filled: Vec<Value> = entries
-                .into_iter()
-                .map(|mut entry| {
-                    if let Some(object) = entry.as_object_mut() {
-                        object.insert("path".to_string(), Value::String(path.clone()));
+    // Tolerance: an entry with no path edits the file the call's top-level
+    // "path" names, or failing that the file of the nearest earlier entry
+    // (recorded runs sent three find/replace entries under one path, and
+    // mixed lists where only the first entry carried the path, and lost a
+    // round each to "Missing path"). An entry that sends the old text as
+    // "content" beside a "replace" is a find + replace pair under the wrong
+    // name; "content" beside a "find" is the replacement (handled below).
+    if let Some(Value::Array(entries)) = args.get("files").cloned() {
+        let top_path = args.get("path").and_then(Value::as_str).map(str::to_string);
+        let mut previous_path: Option<String> = None;
+        let filled: Vec<Value> = entries
+            .into_iter()
+            .map(|mut entry| {
+                if let Some(object) = entry.as_object_mut() {
+                    repair_patch_entry(object, top_path.as_deref(), previous_path.as_deref());
+                    if let Some(path) = object.get("path").and_then(Value::as_str) {
+                        previous_path = Some(path.to_string());
                     }
-                    entry
-                })
-                .collect();
-            args.insert("files".to_string(), Value::Array(filled));
-        }
+                }
+                entry
+            })
+            .collect();
+        args.insert("files".to_string(), Value::Array(filled));
     }
 
     // Multi-file transaction mode: files array takes precedence
@@ -583,6 +677,13 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
         }
     }
 
+    // content beside a replace and no find is the old text under the wrong
+    // name ({content, replace} was 12 of 110 recorded PATCH failures).
+    let (content, find, replace) = match (content, find, replace) {
+        (Some(text), None, Some(echo)) if echo == text && !text.is_empty() => (Some(text), None, None),
+        (Some(text), None, Some(new)) if !new.is_empty() && !text.is_empty() => (None, Some(text), Some(new)),
+        triple => triple,
+    };
     // content beside a non-empty find and no replace is the replacement text
     // under the wrong name (recorded runs sent {find, content} for a targeted
     // edit); read it as replace rather than costing a round on the error.
@@ -918,6 +1019,15 @@ pub fn resolve_file_entry(
             effective_replace = strip_line_number_prefixes(&effective_replace);
             occurrences = count_occurrences(&existing_text, &effective_find);
             crlf_note = " (line-number prefixes copied from READ output were stripped)".to_string();
+        }
+    }
+
+    if occurrences == 0 {
+        if let Some((actual_find, reindented)) = indentation_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+            effective_find = actual_find;
+            effective_replace = reindented;
+            occurrences = count_occurrences(&existing_text, &effective_find);
+            crlf_note = INDENT_MATCH_NOTE.to_string();
         }
     }
 
@@ -1342,6 +1452,15 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     }
 
     if occurrences == 0 {
+        if let Some((actual_find, reindented)) = indentation_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+            effective_find = actual_find;
+            effective_replace = reindented;
+            occurrences = existing_text.matches(&effective_find).count();
+            crlf_note = INDENT_MATCH_NOTE.to_string();
+        }
+    }
+
+    if occurrences == 0 {
         return Err(format!(
             "The find text was not found in \"{}\". READ the file and pass the exact text, including whitespace (do not include READ's line-number prefixes).",
             display_path
@@ -1468,7 +1587,7 @@ mod execute_tests {
     use super::*;
 
     // Creates a unique workspace dir under the OS temp dir and returns its path.
-    fn temp_workspace(tag: &str) -> std::path::PathBuf {
+    pub(super) fn temp_workspace(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "drip-patch-execute-tests-{}-{}",
             tag,
@@ -1481,7 +1600,7 @@ mod execute_tests {
         dir
     }
 
-    fn ctx_for(dir: &std::path::Path) -> ToolCtx {
+    pub(super) fn ctx_for(dir: &std::path::Path) -> ToolCtx {
         ToolCtx {
             cwd: dir.to_path_buf(),
             allow_net: false,
@@ -2213,5 +2332,68 @@ mod prepare_tests {
         )
         .unwrap_err();
         assert!(err.to_string().starts_with("Pass either content, or find + replace"), "{err}");
+    }
+
+    #[test]
+    fn a_find_that_misses_only_by_indentation_matches_and_reindents_the_replacement() {
+        let workspace = super::execute_tests::temp_workspace("indent-tolerant");
+        let ctx = super::execute_tests::ctx_for(&workspace);
+        let file = workspace.join("mod.py");
+        std::fs::write(&file, "class A:\n    def f(self):\n        x = 1\n        return x\n").unwrap();
+        let outcome = execute(
+            &json!({"path": "mod.py", "find": "    x = 1\n    return x\n", "replace": "    x = 2\n    return x\n"}),
+            &ctx,
+        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "class A:\n    def f(self):\n        x = 2\n        return x\n");
+        assert!(outcome.text.contains("indentation ignored"), "{}", outcome.text);
+        // Deeper find than file: the surplus is stripped from the replacement.
+        let outcome = execute(
+            &json!({"files": [{"path": "mod.py", "find": "            x = 2", "replace": "            x = 3"}]}),
+            &ctx,
+        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("        x = 3\n"));
+        // Ambiguous windows stay "not found".
+        std::fs::write(&file, "a\n    b\nc\n        b\n").unwrap();
+        let outcome = execute(&json!({"path": "mod.py", "find": "  bbb", "replace": "z"}), &ctx);
+        assert!(outcome.failed);
+        assert!(indentation_tolerant_match("a\n    b\nc\n        b\n", "  b", "z").is_none(), "two windows and a too-short line");
+        assert!(indentation_tolerant_match("    let value = 1;\n", "let value = 1;", "let value = 2;").is_some());
+    }
+
+    #[test]
+    fn content_beside_replace_is_the_find_and_pathless_entries_inherit_a_path() {
+        let workspace = super::execute_tests::temp_workspace("repair-shapes");
+        let ctx = super::execute_tests::ctx_for(&workspace);
+        std::fs::write(workspace.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(workspace.join("b.txt"), "three\n").unwrap();
+        let outcome = execute(&json!({"path": "a.txt", "content": "one", "replace": "uno"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "uno\ntwo\n");
+        // The same text under both names is a whole-file write.
+        let outcome = execute(&json!({"path": "c.txt", "content": "whole\n", "replace": "whole\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(workspace.join("c.txt")).unwrap(), "whole\n");
+        let outcome = execute(&json!({"files": [{"path": "d.txt", "content": "whole\n", "replace": "whole\n"}]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(workspace.join("d.txt")).unwrap(), "whole\n");
+        let outcome = execute(
+            &json!({"files": [
+                {"path": "b.txt", "find": "three", "replace": "tres"},
+                {"content": "tres", "replace": "3"},
+                {"path": "a.txt", "find": "two", "replace": "dos"},
+                {"find": "dos", "replace": "2"}
+            ]}),
+            &ctx,
+        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "uno\n2\n");
+        assert_eq!(std::fs::read_to_string(workspace.join("b.txt")).unwrap(), "3\n");
+        let outcome = execute(&json!({"path": "a.txt", "files": [{"find": "uno", "replace": "1"}, {"path": "b.txt", "find": "3", "replace": "iii"}]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "1\n2\n");
+        let err = prepare(&json!({"files": [{"find": "x", "replace": "y"}]}), &test_ctx()).unwrap_err();
+        assert!(err.to_string().contains("Missing or empty \"path\""), "{err}");
     }
 }

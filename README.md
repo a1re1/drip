@@ -1343,6 +1343,14 @@ the first dogfood of this lever handed the model the head and tail of a 32KB
 file and it re-read the whole file twice more. A recorded run paged through
 an 845-line file in 66 windows, one round each, when a handful of full reads
 would have carried the same text.
+A native-runner filter that is a source module's stem (`cargo test --lib
+child_process` against an edited `src/tools/child_process.rs`) no longer
+downgrades the run to self-authored — the stem rule applies to test-like
+paths only (`tests/`, `test_*`, `*_test`, `*.test`/`*.spec`), since a module
+filter runs that module's mostly pre-existing tests; a recorded run had its
+36-test filtered run downgraded on that match and then paid a full-suite
+re-run at finish. A `cargo test` given two positional filters fails before
+any test runs; the result now says to chain separate commands.
 A BASH command over 1200 chars gets a note with its generation cost: a
 recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
 calls whose 1200-4000-token shell scripts each waited 20-45s to be written

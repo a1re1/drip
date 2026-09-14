@@ -746,6 +746,17 @@ pub fn overlay_role_definition(base: RoleDefinition, over: RoleDefinition) -> Ro
 	}
 }
 
+/// Reasoning effort planning loops run at when the role sets none.
+pub const PLANNING_DEFAULT_REASONING_EFFORT: &str = "medium";
+
+/// The effort a planning-bound role's route should switch to: only a role
+/// bound to planning/replanning, only when the role itself set no effort,
+/// and only down from the profile's "high" (a provider default or a lower
+/// setting is left alone).
+pub fn planning_effort_default(is_planning: bool, explicit: bool, current: Option<&str>) -> Option<&'static str> {
+	(is_planning && !explicit && current == Some("high")).then_some(PLANNING_DEFAULT_REASONING_EFFORT)
+}
+
 fn overlay_into(definitions: &mut indexmap::IndexMap<String, RoleDefinition>, role: RoleDefinition) {
 	let merged = match definitions.shift_remove(&role.name) {
 		Some(base) => overlay_role_definition(base, role),
@@ -994,6 +1005,23 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
 			.or(project_source.bindings.as_ref().and_then(|b| b.task.clone()))
 			.or(config_source.bindings.as_ref().and_then(|b| b.task.clone())),
 	};
+
+	// Planning loops run at medium reasoning effort unless the role says
+	// otherwise: a same-window A/B (five tasks × 2, planner gpt-6-astra via
+	// codex) halved the planning call at medium — 6.6-12.4s vs 12.6-24.6s —
+	// with the same hidden-test pass rate and the same one-task plans, so a
+	// planned run finished 30-40% sooner. The profile's "high" is the model's
+	// general default, not a planning choice.
+	for role in roles.iter_mut() {
+		let is_planning = merged_bindings.planning.as_deref() == Some(role.name.as_str())
+			|| merged_bindings.replanning.as_deref() == Some(role.name.as_str());
+		let explicit = definitions.get(&role.name).is_some_and(|definition| definition.reasoning_effort.is_some());
+		if let Some(route) = role.route.as_mut() {
+			if let Some(effort) = planning_effort_default(is_planning, explicit, route.reasoning_effort.as_deref()) {
+				route.reasoning_effort = Some(effort.to_string());
+			}
+		}
+	}
 
 	for kind in ["planning", "replanning", "task"] {
 		let bound = match kind {
@@ -1258,6 +1286,15 @@ mod overlay_tests {
 		let merged = overlay_role_definition(merged, over);
 		assert_eq!(merged.model.as_deref(), Some("glm-5-3-flash"));
 		assert_eq!(merged.reasoning_effort.as_deref(), Some("medium"));
+	}
+
+	#[test]
+	fn planning_roles_step_down_from_high_unless_they_set_an_effort() {
+		assert_eq!(planning_effort_default(true, false, Some("high")), Some("medium"));
+		assert_eq!(planning_effort_default(true, true, Some("high")), None);
+		assert_eq!(planning_effort_default(false, false, Some("high")), None);
+		assert_eq!(planning_effort_default(true, false, Some("low")), None);
+		assert_eq!(planning_effort_default(true, false, None), None);
 	}
 }
 

@@ -245,6 +245,38 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn the_fourth_read_window_of_a_small_file_becomes_a_whole_file_read() {
+        let dir = std::env::temp_dir().join(format!("drip-read-promote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = (1..=120).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.join("a.rs"), &text).unwrap();
+        let input = r#"{"path":"a.rs","offset":41,"limit":40}"#;
+        // Under the threshold: untouched.
+        assert_eq!(promote_read_to_whole_file(input, 2, &dir), (input.to_string(), None));
+        // At the threshold: the whole file, with a note.
+        let (promoted, note) = promote_read_to_whole_file(input, 3, &dir);
+        let value: serde_json::Value = serde_json::from_str(&promoted).unwrap();
+        assert_eq!(value["offset"], 1);
+        assert_eq!(value["limit"], 120);
+        assert!(note.unwrap().contains("window 4 of a.rs"));
+        // Already a whole-file read, a missing file, or a huge file: untouched.
+        let whole = r#"{"path":"a.rs","offset":1,"limit":400}"#;
+        assert_eq!(promote_read_to_whole_file(whole, 5, &dir), (whole.to_string(), None));
+        let missing = r#"{"path":"nope.rs","offset":41,"limit":40}"#;
+        assert_eq!(promote_read_to_whole_file(missing, 5, &dir), (missing.to_string(), None));
+        let big: String = (1..=READ_WHOLE_FILE_MAX_LINES + 1).map(|n| format!("{n}\n")).collect();
+        std::fs::write(dir.join("big.rs"), big).unwrap();
+        let big_input = r#"{"path":"big.rs","offset":41,"limit":40}"#;
+        assert_eq!(promote_read_to_whole_file(big_input, 5, &dir), (big_input.to_string(), None));
+        // Few lines but too many chars: untouched.
+        let wide: String = (1..=200).map(|_| format!("{}\n", "x".repeat(300))).collect();
+        std::fs::write(dir.join("wide.rs"), wide).unwrap();
+        let wide_input = r#"{"path":"wide.rs","offset":41,"limit":40}"#;
+        assert_eq!(promote_read_to_whole_file(wide_input, 5, &dir), (wide_input.to_string(), None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_long_bash_command_gets_a_generation_cost_note() {
         assert!(long_bash_command_note("cargo test -q").is_none());
         let script = "x".repeat(LONG_BASH_COMMAND_CHARS + 1);
@@ -1552,6 +1584,56 @@ pub fn long_bash_command_note(command: &str) -> Option<String> {
             chars / 4 * 13 / 1000
         )
     })
+}
+
+/// READ windows of one file in one loop before the next READ of it returns
+/// the whole file (when the file is at most READ_WHOLE_FILE_MAX_LINES): a
+/// recorded run paged through an 845-line file in 66 windows, one round
+/// each, when three or four full reads would have carried the same text.
+pub const READ_WHOLE_FILE_AFTER: u32 = 3;
+pub const READ_WHOLE_FILE_MAX_LINES: usize = 1500;
+/// A promoted whole-file read bypasses the per-result truncation up to this
+/// many chars (about 10K tokens): under the default 8000-char cap the first
+/// dogfood of this lever handed the model the head and tail of a 32KB file
+/// and it re-read the whole file twice more. One bounded read replaces the
+/// pages the model would otherwise request one round at a time.
+pub const READ_WHOLE_FILE_MAX_CHARS: usize = 40_000;
+
+/// Rewrites a READ of a path already paged `prior_windows` times this loop
+/// into a whole-file read, returning the new input and the note to append;
+/// otherwise the input untouched.
+pub fn promote_read_to_whole_file(raw_input: &str, prior_windows: u32, cwd: &std::path::Path) -> (String, Option<String>) {
+    if prior_windows < READ_WHOLE_FILE_AFTER {
+        return (raw_input.to_string(), None);
+    }
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return (raw_input.to_string(), None);
+    };
+    let Some(path) = input.get("path").and_then(|value| value.as_str()).map(str::to_string) else {
+        return (raw_input.to_string(), None);
+    };
+    let full = if std::path::Path::new(&path).is_absolute() { std::path::PathBuf::from(&path) } else { cwd.join(&path) };
+    let Ok(text) = std::fs::read_to_string(&full) else {
+        return (raw_input.to_string(), None);
+    };
+    let lines = text.lines().count();
+    if lines == 0 || lines > READ_WHOLE_FILE_MAX_LINES || text.chars().count() > READ_WHOLE_FILE_MAX_CHARS {
+        return (raw_input.to_string(), None);
+    }
+    let offset = input.get("offset").and_then(|value| value.as_f64()).unwrap_or(1.0);
+    let limit = input.get("limit").and_then(|value| value.as_f64()).unwrap_or(400.0);
+    if offset <= 1.0 && limit as usize >= lines {
+        return (raw_input.to_string(), None);
+    }
+    input["offset"] = serde_json::Value::from(1);
+    input["limit"] = serde_json::Value::from(lines as u64);
+    (
+        input.to_string(),
+        Some(format!(
+            "[harness] READ window {} of {path} in this loop — the whole file ({lines} lines) is returned instead of another page, so read it once and stop paging.",
+            prior_windows + 1
+        )),
+    )
 }
 
 pub fn drop_runner_tail_filter(raw_input: &str) -> (String, Option<String>) {
@@ -2897,6 +2979,9 @@ pub struct LoopScope {
     /// point at it instead of sending the content again — only while that
     /// message is still unfolded.
     pub hot_read_only_results: HashMap<String, (usize, String)>,
+    /// READ windows opened on each path this loop, so the fourth window of
+    /// one file returns the whole file instead of another page.
+    pub read_windows: HashMap<String, u32>,
     pub used_tool_call_ids: HashSet<String>,
     pub affordable_cycles: i64,
     /// The cycle currently running (1-based; 0 before the first begins).
@@ -4970,6 +5055,7 @@ impl HarnessRun {
             transport_messages: Vec::new(),
             folded_message_indexes: HashSet::new(),
             hot_read_only_results: HashMap::new(),
+            read_windows: HashMap::new(),
             used_tool_call_ids: HashSet::new(),
             affordable_cycles,
             cycle: 0,
@@ -6223,6 +6309,19 @@ impl HarnessRun {
             let prior_output = prior_record.map(|record| record.last_output);
 
             let (raw_input, dropped_tail_filter) = if tool_name == "BASH" { drop_runner_tail_filter(&raw_input) } else { (raw_input, None) };
+            let (raw_input, whole_file_note) = if tool_name == "READ" {
+                let path = serde_json::from_str::<serde_json::Value>(&raw_input)
+                    .ok()
+                    .and_then(|value| value.get("path").and_then(|path| path.as_str()).map(str::to_string));
+                let prior = path.as_ref().and_then(|path| scope.read_windows.get(path).copied()).unwrap_or(0);
+                let promoted = promote_read_to_whole_file(&raw_input, prior, std::path::Path::new(&self.cwd));
+                if let Some(path) = path {
+                    *scope.read_windows.entry(path).or_insert(0) += 1;
+                }
+                promoted
+            } else {
+                (raw_input, None)
+            };
             let execution_started_at_ms = (self.now)().timestamp_millis();
             let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
@@ -6265,13 +6364,21 @@ impl HarnessRun {
 
             let verification_command = self.record_verification_outcome(scope, &tool_name, &raw_input, &mut execution);
 
-            let mut tool_content = truncate_text_keeping_ends(
-                &execution.tool_content,
-                scope.loop_budget.max_tool_result_chars as usize,
-            );
+            // A promoted whole-file READ is the one result allowed past the
+            // per-result cap: it replaces the pages the model would request.
+            let result_cap = if whole_file_note.is_some() {
+                (scope.loop_budget.max_tool_result_chars as usize).max(READ_WHOLE_FILE_MAX_CHARS + 512)
+            } else {
+                scope.loop_budget.max_tool_result_chars as usize
+            };
+            let mut tool_content = truncate_text_keeping_ends(&execution.tool_content, result_cap);
             if let Some(note) = bash_command.as_deref().and_then(long_bash_command_note) {
                 tool_content.push_str("\n");
                 tool_content.push_str(&note);
+            }
+            if let Some(note) = whole_file_note.as_deref() {
+                tool_content.push_str("\n");
+                tool_content.push_str(note);
             }
             if let Some(filter) = dropped_tail_filter.as_deref() {
                 tool_content.push_str(&format!(
@@ -6294,7 +6401,7 @@ impl HarnessRun {
 
             // Oversized output spills to a file beside the state store so the
             // elided middle stays recoverable with READ/GREP.
-            if execution.tool_content.chars().count() > scope.loop_budget.max_tool_result_chars as usize {
+            if execution.tool_content.chars().count() > result_cap {
                 if let Some(state_path) = self.options.state_path.clone() {
                     let spill_path = spill_tool_output(&state_path.to_string_lossy(), self.state.r#loop as u32, &call_id, &execution.tool_content);
                     if let Some(spill_path) = spill_path {

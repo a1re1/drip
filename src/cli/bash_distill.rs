@@ -391,6 +391,7 @@ pub async fn distill_with_model(
         headers.push(("content-type".to_string(), "application/json".to_string()));
     }
     let caller = create_model_caller(ModelCallerDeps {
+        codex_executable: None,
         cwd: None,
         default_transport_tools: Vec::new(),
         emit: Arc::new(|_| {}),

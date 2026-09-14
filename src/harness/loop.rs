@@ -3347,6 +3347,7 @@ impl HarnessRun {
         let retry_sink = usage_inbox.clone();
         let call_model = crate::harness::model_call::create_model_caller(
             crate::harness::model_call::ModelCallerDeps {
+                codex_executable: None,
                 cwd: Some(cwd.clone()),
                 default_transport_tools: default_transport_tools.clone(),
                 emit: emit_fn.clone(),

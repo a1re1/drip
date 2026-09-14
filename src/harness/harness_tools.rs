@@ -1332,6 +1332,30 @@ pub struct HarnessToolResult {
 /// The review task's review_of points at the most recently finished task
 /// (the rework target on rejection); the others are named in its title and
 /// notes so the reviewer verifies all of them.
+/// The command of a passing check the harness trusts to settle the current
+/// change: not failed, ran at least one test, an external (goal-declared or
+/// harness-run) anchor, and no edit since. The review is told about it so the
+/// reviewer confirms the diff instead of spending rounds re-running a suite
+/// the harness already ran green. 50 of 68 recorded review loops re-ran a
+/// test command and none of the 68 changed a line. None when the last check
+/// is missing, stale, self-authored, empty, or proved nothing.
+pub fn review_trusts_recorded_check(state: &crate::core::types::HarnessState) -> Option<String> {
+    let record = state.last_verification.as_ref()?;
+    if record.failed || record.ran_no_tests == Some(true) || state.mutations_since_verification.unwrap_or(0) > 0 {
+        return None;
+    }
+    let evidence = record.evidence.as_ref()?;
+    let anchor = evidence.anchor.as_ref()?;
+    if anchor.kind != crate::core::types::VerificationAnchorKind::External || evidence.executed <= 0 || evidence.failed > 0 {
+        return None;
+    }
+    let command = record.command.trim();
+    if command.is_empty() || command.starts_with("CHECK ") {
+        return None;
+    }
+    Some(command.to_string())
+}
+
 pub fn spawn_deferred_review(
     state: &mut crate::core::types::HarnessState,
     gate: &HarnessRoleGate,
@@ -1357,12 +1381,27 @@ pub fn spawn_deferred_review(
         }
         return None;
     }
+    let trusted_check = review_trusts_recorded_check(state);
     let ids: Vec<&str> = awaiting.iter().map(|(id, _, _, _)| id.as_str()).collect();
     let covered = ids.join(", ");
+    // When a trusted check already settled the change, the title asks for a
+    // diff review rather than "independently verify with your own tools", so
+    // it does not pull the reviewer back into re-running the passed suite the
+    // note tells it to trust.
+    let verify_clause = if trusted_check.is_some() {
+        "confirm the completed work by reading the diff (a check already passed — see the note; re-run only on a specific doubt)"
+    } else {
+        "independently verify the completed work with your own tools"
+    };
+    let verify_clause_all = if trusted_check.is_some() {
+        "confirm all of the completed work by reading the diff (a check already passed — see the note; re-run only on a specific doubt)"
+    } else {
+        "independently verify all of the completed work with your own tools"
+    };
     let title = if awaiting.len() == 1 {
         let (id, task_title, _, _) = &awaiting[0];
         format!(
-            "Review {id} (\"{task_title}\"): independently verify the completed work with your own tools, then finish_task completed to confirm it, or blocked with what is wrong to send it back."
+            "Review {id} (\"{task_title}\"): {verify_clause}, then finish_task completed to confirm it, or blocked with what is wrong to send it back."
         )
     } else {
         let titles = awaiting
@@ -1371,7 +1410,7 @@ pub fn spawn_deferred_review(
             .collect::<Vec<_>>()
             .join("; ");
         format!(
-            "Review {covered} as one change — {titles}: independently verify all of the completed work with your own tools, then finish_task completed to confirm it, or blocked naming which task is wrong to send it back."
+            "Review {covered} as one change — {titles}: {verify_clause_all}, then finish_task completed to confirm it, or blocked naming which task is wrong to send it back."
         )
     };
     let entries = vec![core_state::HarnessTaskInput {
@@ -1398,6 +1437,17 @@ pub fn spawn_deferred_review(
                 crate::core::state::append_task_note(
                     review_task,
                     &format!("author evidence (harness-recorded): {}", notes.join(" | ")),
+                );
+            }
+        }
+        if let Some(command) = trusted_check.as_deref() {
+            if let Some(review_task) = core_state::get_task_by_id_mut(state, &review_task_id) {
+                crate::core::state::append_task_note(
+                    review_task,
+                    &format!(
+                        "a check already passed after the last edit (harness-recorded, not stale): `{}`. Confirm the change by reading the diff; you need not re-run this check — re-run only if the diff gives you a specific reason to doubt the recorded pass.",
+                        crate::harness::telemetry::truncate_text(command, 120)
+                    ),
                 );
             }
         }
@@ -6058,6 +6108,48 @@ mod review_opt_out_enforcement_tests {
                 .any(|task| task.review_of.as_deref() == Some("task-1")),
             "verified_by chain intact without opt-out"
         );
+    }
+
+    #[test]
+    fn a_review_is_told_when_a_trusted_check_already_passed() {
+        use crate::core::types::{HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        let mut state = create_harness_state("goal");
+        let record = |failed: bool, executed: i64, external: bool| HarnessVerificationRecord {
+            at_iteration: 2,
+            command: "cargo test --release --lib".into(),
+            failed,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed,
+                passed: executed,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: Some(VerificationAnchor {
+                    kind: if external { VerificationAnchorKind::External } else { VerificationAnchorKind::SelfAuthored },
+                    source: None,
+                    downgraded_reason: None,
+                    coverage: None,
+                    expectation_subject: None,
+                }),
+            }),
+            id: Some("v1".into()),
+        };
+        state.mutations_since_verification = Some(0);
+        state.last_verification = Some(record(false, 6, true));
+        assert_eq!(review_trusts_recorded_check(&state).as_deref(), Some("cargo test --release --lib"));
+        // A failure, a self-authored anchor, zero executed, or an edit since all disqualify it.
+        state.last_verification = Some(record(true, 6, true));
+        assert!(review_trusts_recorded_check(&state).is_none());
+        state.last_verification = Some(record(false, 6, false));
+        assert!(review_trusts_recorded_check(&state).is_none());
+        state.last_verification = Some(record(false, 0, true));
+        assert!(review_trusts_recorded_check(&state).is_none());
+        state.last_verification = Some(record(false, 6, true));
+        state.mutations_since_verification = Some(1);
+        assert!(review_trusts_recorded_check(&state).is_none());
     }
 
     #[test]

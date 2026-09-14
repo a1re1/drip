@@ -1324,6 +1324,11 @@ block behind "FAILED. 0 passed; 1 failed" and cost the next round a
 `| grep -A6 panicked`. When a failing runner's output is long enough to be
 cut in the middle, the failure block (from the first panic / assertion / FAIL
 line) is appended as `failure excerpt from the elided middle`.
+A BASH command over 1200 chars gets a note with its generation cost: a
+recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
+calls whose 1200-4000-token shell scripts each waited 20-45s to be written
+before they ran (the system prompt now asks for one command or a short
+pipeline per call, with independent checks as separate calls in one round).
 
 When a finish arrives with no check behind it and the goal declares none,
 the harness detects the project's own suite from the workspace layout

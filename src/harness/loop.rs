@@ -245,6 +245,14 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_long_bash_command_gets_a_generation_cost_note() {
+        assert!(long_bash_command_note("cargo test -q").is_none());
+        let script = "x".repeat(LONG_BASH_COMMAND_CHARS + 1);
+        let note = long_bash_command_note(&script).expect("note");
+        assert!(note.contains("1201 chars") && note.contains("separate calls"), "{note}");
+    }
+
+    #[test]
     fn a_runner_bash_call_loses_its_trailing_tail_filter() {
         let (input, dropped) = drop_runner_tail_filter(r#"{"command":"cargo test --lib shape 2>&1 | tail -3","timeoutMs":300000}"#);
         assert_eq!(dropped.as_deref(), Some("| tail -3"));
@@ -1529,6 +1537,23 @@ pub fn repeated_verify_reuse(
 /// `| grep -A6 panicked`), while the harness already bounds runner output
 /// and excerpts failures. Returns the rewritten input and the dropped
 /// filter text, or the input untouched.
+/// A BASH command longer than this gets a note in its result: a recorded
+/// "prepare the PR" run spent 739s of its 1202s of inference on 24 calls
+/// whose 1200-4000-token shell scripts (printf banners, a dozen sections)
+/// each waited 20-45s to be generated before running.
+pub const LONG_BASH_COMMAND_CHARS: usize = 1200;
+
+pub fn long_bash_command_note(command: &str) -> Option<String> {
+    let chars = command.chars().count();
+    (chars > LONG_BASH_COMMAND_CHARS).then(|| {
+        format!(
+            "[harness] this command was {chars} chars (~{} output tokens, ~{}s to generate before it ran). Keep BASH calls to one command or a short pipeline and put independent checks in separate calls in the same round.",
+            chars / 4,
+            chars / 4 * 13 / 1000
+        )
+    })
+}
+
 pub fn drop_runner_tail_filter(raw_input: &str) -> (String, Option<String>) {
     let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
         return (raw_input.to_string(), None);
@@ -6243,6 +6268,10 @@ impl HarnessRun {
                 &execution.tool_content,
                 scope.loop_budget.max_tool_result_chars as usize,
             );
+            if let Some(note) = bash_command.as_deref().and_then(long_bash_command_note) {
+                tool_content.push_str("\n");
+                tool_content.push_str(&note);
+            }
             if let Some(filter) = dropped_tail_filter.as_deref() {
                 tool_content.push_str(&format!(
                     "\n[harness] the trailing `{filter}` was dropped: runner output is bounded here and its failure block is kept, so the summary and any panic are both visible without a re-run."

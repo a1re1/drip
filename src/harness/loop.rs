@@ -387,6 +387,9 @@ mod goal_check_tests {
         let goal = "run cargo build && cargo test --lib harness and then stop";
         assert_eq!(plain_prose_check_commands(goal), vec!["cargo build && cargo test --lib harness".to_string()]);
         assert_eq!(plain_prose_check_commands("cargo test --lib alpha && echo done"), vec!["cargo test --lib alpha".to_string()], "a chain onto a non-runner ends the command");
+        let goal = "add a test: check_duration_measurable(Some(\"cargo test --no-run\"), false, \"cargo test --lib\") must be true. Verify with cargo test --release --lib. Do not commit.";
+        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --release --lib".to_string()], "quoted code samples are not commands");
+        assert_eq!(plain_prose_check_commands("run cargo test --lib\" now"), vec!["cargo test".to_string()], "a quote inside an argument ends the command before it");
         assert_eq!(plain_prose_check_commands("then (cd drip && cargo test) green and finish_task"), vec!["cargo test".to_string()]);
         assert!(plain_prose_check_commands("Acceptance: `cargo test -q` must pass.").is_empty(), "backticked spans belong to the other scan");
         assert!(plain_prose_check_commands("a pytest-style fixture and the mycargo tester").is_empty(), "word boundaries");
@@ -2790,8 +2793,14 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
             let start = from + offset;
             from = start + runner.len();
             let preceded_by_word = start > 0 && line.as_bytes()[start - 1].is_ascii_alphanumeric();
+            // A runner opening a quoted string is a code sample in the prose
+            // (`Some("cargo test --no-run")` in a goal describing a test),
+            // not a command to run: a recorded run warmed up on
+            // `cargo test --lib"` from such a sample instead of the declared
+            // `cargo test --release --lib`, compiling the wrong profile.
+            let preceded_by_quote = start > 0 && matches!(line.as_bytes()[start - 1], b'"' | b'\'');
             let followed_by_word = line.as_bytes().get(from).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
-            if preceded_by_word || followed_by_word {
+            if preceded_by_word || preceded_by_quote || followed_by_word {
                 continue;
             }
             // Runner words are exempt from the stop-word rule ("bun run
@@ -2816,7 +2825,7 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
                         _ => break,
                     }
                 }
-                if clean.is_empty() || clean.starts_with('(') || clean == "||" || clean == "|" {
+                if clean.is_empty() || clean.starts_with('(') || clean == "||" || clean == "|" || clean.contains('"') {
                     break;
                 }
                 if index >= exempt_until && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str()) {

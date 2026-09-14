@@ -1017,6 +1017,18 @@ pub fn normalize_command_shape(command: &str) -> String {
     if words.len() > 2 && matches!(words[0], "timeout" | "gtimeout") && words[1].chars().all(|c| c.is_ascii_digit() || c == 's' || c == 'm') {
         words.drain(0..2);
     }
+    // Trailing `2>/dev/null` redirect.
+    if words.last() == Some(&"2>/dev/null") {
+        words.pop();
+    }
+    // Trailing `--nocapture` flag.
+    if words.last() == Some(&"--nocapture") {
+        words.pop();
+        // Drop the `--` test-harness separator that introduced it.
+        if words.last() == Some(&"--") {
+            words.pop();
+        }
+    }
     words.retain(|word| !matches!(*word, "2>&1" | "-v" | "-vv" | "-q" | "--verbose" | "--quiet"));
     words.join(" ")
 }
@@ -7512,9 +7524,13 @@ mod role_inference_tests {
             "cd /tmp && python3 -m unittest discover -s tests",
             "RUST_BACKTRACE=1 python3 -m unittest discover -s tests",
             "cd crate && RUST_BACKTRACE=1 python3 -m unittest discover -s tests -v",
+            "python3 -m unittest discover -s tests 2>/dev/null",
+            "python3 -m unittest discover -s tests -- --nocapture",
         ] {
             assert_eq!(normalize_command_shape(variant), base, "{variant}");
         }
+        assert_eq!(normalize_command_shape("cargo test foo 2>/dev/null"), "cargo test foo");
+        assert_eq!(normalize_command_shape("cargo test foo -- --nocapture"), "cargo test foo");
         assert_ne!(normalize_command_shape("python3 -m unittest tests.test_server"), base);
     }
 

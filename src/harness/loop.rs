@@ -340,11 +340,18 @@ mod goal_check_tests {
     #[test]
     fn edit_check_runs_for_fast_or_interpreted_checks_only() {
         use super::{edit_check_allowed, edit_check_note};
-        assert!(edit_check_allowed("python3 -m unittest discover -s tests -q", None));
-        assert!(edit_check_allowed("npm test", None));
-        assert!(!edit_check_allowed("cargo test -q", None), "compile-first runner, unmeasured");
-        assert!(edit_check_allowed("cargo test -q", Some(3_000)), "measured fast");
-        assert!(!edit_check_allowed("python3 -m pytest", Some(9_000)), "measured slow");
+        assert!(edit_check_allowed("python3 -m unittest discover -s tests -q", None, false));
+        assert!(edit_check_allowed("npm test", None, false));
+        assert!(!edit_check_allowed("cargo test -q", None, false), "compile-first runner, unmeasured");
+        assert!(edit_check_allowed("cargo test -q", None, true), "unmeasured, but the warm-up build is done");
+        assert!(!edit_check_allowed("cargo test -q", Some(super::EDIT_CHECK_MAX_KNOWN_MS + 1), true), "a measured slow check stays skipped");
+        use super::check_duration_measurable;
+        assert!(!check_duration_measurable(Some("cargo test features --no-run --quiet"), false, "cargo test features::"), "compiling: not a measure of the check");
+        assert!(check_duration_measurable(Some("cargo test features --no-run --quiet"), true, "cargo test features::"));
+        assert!(check_duration_measurable(Some("cargo test --no-run"), false, "python3 -m unittest"), "another runner is unaffected");
+        assert!(check_duration_measurable(None, false, "cargo test"));
+        assert!(edit_check_allowed("cargo test -q", Some(3_000), false), "measured fast");
+        assert!(!edit_check_allowed("python3 -m pytest", Some(9_000), false), "measured slow");
         let passed = edit_check_note("pytest -q", true, "passed", "");
         assert!(passed.starts_with("\n\n[harness] ran the goal-declared check after this edit: pytest -q -> passed."), "{passed}");
         assert!(passed.contains("finish_task now"), "{passed}");
@@ -1795,10 +1802,29 @@ pub const EDIT_CHECK_MAX_KNOWN_MS: i64 = 8_000;
 pub const EDIT_CHECK_SLOW_RUNNERS: &[&str] = &["cargo test", "cargo nextest", "go test", "dotnet test", "mvn test", "gradle test", "mix test"];
 
 /// Whether the goal's check is cheap enough to run after an edit round.
-pub fn edit_check_allowed(command: &str, known_ms: Option<i64>) -> bool {
+/// `build_warm`: the run's background warm-up build for this runner has
+/// finished, so the compile that makes the runner slow is already paid and
+/// an unmeasured check is an incremental one. A recorded pwrde run had its
+/// warm-up done seconds in, yet spent three PATCH rounds and a READ
+/// self-repairing a `]`-for-`}` slip without a check between them, because
+/// cargo was skipped as compile-first; the finish-time check then took 7s.
+pub fn edit_check_allowed(command: &str, known_ms: Option<i64>, build_warm: bool) -> bool {
     match known_ms {
         Some(ms) => ms <= EDIT_CHECK_MAX_KNOWN_MS,
-        None => !native_runner_name(command).is_some_and(|runner| EDIT_CHECK_SLOW_RUNNERS.contains(&runner)),
+        None => build_warm || !native_runner_name(command).is_some_and(|runner| EDIT_CHECK_SLOW_RUNNERS.contains(&runner)),
+    }
+}
+
+/// Whether a check's duration is a fair measure of the check: not while the
+/// run's warm-up build for the same runner is still compiling, because the
+/// check then waits on the build lock and its time is the compile's. A
+/// recorded pwrde run measured its first `cargo test features::` at 34s
+/// that way and skipped every later edit check as "measured slow", though
+/// the same check took 5s once the build was warm.
+pub fn check_duration_measurable(warmup_command: Option<&str>, warmup_done: bool, command: &str) -> bool {
+    match warmup_command {
+        Some(warmup) if native_runner_name(warmup).is_some() && native_runner_name(warmup) == native_runner_name(command) => warmup_done,
+        _ => true,
     }
 }
 
@@ -7146,6 +7172,15 @@ impl HarnessRun {
     /// ran within EDIT_CHECK_MAX_KNOWN_MS (or, unmeasured, are not
     /// compile-first runners), never a command that hung this run, at most
     /// EDIT_CHECKS_MAX_PER_LOOP per loop.
+    /// See check_duration_measurable: the warm-up's state right now.
+    pub fn check_duration_is_measurable(&mut self, command: &str) -> bool {
+        let (warmup_command, done) = match self.warmup.as_mut() {
+            Some(job) => (Some(job.command.clone()), job.finished()),
+            None => (None, true),
+        };
+        check_duration_measurable(warmup_command.as_deref(), done, command)
+    }
+
     pub fn run_edit_check(&mut self, scope: &mut LoopScope, call_id: &str) -> Option<String> {
         if scope.edit_checks_run >= EDIT_CHECKS_MAX_PER_LOOP {
             return None;
@@ -7158,8 +7193,25 @@ impl HarnessRun {
         }
         let shape = normalize_command_shape(&command);
         let known = self.check_durations_ms.get(&shape).copied();
-        if !edit_check_allowed(&command, known) {
+        let build_warm = self
+            .warmup
+            .as_mut()
+            .filter(|job| native_runner_name(&job.command).is_some() && native_runner_name(&job.command) == native_runner_name(&command))
+            // Finished, not succeeded: the model edits the crate while the
+            // warm-up compiles it, so the warm-up can fail on the crate's
+            // own error having already paid for the dependencies.
+            .map(|job| job.finished())
+            .unwrap_or(false);
+        if !edit_check_allowed(&command, known, build_warm) {
             return None;
+        }
+        if known.is_none() && build_warm {
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                detail: format!("edit check allowed for a compile-first runner: the warm-up build finished, so {} runs incrementally", truncate_text(&command, 80)),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
         }
         scope.edit_checks_run += 1;
         let mut input = serde_json::json!({ "command": command });
@@ -7176,7 +7228,9 @@ impl HarnessRun {
         let started = (self.now)().timestamp_millis();
         let mut execution = self.execute_workspace_tool(&format!("{call_id}-editcheck"), &verify_input, Some(&scope.loop_tool_indexes), "VERIFY");
         let took = (self.now)().timestamp_millis() - started;
-        self.check_durations_ms.insert(shape, took);
+        if self.check_duration_is_measurable(&command) {
+            self.check_durations_ms.insert(shape, took);
+        }
         self.record_verification_outcome(scope, "VERIFY", &verify_input, &mut execution);
         let verdict = match &self.state.last_verification {
             Some(latest) => core_state::describe_verification_outcome(latest.failed, latest.ran_no_tests, latest.evidence.as_ref()),
@@ -7504,7 +7558,9 @@ impl HarnessRun {
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
             if tool_name == "VERIFY" || tool_name == "BASH" {
                 if let Some(command) = extract_bash_command(&raw_input) {
-                    self.check_durations_ms.insert(normalize_command_shape(&command), execution_duration_ms);
+                    if self.check_duration_is_measurable(&command) {
+                        self.check_durations_ms.insert(normalize_command_shape(&command), execution_duration_ms);
+                    }
                 }
             }
 

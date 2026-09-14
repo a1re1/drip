@@ -236,6 +236,15 @@ impl WarmupJob {
     pub fn finished(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
+
+    /// Some(true) once the warm-up exited successfully, Some(false) once it
+    /// failed, None while it is still running.
+    pub fn succeeded(&mut self) -> Option<bool> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.success()),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for WarmupJob {

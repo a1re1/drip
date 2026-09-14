@@ -84,6 +84,155 @@ fn git_grep_hits(cwd: &str, symbol: &str) -> Option<Vec<String>> {
     Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
 }
 
+/// Plain words the goal quotes in backticks — `title` — that are not
+/// identifiers. A whole-word grep for such a word is noise (hundreds of
+/// hits), but the definitions whose *name* contains it are exactly where a
+/// goal that says "the predicate whose name contains `title`" sends the
+/// first rounds.
+pub const DEFINITION_HITS_MAX_WORDS: usize = 4;
+/// Files listed with their definitions per word; further files are named
+/// with a count only. Source files come before test, fixture, eval, example
+/// and vendor trees, then by hit count — a benchmark fixture with seventy
+/// `def *_title_*` helpers must not crowd out the two in `src/`.
+pub const DEFINITION_HITS_MAX_FILES: usize = 4;
+pub const DEFINITION_HITS_MAX_PER_FILE: usize = 6;
+pub const DEFINITION_HITS_MAX_NAMED_FILES: usize = 10;
+
+pub fn extract_quoted_words(texts: &[&str]) -> Vec<String> {
+    let symbols = extract_goal_symbols(texts);
+    let mut out: Vec<String> = Vec::new();
+    for text in texts {
+        let mut parts = text.split('`');
+        // Odd segments sit between backticks.
+        parts.next();
+        while let (Some(inner), next) = (parts.next(), parts.next()) {
+            let word = inner.trim();
+            let plain = word.len() >= 3
+                && word.len() <= 30
+                && word.chars().all(|c| c.is_ascii_alphabetic())
+                && !symbols.iter().any(|symbol| symbol.eq_ignore_ascii_case(word))
+                && !out.iter().any(|seen| seen.eq_ignore_ascii_case(word));
+            if plain {
+                out.push(word.to_string());
+                if out.len() >= DEFINITION_HITS_MAX_WORDS {
+                    return out;
+                }
+            }
+            if next.is_none() {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
+    let pattern = format!(
+        "^[[:space:]]*(export[[:space:]]+(default[[:space:]]+)?)?(pub(\\(crate\\))?[[:space:]]+)?(async[[:space:]]+)?(fn|struct|enum|trait|type|impl|def|class|function|const|static|interface|func)[[:space:]]+[A-Za-z_]*{word}"
+    );
+    let output = std::process::Command::new("git")
+        .args(["grep", "-n", "-i", "-I", "-E", "--untracked", "-e", &pattern, "--", ".", ":!*.lock", ":!*.min.*"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
+}
+
+fn test_like_path(path: &str) -> bool {
+    const TREES: &[&str] = &[
+        "test", "tests", "testing", "fixture", "fixtures", "eval", "evals", "example", "examples", "bench", "benches",
+        "benchmark", "benchmarks", "vendor", "third_party", "node_modules", "dist", "build", "target", "spec", "specs",
+        "__tests__", "snapshots", "__snapshots__", "testdata",
+    ];
+    let mut segments = path.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        let last = segments.peek().is_none();
+        if last {
+            let lower = segment.to_ascii_lowercase();
+            return lower.starts_with("test") || lower.contains("_test") || lower.contains(".test") || lower.contains(".spec");
+        }
+        if TREES.contains(&segment) {
+            return true;
+        }
+    }
+    false
+}
+
+/// One orientation line for `word`: hits grouped by file, source files
+/// first, each of the first files with its definitions as `line signature`.
+fn definition_hits_line(word: &str, hits: &[String]) -> String {
+    let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for hit in hits {
+        let mut parts = hit.trim().splitn(3, ':');
+        let (path, num, text) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());
+        if path.is_empty() || num.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|(seen, _)| seen == path) {
+            Some((_, entries)) => entries.push((num.to_string(), signature(text))),
+            None => groups.push((path.to_string(), vec![(num.to_string(), signature(text))])),
+        }
+    }
+    groups.sort_by(|a, b| {
+        test_like_path(&a.0)
+            .cmp(&test_like_path(&b.0))
+            .then(b.1.len().cmp(&a.1.len()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut rendered: Vec<String> = Vec::new();
+    for (index, (path, entries)) in groups.iter().enumerate() {
+        if index < DEFINITION_HITS_MAX_FILES {
+            let shown: Vec<String> = entries.iter().take(DEFINITION_HITS_MAX_PER_FILE).map(|(num, sig)| format!("{num} {sig}")).collect();
+            let mut part = format!("{path}: {}", shown.join("; "));
+            if entries.len() > shown.len() {
+                part.push_str(&format!("; +{} more", entries.len() - shown.len()));
+            }
+            rendered.push(part);
+        } else if index < DEFINITION_HITS_MAX_NAMED_FILES {
+            rendered.push(format!("{path} ({})", entries.len()));
+        } else {
+            rendered.push(format!("+{} more files", groups.len() - index));
+            break;
+        }
+    }
+    format!("{word}: {}", rendered.join(" | "))
+}
+
+/// Definition lines whose name contains a word the goal quotes in
+/// backticks (`title` → `fn should_request_title`, `struct TitleRoute`),
+/// grouped by file with source files first. None outside git or when the
+/// goal quotes no plain word.
+pub fn definition_hits_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
+    let words = extract_quoted_words(texts);
+    if words.is_empty() {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    let mut lines: Vec<String> = Vec::new();
+    for word in &words {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS {
+            break;
+        }
+        let hits = git_grep_definitions(cwd, word)?;
+        if hits.is_empty() {
+            lines.push(format!("{word}: no definition names contain it"));
+        } else {
+            lines.push(definition_hits_line(word, &hits));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "definition hits (definitions whose name contains a word the goal quotes, grouped by file with source files before test and fixture trees — READ the one you need instead of GREPping for it):\n{}",
+            lines.join("\n")
+        ))
+    }
+}
+
 /// `git grep -nw` hits for the identifiers `texts` name, one line per
 /// identifier, so the first rounds of a task start from the call sites and
 /// definitions instead of GREPping for them. None outside git or when
@@ -507,5 +656,29 @@ mod tests {
         let unterminated = "fn open() {\n    let x = 1;\n";
         let lines: Vec<&str> = unterminated.lines().collect();
         assert_eq!(definition_end("rs", &lines, 0), 1);
+    }
+
+    #[test]
+    fn quoted_words_find_the_definitions_named_after_them() {
+        assert_eq!(extract_quoted_words(&["the predicate whose name contains `title` and calls `RoleTotals`"]), vec!["title".to_string()]);
+        assert!(extract_quoted_words(&["run `cargo test --lib` and `x`"]).is_empty());
+        let dir = std::env::temp_dir().join(format!("drip-definition-hits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(definition_hits_for_texts(&cwd, &["`title`"]).is_none(), "not a repo");
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "src/a.rs", "pub struct TitleRoute {}\n    fn should_request_title(x: u32) -> bool {\n        let title = x;\n        title > 1\n    }\n");
+        write(&dir, "src/b.py", "def make_title():\n    return 1\n");
+        let fixture: String = (0..30).map(|i| format!("def pad_title_{i}(x):\n    return x\n")).collect();
+        write(&dir, "evals/fixture/textutil.py", &fixture);
+        let hits = definition_hits_for_texts(&cwd, &["find the predicate whose name contains `title`"]).unwrap();
+        assert!(hits.starts_with("definition hits ("), "{hits}");
+        assert!(hits.contains("title: src/a.rs: 1 pub struct TitleRoute; 2 fn should_request_title(x: u32) -> bool | src/b.py: 1 def make_title() | evals/fixture/textutil.py: 1 def pad_title_0(x); 3 def pad_title_1(x); "), "{hits}");
+        assert!(hits.contains("; +24 more"), "{hits}");
+        assert!(!hits.contains("let title"), "{hits}");
+        assert!(test_like_path("evals/fixture/textutil.py") && test_like_path("src/foo_test.go") && !test_like_path("src/tui/app.rs"));
+        assert!(definition_hits_for_texts(&cwd, &["`nothing`"]).unwrap().contains("nothing: no definition names contain it"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1240,6 +1240,14 @@ needs instead of paging through it. The same section lists `git grep -nw`
 hits for the identifiers the task names (snake_case and CamelCase tokens, up
 to eight names and six hits each), so the first rounds start from the call
 sites and definitions instead of discovering them one GREP per round.
+A plain word the goal quotes in backticks (`title`, in "the predicate whose
+name contains `title`") is not an identifier, so instead of a whole-word grep
+the section lists the definitions whose name contains it (`fn
+should_request_title`, `struct TitleRoute`, `def make_title`), grouped by
+file with source trees before test, fixture, eval and vendor trees (the
+first four files with up to six definitions each, the rest by count), for up
+to four words; the recorded runs of such a goal spent their first round on
+exactly that search.
 
 A GREP hit names the definition it sits in (`  [in run_goal]`), and a GREP
 whose whole search matches at most three lines returns the body of every hit

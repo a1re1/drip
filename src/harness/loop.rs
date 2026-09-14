@@ -5422,6 +5422,7 @@ impl HarnessRun {
                     let mut parts: Vec<String> = Vec::new();
                     parts.extend(crate::harness::outline::outlines_for_texts(&self.cwd, &texts));
                     parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
+                    parts.extend(crate::harness::outline::definition_hits_for_texts(&self.cwd, &texts));
                     // A later author task of the run sees what earlier tasks
                     // changed, with outlines of those files: planned runs
                     // spent 2-3× the author time of direct runs on the same

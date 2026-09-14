@@ -5448,7 +5448,28 @@ impl HarnessRun {
                     let notes = task.notes.join("\n");
                     let texts = [task.title.as_str(), notes.as_str(), self.state.goal.as_str()];
                     let mut parts: Vec<String> = Vec::new();
-                    parts.extend(crate::harness::outline::outlines_for_texts(&self.cwd, &texts));
+                    // Short named files travel whole (the text a READ would
+                    // return); the rest get outlines.
+                    let named_paths = crate::harness::outline::named_paths_for_texts(&texts);
+                    let mut carry_paths = named_paths.clone();
+                    carry_paths.extend(crate::harness::outline::definition_files_for_texts(&self.cwd, &texts, &named_paths));
+                    let (bodies, carried) = crate::harness::outline::named_file_bodies_for_paths(&self.cwd, &carry_paths);
+                    if let Some(bodies) = bodies {
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            detail: format!(
+                                "named files carried whole into {}'s first prompt: {} ({} chars)",
+                                task.id,
+                                carried.join(", "),
+                                bodies.chars().count()
+                            ),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        parts.push(bodies);
+                    }
+                    let outline_paths: Vec<String> = named_paths.iter().filter(|path| !carried.contains(path)).cloned().collect();
+                    parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &outline_paths));
                     parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
                     parts.extend(crate::harness::outline::definition_hits_for_texts(&self.cwd, &texts));
                     // A later author task of the run sees what earlier tasks
@@ -5477,7 +5498,7 @@ impl HarnessRun {
                         self.emit(HarnessEvent {
                             data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
                             detail: format!(
-                                "file outline: {} section(s), {} chars injected into {}'s first prompt (definition maps, symbol hits, changes so far)",
+                                "file outline: {} section(s), {} chars injected into {}'s first prompt (named file bodies, definition maps, symbol hits, changes so far)",
                                 parts.len(),
                                 text.chars().count(),
                                 task.id

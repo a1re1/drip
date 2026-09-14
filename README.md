@@ -1372,10 +1372,13 @@ hedged requests in seven benches the second request won 18 times (resolved in
 9-18s where the first would have taken longer) and lost 13, mostly within two
 seconds of the 8s floor; the floor is right where it is.
 
-The review brief a reviewer loop opens with carries small new files in full
-(up to four files of at most 200 lines) next to the diff, and tells the
-reviewer not to READ files it was already handed; bench reviewers spent two of
-their four rounds re-reading changed files before verifying.
+The review brief a reviewer loop opens with carries new files in full (up to
+four files of at most 400 lines and 16,000 characters) next to the diff, and
+the tracked files the author edited as their full current text, line-numbered
+exactly as a READ returns them (up to three files, 400 lines each, 40,000
+characters in total), and tells the reviewer not to READ files it was already
+handed. Before the edited-file carry, 74 of 81 recorded reviewer loops opened
+with READs of the files whose hunks the diff had just shown them.
 
 A BASH or VERIFY command that hits its timeout is remembered two ways. The
 exact text is refused on an identical re-run (`harness: not run — this exact

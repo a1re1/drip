@@ -603,6 +603,12 @@ pub const NAMED_FILE_BODIES_HEADER: &str = "files the goal names or that define 
 /// the paths carried so the caller can skip their outlines. Missing,
 /// directory, empty, and non-UTF-8 paths are skipped.
 pub fn named_file_bodies_for_paths(cwd: &str, paths: &[String]) -> (Option<String>, Vec<String>) {
+    file_bodies_for_paths(cwd, paths, NAMED_FILE_BODIES_HEADER)
+}
+
+/// `named_file_bodies_for_paths` under a caller-chosen header (the review
+/// brief carries the files the author edited the same way).
+pub fn file_bodies_for_paths(cwd: &str, paths: &[String], header: &str) -> (Option<String>, Vec<String>) {
     let mut blocks: Vec<String> = Vec::new();
     let mut carried: Vec<String> = Vec::new();
     let mut chars = 0usize;
@@ -643,7 +649,7 @@ pub fn named_file_bodies_for_paths(cwd: &str, paths: &[String]) -> (Option<Strin
     if blocks.is_empty() {
         (None, carried)
     } else {
-        (Some(format!("{NAMED_FILE_BODIES_HEADER}\n{}", blocks.join("\n"))), carried)
+        (Some(format!("{header}\n{}", blocks.join("\n"))), carried)
     }
 }
 

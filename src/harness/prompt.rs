@@ -580,7 +580,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
         task_sections.push(if current_task.review_of.is_some() {
             format!(
-                "instruction: This is a REVIEW task: independently verify the work claimed by {} using your own tools — do not take its summary on faith. Call finish_task completed to confirm the work, or finish_task blocked with exactly what is wrong to send {} back for rework. Scope: judge the change against the goal and the task contract. Pre-existing behaviour the goal did not ask to change is out of scope — record it with note_task, never as an anomaly or a reason to block or finish unreconciled.",
+                "instruction: This is a REVIEW task: independently verify the work claimed by {} using your own tools — do not take its summary on faith. Call finish_task completed to confirm the work (summary: one sentence — the verdict and the check that backs it), or finish_task blocked with exactly what is wrong to send {} back for rework. Scope: judge the change against the goal and the task contract. Pre-existing behaviour the goal did not ask to change is out of scope — record it with note_task, never as an anomaly or a reason to block or finish unreconciled.",
                 current_task.review_of.as_deref().unwrap(),
                 current_task.review_of.as_deref().unwrap()
             )

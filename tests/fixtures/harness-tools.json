@@ -228,7 +228,7 @@
             "type": "string"
           },
           "summary": {
-            "description": "What was done, or why the task is blocked and what would unblock it.",
+            "description": "One to three short sentences, about 300 characters at most: what changed and what proved it (the check and its counts), or why the task is blocked and what would unblock it. Do not restate the goal, list files the diff already shows, or narrate the steps taken — every token here is generated at the end of the task and read by nobody but the next loop.",
             "type": "string"
           },
           "taskId": {

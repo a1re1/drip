@@ -1224,6 +1224,22 @@ The `definition bodies carried` event records which. Named-file carry now
 allows five files under the same 40K-character budget, so the small hit
 files ride along with the named ones.
 
+A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
+and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
+the parent environment sets it, so a Python test that never returns dumps
+every thread's traceback to stderr as it dies. The HUNG result then carries
+the last test that started and never finished, each thread's innermost
+frames with user files named, and — when the hung thread is joining under
+unittest's cleanups while another thread sits in `serve_forever` — the
+explanation that cleanups run LIFO, so `addCleanup(thread.join)` registered
+before `addCleanup(server.shutdown)` joins a server that was never told to
+stop. A recorded http-serve run had exactly that deadlock and spent 1,000s
+and 44 shell probes finding it; the fault handler's dump had shown it at
+the first failure, but only inside a probe the model ran itself, 300s in.
+The forensics lead the result and the raw dump is trimmed to three frames
+per thread (the C stack dropped), so the middle truncation of a long result
+keeps them; the first probe lost them to it.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

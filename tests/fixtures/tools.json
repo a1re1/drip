@@ -48,7 +48,7 @@
             "type": "number"
           },
           "files": {
-            "description": "Apply a batch of file edits. All entries are validated and duplicate/aliased destinations rejected before writing; use separate PATCH calls for multiple edits to one file. On an ordinary write failure, rollback is attempted and any restoration failures are reported explicitly. This is not crash-atomic across files. Each entry uses content for a full write or find + replace for a targeted edit.",
+            "description": "Apply a batch of file edits in one call: every edit for the task — all files, several entries for the same file, applied in order — so the change lands in one round; a second PATCH call costs a model round (24 of 36 extra PATCH rounds in a recorded bench edited the file the previous round had just patched). All entries are validated before writing; on an ordinary write failure, rollback is attempted and any restoration failures are reported explicitly. This is not crash-atomic across files. Each entry uses content for a full write or find + replace for a targeted edit.",
             "items": {
               "additionalProperties": false,
               "properties": {

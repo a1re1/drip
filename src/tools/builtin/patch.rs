@@ -154,6 +154,158 @@ pub struct ResolvedEntry {
 /// indentation ignored.
 pub const INDENT_MATCH_NOTE: &str = " (the find text matched only with its indentation ignored; the replacement was re-indented to the file's — check the diff)";
 
+/// Note on a summary when the find text carried JSON escapes as literal
+/// characters and matched only once they were decoded.
+pub const ESCAPE_MATCH_NOTE: &str = " (the find text carried JSON escapes such as \\u2026 as literal characters; they were decoded to match the file)";
+
+/// Decodes JSON string escapes that survived as literal text (`\u2026`, `\n`,
+/// `\t`, `\"`, `\\`). Returns None when the text holds no escape or one is
+/// malformed. A recorded big-file run sent the six characters `\u2026` for
+/// the `…` its file held, lost the round to "not found", and then spent
+/// twenty more repairing the guess.
+pub fn decode_literal_escapes(text: &str) -> Option<String> {
+    if !text.contains('\\') {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut decoded_any = false;
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('u') => {
+                let mut code = String::new();
+                for _ in 0..4 {
+                    code.push(chars.next()?);
+                }
+                let mut value = u32::from_str_radix(&code, 16).ok()?;
+                if (0xD800..0xDC00).contains(&value) {
+                    // A surrogate pair: the low half follows as another \uXXXX.
+                    if chars.next()? != '\\' || chars.next()? != 'u' {
+                        return None;
+                    }
+                    let mut low = String::new();
+                    for _ in 0..4 {
+                        low.push(chars.next()?);
+                    }
+                    let low = u32::from_str_radix(&low, 16).ok()?;
+                    value = 0x10000 + ((value - 0xD800) << 10) + low.checked_sub(0xDC00)?;
+                }
+                out.push(char::from_u32(value)?);
+            }
+            _ => return None,
+        }
+        decoded_any = true;
+    }
+    decoded_any.then_some(out)
+}
+
+/// A find that misses only because its escapes were sent as text: when the
+/// decoded find occurs in the file, returns it with the replacement decoded
+/// the same way.
+pub fn escape_tolerant_match(existing: &str, find: &str, replace: &str) -> Option<(String, String)> {
+    let decoded_find = decode_literal_escapes(find)?;
+    if count_occurrences(existing, &decoded_find) == 0 {
+        return None;
+    }
+    let decoded_replace = decode_literal_escapes(replace).unwrap_or_else(|| replace.to_string());
+    Some((decoded_find, decoded_replace))
+}
+
+/// Similarity of two lines as the share of the longer one covered by their
+/// common prefix plus common suffix — the shape of a one-token miss.
+fn line_similarity(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.trim().chars().collect();
+    let b: Vec<char> = b.trim().chars().collect();
+    let longest = a.len().max(b.len());
+    if longest == 0 {
+        return 0.0;
+    }
+    let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
+    let shortest = a.len().min(b.len());
+    let suffix = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count().min(shortest - prefix);
+    (prefix + suffix) as f64 / longest as f64
+}
+
+/// Minimum similarity for a file line to be named as the closest match.
+const NEAREST_LINE_MIN_SIMILARITY: f64 = 0.6;
+
+
+/// Splits a Python file into the text before its trailing `if __name__ ==
+/// "__main__":` guard and the guard itself, when that guard is the last
+/// top-level statement. An append lands before it: 16 of 31 recorded append
+/// entries were indented test methods, and appended after the guard they sat
+/// inside it — syntactically valid, never discovered, and the goal's own
+/// check still passed.
+pub fn split_python_main_guard(text: &str) -> Option<(&str, &str)> {
+    let guard_start = text
+        .match_indices("if __name__")
+        .filter(|(index, _)| *index == 0 || text.as_bytes()[index - 1] == b'\n')
+        .map(|(index, _)| index)
+        .last()?;
+    let guard_line = text[guard_start..].lines().next()?;
+    if !(guard_line.contains("__main__") && guard_line.trim_end().ends_with(':')) {
+        return None;
+    }
+    let after_guard_line = guard_start + guard_line.len();
+    let tail_has_top_level = text[after_guard_line..]
+        .lines()
+        .any(|line| !line.trim().is_empty() && !line.starts_with(' ') && !line.starts_with('\t'));
+    if tail_has_top_level {
+        return None;
+    }
+    Some((&text[..guard_start], &text[guard_start..]))
+}
+
+/// Note on the append summary when the text went before the main guard.
+pub const APPEND_BEFORE_GUARD_NOTE: &str = " before the `if __name__ == \"__main__\":` block";
+
+/// Why a find text missed, from the file's side. The error alone ("not
+/// found") sends the model back to a READ or, worse, to re-sending the same
+/// guess. Names the first line of the find text that the file does not hold
+/// and, when a file line resembles it, that line: the one token that
+/// differs. When every line is present but not as one block, says so (a
+/// blank line, an order change, or a hunk an earlier entry already edited).
+pub fn nearest_line_hint(existing: &str, find: &str) -> Option<String> {
+    let file_lines: Vec<&str> = existing.lines().collect();
+    let find_lines: Vec<(usize, &str)> = find.lines().enumerate().filter(|(_, line)| line.trim().chars().count() >= 3).collect();
+    let (missing_index, probe) = match find_lines.iter().find(|(_, line)| !file_lines.iter().any(|held| held.trim() == line.trim())) {
+        Some(found) => *found,
+        None => {
+            let (_, first) = *find_lines.first()?;
+            let at = file_lines.iter().position(|held| held.trim() == first.trim())? + 1;
+            return Some(format!(
+                " Every line of the find text is in the file (its first line is line {at}), but not as one contiguous block: check the lines between, or whether an earlier entry in this call already changed that region."
+            ));
+        }
+    };
+    let ordinal = if find_lines.len() > 1 { format!(" Line {} of the find text has no match in the file.", missing_index + 1) } else { String::new() };
+    let closest = file_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| (index, line, line_similarity(line, probe)))
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        .filter(|(_, _, score)| *score >= NEAREST_LINE_MIN_SIMILARITY)
+        .map(|(index, line, _)| {
+            let shown: String = line.chars().take(160).collect();
+            format!(" The closest line in the file is line {}: `{}`", index + 1, shown.trim_end())
+        })
+        .unwrap_or_default();
+    if ordinal.is_empty() && closest.is_empty() {
+        return None;
+    }
+    Some(format!("{ordinal}{closest}"))
+}
+
 pub fn count_occurrences(text: &str, find: &str) -> usize {
     if find.is_empty() {
         return 0;
@@ -1027,11 +1179,33 @@ pub fn resolve_file_entry(
             },
             None => None,
         };
-        let mut new_text = existing_text.clone().unwrap_or_default();
-        if !new_text.is_empty() && !new_text.ends_with('\n') {
-            new_text.push('\n');
-        }
-        new_text.push_str(append);
+        let is_python = std::path::Path::new(&entry.path).extension().and_then(|ext| ext.to_str()) == Some("py");
+        let guard_split = if is_python { existing_text.as_deref().and_then(split_python_main_guard) } else { None };
+        let mut placement_note = "";
+        let mut new_text = match guard_split {
+            Some((head, guard)) => {
+                // Before the guard: one blank line for an indented body
+                // continuation (a method joining the last class), two for a
+                // new top-level definition, then the guard restored after
+                // two blank lines as the file had it.
+                let indented = append.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'));
+                let mut text = head.trim_end_matches('\n').to_string();
+                text.push_str(if indented { "\n\n" } else { "\n\n\n" });
+                text.push_str(append.trim_matches('\n'));
+                text.push_str("\n\n\n");
+                text.push_str(guard);
+                placement_note = APPEND_BEFORE_GUARD_NOTE;
+                text
+            }
+            None => {
+                let mut text = existing_text.clone().unwrap_or_default();
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(append);
+                text
+            }
+        };
         if !new_text.ends_with('\n') {
             new_text.push('\n');
         }
@@ -1040,7 +1214,7 @@ pub fn resolve_file_entry(
                 return Err(error);
             }
         }
-        let appended = append.lines().count();
+        let appended = if placement_note.is_empty() { append.lines().count() } else { append.trim_matches('\n').lines().count() };
         return Ok(ResolvedEntry {
             absolute_path,
             display_path,
@@ -1049,7 +1223,7 @@ pub fn resolve_file_entry(
             effective_replace: None,
             occurrences: None,
             match_lines: None,
-            crlf_note: None,
+            crlf_note: (!placement_note.is_empty()).then(|| placement_note.to_string()),
             existing_text,
             new_text,
             appended: Some(appended),
@@ -1202,9 +1376,34 @@ pub fn resolve_file_entry(
     }
 
     if occurrences == 0 {
+        if let Some((decoded_find, decoded_replace)) = escape_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+            effective_find = decoded_find;
+            effective_replace = decoded_replace;
+            occurrences = count_occurrences(&existing_text, &effective_find);
+            crlf_note = ESCAPE_MATCH_NOTE.to_string();
+        }
+    }
+
+    if occurrences == 0 {
+        // A find written against the file on disk, when an earlier entry in
+        // this call already changed that region (a recorded http-serve run
+        // lost two rounds to this: its second entry's find spanned the hunk
+        // its first entry had replaced).
+        if base_text.is_some() {
+            if let Ok(on_disk) = std::fs::read_to_string(&absolute_path_buf) {
+                if count_occurrences(&on_disk, &effective_find) > 0 {
+                    return Err(format!(
+                        "{} The find text matches the file on disk but not the text after the earlier entries in this call for \"{}\": entries to one file apply in order, so write this find against the text those entries leave, or fold both changes into one entry.",
+                        tag, display_path
+                    ));
+                }
+            }
+        }
         return Err(format!(
-            "{} The find text was not found in \"{}\". READ the file and pass the exact text, including whitespace.",
-            tag, display_path
+            "{} The find text was not found in \"{}\".{} READ the file and pass the exact text, including whitespace.",
+            tag,
+            display_path,
+            nearest_line_hint(&existing_text, &effective_find).unwrap_or_default()
         ));
     }
 
@@ -1496,6 +1695,9 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                     earlier.occurrences = Some(earlier.occurrences.unwrap_or(0) + next.occurrences.unwrap_or(0));
                     if let Some(appended) = next.appended {
                         earlier.appended = Some(earlier.appended.unwrap_or(0) + appended);
+                        if next.crlf_note.is_some() {
+                            earlier.crlf_note = next.crlf_note;
+                        }
                     }
                     if let Some(lines) = next.match_lines {
                         earlier.match_lines.get_or_insert_with(Vec::new).extend(lines);
@@ -1520,9 +1722,10 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
             } else if let Some(appended) = entry.appended {
                 let replaced = entry.occurrences.unwrap_or(0);
                 format!(
-                    "{}: appended {} line(s){}{}",
+                    "{}: appended {} line(s){}{}{}",
                     entry.display_path,
                     appended,
+                    entry.crlf_note.clone().unwrap_or_default(),
                     if replaced > 0 { format!(" after replacing {} occurrence(s)", replaced) } else { String::new() },
                     if entry.existing_text.is_none() { " (file created)" } else { "" }
                 )
@@ -1650,9 +1853,19 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     }
 
     if occurrences == 0 {
+        if let Some((decoded_find, decoded_replace)) = escape_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+            effective_find = decoded_find;
+            effective_replace = decoded_replace;
+            occurrences = existing_text.matches(&effective_find).count();
+            crlf_note = ESCAPE_MATCH_NOTE.to_string();
+        }
+    }
+
+    if occurrences == 0 {
         return Err(format!(
-            "The find text was not found in \"{}\". READ the file and pass the exact text, including whitespace (do not include READ's line-number prefixes).",
-            display_path
+            "The find text was not found in \"{}\".{} READ the file and pass the exact text, including whitespace (do not include READ's line-number prefixes).",
+            display_path,
+            nearest_line_hint(&existing_text, &effective_find).unwrap_or_default()
         ));
     }
 
@@ -1859,6 +2072,77 @@ mod execute_tests {
         assert!(outcome.text.contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"), "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
         assert!(text.contains("class D0:") && text.ends_with("class E:\n    pass\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escaped_find_text_is_decoded_and_a_near_miss_names_the_closest_line() {
+        assert_eq!(decode_literal_escapes("a \\u2026 b\\n"), Some("a … b\n".to_string()));
+        assert_eq!(decode_literal_escapes("plain"), None);
+        assert_eq!(decode_literal_escapes("bad \\u12"), None);
+        assert_eq!(decode_literal_escapes("\\ud83d\\ude00"), Some("😀".to_string()));
+        let dir = temp_workspace("escapes");
+        let ctx = ctx_for(&dir);
+        std::fs::write(dir.join("t.py"), "def f(text):\n    return text[:left] + \"…\" + text[right:]\n").unwrap();
+        let outcome = execute(
+            &serde_json::json!({"files": [{"path": "t.py", "find": "    return text[:left] + \"\\u2026\" + text[right:]", "replace": "    return text[:left] + \"\\u2026\" + tail"}]}),
+            &ctx,
+        );
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("JSON escapes"), "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(dir.join("t.py")).unwrap(), "def f(text):\n    return text[:left] + \"…\" + tail\n");
+        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "    return text[:left] + \"...\" + tail", "replace": "x"}), &ctx);
+        assert!(outcome.failed, "{}", outcome.text);
+        assert!(
+            outcome.text.contains("The closest line in the file is line 2: `    return text[:left] + \"…\" + tail`"),
+            "{}",
+            outcome.text
+        );
+        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "nothing like this at all", "replace": "x"}), &ctx);
+        assert!(outcome.failed && !outcome.text.contains("closest line"), "{}", outcome.text);
+        // A later line of the find text is the one that misses.
+        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "def f(text):\n    return text[:left] + \"...\" + tail", "replace": "x"}), &ctx);
+        assert!(outcome.text.contains("Line 2 of the find text has no match in the file. The closest line in the file is line 2:"), "{}", outcome.text);
+        // Every line present, but not contiguous.
+        std::fs::write(dir.join("u.py"), "a = 1\n\nb = 2\nc = 3\n").unwrap();
+        let outcome = execute(&serde_json::json!({"path": "u.py", "find": "a = 1\nb = 2", "replace": "x"}), &ctx);
+        assert!(outcome.text.contains("Every line of the find text is in the file (its first line is line 1), but not as one contiguous block"), "{}", outcome.text);
+        // A second entry whose find spans the hunk the first entry replaced.
+        let outcome = execute(&serde_json::json!({"files": [
+            {"path": "u.py", "find": "b = 2\nc = 3\n", "replace": "bc = 5\n"},
+            {"path": "u.py", "find": "c = 3\n", "replace": "c = 4\n"}
+        ]}), &ctx);
+        assert!(outcome.failed && outcome.text.contains("matches the file on disk but not the text after the earlier entries in this call"), "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(dir.join("u.py")).unwrap(), "a = 1\n\nb = 2\nc = 3\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_to_a_python_file_goes_before_the_main_guard() {
+        let dir = temp_workspace("append-guard");
+        let ctx = ctx_for(&dir);
+        let original = "import unittest\n\n\nclass StoreTests(unittest.TestCase):\n    def test_a(self):\n        pass\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n";
+        std::fs::write(dir.join("tests/test_store.py"), original).ok();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_store.py"), original).unwrap();
+        let outcome = execute(&serde_json::json!({"path": "tests/test_store.py", "append": "\n    def test_b(self):\n        pass\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.starts_with("tests/test_store.py: appended 2 line(s) before the `if __name__ == \"__main__\":` block"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("tests/test_store.py")).unwrap();
+        assert_eq!(
+            text,
+            "import unittest\n\n\nclass StoreTests(unittest.TestCase):\n    def test_a(self):\n        pass\n\n    def test_b(self):\n        pass\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+        );
+        // A top-level definition gets two blank lines; a guard that is not
+        // the last top-level statement is not a tail.
+        let outcome = execute(&serde_json::json!({"path": "tests/test_store.py", "append": "class More(unittest.TestCase):\n    pass\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("tests/test_store.py")).unwrap();
+        assert!(text.contains("        pass\n\n\nclass More(unittest.TestCase):\n    pass\n\n\nif __name__"), "{text}");
+        assert!(split_python_main_guard("if __name__ == \"__main__\":\n    main()\n\nx = 1\n").is_none());
+        assert!(split_python_main_guard("def f():\n    if __name__ == \"__main__\":\n        pass\n").is_none());
+        let outcome = execute(&serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}), &ctx);
+        assert!(!outcome.failed && !outcome.text.contains("block"), "{}", outcome.text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

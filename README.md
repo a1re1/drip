@@ -1328,6 +1328,12 @@ A role route whose codex executable cannot be spawned (missing binary) no
 longer ends the run: the call falls through to the run's base model once,
 with a run warning naming the route (a recorded run died at its replanning
 loop on "codex executable not found").
+A `DELEGATE` child has a wall-clock budget as well as an iteration cap
+(`wallSeconds`, default 1200, max 3600): two recorded parents that looked
+like 75-79 calls each hid a child that ran to max-iterations for 2.5-3.3
+hours behind one DELEGATE call. At the deadline the child is stopped and the
+result reads `DELEGATE wall budget of Ns exhausted (…)` with what it
+finished, so the parent can resume it narrower or do the rest directly.
 A BASH command over 1200 chars gets a note with its generation cost: a
 recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
 calls whose 1200-4000-token shell scripts each waited 20-45s to be written

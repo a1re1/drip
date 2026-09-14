@@ -1340,7 +1340,7 @@ whose observation matched, or whose observed text reports success (exit 0,
 verification record, without anchor bookkeeping.
 
 `--plan-mode auto|always|direct` decides how a run gets its first task list.
-`auto` (default) skips the planner for a small goal (≤700 chars, ≤3 named paths) that the harness can still
+`auto` (default) skips the planner for a small goal (≤2500 chars, ≤10 named paths) that the harness can still
 verify — it declares its own backticked acceptance check, or the workspace has
 a detectable project suite (`Cargo.toml`, `go.mod`, a `package.json` test
 script, pytest config, or a `tests/` of `.py` files; the seeded event names

@@ -1239,6 +1239,19 @@ under the same already-read header. Both http-serve runs on 0.161 had
 opened with a READ of `kvstore/store.py`, which the goal never names but
 which sits in the package it does.
 
+The goal's check runs after the edit, not only at the finish. When a
+response's last PATCH lands and the response carries no finish, the harness
+runs the goal-declared (or detected) project check once and puts its verdict
+on the PATCH result — `-> passed`, with the note that nothing needs to run it
+again, or `-> FAILED` with the failure block and the ask to fix it in the
+next PATCH with finish on it. The recorded bench paid a bounce round for every
+finish whose harness-run check failed (4 of 16 runs) and an author's own
+check round in 3 more; with the verdict in hand the next round is the fix or
+the finish. The check runs only when its last measured run was under 8s
+(unmeasured interpreted runners qualify; `cargo test` and other compile-first
+runners do not until measured), never for a command that hung this run, and
+at most three times per loop.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

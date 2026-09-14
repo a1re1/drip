@@ -33,9 +33,16 @@ pub const MAX_DIGEST_ACTION_CHARS: usize = 200;
 /// just because its fixed budget ran out. Loops that only read never extend.
 pub const MAX_CYCLE_EXTENSIONS: i64 = 2;
 /// A single-task run whose goal-declared check the harness ran and passed
-/// after the last edit skips the reviewer loop when the whole change (tracked
-/// diff plus new files) is at most this many lines.
+/// after the last edit skips the reviewer loop when the change outside test
+/// files (tracked diff plus new files) is at most this many lines. Test
+/// lines count toward REVIEW_WAIVER_MAX_TOTAL_LINES only: the check the
+/// waiver rests on just ran them, and on the recorded bench every reviewer
+/// loop that fired did so on 110–161 total lines of which 38–75 were code,
+/// confirmed 7 of 7 with no finding, and in 5 of 7 re-ran the check.
 pub const REVIEW_WAIVER_MAX_LINES: usize = 100;
+/// The whole change, tests included, must still fit this many lines for the
+/// waiver.
+pub const REVIEW_WAIVER_MAX_TOTAL_LINES: usize = 500;
 /// Output lines carried in a harness report of a settled background job.
 pub const BACKGROUND_REPORT_TAIL_LINES: i64 = 40;
 pub const BACKGROUND_REPORT_MAX_CHARS: usize = 4_000;
@@ -497,6 +504,10 @@ mod review_brief_tests {
         std::fs::create_dir_all(dir.path().join(".dripdata/sessions")).unwrap();
         std::fs::write(dir.path().join(".dripdata/sessions/state.json"), "{}\n".repeat(500)).unwrap();
         assert_eq!(workspace_changed_lines(&cwd, &head), Some(1 + 2 + 2), "one deleted, two added, two untracked; the binary blob and the dot-directory count nothing");
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests/test_a.py"), "import unittest\n".repeat(30)).unwrap();
+        assert_eq!(workspace_changed_lines_split(&cwd, &head), Some((1 + 2 + 2, 30)), "test files count on their own side");
+        assert_eq!(workspace_changed_lines(&cwd, &head), Some(1 + 2 + 2 + 30));
         assert_eq!(workspace_changed_lines(&std::env::temp_dir().to_string_lossy(), "HEAD"), None);
     }
 
@@ -627,17 +638,33 @@ pub fn changes_so_far(cwd: &str, base: &str) -> Option<(String, Vec<String>)> {
 }
 
 pub fn workspace_changed_lines(cwd: &str, base: &str) -> Option<usize> {
+    workspace_changed_lines_split(cwd, base).map(|(code, tests)| code + tests)
+}
+
+/// Changed lines since `base` as (outside test files, in test files): the
+/// tracked diff's added plus deleted lines and every line of each new file,
+/// test-likeness by path (tests/ trees, test_*.py, *.test.ts, …).
+pub fn workspace_changed_lines_split(cwd: &str, base: &str) -> Option<(usize, usize)> {
     let numstat = git_output(cwd, &["diff", "--numstat", base])?;
-    let mut lines = 0usize;
+    let mut code = 0usize;
+    let mut tests = 0usize;
+    let mut count = |path: &str, lines: usize| {
+        if crate::harness::outline::test_like_path(path) {
+            tests += lines;
+        } else {
+            code += lines;
+        }
+    };
     for row in numstat.lines() {
         let mut cols = row.split('\t');
         let added = cols.next().and_then(|v| v.trim().parse::<usize>().ok());
         let deleted = cols.next().and_then(|v| v.trim().parse::<usize>().ok());
+        let path = cols.next().map(str::trim).unwrap_or("");
         // Binary rows show "-": a reviewer could not read them either, and
         // in practice they are build artefacts (a tracked __pycache__), so
         // they do not count toward the bound.
         if let (Some(a), Some(d)) = (added, deleted) {
-            lines += a + d;
+            count(path, a + d);
         }
     }
     if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]) {
@@ -648,12 +675,13 @@ pub fn workspace_changed_lines(cwd: &str, base: &str) -> Option<usize> {
                 continue;
             }
             // An unreadable (binary) new file counts nothing, like a binary hunk.
-            lines += std::fs::read_to_string(std::path::Path::new(cwd).join(path))
+            let lines = std::fs::read_to_string(std::path::Path::new(cwd).join(path))
                 .map(|text| text.lines().count())
                 .unwrap_or(0);
+            count(path, lines);
         }
     }
-    Some(lines)
+    Some((code, tests))
 }
 
 pub fn git_head(cwd: &str) -> Option<String> {
@@ -4535,9 +4563,15 @@ impl HarnessRun {
         let base = self.run_start_head.as_deref()?;
         let (how, command) = self.verified_after_last_edit(harness_ran)?;
         let bound = self.review_waiver_lines.unwrap_or(REVIEW_WAIVER_MAX_LINES);
-        let lines = workspace_changed_lines(&self.cwd, base).filter(|lines| *lines <= bound)?;
+        if bound == 0 {
+            return None;
+        }
+        let (code, tests) = workspace_changed_lines_split(&self.cwd, base)?;
+        if code > bound || code + tests > REVIEW_WAIVER_MAX_TOTAL_LINES.max(bound) {
+            return None;
+        }
         Some(format!(
-            "{how} ({}) after the last edit and it passed, and the whole change is {lines} line(s) (waiver bound {bound})",
+            "{how} ({}) after the last edit and it passed, and the whole change is {code} line(s) outside tests plus {tests} in tests (waiver bound {bound} outside tests)",
             truncate_text(&command, 80)
         ))
     }

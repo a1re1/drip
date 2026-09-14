@@ -1318,6 +1318,12 @@ And a VERIFY that repeats the current record's command (same shape, nothing
 edited since, the record passed with executed tests) does not run again: the
 result says `VERIFY not re-run` and names the record to cite (`mix test`,
 `dotnet test`, `mvn test` and `gradle test` count as native runners too).
+A BASH runner command piped into a trailing `| tail -N` / `| head -N` loses
+the filter the way VERIFY does (the result says so): the filter hid the panic
+block behind "FAILED. 0 passed; 1 failed" and cost the next round a
+`| grep -A6 panicked`. When a failing runner's output is long enough to be
+cut in the middle, the failure block (from the first panic / assertion / FAIL
+line) is appended as `failure excerpt from the elided middle`.
 
 When a finish arrives with no check behind it and the goal declares none,
 the harness detects the project's own suite from the workspace layout

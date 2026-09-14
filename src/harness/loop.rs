@@ -245,6 +245,20 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_runner_bash_call_loses_its_trailing_tail_filter() {
+        let (input, dropped) = drop_runner_tail_filter(r#"{"command":"cargo test --lib shape 2>&1 | tail -3","timeoutMs":300000}"#);
+        assert_eq!(dropped.as_deref(), Some("| tail -3"));
+        let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(value["command"], "cargo test --lib shape 2>&1");
+        assert_eq!(value["timeoutMs"], 300000);
+        // Not a runner, or no filter: untouched.
+        let plain = r#"{"command":"ls | tail -3"}"#;
+        assert_eq!(drop_runner_tail_filter(plain), (plain.to_string(), None));
+        let bare = r#"{"command":"cargo test -q"}"#;
+        assert_eq!(drop_runner_tail_filter(bare), (bare.to_string(), None));
+    }
+
+    #[test]
     fn a_repeated_verify_reuses_a_current_passing_record_only() {
         use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
         let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 1, passed: 1, failed: 0, skipped: None, detail: None };
@@ -1506,6 +1520,32 @@ pub fn repeated_verify_reuse(
         "{VERIFY_REUSED_PREFIX} the same command already passed as verification record {id} at iteration {} ({} executed, {} failed) and nothing was edited since — that record is current, so cite it in finish_task instead of re-running. Re-run only after an edit.",
         record.at_iteration, evidence.executed, evidence.failed
     ))
+}
+
+/// A BASH call whose command is a native test runner piped into a trailing
+/// `| tail -N` / `| head -N` gets the filter dropped, the way VERIFY does:
+/// the filter hides the failure block (a recorded run saw only "FAILED. 0
+/// passed; 1 failed" through `| tail -3` and spent the next round on
+/// `| grep -A6 panicked`), while the harness already bounds runner output
+/// and excerpts failures. Returns the rewritten input and the dropped
+/// filter text, or the input untouched.
+pub fn drop_runner_tail_filter(raw_input: &str) -> (String, Option<String>) {
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return (raw_input.to_string(), None);
+    };
+    let Some(command) = input.get("command").and_then(|value| value.as_str()).map(str::to_string) else {
+        return (raw_input.to_string(), None);
+    };
+    if native_runner_name(&command).is_none() {
+        return (raw_input.to_string(), None);
+    }
+    let stripped = crate::tools::builtin::verify::strip_trailing_tail_pipe(&command);
+    if stripped == command.trim() {
+        return (raw_input.to_string(), None);
+    }
+    let dropped = command.trim()[stripped.len()..].trim().to_string();
+    input["command"] = serde_json::Value::String(stripped);
+    (input.to_string(), Some(dropped))
 }
 
 pub fn native_runner_name(command: &str) -> Option<&'static str> {
@@ -6156,6 +6196,7 @@ impl HarnessRun {
             let prior_loop_text = prior_record.as_ref().map(|record| record.last_used_iteration.to_string());
             let prior_output = prior_record.map(|record| record.last_output);
 
+            let (raw_input, dropped_tail_filter) = if tool_name == "BASH" { drop_runner_tail_filter(&raw_input) } else { (raw_input, None) };
             let execution_started_at_ms = (self.now)().timestamp_millis();
             let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
@@ -6202,6 +6243,24 @@ impl HarnessRun {
                 &execution.tool_content,
                 scope.loop_budget.max_tool_result_chars as usize,
             );
+            if let Some(filter) = dropped_tail_filter.as_deref() {
+                tool_content.push_str(&format!(
+                    "\n[harness] the trailing `{filter}` was dropped: runner output is bounded here and its failure block is kept, so the summary and any panic are both visible without a re-run."
+                ));
+            }
+            // A truncated runner failure keeps its panic block: the ends-kept
+            // cut drops the middle, which is where the assertion lives.
+            if execution.failed
+                && bash_command.as_deref().or(verification_command.as_deref()).is_some_and(|command| native_runner_name(command).is_some())
+                && execution.tool_content.chars().count() > scope.loop_budget.max_tool_result_chars as usize
+            {
+                if let Some(excerpt) = crate::tools::builtin::verify::runner_failure_excerpt(&execution.tool_content) {
+                    let first = excerpt.lines().next().unwrap_or("");
+                    if !first.is_empty() && !tool_content.contains(first) {
+                        tool_content.push_str(&format!("\n\n[harness] failure excerpt from the elided middle:\n{excerpt}"));
+                    }
+                }
+            }
 
             // Oversized output spills to a file beside the state store so the
             // elided middle stays recoverable with READ/GREP.

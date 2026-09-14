@@ -187,12 +187,12 @@
     "type": "function",
     "function": {
       "name": "GREP",
-      "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern.",
+      "description": "Search files in the workspace for lines matching a JavaScript-flavored regex pattern. Each hit names the definition it sits in, and when the whole search matches at most 3 lines, every hit that is a definition line is followed by its body (line-numbered like a READ) — a GREP for `fn name` returns the function, so do not READ the range it just showed.",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "context": {
-            "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0.",
+            "description": "Number of lines of context (before and after) to include around each match. Accepts 0–5, defaults to 0; honoured only when the search matches at most 5 lines (a broader search returns the compact list, each hit naming its definition).",
             "maximum": 5,
             "minimum": 0,
             "type": "number"

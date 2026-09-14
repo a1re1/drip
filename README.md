@@ -1241,6 +1241,14 @@ hits for the identifiers the task names (snake_case and CamelCase tokens, up
 to eight names and six hits each), so the first rounds start from the call
 sites and definitions instead of discovering them one GREP per round.
 
+A GREP hit names the definition it sits in (`  [in run_goal]`), and a GREP
+whose whole search matches at most three lines returns the body of every hit
+that is a definition line, numbered like a READ (up to 80 lines each, 6000
+characters in all, with a pointer to the READ that shows the rest of a longer
+body). Nine hundred of the twelve thousand GREPs in this machine's transcripts
+were followed by a READ starting at the line the GREP had just found — one
+extra model round each; the body arrives in the GREP's round instead.
+
 Model calls are bounded per attempt (240s by default). Once a model has three
 completed calls behind it, the first attempt of each call is bounded by eight
 times that model's recent median latency instead (never below 45s, never above

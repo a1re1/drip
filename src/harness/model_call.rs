@@ -489,6 +489,9 @@ pub struct ModelCallerDeps {
     /// Harness working directory handed to the codex bridge so spawned
     /// `codex app-server` processes run where the harness runs.
     pub cwd: Option<String>,
+    /// Executable the codex bridge spawns (None: "codex" on PATH). Tests point
+    /// it at a missing binary to exercise the base-model fallback.
+    pub codex_executable: Option<String>,
     pub default_transport_tools: Vec<OpenAICompatibleRequestTool>,
     pub emit: Arc<dyn Fn(HarnessEvent) + Send + Sync>,
     /// Fallback gateway for calls that use the base model/url (text-only calls such as run summaries), where there is no route object to hang one off.
@@ -539,6 +542,12 @@ pub struct ModelCaller {
     /// Codex lane for include_tools=false calls (run summaries), so they never
     /// interleave with the tool lane's pending tool request.
     codex_summary_lane: tokio::sync::Mutex<Option<CodexBridge>>,
+}
+
+/// A codex bridge that could not start at all (missing binary, spawn error):
+/// the one gateway failure no retry or wait can fix.
+pub fn is_codex_spawn_failure(message: &str) -> bool {
+    message.contains("not found or failed to spawn")
 }
 
 pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
@@ -828,6 +837,11 @@ impl ModelCaller {
         let mut failures: Vec<String> = Vec::new();
         let mut route = primary_route;
         let mut next_route = effective_fallback_route;
+        // A role route whose codex executable cannot even be spawned is a
+        // local, permanent failure: instead of ending the run ("codex
+        // executable not found" killed a recorded run at its replanning
+        // loop), the call falls through to the run's base model once.
+        let mut base_fallback_used = false;
 
         loop {
             let max_attempts = if next_route.is_some() {
@@ -870,6 +884,21 @@ impl ModelCaller {
                     failures.push(message.clone());
 
                     let Some(next) = next_route else {
+                        if route.is_some() && !base_fallback_used && is_codex_spawn_failure(&message) {
+                            self.emit(
+                                HarnessEventType::RunWarning,
+                                format!(
+                                    "role route {} (codex) is unavailable ({message}) — falling back to the run's base model {} for this call",
+                                    route.as_ref().map(|route| route.model.clone()).unwrap_or_default(),
+                                    self.deps.model
+                                ),
+                                None,
+                            );
+                            base_fallback_used = true;
+                            route = None;
+                            next_route = None;
+                            continue;
+                        }
                         if failures.len() == 1 {
                             return Err(error);
                         }
@@ -937,6 +966,7 @@ impl ModelCaller {
     fn codex_bridge_config(&self, model: &str) -> BridgeConfig {
         BridgeConfig {
             cwd: self.deps.cwd.as_deref().map(std::path::PathBuf::from),
+            executable: self.deps.codex_executable.clone().unwrap_or_else(|| "codex".to_string()),
             model: Some(model.to_string()),
             request_timeout_ms: self.request_timeout_ms,
             ..BridgeConfig::default()
@@ -1767,6 +1797,7 @@ mod tests {
     fn test_deps(url: String) -> ModelCallerDeps {
         ModelCallerDeps {
             cwd: None,
+            codex_executable: None,
             default_transport_tools: Vec::new(),
             emit: Arc::new(|_| {}),
             fallback_route: None,
@@ -1981,6 +2012,41 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_codex_role_route_whose_executable_is_missing_falls_back_to_the_base_model() {
+        let (url, server) = spawn_mock_server(
+            1,
+            200,
+            r#"{"choices":[{"message":{"content":"base hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#,
+        );
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut deps = test_deps(url);
+        let sink = events.clone();
+        deps.emit = Arc::new(move |event| sink.lock().unwrap().push(event.detail));
+        deps.codex_executable = Some("drip-missing-codex-binary-for-tests".to_string());
+        let caller = create_model_caller(deps);
+        let route = ModelRoute {
+            fallback_route: None,
+            headers: None,
+            model: "gpt-6-astra".to_string(),
+            provider: Some("codex".to_string()),
+            reasoning_effort: None,
+            refresh_headers: None,
+            url: String::new(),
+        };
+        let response = caller
+            .call_model(vec![user_message("plan")], Some(ModelCallOptions { route: Some(route), ..Default::default() }))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.choices.as_ref().unwrap()[0].message.as_ref().unwrap().content.as_ref().unwrap(),
+            &serde_json::json!("base hi")
+        );
+        let _ = server.join();
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|detail| detail.contains("falling back to the run's base model test-model")), "{events:?}");
     }
 
     #[tokio::test]

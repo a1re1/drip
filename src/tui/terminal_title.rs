@@ -179,6 +179,7 @@ pub async fn generate_chat_title(
 ) -> Option<String> {
     let timeout_ms = timeout_ms.max(1);
     let caller = create_model_caller(ModelCallerDeps {
+        codex_executable: None,
         cwd: None,
         default_transport_tools: Vec::new(),
         emit: Arc::new(|_| {}),

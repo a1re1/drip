@@ -342,12 +342,22 @@ const DEFINITION_MODIFIERS: &[&str] = &[
 /// call. Err names the reason when there is no such line or several.
 pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String> {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A model naming the anchor as the call it reads in the file —
+    // `describe("readRegistry")`, `test('x')` — passes the whole expression,
+    // not a bare identifier. Match such a line by its literal opening; a
+    // recorded dogfood sent `before: describe("readRegistry")` and the
+    // strict lookup missed it, so the append fell to the end of the file and
+    // cost three more edits to relocate.
+    let anchor_is_call_expr = !name.is_empty() && !name.chars().all(|c| is_ident(c)) && name.contains('(');
+    let literal = name.trim_end().trim_end_matches(')').trim_end();
+    let search = if anchor_is_call_expr { literal } else { name };
     let mut hits: Vec<usize> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        if !trimmed.contains(name) {
+        if !trimmed.contains(search) {
             continue;
         }
+        let literal_hit = anchor_is_call_expr && !literal.is_empty() && trimmed.starts_with(literal);
         let mut words = trimmed.split_whitespace().peekable();
         while words.peek().is_some_and(|word| DEFINITION_MODIFIERS.contains(word)) {
             words.next();
@@ -367,7 +377,7 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
                     && rest.get(1 + name.len()..).is_some_and(|tail| tail.starts_with(|c| c == '"' || c == '\'' || c == '`'))
             }
         });
-        if keyword_hit || call_hit {
+        if keyword_hit || call_hit || literal_hit {
             hits.push(index);
         }
     }
@@ -2392,6 +2402,14 @@ mod execute_tests {
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("t.py")).unwrap();
         assert!(text.contains("        self.assertTrue(True)\n\n    def test_mid(self):\n        pass\n\n    @skip\n    def test_b(self):"), "{text}");
+        // A call-expression anchor (a describe/test block named as the model
+        // reads it) matches by its literal opening, not only a bare name.
+        std::fs::write(dir.join("d.test.ts"), "describe(\"a\", () => {\n  test(\"x\", () => {});\n});\n\ndescribe(\"b\", () => {\n  test(\"y\", () => {});\n});\n").unwrap();
+        let outcome = execute(&serde_json::json!({"path": "d.test.ts", "before": "describe(\"b\")", "append": "  test(\"z\", () => {});\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("before `describe(\"b\")`"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("d.test.ts")).unwrap();
+        assert!(text.contains("});\n\n  test(\"z\", () => {});\n\ndescribe(\"b\", () => {"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

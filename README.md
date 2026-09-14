@@ -1227,11 +1227,24 @@ rounds. The read-only nudge ("N reads and nothing written") waits for the
 second cycle of a loop (or sixteen reads): eight reads in a fresh loop's first
 cycle is orientation, not drift.
 
-A Cargo workspace gets a build warm-up: `cargo build --tests --quiet` starts
-in the background at run start (its output goes nowhere; the job is killed
-with the run), so the author's first `cargo test` finds the compile done
-instead of paying it after 20-40s of orientation during which the CPU sat
-idle. `DRIP_NO_WARMUP=1` disables it.
+A Cargo workspace gets a build warm-up in the background at run start (its
+output goes nowhere; the job is killed with the run), so the author's first
+`cargo test` finds the compile done instead of paying it after 20-40s of
+orientation during which the CPU sat idle. The warm-up compiles what the
+goal's check will run: a goal-declared `cargo test …` keeps its profile,
+targets and packages and gets `--no-run` (`cargo test --release --lib
+harness::model_call` warms up as `cargo test --release --lib
+harness::model_call --no-run --quiet`); with no such check it is `cargo
+build --tests --quiet`. Six recorded dogfoods declared a `--release` check
+while the warm-up built the dev profile, so every check still paid a 27s
+release compile. `DRIP_NO_WARMUP=1` disables it.
+
+The warm-up cannot remove the recompile an edit forces: a release
+recompile of this crate after one edit takes 17–18s (the release profile
+turns incremental compilation off, and `sccache` refuses
+`CARGO_INCREMENTAL=1` outright), so a check after the last edit pays that
+once. What the warm-up removes is everything else the check would compile
+cold: the dev-dependencies and test targets of the profile it names.
 
 When the goal-declared check already passed after the author's last edit
 (the same anchor the review waiver uses, without its size bound), the review

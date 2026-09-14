@@ -1002,18 +1002,52 @@ pub fn extract_bash_command(raw_input: &str) -> Option<String> {
     parsed.get("command").and_then(Value::as_str).map(str::to_string)
 }
 
-/// The build warm-up for a workspace, if any: `cargo build --tests` when a
-/// Cargo.toml sits at the root. Recorded Rust dogfoods paid 20-60s of
-/// compile inside their first `cargo test`, after 20-40s of orientation in
-/// which the CPU sat idle. DRIP_NO_WARMUP=1 disables it.
-pub fn build_warmup_command(cwd: &str) -> Option<(String, Vec<String>)> {
+/// The build warm-up for a workspace, if any, when a Cargo.toml sits at
+/// the root. Recorded Rust dogfoods paid 20-60s of compile inside their
+/// first `cargo test`, after 20-40s of orientation in which the CPU sat
+/// idle. The warm-up compiles what the goal's check will run: a
+/// goal-declared `cargo test …` keeps its profile, targets and packages
+/// and gets `--no-run` (six dogfoods declared `cargo test --release --lib
+/// <module>` while the warm-up built the dev profile, so every check still
+/// paid a 27s release compile); with no such check it is `cargo build
+/// --tests`. DRIP_NO_WARMUP=1 disables it.
+pub fn build_warmup_command(cwd: &str, goal: &str) -> Option<(String, Vec<String>)> {
     if std::env::var_os("DRIP_NO_WARMUP").is_some() {
         return None;
     }
-    if Path::new(cwd).join("Cargo.toml").is_file() {
-        return Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]));
+    if !Path::new(cwd).join("Cargo.toml").is_file() {
+        return None;
     }
-    None
+    if let Some(args) = goal_declared_check_commands(goal).iter().find_map(|command| cargo_test_warmup_args(command)) {
+        return Some(("cargo".to_string(), args));
+    }
+    Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]))
+}
+
+/// The `cargo test` arguments of a check command with `--no-run` added and
+/// the shell tail dropped (pipes, `&&` chains, redirections, the `--`
+/// runner arguments), so the warm-up compiles exactly the profile, targets
+/// and packages the check will run. None when the command is not a cargo
+/// test.
+pub fn cargo_test_warmup_args(command: &str) -> Option<Vec<String>> {
+    let head = command.split(['|', ';']).next()?.split("&&").next()?;
+    let tokens: Vec<&str> = head.split_whitespace().collect();
+    let start = tokens.windows(2).position(|pair| pair[0] == "cargo" && pair[1] == "test")?;
+    let mut args = vec!["test".to_string()];
+    for token in &tokens[start + 2..] {
+        if *token == "--" {
+            break;
+        }
+        if *token == "--no-run" || token.starts_with("2>") || token.starts_with('>') || token.starts_with('<') {
+            continue;
+        }
+        args.push((*token).to_string());
+    }
+    args.push("--no-run".to_string());
+    if !args.iter().any(|arg| arg == "--quiet" || arg == "-q") {
+        args.push("--quiet".to_string());
+    }
+    Some(args)
 }
 
 /// The project's own test command when the goal declares none, from the
@@ -3417,7 +3451,7 @@ impl HarnessRun {
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
         let max_loops = options.max_loops.unwrap_or(i64::MAX);
         let run_start_head = git_head(&cwd);
-        let warmup = build_warmup_command(&cwd)
+        let warmup = build_warmup_command(&cwd, &options.goal)
             .and_then(|(program, args)| crate::tools::child_process::WarmupJob::spawn(&program, &args, &cwd).ok());
         if let Some(job) = &warmup {
             (emit_fn)(HarnessEvent {
@@ -7983,12 +8017,33 @@ mod role_inference_tests {
     fn warmup_command_only_for_cargo_workspaces() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_string_lossy().into_owned();
-        assert_eq!(build_warmup_command(&cwd), None);
+        assert_eq!(build_warmup_command(&cwd, "Fix the bug; run `cargo test --release`"), None);
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         assert_eq!(
-            build_warmup_command(&cwd),
+            build_warmup_command(&cwd, "Fix the bug in page"),
             Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]))
         );
+        assert_eq!(
+            build_warmup_command(&cwd, "Add the test. Acceptance: `cargo test --release --lib harness::model_call` passes."),
+            Some((
+                "cargo".to_string(),
+                vec!["test".to_string(), "--release".to_string(), "--lib".to_string(), "harness::model_call".to_string(), "--no-run".to_string(), "--quiet".to_string()]
+            )),
+            "the warm-up compiles the profile and targets the goal's check runs"
+        );
+    }
+
+    #[test]
+    fn cargo_test_warmup_args_keep_selection_flags_and_drop_the_shell_tail() {
+        let args = |command: &str| cargo_test_warmup_args(command).map(|args| args.join(" "));
+        assert_eq!(args("cargo test -q 2>&1 | tail -20"), Some("test -q --no-run".to_string()));
+        assert_eq!(
+            args("timeout 120 cargo test --release -p drip --lib tools::patch -- --nocapture && echo ok"),
+            Some("test --release -p drip --lib tools::patch --no-run --quiet".to_string())
+        );
+        assert_eq!(args("cargo test --no-run --quiet"), Some("test --quiet --no-run".to_string()));
+        assert_eq!(args("cargo build --release"), None);
+        assert_eq!(args("python3 -m unittest"), None);
     }
 
     #[test]

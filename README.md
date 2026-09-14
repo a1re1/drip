@@ -522,6 +522,13 @@ a `--roles` file over both) overrides only the fields it sets, so
 planner's model and prompt; replacing the whole definition used to drop the
 model silently and run the planning loop on the base model.
 
+A role bound to planning or replanning runs at medium reasoning effort when
+it sets none and its model profile says high: a same-window A/B (five tasks
+× 2, planner gpt-6-astra via codex) halved the planning call at medium
+(6.6-12.4s vs 12.6-24.6s) with the same hidden-test pass rate and the same
+plans, so planned runs finished 30-40% sooner. Set `reasoningEffort` on the
+role to keep high.
+
 The `--roles` flag accepts a built-in preset name (or a path to a roles.json
 file using the same schema as config-sourced roles). Preset roles are merged
 with config-sourced roles by name, with the preset taking precedence on name

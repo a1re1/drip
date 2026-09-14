@@ -282,6 +282,21 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn edit_check_runs_for_fast_or_interpreted_checks_only() {
+        use super::{edit_check_allowed, edit_check_note};
+        assert!(edit_check_allowed("python3 -m unittest discover -s tests -q", None));
+        assert!(edit_check_allowed("npm test", None));
+        assert!(!edit_check_allowed("cargo test -q", None), "compile-first runner, unmeasured");
+        assert!(edit_check_allowed("cargo test -q", Some(3_000)), "measured fast");
+        assert!(!edit_check_allowed("python3 -m pytest", Some(9_000)), "measured slow");
+        let passed = edit_check_note("pytest -q", true, "passed", "");
+        assert!(passed.starts_with("\n\n[harness] ran the goal-declared check after this edit: pytest -q -> passed."), "{passed}");
+        assert!(passed.contains("finish_task now"), "{passed}");
+        let failed = edit_check_note("pytest -q", false, "FAILED", "E  assert 1 == 2");
+        assert!(failed.contains("Fix it in the next PATCH and put finish") && failed.ends_with("E  assert 1 == 2"), "{failed}");
+    }
+
+    #[test]
     fn goal_declared_check_commands_keeps_backticked_test_runners_only() {
         let goal = "Add a `--count` flag to `kvstore`. Acceptance: `python3 -m unittest discover -s tests -q` must pass and `cargo test` too. Do not touch `README.md`.";
         assert_eq!(
@@ -1676,6 +1691,38 @@ pub fn record_edited_path(edited_paths: &mut Vec<String>, path: &str) {
 /// Finish-time checks the harness runs per loop before it stops offering
 /// them and asks for a VERIFY instead.
 pub const FINISH_CHECKS_MAX_PER_LOOP: u32 = 3;
+
+/// Checks the harness runs after an edit round (see run_edit_check) per
+/// loop; a workspace that keeps failing is the model's to fix, not the
+/// harness's to keep measuring.
+pub const EDIT_CHECKS_MAX_PER_LOOP: u32 = 3;
+/// A check that took longer than this the last time it ran is not run
+/// after every edit: the round it would save is cheaper than the wait.
+pub const EDIT_CHECK_MAX_KNOWN_MS: i64 = 8_000;
+/// Runners that compile before they test; unknown durations for these are
+/// assumed slow.
+pub const EDIT_CHECK_SLOW_RUNNERS: &[&str] = &["cargo test", "cargo nextest", "go test", "dotnet test", "mvn test", "gradle test", "mix test"];
+
+/// Whether the goal's check is cheap enough to run after an edit round.
+pub fn edit_check_allowed(command: &str, known_ms: Option<i64>) -> bool {
+    match known_ms {
+        Some(ms) => ms <= EDIT_CHECK_MAX_KNOWN_MS,
+        None => !native_runner_name(command).is_some_and(|runner| EDIT_CHECK_SLOW_RUNNERS.contains(&runner)),
+    }
+}
+
+/// The trailer on a PATCH result that carries the check's verdict.
+pub fn edit_check_note(command: &str, passed: bool, verdict: &str, failure: &str) -> String {
+    if passed {
+        format!(
+            "\n\n[harness] ran the goal-declared check after this edit: {command} -> {verdict}. That is the verification for the workspace as it stands: finish_task now (or put finish on the next PATCH if an edit remains); nothing needs to run it again."
+        )
+    } else {
+        format!(
+            "\n\n[harness] ran the goal-declared check after this edit: {command} -> {verdict}. Fix it in the next PATCH and put finish (summary + check) on that PATCH; the harness re-runs the check for the finish.\n{failure}"
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinishRecheck {
@@ -3361,6 +3408,9 @@ pub struct HarnessRun {
     /// BASH/VERIFY command texts that hung (timed out) this run; an identical
     /// re-run is refused instead of hanging again.
     pub hung_commands: Vec<String>,
+    /// Wall time of the last run of each check command shape this run
+    /// (normalize_command_shape); run_edit_check consults it.
+    pub check_durations_ms: HashMap<String, i64>,
     /// Normalized shapes (see normalize_command_shape) of commands that hung
     /// this run. A re-run of the same shape under a different spelling
     /// (`timeout 90 …`, `-v`, another tail filter) is not refused but runs
@@ -3480,6 +3530,8 @@ pub struct LoopScope {
     /// `check`, goal-declared, or detected project check); capped so a
     /// finish that keeps failing cannot burn the loop on re-runs.
     pub finish_checks_run: u32,
+    /// Checks the harness ran after an edit round this loop (run_edit_check).
+    pub edit_checks_run: u32,
     /// Workspace tools that failed earlier in the model response being
     /// dispatched (cleared per response); a completed finish_task after one
     /// is bounced, since the edit it counted on is not in place.
@@ -3954,6 +4006,7 @@ impl HarnessRun {
             task_loop_limit,
             review_waiver_lines,
             hung_commands: Vec::new(),
+            check_durations_ms: HashMap::new(),
             hung_shapes: Vec::new(),
             hung_shape_leash_ms: HUNG_SHAPE_LEASH_MS,
             warmup,
@@ -5632,6 +5685,7 @@ impl HarnessRun {
             planned_and_yielded: false,
             plan_yield_requested: false,
             finish_checks_run: 0,
+            edit_checks_run: 0,
             failed_calls_this_response: Vec::new(),
             finish_bounce: None,
             cycles_run: 0,
@@ -6731,9 +6785,66 @@ impl HarnessRun {
     /// harness ops, or workspace tools (verification tracking, spill,
     /// telemetry, footprint, tool-call/tool-result events), appending the
     /// tool-role messages to the transcript.
+    /// After the response's last successful PATCH, when the response carries
+    /// no finish, run the goal's check once so its verdict rides on the PATCH
+    /// result. The recorded bench paid a bounce round for every finish whose
+    /// harness-run check failed (4 of 16 runs) and an author's own check
+    /// round between edit and finish in 3 more; with the verdict already in
+    /// hand the next round is the fix or the finish. Gated to checks that
+    /// ran within EDIT_CHECK_MAX_KNOWN_MS (or, unmeasured, are not
+    /// compile-first runners), never a command that hung this run, at most
+    /// EDIT_CHECKS_MAX_PER_LOOP per loop.
+    pub fn run_edit_check(&mut self, scope: &mut LoopScope, call_id: &str) -> Option<String> {
+        if scope.edit_checks_run >= EDIT_CHECKS_MAX_PER_LOOP {
+            return None;
+        }
+        let declared = goal_declared_check_commands(&self.state.goal).into_iter().next();
+        let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
+        let command = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone()))?;
+        if self.hung_commands.iter().any(|hung| *hung == command) {
+            return None;
+        }
+        let shape = normalize_command_shape(&command);
+        let known = self.check_durations_ms.get(&shape).copied();
+        if !edit_check_allowed(&command, known) {
+            return None;
+        }
+        scope.edit_checks_run += 1;
+        let mut input = serde_json::json!({ "command": command });
+        input["anchor"] = serde_json::json!({
+            "kind": "external",
+            "source": detected
+                .as_ref()
+                .map(|(_, source)| format!("project test suite detected by the harness ({source}), run by the harness after an edit"))
+                .unwrap_or_else(|| "goal-declared acceptance check, run by the harness after an edit".to_string()),
+            "coverage": "reportedClaim"
+        });
+        input[GOAL_DECLARED_CHECK_MARKER] = serde_json::json!(true);
+        let verify_input = input.to_string();
+        let started = (self.now)().timestamp_millis();
+        let mut execution = self.execute_workspace_tool(&format!("{call_id}-editcheck"), &verify_input, Some(&scope.loop_tool_indexes), "VERIFY");
+        let took = (self.now)().timestamp_millis() - started;
+        self.check_durations_ms.insert(shape, took);
+        self.record_verification_outcome(scope, "VERIFY", &verify_input, &mut execution);
+        let verdict = match &self.state.last_verification {
+            Some(latest) => core_state::describe_verification_outcome(latest.failed, latest.ran_no_tests, latest.evidence.as_ref()),
+            None => core_state::describe_verification_outcome(execution.failed, None, None),
+        };
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+            detail: format!("harness ran the goal-declared check after this round's edits: {} -> {verdict} ({took}ms)", truncate_text(&command, 120)),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.digest_actions.push(format!("harness ran {} after the edit -> {verdict}", truncate_text(&command, 80)));
+        Some(edit_check_note(&command, !execution.failed, &verdict, &truncate_text_keeping_ends(&execution.tool_content, 1200)))
+    }
+
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
         scope.failed_calls_this_response.clear();
-        for call in calls {
+        let response_has_finish = calls.iter().any(|call| call.tool_name == "finish_task");
+        let last_patch_index = calls.iter().rposition(|call| call.tool_name == "PATCH");
+        for (call_index, call) in calls.into_iter().enumerate() {
             let NormalizedCall { call_id, raw_input, tool_name, .. } = call;
 
             // A survey timeout or a mid-wait abort ends the run: the calls
@@ -6985,6 +7096,11 @@ impl HarnessRun {
             let execution_started_at_ms = (self.now)().timestamp_millis();
             let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
+            if tool_name == "VERIFY" || tool_name == "BASH" {
+                if let Some(command) = extract_bash_command(&raw_input) {
+                    self.check_durations_ms.insert(normalize_command_shape(&command), execution_duration_ms);
+                }
+            }
 
             // A successful workspace mutation counts as task progress even if
             // finish_task is not called this loop, so the stall counter does
@@ -7006,6 +7122,12 @@ impl HarnessRun {
                 self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
+            let edit_check_note =
+                if tool_name == "PATCH" && !execution.failed && !response_has_finish && last_patch_index == Some(call_index) && !scope.review_loop {
+                    self.run_edit_check(scope, &call_id)
+                } else {
+                    None
+                };
             // Paths the run has edited decide whether a later "external"
             // verification anchor is honest: a check that names a file the
             // agent wrote is consistency with its own work, not correctness.
@@ -7038,6 +7160,9 @@ impl HarnessRun {
             }
             if let Some(note) = whole_file_note.as_deref() {
                 tool_content.push_str("\n");
+                tool_content.push_str(note);
+            }
+            if let Some(note) = edit_check_note.as_deref() {
                 tool_content.push_str(note);
             }
             if let Some(filter) = dropped_tail_filter.as_deref() {

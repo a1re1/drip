@@ -70,6 +70,18 @@ fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> Str
     .to_string()
 }
 
+fn tool_calls_response(calls: Vec<(&str, &str, serde_json::Value)>) -> String {
+    let tool_calls: Vec<serde_json::Value> = calls
+        .into_iter()
+        .map(|(id, name, arguments)| serde_json::json!({"id": id, "type": "function", "function": {"name": name, "arguments": arguments.to_string()}}))
+        .collect();
+    serde_json::json!({
+        "choices": [{"message": {"content": null, "tool_calls": tool_calls}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+    })
+    .to_string()
+}
+
 fn text_response(text: &str) -> String {
     serde_json::json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}).to_string()
 }
@@ -214,7 +226,58 @@ async fn unchecked_finish_runs_the_goal_declared_check() {
     assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::External);
     let events = events.lock().unwrap();
     assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
-    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 1);
+    // The check ran when the PATCH landed (run_edit_check); the finish that
+    // followed without further edits was accepted on that record.
+    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check after this round's edits")).count(), 1, "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.starts_with("harness ran")).collect::<Vec<_>>());
+    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 0);
+}
+
+/// Two PATCH calls in one response: the check runs once, after the last of
+/// them, and its verdict rides on that PATCH's result. A recorded bench run
+/// whose first PATCH created a source file and whose second created its test
+/// must not be measured between the two.
+#[tokio::test]
+async fn edit_check_runs_once_after_the_last_patch_of_a_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let (url, server) = spawn_scripted_server(vec![
+        tool_calls_response(vec![
+            ("w1", "PATCH", serde_json::json!({"path":"pkg/__init__.py","content":"def add(a, b):\n    return a + b\n"})),
+            ("w2", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\nfrom pkg import add\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(add(1, 1), 2)\n"})),
+        ]),
+        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added add and its test","anchor":"none","anchorNote":"nothing ran"})),
+        text_response("Done."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Add pkg/__init__.py with add() and tests/test_ok.py. Acceptance: `python3 -m unittest discover -s tests -q` must pass.".into(),
+        plan_mode: Some("never".into()),
+        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
+        })),
+        ..Default::default()
+    }).await.unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let events = events.lock().unwrap();
+    let details: Vec<String> = events.iter().map(|e| e.detail.clone()).collect();
+    // Tool-call events are emitted after the call runs, so order them by
+    // which PATCH result carries the check's trailer instead.
+    let checks: Vec<&String> = details.iter().filter(|d| d.starts_with("harness ran the goal-declared check after this round's edits")).collect();
+    assert_eq!(checks.len(), 1, "{details:?}");
+    assert!(checks[0].contains("-> passed"), "{}", checks[0]);
+    // The test file exists only after the second PATCH: a check that ran
+    // between the two would have found no tests at all.
+    let records = result.state.verifications.as_ref().unwrap();
+    assert_eq!(records.len(), 1, "one harness-run check");
+    assert_eq!(records[0].evidence.as_ref().unwrap().executed, 1, "the check ran before tests/test_ok.py existed: {:?}", records[0]);
+    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 0);
 }
 
 /// A stale finish whose last check cannot be re-run (the record keeps only a
@@ -250,8 +313,10 @@ async fn stale_finish_with_unrerunnable_check_falls_back_to_the_goal_check() {
     server.join().unwrap();
     assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
     let records = result.state.verifications.as_ref().unwrap();
-    assert_eq!(records.len(), 2, "the long probe and the harness-run goal check");
-    assert_eq!(records[1].command, "python3 -m unittest discover -s tests -q");
+    // Each PATCH lands the goal check (run_edit_check) around the long probe;
+    // the finish is accepted on the last of them without a re-run.
+    assert_eq!(records.len(), 3, "goal check, the long probe, goal check: {:?}", records.iter().map(|r| r.command.clone()).collect::<Vec<_>>());
+    assert_eq!(records[2].command, "python3 -m unittest discover -s tests -q");
     let events = events.lock().unwrap();
     assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
 }

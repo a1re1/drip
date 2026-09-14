@@ -24,6 +24,44 @@ use crate::tools::types::{
 
 const MAX_CHILD_ITERATIONS: i64 = 20;
 const DEFAULT_CHILD_ITERATIONS: i64 = 10;
+/// Wall-clock budget for a child run. Two recorded parents that looked like
+/// 75-79 calls each hid a child that ran to max-iterations for 2.5-3.3
+/// hours behind one DELEGATE call; an iteration cap bounds rounds, not
+/// time, and a child stuck in slow builds or slow calls eats the parent's
+/// whole afternoon. The child is aborted at the deadline and reports so.
+pub const DEFAULT_CHILD_WALL_SECONDS: i64 = 1200;
+pub const MAX_CHILD_WALL_SECONDS: i64 = 3600;
+
+/// Aborts `child` when `parent` aborts or `wall_seconds` elapse, until `done`
+/// is set. Returns the watcher thread and the flag that says the deadline
+/// (not the parent) fired.
+fn watch_child_budget(
+    child: AbortSignal,
+    parent: Option<AbortSignal>,
+    wall_seconds: i64,
+    done: Arc<std::sync::atomic::AtomicBool>,
+) -> (std::thread::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
+    use std::sync::atomic::Ordering;
+    let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hit = deadline_hit.clone();
+    let handle = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(wall_seconds.max(1) as u64);
+        while !done.load(Ordering::SeqCst) {
+            if parent.as_ref().is_some_and(|signal| signal.is_aborted()) {
+                child.abort();
+                break;
+            }
+            if started.elapsed() >= budget {
+                hit.store(true, Ordering::SeqCst);
+                child.abort();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
+    (handle, deadline_hit)
+}
 
 /// Wiring for the DELEGATE tool. Tool definitions are not
 /// clonable (boxed stage closures), so the child pack arrives as a factory
@@ -60,6 +98,10 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                 "maxIterations": {
                     "description": format!("Cycle budget for the child (default {DEFAULT_CHILD_ITERATIONS}, max {MAX_CHILD_ITERATIONS})."),
                     "type": "number"
+                },
+                "wallSeconds": {
+                    "description": format!("Wall-clock budget for the child in seconds (default {DEFAULT_CHILD_WALL_SECONDS}, max {MAX_CHILD_WALL_SECONDS}); the child is stopped at the deadline and reports what it finished."),
+                    "type": "number"
                 }
             },
             "required": ["goal"],
@@ -87,11 +129,19 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                 .map(|value| value.floor() as i64)
                 .unwrap_or(DEFAULT_CHILD_ITERATIONS);
 
+            let wall_seconds = parsed
+                .get("wallSeconds")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .map(|value| value.floor() as i64)
+                .unwrap_or(DEFAULT_CHILD_WALL_SECONDS);
+
             Ok(ChatToolPreparedInput {
                 display_input: format!("delegate: {}", goal.chars().take(80).collect::<String>()),
                 input: json!({
                     "goal": goal,
-                    "maxIterations": requested.clamp(1, MAX_CHILD_ITERATIONS)
+                    "maxIterations": requested.clamp(1, MAX_CHILD_ITERATIONS),
+                    "wallSeconds": wall_seconds.clamp(30, MAX_CHILD_WALL_SECONDS)
                 }),
                 tags: None,
             })
@@ -99,6 +149,10 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
         execute: Box::new(move |request: ChatToolExecuteRequest<'_>| {
             let goal = request.prepared.input["goal"].as_str().unwrap_or_default().to_string();
             let max_iterations = request.prepared.input["maxIterations"].as_i64().unwrap_or(DEFAULT_CHILD_ITERATIONS);
+            let wall_seconds = request.prepared.input["wallSeconds"].as_i64().unwrap_or(DEFAULT_CHILD_WALL_SECONDS);
+            let child_signal = AbortSignal::new();
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (watcher, deadline_hit) = watch_child_budget(child_signal.clone(), wiring.signal.clone(), wall_seconds, done.clone());
             let wiring = wiring.clone();
             let index = open_session_index(&wiring.index_db_path);
             let project_paths = ProjectPaths::from(&wiring.project);
@@ -148,7 +202,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     role_bindings: None,
                     roles: None,
                     session: &child_session,
-                    signal: wiring.signal.clone(),
+                    signal: Some(child_signal.clone()),
                     skills: wiring.skills.clone(),
                     summarize_run: None,
                     lite: false,
@@ -158,16 +212,26 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     // A delegate child gets no MCP surface of its own.
                     mcp_servers: None,
                 }))
-            })
-            .map_err(|error| error.to_string())?;
+            });
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = watcher.join();
+            let deadline_hit = deadline_hit.load(std::sync::atomic::Ordering::SeqCst);
+            let outcome = outcome.map_err(|error| error.to_string())?;
             let record = &outcome.record;
             let verification = record.last_verification.as_ref();
             let short_id: String = child_session.id.chars().take(8).collect();
             let lines = vec![
-                format!(
-                    "DELEGATE {}: {} completed, {} pending, {} blocked (child session {short_id})",
-                    record.reason, record.task_stats.completed, record.task_stats.pending, record.task_stats.blocked
-                ),
+                if deadline_hit {
+                    format!(
+                        "DELEGATE wall budget of {wall_seconds}s exhausted ({}): {} completed, {} pending, {} blocked (child session {short_id}) — resume it with a narrower goal or a larger wallSeconds, or do the rest directly",
+                        record.reason, record.task_stats.completed, record.task_stats.pending, record.task_stats.blocked
+                    )
+                } else {
+                    format!(
+                        "DELEGATE {}: {} completed, {} pending, {} blocked (child session {short_id})",
+                        record.reason, record.task_stats.completed, record.task_stats.pending, record.task_stats.blocked
+                    )
+                },
                 match verification {
                     Some(verification) => format!(
                         "verification: {} → {}{}",
@@ -274,6 +338,31 @@ mod tests {
     }
 
     #[test]
+    fn the_budget_watcher_aborts_the_child_at_the_deadline_or_on_parent_abort() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Deadline: a 1s budget fires and marks the deadline.
+        let child = AbortSignal::new();
+        let done = Arc::new(AtomicBool::new(false));
+        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, done.clone());
+        watcher.join().unwrap();
+        assert!(child.is_aborted() && hit.load(Ordering::SeqCst));
+        // Parent abort: forwarded, deadline not marked.
+        let child = AbortSignal::new();
+        let parent = AbortSignal::new();
+        let done = Arc::new(AtomicBool::new(false));
+        let (watcher, hit) = watch_child_budget(child.clone(), Some(parent.clone()), 600, done.clone());
+        parent.abort();
+        watcher.join().unwrap();
+        assert!(child.is_aborted() && !hit.load(Ordering::SeqCst));
+        // Done: the watcher exits without aborting.
+        let child = AbortSignal::new();
+        let done = Arc::new(AtomicBool::new(true));
+        let (watcher, hit) = watch_child_budget(child.clone(), None, 600, done);
+        watcher.join().unwrap();
+        assert!(!child.is_aborted() && !hit.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn prepare_clamps_iterations_and_requires_goal() {
         let prepared = prepare(r#"{"goal":"  do it  ","maxIterations":99.7}"#).unwrap();
         assert_eq!(prepared.input["goal"], "do it");
@@ -284,6 +373,11 @@ mod tests {
         assert_eq!(prepared.input["maxIterations"], 10);
         let prepared = prepare(r#"{"goal":"x","maxIterations":0}"#).unwrap();
         assert_eq!(prepared.input["maxIterations"], 1);
+        assert_eq!(prepared.input["wallSeconds"], DEFAULT_CHILD_WALL_SECONDS);
+        let prepared = prepare(r#"{"goal":"x","wallSeconds":99999}"#).unwrap();
+        assert_eq!(prepared.input["wallSeconds"], MAX_CHILD_WALL_SECONDS);
+        let prepared = prepare(r#"{"goal":"x","wallSeconds":1}"#).unwrap();
+        assert_eq!(prepared.input["wallSeconds"], 30);
 
         let error = prepare(r#"{"goal":"   "}"#).unwrap_err();
         assert_eq!(error, "DELEGATE needs a \"goal\" string — the complete subtask description.");

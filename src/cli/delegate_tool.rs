@@ -40,6 +40,7 @@ fn watch_child_budget(
     parent: Option<AbortSignal>,
     wall_seconds: i64,
     done: Arc<std::sync::atomic::AtomicBool>,
+    terminate_in_flight: Arc<dyn Fn() + Send + Sync>,
 ) -> (std::thread::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
     use std::sync::atomic::Ordering;
     let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -50,7 +51,7 @@ fn watch_child_budget(
         while !done.load(Ordering::SeqCst) {
             if parent.as_ref().is_some_and(|signal| signal.is_aborted()) {
                 child.abort();
-                crate::tools::child_process::terminate_active_processes();
+                terminate_in_flight();
                 break;
             }
             if started.elapsed() >= budget {
@@ -60,7 +61,9 @@ fn watch_child_budget(
                 // flight (a full cargo run, in a recorded dogfood) would
                 // otherwise finish first. The parent is blocked on this
                 // DELEGATE, so every active process belongs to the child.
-                crate::tools::child_process::terminate_active_processes();
+                // (Injected: the unit tests must not kill the test binary's
+                // other children — that took out three unrelated tests.)
+                terminate_in_flight();
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -158,7 +161,15 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
             let wall_seconds = request.prepared.input["wallSeconds"].as_i64().unwrap_or(DEFAULT_CHILD_WALL_SECONDS);
             let child_signal = AbortSignal::new();
             let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (watcher, deadline_hit) = watch_child_budget(child_signal.clone(), wiring.signal.clone(), wall_seconds, done.clone());
+            let (watcher, deadline_hit) = watch_child_budget(
+                child_signal.clone(),
+                wiring.signal.clone(),
+                wall_seconds,
+                done.clone(),
+                Arc::new(|| {
+                    crate::tools::child_process::terminate_active_processes();
+                }),
+            );
             let wiring = wiring.clone();
             let index = open_session_index(&wiring.index_db_path);
             let project_paths = ProjectPaths::from(&wiring.project);
@@ -345,27 +356,37 @@ mod tests {
 
     #[test]
     fn the_budget_watcher_aborts_the_child_at_the_deadline_or_on_parent_abort() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        // Deadline: a 1s budget fires and marks the deadline.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let kills = Arc::new(AtomicUsize::new(0));
+        let terminate = {
+            let kills = kills.clone();
+            Arc::new(move || {
+                kills.fetch_add(1, Ordering::SeqCst);
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
+        // Deadline: a 1s budget fires, marks the deadline, and kills in-flight work.
         let child = AbortSignal::new();
         let done = Arc::new(AtomicBool::new(false));
-        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, done.clone());
+        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, done.clone(), terminate.clone());
         watcher.join().unwrap();
         assert!(child.is_aborted() && hit.load(Ordering::SeqCst));
-        // Parent abort: forwarded, deadline not marked.
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        // Parent abort: forwarded with a kill, deadline not marked.
         let child = AbortSignal::new();
         let parent = AbortSignal::new();
         let done = Arc::new(AtomicBool::new(false));
-        let (watcher, hit) = watch_child_budget(child.clone(), Some(parent.clone()), 600, done.clone());
+        let (watcher, hit) = watch_child_budget(child.clone(), Some(parent.clone()), 600, done.clone(), terminate.clone());
         parent.abort();
         watcher.join().unwrap();
         assert!(child.is_aborted() && !hit.load(Ordering::SeqCst));
-        // Done: the watcher exits without aborting.
+        assert_eq!(kills.load(Ordering::SeqCst), 2);
+        // Done: the watcher exits without aborting or killing.
         let child = AbortSignal::new();
         let done = Arc::new(AtomicBool::new(true));
-        let (watcher, hit) = watch_child_budget(child.clone(), None, 600, done);
+        let (watcher, hit) = watch_child_budget(child.clone(), None, 600, done, terminate);
         watcher.join().unwrap();
         assert!(!child.is_aborted() && !hit.load(Ordering::SeqCst));
+        assert_eq!(kills.load(Ordering::SeqCst), 2);
     }
 
     #[test]

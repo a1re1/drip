@@ -5976,6 +5976,7 @@ impl HarnessRun {
                     carry_paths.extend(crate::harness::outline::definition_files_for_texts(&self.cwd, &texts, &named_paths));
                     let hit_files = crate::harness::outline::symbol_hit_files_for_texts(&self.cwd, &texts, &carry_paths);
                     carry_paths.extend(hit_files);
+                    carry_paths.extend(crate::harness::outline::named_directory_files(&self.cwd, &texts, &carry_paths));
                     let (bodies, carried) = crate::harness::outline::named_file_bodies_for_paths(&self.cwd, &carry_paths);
                     if let Some(bodies) = bodies {
                         self.emit(HarnessEvent {

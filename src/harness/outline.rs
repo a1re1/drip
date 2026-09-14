@@ -27,7 +27,7 @@ const OUTLINE_ENTRY_CHARS: usize = 90;
 /// many lines gets an outline instead (READ's default window is 400 lines).
 pub const NAMED_FILE_BODY_MAX_LINES: usize = 400;
 /// Named files carried whole into the first prompt, first-mentioned first.
-pub const NAMED_FILE_BODIES_MAX_FILES: usize = 5;
+pub const NAMED_FILE_BODIES_MAX_FILES: usize = 8;
 /// Total budget for the carried bodies; a file that would cross it is skipped.
 pub const NAMED_FILE_BODIES_MAX_CHARS: usize = 40_000;
 /// Longest line kept in a carried body (READ clamps at the same width).
@@ -271,6 +271,63 @@ pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
         kept.push(line);
     }
     kept.join("\n")
+}
+
+pub const NAMED_DIR_FILE_MAX_LINES: usize = 60;
+pub const NAMED_DIR_FILE_MAX_CHARS: usize = 2_500;
+pub const NAMED_DIR_FILES_MAX: usize = 4;
+pub const NAMED_DIRS_MAX: usize = 2;
+
+/// The small direct files of the directories the goal names (`kvstore`,
+/// `tests/`) that nothing else carried, at most NAMED_DIR_FILES_MAX across
+/// NAMED_DIRS_MAX directories. Both recorded http-serve runs on 0.161
+/// opened with a READ of kvstore/store.py — named nowhere in the goal,
+/// but sitting beside the file the goal does name in the package it names.
+pub fn named_directory_files(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
+    let Some(files) = tracked_files(cwd) else { return Vec::new() };
+    let mut dirs: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for file in &files {
+        let mut end = 0usize;
+        for (index, ch) in file.char_indices() {
+            if ch == '/' {
+                dirs.insert(&file[..index]);
+                end = index;
+            }
+        }
+        let _ = end;
+    }
+    let mut named: Vec<String> = Vec::new();
+    for text in texts {
+        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c)) {
+            let word = raw.trim_matches('/').trim_end_matches('.');
+            if word.is_empty() || !dirs.contains(word) || named.iter().any(|seen| seen == word) {
+                continue;
+            }
+            named.push(word.to_string());
+            if named.len() >= NAMED_DIRS_MAX {
+                break;
+            }
+        }
+        if named.len() >= NAMED_DIRS_MAX {
+            break;
+        }
+    }
+    let mut found: Vec<String> = Vec::new();
+    for dir in &named {
+        for file in files.iter().filter(|file| file.rsplit_once('/').is_some_and(|(parent, _)| parent == dir)) {
+            if found.len() >= NAMED_DIR_FILES_MAX {
+                break;
+            }
+            if skip.iter().any(|s| s == file) || found.contains(file) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(file)) else { continue };
+            if !text.trim().is_empty() && text.lines().count() <= NAMED_DIR_FILE_MAX_LINES && text.chars().count() <= NAMED_DIR_FILE_MAX_CHARS {
+                found.push(file.clone());
+            }
+        }
+    }
+    found
 }
 
 pub const SIBLING_TEST_MAX_LINES: usize = 80;
@@ -1065,6 +1122,27 @@ mod tests {
         assert!(big.contains("135 files; top-level directories"), "{big}");
         assert!(big.contains("  ./: Cargo.toml\n  src/ (133 files; subdirs: harness tools; files: lib.rs main.rs)\n  tests/ (1 files; files: t.rs)"), "{big}");
         assert!(!big.contains("m17.rs"), "{big}");
+    }
+
+    #[test]
+    fn named_directory_files_carry_the_small_files_of_a_goal_named_package() {
+        let dir = std::env::temp_dir().join(format!("drip-named-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "kvstore/__init__.py", "from .store import Store\n");
+        write(&dir, "kvstore/cli.py", "x\n");
+        write(&dir, "kvstore/store.py", "class Store: pass\n");
+        write(&dir, "kvstore/textutil.py", &"x\n".repeat(NAMED_DIR_FILE_MAX_LINES + 1));
+        write(&dir, "kvstore/sub/deep.py", "x\n");
+        write(&dir, "tests/test_store.py", "import unittest\n");
+        write(&dir, "README.md", "# kv\n");
+        let texts = ["Add an HTTP API to kvstore. Create kvstore/server.py exposing make_server; add tests in tests/test_server.py"];
+        let found = named_directory_files(&cwd, &texts, &["kvstore/cli.py".to_string()]);
+        assert_eq!(found, vec!["kvstore/__init__.py".to_string(), "kvstore/store.py".to_string(), "tests/test_store.py".to_string()], "textutil too long, deep.py not direct, cli.py skipped");
+        assert!(named_directory_files(&cwd, &["nothing named here"], &[]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

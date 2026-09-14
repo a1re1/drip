@@ -812,6 +812,20 @@ pub struct PatchToolPrepared {
     pub display_input: String,
 }
 
+/// Whether an append restates what a find + replace in the same entry already
+/// does: the replace text contains the append's core (the append stripped of
+/// leading/trailing whitespace and trailing closing brackets). A recorded
+/// pwrde run sent a test both as a `replace` that inserted it after an anchor
+/// and as an `append` of the same test, so applying both duplicated the test
+/// and left a stray `}` — three edits to recover.
+pub fn append_restates_replace(append: &str, replace: &str) -> bool {
+    let core = append
+        .trim()
+        .trim_end_matches(|c: char| c == '}' || c == ')' || c == ']' || c == ';' || c == ',' || c.is_whitespace())
+        .trim();
+    core.chars().count() >= 12 && replace.contains(core)
+}
+
 /// A "files" value sent as a JSON-encoded string, decoded when it holds an
 /// array. A second attempt repairs the escaping small models produce when
 /// they nest JSON in a string — structural quotes written as `\"` around
@@ -941,7 +955,9 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 // insert; the append alone is what it asked for.
                 let find = entry.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
                 let replace = entry.get("replace").and_then(Value::as_str);
+                let mut redundant_append = false;
                 if let (Some(find), Some(replace)) = (find, replace) {
+                    redundant_append = append_restates_replace(append, replace);
                     files.push(FileEntry {
                         path: path.clone(),
                         find: Some(find.to_string()),
@@ -953,16 +969,18 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                         before: None,
                     });
                 }
-                files.push(FileEntry {
-                    path: path.clone(),
-                    find: None,
-                    replace: None,
-                    expected_occurrences: None,
-                    content: None,
-                    append: Some(append.to_string()),
-                    after: entry.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-                    before: entry.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-                });
+                if !redundant_append {
+                    files.push(FileEntry {
+                        path: path.clone(),
+                        find: None,
+                        replace: None,
+                        expected_occurrences: None,
+                        content: None,
+                        append: Some(append.to_string()),
+                        after: entry.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                        before: entry.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                    });
+                }
                 continue;
             }
             let content_present = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
@@ -1090,7 +1108,9 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
         let mut files = Vec::with_capacity(2);
         let find = args.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
         let replace = args.get("replace").and_then(Value::as_str);
+        let mut redundant_append = false;
         if let (Some(find), Some(replace)) = (find, replace) {
+            redundant_append = append_restates_replace(append, replace);
             files.push(FileEntry {
                 path: raw_path.clone(),
                 find: Some(find.to_string()),
@@ -1102,16 +1122,18 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 before: None,
             });
         }
-        files.push(FileEntry {
-            path: raw_path.clone(),
-            find: None,
-            replace: None,
-            expected_occurrences: None,
-            content: None,
-            append: Some(append.to_string()),
-            after: args.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-            before: args.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-        });
+        if !redundant_append {
+            files.push(FileEntry {
+                path: raw_path.clone(),
+                find: None,
+                replace: None,
+                expected_occurrences: None,
+                content: None,
+                append: Some(append.to_string()),
+                after: args.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                before: args.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+            });
+        }
         let display_path = format_tool_path(&workspace_root, &resolve_tool_path(&workspace_root, &raw_path));
         return Ok(PatchToolPrepared {
             display_input: format!("{} (append {} line(s))", display_path, append.lines().count()),
@@ -2372,6 +2394,32 @@ mod execute_tests {
         assert!(split_python_main_guard("def f():\n    if __name__ == \"__main__\":\n        pass\n").is_none());
         let outcome = execute(&serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}), &ctx);
         assert!(!outcome.failed && !outcome.text.contains("block"), "{}", outcome.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_append_that_restates_a_find_replace_is_dropped() {
+        use super::append_restates_replace;
+        let test = "    #[test]\n    fn t() {\n        assert!(true);\n    }\n";
+        let replace = format!("        prev();\n    }}\n\n{test}}}");
+        assert!(append_restates_replace(&format!("{test}}}\n"), &replace), "the replace already inserts the test");
+        assert!(!append_restates_replace("    fn other() {}\n", &replace), "a different body is a real second edit");
+        assert!(!append_restates_replace("}\n", &replace), "a bare brace is too short to judge");
+        // End to end: one files[] entry carrying both applies the edit once.
+        let dir = temp_workspace("append-dup");
+        let ctx = ctx_for(&dir);
+        std::fs::write(dir.join("m.rs"), "mod tests {\n    #[test]\n    fn a() {\n        assert!(true);\n    }\n}\n").unwrap();
+        let outcome = execute(&serde_json::json!({"files": [{
+            "path": "m.rs",
+            "find": "    fn a() {\n        assert!(true);\n    }\n}",
+            "replace": "    fn a() {\n        assert!(true);\n    }\n\n    #[test]\n    fn b() {\n        assert!(true);\n    }\n}",
+            "append": "    #[test]\n    fn b() {\n        assert!(true);\n    }\n}\n"
+        }]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("m.rs")).unwrap();
+        assert_eq!(text.matches("fn b()").count(), 1, "the test is inserted once, not duplicated: {text}");
+        assert_eq!(text.matches("mod tests").count(), 1);
+        assert!(text.ends_with("    }\n}\n"), "no stray closing brace: {text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1260,6 +1260,15 @@ goal. 272 of 2,522 recorded goals named their runner this way; a dogfood
 that did had paid a `cargo test -q` over the whole crate in the debug
 profile, after a warm-up that had built the wrong one.
 
+A completion report on a verified workspace is the finish. When the goal's
+check passed after the last edit and nothing changed since, a text-only
+reply that reads as done ("the count subcommand is added and the tests
+pass") is accepted as `finish_task` with that text as its summary, in the
+same round. It used to conclude the loop with the task unfinished, and the
+next loop re-seeded the task with a fresh first prompt — a recorded
+count-cmd run paid the whole orientation carry twice for one sentence.
+An unverified text reply still concludes the loop as before.
+
 A check that hangs names itself. The timeout sends SIGABRT before SIGTERM
 and SIGKILL, and every tool command runs with `PYTHONFAULTHANDLER=1` unless
 the parent environment sets it, so a Python test that never returns dumps

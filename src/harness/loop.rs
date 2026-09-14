@@ -282,6 +282,53 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn narration_completes_only_a_verified_workspace() {
+        use super::{narration_reads_as_completion, verified_after_last_edit};
+        use crate::core::types::{HarnessState, HarnessVerificationRecord};
+        assert!(narration_reads_as_completion("The `count` subcommand is added with `--prefix` and the unit tests pass."));
+        assert!(!narration_reads_as_completion("Done?"));
+        assert!(!narration_reads_as_completion("Next I will add the tests for the prefix path."));
+        assert!(!narration_reads_as_completion("The server starts but the suite is still failing on port reuse."));
+        assert!(!narration_reads_as_completion("ok"));
+        let mut state = HarnessState::default();
+        assert!(!verified_after_last_edit(&state), "no edits");
+        state.workspace_edits = Some(1);
+        state.mutations_since_verification = Some(0);
+        assert!(!verified_after_last_edit(&state), "no record");
+        let mut record = HarnessVerificationRecord {
+            at_iteration: 1,
+            command: "python3 -m unittest discover -s tests -q".to_string(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(crate::core::types::VerificationEvidence {
+                anchor: Some(crate::core::types::VerificationAnchor {
+                    kind: crate::core::types::VerificationAnchorKind::External,
+                    source: Some("goal-declared acceptance check, run by the harness after an edit".to_string()),
+                    downgraded_reason: None,
+                    coverage: None,
+                    expectation_subject: None,
+                }),
+                kind: crate::core::types::VerificationEvidenceKind::Tests,
+                executed: 3, passed: 3, failed: 0, skipped: None, detail: None,
+            }),
+            id: None,
+        };
+        state.last_verification = Some(record.clone());
+        assert!(verified_after_last_edit(&state));
+        state.mutations_since_verification = Some(1);
+        assert!(!verified_after_last_edit(&state), "edited since");
+        state.mutations_since_verification = Some(0);
+        record.failed = true;
+        state.last_verification = Some(record.clone());
+        assert!(!verified_after_last_edit(&state), "failed check");
+        record.failed = false;
+        record.evidence.as_mut().unwrap().anchor.as_mut().unwrap().kind = crate::core::types::VerificationAnchorKind::SelfAuthored;
+        state.last_verification = Some(record);
+        assert!(!verified_after_last_edit(&state), "self-authored probe is not the goal's check");
+    }
+
+    #[test]
     fn edit_check_runs_for_fast_or_interpreted_checks_only() {
         use super::{edit_check_allowed, edit_check_note};
         assert!(edit_check_allowed("python3 -m unittest discover -s tests -q", None));
@@ -1751,6 +1798,40 @@ pub enum FinishRecheck {
 /// Why a bounced finish deserves a harness-run check, from the bounce text
 /// and the edits since the last verification. A failed last check with no
 /// edit since is not rechecked: the model has to change something first.
+/// Whether a text-only reply reads as a completion report rather than a
+/// plan, a question or a blocker: long enough to say something, no closing
+/// question, none of the in-progress phrasings.
+pub fn narration_reads_as_completion(text: &str) -> bool {
+    const IN_PROGRESS: &[&str] = &[
+        "next i", "i will", "i'll", "let me", "now i", "todo", "remaining", "not yet", "cannot", "can't", "unable",
+        "blocked", "need to", "needs to", "should i", "would you", "waiting", "still failing", "does not pass", "doesn't pass",
+    ];
+    let trimmed = text.trim();
+    if trimmed.chars().count() < 20 || trimmed.ends_with('?') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    !IN_PROGRESS.iter().any(|marker| lower.contains(marker))
+}
+
+/// Whether the workspace is verified as it stands: edits landed, nothing
+/// changed since the last check, and that check was an external
+/// (goal-declared or project) suite that passed with tests executed.
+pub fn verified_after_last_edit(state: &HarnessState) -> bool {
+    if state.workspace_edits.unwrap_or(0) == 0 || state.mutations_since_verification.unwrap_or(1) != 0 {
+        return false;
+    }
+    let Some(record) = state.last_verification.as_ref() else { return false };
+    if record.failed || record.ran_no_tests == Some(true) {
+        return false;
+    }
+    record
+        .evidence
+        .as_ref()
+        .and_then(|evidence| evidence.anchor.as_ref())
+        .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
+}
+
 pub fn finish_recheck_reason(bounce: &str, mutations_since: i64) -> Option<FinishRecheck> {
     if bounce.contains("no verification command (test/build/typecheck) has run") || bounce.contains("no correctness-class evidence") {
         return Some(FinishRecheck::Unchecked);
@@ -6675,10 +6756,56 @@ impl HarnessRun {
         }
 
         if tool_calls.is_empty() {
+            let trimmed = response_text.trim().to_string();
+            // A completion report on a verified workspace is the finish the
+            // model forgot to call: the goal's check passed after the last
+            // edit and nothing changed since, so the narration cannot claim
+            // work that is not there (the concern behind the non-feature
+            // below). Without this the reply concluded the loop and the
+            // unfinished task was re-seeded with a fresh first prompt — a
+            // recorded count-cmd run paid the whole orientation carry twice.
+            if !scope.task_finished
+                && !scope.review_loop
+                && scope.current_task_id.is_some()
+                && verified_after_last_edit(&self.state)
+                && narration_reads_as_completion(&trimmed)
+            {
+                use crate::harness::transport::{normalize_openai_compatible_tool_call, OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction};
+                let raw_input = serde_json::json!({ "status": "completed", "summary": truncate_text(&trimmed, 600) }).to_string();
+                let mut call_id = format!("narration-finish-{}-{}", self.state.iteration, round);
+                while scope.used_tool_call_ids.contains(&call_id) {
+                    call_id.push('x');
+                }
+                scope.used_tool_call_ids.insert(call_id.clone());
+                let normalized = normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
+                    function: Some(OpenAICompatibleToolCallFunction { arguments: Some(raw_input.clone()), name: Some("finish_task".to_string()) }),
+                    id: Some(call_id.clone()),
+                    tool_type: Some("function".to_string()),
+                });
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    detail: format!(
+                        "narration accepted as finish_task: the goal-declared check passed after the last edit and the reply reads as a completion report — {}",
+                        truncate_text(&trimmed, 160)
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+                scope.digest_actions.push(format!("said (accepted as finish): {}", truncate_text(&trimmed, MAX_DIGEST_ACTION_CHARS)));
+                scope.transport_messages.push(TransportRequestMessage {
+                    anthropic_content: None,
+                    content: Some(TransportContent::Text(response_text.clone())),
+                    role: ChatRoleTag::Assistant,
+                    tool_calls: Some(vec![normalized.clone()]),
+                    ..Default::default()
+                });
+                scope.tool_calls_this_loop += 1;
+                self.dispatch_tool_calls(scope, vec![NormalizedCall { call_id, normalized, raw_input, tool_name: "finish_task".to_string() }]).await;
+                return RoundOutcome::Continue;
+            }
             // A narration-only first reply with an unfinished task gets ONE
             // corrective push and the round loop continues; a second
             // text-only reply concludes the loop as before.
-            let trimmed = response_text.trim().to_string();
             if !scope.narration_nudge_used
                 && scope.tool_calls_this_loop == 0
                 && scope.current_task_id.is_some()

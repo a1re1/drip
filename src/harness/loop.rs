@@ -245,6 +245,24 @@ mod review_brief_tests {
     /// the run stays visible), lists untracked files, and carries the run's
     /// verification records.
     #[test]
+    fn a_repeated_verify_reuses_a_current_passing_record_only() {
+        use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
+        let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 1, passed: 1, failed: 0, skipped: None, detail: None };
+        let record = HarnessVerificationRecord { at_iteration: 3, command: "cargo test --lib native_runner 2>&1 | tail -20".into(), failed: false, output_tail: String::new(), ran_no_tests: None, evidence: Some(tests.clone()), id: Some("v2".into()) };
+        // Same shape (tail filter and verbosity ignored), nothing edited: reused, citing the record.
+        let text = repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 0).expect("reused");
+        assert!(text.contains("record v2") && text.contains("iteration 3"), "{text}");
+        // An edit since, a different command, a failed run, or no executed evidence: runs again.
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 1).is_none());
+        assert!(repeated_verify_reuse("cargo test --lib other", Some(&record), 0).is_none());
+        let failed = HarnessVerificationRecord { failed: true, ..record.clone() };
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&failed), 0).is_none());
+        let empty = HarnessVerificationRecord { evidence: Some(VerificationEvidence { executed: 0, passed: 0, ..tests }), ..record.clone() };
+        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&empty), 0).is_none());
+        assert!(repeated_verify_reuse("cargo test", None, 0).is_none());
+    }
+
+    #[test]
     fn a_native_runner_suite_naming_no_edited_file_is_promoted_to_external() {
         use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
         let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 12, passed: 12, failed: 0, skipped: None, detail: None };
@@ -1439,6 +1457,43 @@ pub fn promote_native_runner_anchor(
         }
         other => other,
     }
+}
+
+/// The text a VERIFY gets instead of running when it repeats the last
+/// verification record's command with no edit in between: the record is
+/// still current, so re-running proves nothing the run does not already
+/// hold (dogfood #42 re-ran a 12s `cargo test` filter it had just recorded
+/// from BASH, then finished on the duplicate). Only a passing record with
+/// executed evidence is reused; a failed, empty, or stale record lets the
+/// VERIFY run so the model sees fresh output.
+/// Prefix of the text a reused VERIFY returns; the recorder skips such a
+/// result so the current record stays instead of being replaced by an
+/// empty one parsed from this text.
+pub const VERIFY_REUSED_PREFIX: &str = "VERIFY not re-run:";
+
+pub fn repeated_verify_reuse(
+    command: &str,
+    record: Option<&crate::core::types::HarnessVerificationRecord>,
+    mutations_since: i64,
+) -> Option<String> {
+    let record = record?;
+    if record.failed || record.ran_no_tests == Some(true) || mutations_since > 0 {
+        return None;
+    }
+    let evidence = record.evidence.as_ref()?;
+    if evidence.executed == 0 {
+        return None;
+    }
+    let same = normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(command))
+        == normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(&record.command));
+    if !same {
+        return None;
+    }
+    let id = record.id.as_deref().unwrap_or("the last record");
+    Some(format!(
+        "{VERIFY_REUSED_PREFIX} the same command already passed as verification record {id} at iteration {} ({} executed, {} failed) and nothing was edited since — that record is current, so cite it in finish_task instead of re-running. Re-run only after an edit.",
+        record.at_iteration, evidence.executed, evidence.failed
+    ))
 }
 
 pub fn native_runner_name(command: &str) -> Option<&'static str> {
@@ -3699,6 +3754,10 @@ impl HarnessRun {
     ) -> Option<String> {
         let tool_name = tool_name.to_string();
         let raw_input = raw_input.to_string();
+            // A reused VERIFY ran nothing: the record it cites stays current.
+            if tool_name == "VERIFY" && !execution.dispatched && execution.tool_content.starts_with(VERIFY_REUSED_PREFIX) {
+                return None;
+            }
             let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
                 .or_else(|| {
                     (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
@@ -4216,6 +4275,19 @@ impl HarnessRun {
                 r#type: HarnessEventType::HarnessOp,
             });
             return WorkspaceToolExecution { dispatched: false, failed: true, tool_content: text };
+        }
+        if tool_name == "VERIFY" {
+            if let Some(text) = command.as_deref().and_then(|command| {
+                repeated_verify_reuse(command, self.state.last_verification.as_ref(), self.state.mutations_since_verification.unwrap_or(0))
+            }) {
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                    detail: format!("repeated VERIFY reused the current record instead of re-running: {}", truncate_text(command.as_deref().unwrap_or(""), 120)),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+                return WorkspaceToolExecution { dispatched: false, failed: false, tool_content: text };
+            }
         }
         let dispatched = tool.is_some();
         let executed = execute_tool_call(ToolExecutionContext {

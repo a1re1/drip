@@ -1314,6 +1314,10 @@ goals declare no check and their reviews re-ran exactly that suite. The same
 suite run through BASH instead of VERIFY is recorded as a verification too
 (the result text says `recorded as verification record v<n>`), so a finish
 after `cargo test` via BASH is not bounced into re-running it as VERIFY.
+And a VERIFY that repeats the current record's command (same shape, nothing
+edited since, the record passed with executed tests) does not run again: the
+result says `VERIFY not re-run` and names the record to cite (`mix test`,
+`dotnet test`, `mvn test` and `gradle test` count as native runners too).
 
 When a finish arrives with no check behind it and the goal declares none,
 the harness detects the project's own suite from the workspace layout

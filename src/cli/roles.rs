@@ -725,6 +725,35 @@ pub struct ResolveRoleSetupArgs<'a> {
 // ones under the same key (marketplace < config < project < extra), so the
 // --roles preset or file has the highest precedence. The config and project
 // sources come back too: their bindings still take part in resolution.
+/// A later source's definition of an already-known role overrides only the
+/// fields it sets. Replacing the whole definition made a partial override
+/// a trap: `--roles '{"roles":[{"name":"planner","reasoningEffort":"medium"}]}'`
+/// silently dropped the config planner's model and ran the planning loop on
+/// the base model (a recorded A/B measured the wrong thing that way).
+pub fn overlay_role_definition(base: RoleDefinition, over: RoleDefinition) -> RoleDefinition {
+	RoleDefinition {
+		name: over.name,
+		description: over.description.or(base.description),
+		r#loop: over.r#loop.or(base.r#loop),
+		model: over.model.or(base.model),
+		reasoning_effort: over.reasoning_effort.or(base.reasoning_effort),
+		prompt: over.prompt.or(base.prompt),
+		skills: over.skills.or(base.skills),
+		tools: over.tools.or(base.tools),
+		verified_by: over.verified_by.or(base.verified_by),
+		mcp_servers: over.mcp_servers.or(base.mcp_servers),
+		blind: over.blind || base.blind,
+	}
+}
+
+fn overlay_into(definitions: &mut indexmap::IndexMap<String, RoleDefinition>, role: RoleDefinition) {
+	let merged = match definitions.shift_remove(&role.name) {
+		Some(base) => overlay_role_definition(base, role),
+		None => role,
+	};
+	definitions.insert(merged.name.clone(), merged);
+}
+
 fn merge_role_definitions(
 	args: &ResolveRoleSetupArgs,
 	issues: &mut Vec<String>,
@@ -740,16 +769,16 @@ fn merge_role_definitions(
 	}
 
 	for role in &config_source.roles {
-		definitions.insert(role.name.clone(), role.clone());
+		overlay_into(&mut definitions, role.clone());
 	}
 
 	for role in &project_source.roles {
-		definitions.insert(role.name.clone(), role.clone());
+		overlay_into(&mut definitions, role.clone());
 	}
 
 	if let Some(extra) = &args.extra_roles {
 		for role in extra {
-			definitions.insert(role.name.clone(), role.clone());
+			overlay_into(&mut definitions, role.clone());
 		}
 	}
 
@@ -1203,6 +1232,33 @@ fn resolve_model_profile_route(
 	let resolved = crate::core::inference::resolve_model_profile_route(settings, model_profile_id, env)?;
 
 	Ok(convert(&resolved))
+}
+
+#[cfg(test)]
+mod overlay_tests {
+	use super::*;
+
+	#[test]
+	fn a_partial_override_keeps_the_base_role_fields_it_does_not_set() {
+		let base = RoleDefinition {
+			name: "planner".to_string(),
+			model: Some("gpt-6-astra".to_string()),
+			prompt: Some("plan carefully".to_string()),
+			tools: Some(vec!["READ".to_string()]),
+			..RoleDefinition::default()
+		};
+		let over = RoleDefinition { name: "planner".to_string(), reasoning_effort: Some("medium".to_string()), ..RoleDefinition::default() };
+		let merged = overlay_role_definition(base, over);
+		assert_eq!(merged.model.as_deref(), Some("gpt-6-astra"));
+		assert_eq!(merged.reasoning_effort.as_deref(), Some("medium"));
+		assert_eq!(merged.prompt.as_deref(), Some("plan carefully"));
+		assert_eq!(merged.tools, Some(vec!["READ".to_string()]));
+		// A field the override sets wins.
+		let over = RoleDefinition { name: "planner".to_string(), model: Some("glm-5-3-flash".to_string()), ..RoleDefinition::default() };
+		let merged = overlay_role_definition(merged, over);
+		assert_eq!(merged.model.as_deref(), Some("glm-5-3-flash"));
+		assert_eq!(merged.reasoning_effort.as_deref(), Some("medium"));
+	}
 }
 
 #[cfg(test)]

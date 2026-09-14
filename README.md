@@ -516,6 +516,12 @@ drip --resume <sessionId> --roles reviewed --skill verify-before-done --new-goal
 
 ## Built-in role presets
 
+A role a later source defines again (`.drip/roles.json` over the config,
+a `--roles` file over both) overrides only the fields it sets, so
+`{"roles":[{"name":"planner","reasoningEffort":"medium"}]}` keeps the config
+planner's model and prompt; replacing the whole definition used to drop the
+model silently and run the planning loop on the base model.
+
 The `--roles` flag accepts a built-in preset name (or a path to a roles.json
 file using the same schema as config-sourced roles). Preset roles are merged
 with config-sourced roles by name, with the preset taking precedence on name

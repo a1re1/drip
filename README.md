@@ -1728,3 +1728,15 @@ model had to re-run the check a second, plainer way. Build-evidence detection
 now strips a leading `cd DIR &&` / `pushd DIR &&` (and one paren layer) and
 ignores redirection operators, while still rejecting any real second command in
 the chain. `tsc` clean-pass detection inherits the same normalization.
+
+### `npm/bun run typecheck` counts as the tsc it wraps (#119)
+
+A bare `tsc` / `bunx tsc` already counted as typecheck evidence, but the same
+check run through a package script — `bun run typecheck`, `npm --prefix web run
+check-types` — fell to an UNVERIFIED "unknown runner", so a standalone
+type-check pass earned no credit and the model re-ran it another way. Build-
+evidence detection now recognizes a `npm/bun/pnpm/yarn run <script>` indirection
+whose script is a conventional type-check (typecheck, check-types, tsc, …) and
+credits it identically. `build` and `test` scripts are deliberately excluded: a
+build script wraps a bundler rather than a recognized compiler, and test
+assertions are read from the runner's output.

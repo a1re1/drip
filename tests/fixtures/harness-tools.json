@@ -125,7 +125,7 @@
     "type": "function",
     "function": {
       "name": "finish_task",
-      "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external, or the check you name here, run by the harness) or anchor=\"none\" with an anchorNote saying why no external anchor exists.",
+      "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external, or the check you name here, run by the harness) or anchor=\"none\" with an anchorNote saying why no external anchor exists. The one-call form: put finish (summary plus check) on the final PATCH and the harness runs finish_task right after the edit; a finish that follows a failed call in the same response is bounced.",
       "parameters": {
         "properties": {
           "anchor": {

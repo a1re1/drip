@@ -173,7 +173,7 @@ mod cycle_progress_tests {
 
 #[cfg(test)]
 mod goal_check_tests {
-    use super::{explicit_finish_check, finish_recheck_reason, goal_declared_check_commands, FinishRecheck};
+    use super::{expand_patch_finishes, explicit_finish_check, finish_after_failed_call, finish_recheck_reason, goal_declared_check_commands, FinishRecheck, NormalizedCall};
 
     #[test]
     fn a_failed_check_is_rechecked_only_after_an_edit() {
@@ -186,6 +186,59 @@ mod goal_check_tests {
         let unchecked = "harness: not accepted yet — this task edited the workspace but no verification command (test/build/typecheck) has run at any point in this run.";
         assert_eq!(finish_recheck_reason(unchecked, 0), Some(FinishRecheck::Unchecked));
         assert_eq!(finish_recheck_reason("Task task-1 marked completed.", 3), None);
+    }
+
+    #[test]
+    fn a_patch_carrying_finish_expands_into_a_finish_task_after_the_edit() {
+        let call = |id: &str, name: &str, raw: &str| NormalizedCall {
+            call_id: id.to_string(),
+            normalized: crate::harness::transport::OpenAICompatibleToolCall {
+                id: Some(id.to_string()),
+                tool_type: Some("function".to_string()),
+                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction { name: Some(name.to_string()), arguments: Some(raw.to_string()) }),
+            },
+            raw_input: raw.to_string(),
+            tool_name: name.to_string(),
+        };
+        let mut used: std::collections::HashSet<String> = ["c1".to_string(), "c1-finish".to_string()].into_iter().collect();
+        let calls = vec![
+            call("c0", "READ", r#"{"path":"a.py"}"#),
+            call("c1", "PATCH", r#"{"path":"a.py","find":"x","replace":"y","finish":{"summary":"Renamed x.","check":"python3 -m unittest"}}"#),
+        ];
+        let (calls, expanded) = expand_patch_finishes(calls, &mut used);
+        assert_eq!(expanded, 1);
+        assert_eq!(calls.iter().map(|c| c.tool_name.as_str()).collect::<Vec<_>>(), ["READ", "PATCH", "finish_task"]);
+        let patch: serde_json::Value = serde_json::from_str(&calls[1].raw_input).unwrap();
+        assert!(patch.get("finish").is_none(), "the PATCH runs without the key");
+        assert_eq!(calls[1].normalized.function.as_ref().unwrap().arguments.as_deref(), Some(calls[1].raw_input.as_str()));
+        let finish: serde_json::Value = serde_json::from_str(&calls[2].raw_input).unwrap();
+        assert_eq!(finish["status"], "completed");
+        assert_eq!(finish["summary"], "Renamed x.");
+        assert_eq!(finish["check"], "python3 -m unittest");
+        assert_eq!(calls[2].call_id, "c1-finishx", "a taken id is extended");
+        assert!(used.contains("c1-finishx"));
+
+        let (calls, expanded) = expand_patch_finishes(vec![call("c2", "PATCH", r#"{"path":"a.py","content":"z","finish":{"summary":"  "}}"#)], &mut used);
+        assert_eq!(expanded, 0, "an empty finish is dropped, not expanded");
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].raw_input.contains("finish"));
+
+        // Nothing to edit: the PATCH is the finish, under its own id.
+        let (calls, expanded) = expand_patch_finishes(vec![call("c3", "PATCH", r#"{"path":"a.py","files":[],"finish":{"summary":"Done.","check":"cargo test -q"}}"#)], &mut used);
+        assert_eq!(expanded, 1);
+        assert_eq!(calls.iter().map(|c| (c.tool_name.as_str(), c.call_id.as_str())).collect::<Vec<_>>(), [("finish_task", "c3")]);
+        assert_eq!(calls[0].normalized.function.as_ref().unwrap().name.as_deref(), Some("finish_task"));
+        assert!(!used.contains("c3-finish"));
+    }
+
+    #[test]
+    fn a_completed_finish_after_a_failed_call_in_the_same_response_is_bounced() {
+        let failed = vec!["PATCH".to_string(), "PATCH".to_string()];
+        let bounce = finish_after_failed_call(r#"{"status":"completed","summary":"done"}"#, &failed).expect("bounced");
+        assert!(bounce.starts_with("harness: not accepted — PATCH failed earlier in this same response"), "{bounce}");
+        assert!(finish_after_failed_call(r#"{"summary":"done"}"#, &failed).is_some(), "a missing status means completed");
+        assert_eq!(finish_after_failed_call(r#"{"status":"blocked","summary":"stuck"}"#, &failed), None);
+        assert_eq!(finish_after_failed_call(r#"{"status":"completed"}"#, &[]), None);
     }
 
     #[test]
@@ -1609,6 +1662,131 @@ pub fn explicit_finish_check(raw_input: &str) -> Option<String> {
 }
 
 pub const GOAL_DECLARED_CHECK_MARKER: &str = "harnessGoalDeclaredCheck";
+
+/// The one-call form of "edit, then finish": a PATCH whose input carries
+/// `finish` ({summary, check} or a summary string) runs without the key,
+/// and a synthetic finish_task call (status completed, that summary and
+/// check) is dispatched right after it — so the edit lands first, the
+/// finish-time check runs on it, and a failed edit bounces the finish. The
+/// synthetic call joins the assistant turn's tool_calls, so the transcript
+/// stays consistent for strict providers. A PATCH that carries a finish
+/// and nothing to edit (no content, no find, an empty files list — the
+/// model reached for the only tool with a `finish` field) is the finish
+/// itself: it is replaced, under its own id, rather than run and failed.
+/// Returns the calls and how many finishes were expanded. Models that will
+/// not send two tool calls in one response (GLM sent 0 of 19 finishes with
+/// its last PATCH when asked) do set a field on the call they are already
+/// making.
+pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<String>) -> (Vec<NormalizedCall>, usize) {
+    let mut out = Vec::with_capacity(calls.len() + 1);
+    let mut expanded = 0usize;
+    for mut call in calls {
+        if call.tool_name != "PATCH" {
+            out.push(call);
+            continue;
+        }
+        let Ok(mut input) = serde_json::from_str::<Value>(&call.raw_input) else {
+            out.push(call);
+            continue;
+        };
+        let Some(finish) = input.as_object_mut().and_then(|object| object.remove("finish")) else {
+            out.push(call);
+            continue;
+        };
+        let (summary, check) = match &finish {
+            Value::Object(fields) => (
+                fields.get("summary").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+                fields.get("check").and_then(Value::as_str).map(str::trim).filter(|check| !check.is_empty()).map(str::to_string),
+            ),
+            Value::String(summary) => (summary.trim().to_string(), None),
+            _ => (String::new(), None),
+        };
+        let stripped = input.to_string();
+        call.raw_input = stripped.clone();
+        if let Some(function) = call.normalized.function.as_mut() {
+            function.arguments = Some(stripped);
+        }
+        if summary.is_empty() && check.is_none() {
+            out.push(call);
+            continue;
+        }
+        let mut finish_id = format!("{}-finish", call.call_id);
+        while used_ids.contains(&finish_id) {
+            finish_id.push('x');
+        }
+        used_ids.insert(finish_id.clone());
+        let mut finish_input = serde_json::json!({ "status": "completed", "summary": summary });
+        if let Some(check) = check {
+            finish_input["check"] = Value::String(check);
+        }
+        let raw_input = finish_input.to_string();
+        let edit_less = !patch_input_carries_an_edit(&input);
+        let finish_id = if edit_less {
+            used_ids.remove(&finish_id);
+            call.call_id.clone()
+        } else {
+            finish_id
+        };
+        if !edit_less {
+            out.push(call);
+        }
+        out.push(NormalizedCall {
+            call_id: finish_id.clone(),
+            normalized: crate::harness::transport::OpenAICompatibleToolCall {
+                id: Some(finish_id),
+                tool_type: Some("function".to_string()),
+                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
+                    name: Some("finish_task".to_string()),
+                    arguments: Some(raw_input.clone()),
+                }),
+            },
+            raw_input,
+            tool_name: "finish_task".to_string(),
+        });
+        expanded += 1;
+    }
+    (out, expanded)
+}
+
+/// Whether a PATCH input has anything to write: content, or find with
+/// replace, at the top level or in a non-empty files list.
+fn patch_input_carries_an_edit(input: &Value) -> bool {
+    let has_edit = |object: &Value| {
+        object.get("content").and_then(Value::as_str).is_some()
+            || (object.get("find").and_then(Value::as_str).is_some() && object.get("replace").is_some())
+    };
+    if has_edit(input) {
+        return true;
+    }
+    match input.get("files") {
+        Some(Value::Array(entries)) => !entries.is_empty(),
+        Some(Value::String(text)) => !text.trim().is_empty() && text.trim() != "[]",
+        _ => false,
+    }
+}
+
+/// The bounce for a completed finish_task sent in the same model response
+/// as a workspace call that failed (`failed` holds those tools' names):
+/// the finish counted on an edit or command that did not land. A blocked
+/// or unreconciled finish, or a response with no failed call, passes.
+pub fn finish_after_failed_call(raw_input: &str, failed: &[String]) -> Option<String> {
+    if failed.is_empty() {
+        return None;
+    }
+    let status = serde_json::from_str::<Value>(raw_input)
+        .ok()
+        .and_then(|input| input.get("status").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| "completed".to_string());
+    if status != "completed" {
+        return None;
+    }
+    let mut names: Vec<&str> = failed.iter().map(String::as_str).collect();
+    names.dedup();
+    Some(format!(
+        "harness: not accepted — {} failed earlier in this same response, so the work this finish counts on is not in place. Fix that call, then finish_task (in the same response as the fix is fine).",
+        names.join(" and ")
+    ))
+}
 
 /// `declared_verification_anchor` plus one upgrade: a check the agent
 /// labelled "self" whose command is one of the goal's own declared checks
@@ -3216,6 +3394,10 @@ pub struct LoopScope {
     /// `check`, goal-declared, or detected project check); capped so a
     /// finish that keeps failing cannot burn the loop on re-runs.
     pub finish_checks_run: u32,
+    /// Workspace tools that failed earlier in the model response being
+    /// dispatched (cleared per response); a completed finish_task after one
+    /// is bounced, since the edit it counted on is not in place.
+    pub failed_calls_this_response: Vec<String>,
     /// Consecutive finish_task bounces of one anomaly family this loop
     /// (family key, count); see auto_unreconcile_repeated_bounce.
     pub finish_bounce: Option<(&'static str, u32)>,
@@ -5358,6 +5540,7 @@ impl HarnessRun {
             planned_and_yielded: false,
             plan_yield_requested: false,
             finish_checks_run: 0,
+            failed_calls_this_response: Vec::new(),
             finish_bounce: None,
             cycles_run: 0,
             digest_actions: Vec::new(),
@@ -6299,6 +6482,19 @@ impl HarnessRun {
         scope.tool_calls_this_loop += tool_calls.len() as i64;
 
         let normalized_calls = self.normalize_tool_calls(scope, round, &tool_calls);
+        let (normalized_calls, expanded_finishes) = expand_patch_finishes(normalized_calls, &mut scope.used_tool_call_ids);
+        if expanded_finishes > 0 {
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                detail: if normalized_calls.iter().any(|call| call.tool_name == "PATCH") {
+                    "PATCH carried a finish: finish_task runs right after the edit in this same turn".to_string()
+                } else {
+                    "PATCH carried only a finish: finish_task runs in its place".to_string()
+                },
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::HarnessOp,
+            });
+        }
 
         // replay the assistant turn. Native Anthropic
         // content blocks are only replayed when every tool-call id survived
@@ -6405,6 +6601,7 @@ impl HarnessRun {
     /// telemetry, footprint, tool-call/tool-result events), appending the
     /// tool-role messages to the transcript.
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
+        scope.failed_calls_this_response.clear();
         for call in calls {
             let NormalizedCall { call_id, raw_input, tool_name, .. } = call;
 
@@ -6444,6 +6641,31 @@ impl HarnessRun {
                         anthropic_content: None,
                     });
                 continue;
+            }
+
+            // A finish sent in the same response as its final edit is the
+            // fast path (no extra round for "done"); one that follows a
+            // failed PATCH or command in that response would finish on an
+            // edit that never landed, so it comes back instead.
+            if tool_name == "finish_task" {
+                if let Some(bounce) = finish_after_failed_call(&raw_input, &scope.failed_calls_this_response) {
+                    scope.digest_actions.push("finish_task: bounced — a call failed earlier in the same response".to_string());
+                    self.emit(HarnessEvent {
+                        data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                        detail: format!("finish_task: {bounce}"),
+                        iteration: self.state.iteration,
+                        r#type: HarnessEventType::HarnessOp,
+                    });
+                    scope.transport_messages.push(crate::harness::transport::TransportRequestMessage {
+                        content: Some(crate::harness::transport::TransportContent::Text(bounce)),
+                        name: Some(tool_name),
+                        role: ChatRoleTag::Tool,
+                        tool_call_id: Some(call_id),
+                        tool_calls: None,
+                        anthropic_content: None,
+                    });
+                    continue;
+                }
             }
 
             if is_harness_tool(&tool_name) {
@@ -6829,6 +7051,9 @@ impl HarnessRun {
             // One digest line per workspace call — what it touched and how
             // it came out — so the next loop sees what was already read,
             // grepped, or edited instead of re-exploring.
+            if execution.failed && may_mutate {
+                scope.failed_calls_this_response.push(tool_name.clone());
+            }
             scope.digest_actions.push(format!(
                 "{tool_name} {}{} → {}",
                 compact_tool_input(&raw_input, 90),

@@ -585,7 +585,7 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
                 current_task.review_of.as_deref().unwrap()
             )
         } else {
-            "instruction: Complete the current task now, then call finish_task with the acceptance command (or the project's test runner) in its check field — do not spend a VERIFY round on that command first; the harness runs it before judging the finish. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked. If what is missing can only come from the operator (original data, credentials, a decision), block with blockedOn: \"operator\" and say exactly what is needed — do not keep searching for it.".to_string()
+            "instruction: Complete the current task now, then call finish_task with the acceptance command (or the project's test runner) in its check field — do not spend a VERIFY round on that command first; the harness runs it before judging the finish. When the edit you are about to make is the last one, put finish on that PATCH (summary plus the acceptance command as check): the harness applies the edit, runs the check, and completes the task in this same turn; a finish on a PATCH that fails comes back with the error. If you cannot finish it this loop, save what you learned with observe or remember, or call finish_task status blocked. If what is missing can only come from the operator (original data, credentials, a decision), block with blockedOn: \"operator\" and say exactly what is needed — do not keep searching for it.".to_string()
         });
         for task in &state.tasks {
             if let Some(recovery_line) = format_task_recovery_line(task) {
@@ -723,7 +723,7 @@ pub fn build_cycle_continuation_message(state: &HarnessState, args: &CycleContin
         "instruction: This is the FINAL cycle of this loop — the transcript is discarded when it ends. Persist everything worth keeping NOW: finish_task if the task is done or blocked, note_task for where you left off, observe/remember for findings, plan_tasks for follow-up work."
             .to_string()
     } else if args.current_task.is_some() {
-        "instruction: Continue the current task from where the transcript leaves off. Call finish_task when it is done, with the acceptance command in its check field instead of a separate VERIFY round; persist partial findings with observe or remember.".to_string()
+        "instruction: Continue the current task from where the transcript leaves off. Call finish_task when it is done, with the acceptance command in its check field instead of a separate VERIFY round — or put finish (summary plus check) on the final PATCH to complete it in the same turn; persist partial findings with observe or remember.".to_string()
     } else {
         "instruction: Continue planning. Call plan_tasks with the fewest concrete tasks that cover the goal.".to_string()
     });

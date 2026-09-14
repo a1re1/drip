@@ -1334,6 +1334,8 @@ like 75-79 calls each hid a child that ran to max-iterations for 2.5-3.3
 hours behind one DELEGATE call. At the deadline the child is stopped and the
 result reads `DELEGATE wall budget of Ns exhausted (…)` with what it
 finished, so the parent can resume it narrower or do the rest directly.
+The deadline also terminates whatever process the child had in flight (the
+first dogfood of the budget saw a full `cargo test` run on for 26s past it).
 A BASH command over 1200 chars gets a note with its generation cost: a
 recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
 calls whose 1200-4000-token shell scripts each waited 20-45s to be written

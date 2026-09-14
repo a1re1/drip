@@ -33,7 +33,7 @@ pub const DEFAULT_CHILD_WALL_SECONDS: i64 = 1200;
 pub const MAX_CHILD_WALL_SECONDS: i64 = 3600;
 
 /// Aborts `child` when `parent` aborts or `wall_seconds` elapse, until `done`
-/// is set. Returns the watcher thread and the flag that says the deadline
+/// is set, and terminates the child's in-flight processes at that moment. Returns the watcher thread and the flag that says the deadline
 /// (not the parent) fired.
 fn watch_child_budget(
     child: AbortSignal,
@@ -50,11 +50,17 @@ fn watch_child_budget(
         while !done.load(Ordering::SeqCst) {
             if parent.as_ref().is_some_and(|signal| signal.is_aborted()) {
                 child.abort();
+                crate::tools::child_process::terminate_active_processes();
                 break;
             }
             if started.elapsed() >= budget {
                 hit.store(true, Ordering::SeqCst);
                 child.abort();
+                // The abort is only observed between steps; a tool call in
+                // flight (a full cargo run, in a recorded dogfood) would
+                // otherwise finish first. The parent is blocked on this
+                // DELEGATE, so every active process belongs to the child.
+                crate::tools::child_process::terminate_active_processes();
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -360,6 +366,32 @@ mod tests {
         let (watcher, hit) = watch_child_budget(child.clone(), None, 600, done);
         watcher.join().unwrap();
         assert!(!child.is_aborted() && !hit.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_deadline_terminates_a_process_the_child_has_in_flight() {
+        use std::sync::atomic::AtomicBool;
+        let runner = std::thread::spawn(|| {
+            let started = std::time::Instant::now();
+            let result = crate::tools::child_process::run_captured_process(&crate::tools::child_process::CapturedProcessArgs {
+                command: "sleep",
+                cwd: None,
+                env: None,
+                process_args: &["30".to_string()],
+                timeout_ms: None,
+                stdin_payload: None,
+            })
+            .expect("spawned");
+            (started.elapsed(), result)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let child = AbortSignal::new();
+        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, Arc::new(AtomicBool::new(false)));
+        watcher.join().unwrap();
+        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
+        let (elapsed, result) = runner.join().unwrap();
+        assert!(elapsed < std::time::Duration::from_secs(10), "sleep ran for {elapsed:?}");
+        assert!(result.signal.is_some() || result.exit_code != Some(0), "{result:?}");
     }
 
     #[test]

@@ -1753,3 +1753,14 @@ Folding now keeps the freshest READ of up to five distinct files verbatim past
 the hot window, so current file state stays visible and the re-read cycle never
 starts. A read the file has since been PATCHed past is not pinned (it would show
 stale content), and the overflow-recovery path still folds everything.
+
+### Don't pin a read a shell command edited (#121)
+
+The read-pinning from #120 drops a read the file was PATCHed past, but a file
+edited through the shell — `sed -i`, `> file`, `tee` — leaves no PATCH diff, so
+its pinned read could show pre-edit content. Pinning now also inspects the
+mutating BASH commands in the transcript (classified with the existing read-only
+detector) and refuses to pin any read a later shell command names. Sixty percent
+of the high-round sessions in the audit ran at least one such shell edit, so
+this closes the one stale-content gap #120 left open; reads of files the command
+did not touch stay pinned.

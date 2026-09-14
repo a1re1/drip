@@ -580,6 +580,32 @@ mod evidence_tests {
     }
 
     #[test]
+    fn package_run_typecheck_is_credited_like_the_tsc_it_wraps() {
+        // `bun run typecheck` wraps the same tsc that is recognized bare, so a
+        // clean pass (empty output) must verify identically.
+        for command in [
+            "bun run typecheck",
+            "npm run typecheck",
+            "pnpm run check-types",
+            "yarn run tsc",
+            "npm --prefix web run typecheck",
+            "cd web && bun run typecheck 2>&1",
+        ] {
+            let evidence = verification_evidence(command, "");
+            assert_eq!(evidence.kind, Kind::Typecheck, "{command}");
+            assert!(evidence.verifies_work(), "{command}");
+        }
+        // A failing typecheck (tsc diagnostics in output) must NOT verify.
+        assert!(!verification_evidence("bun run typecheck", "src/a.ts(3,1): error TS2304: Cannot find name 'x'.").verifies_work());
+        // build/test scripts and installs are not build evidence: a bundler is
+        // not a recognized compiler, test assertions come from output, and an
+        // install is not a check at all.
+        for command in ["bun run build", "npm run test", "bun install", "bun run dev", "yarn run lint"] {
+            assert!(!verification_evidence(command, "").verifies_work(), "{command}");
+        }
+    }
+
+    #[test]
     fn legacy_records_load_but_do_not_render_as_verified() {
         let record: HarnessVerificationRecord = serde_json::from_value(json!({
             "atIteration":1,"command":"true","failed":false,"outputTail":""
@@ -722,6 +748,31 @@ fn strip_dir_change(command: &str) -> &str {
     command
 }
 
+/// A `npm/bun/pnpm/yarn run <script>` indirection whose script is a
+/// conventional typecheck (it wraps the very `tsc` invocation recognized bare
+/// above, so crediting it is consistency, not a new tolerance). Deliberately
+/// excludes `build`/`test` scripts: a `build` script wraps a bundler, not a
+/// recognized compiler, and a `test` script's assertions are read from output.
+fn package_script_typecheck(args: &[&str]) -> Option<crate::core::types::VerificationEvidenceKind> {
+    if !matches!(args.first().copied()?, "npm" | "pnpm" | "yarn" | "bun") {
+        return None;
+    }
+    let mut i = 1;
+    let script = loop {
+        match args.get(i).copied()? {
+            "run" => break args.get(i + 1).copied()?,
+            // dir-selection flags that take a value: skip the flag and its arg
+            "--prefix" | "-C" | "--cwd" | "--dir" | "--filter" => i += 2,
+            _ => i += 1,
+        }
+    };
+    matches!(
+        script.trim_start_matches("--"),
+        "typecheck" | "type-check" | "typecheck:all" | "check-types" | "checktypes" | "tsc" | "types" | "compile"
+    )
+    .then_some(crate::core::types::VerificationEvidenceKind::Typecheck)
+}
+
 /// Recognize actual compiler/build invocations, not mentions in echo commands
 /// or shell scripts. Complex wrappers can emit a custom assertion result.
 fn build_evidence_kind(command: &str) -> Option<crate::core::types::VerificationEvidenceKind> {
@@ -744,7 +795,7 @@ fn build_evidence_kind(command: &str) -> Option<crate::core::types::Verification
         ["tsc", ..] | ["npx" | "bunx", "tsc", ..]
             if !has_option(&["-v", "--version", "-h", "--help", "--init", "--showConfig", "--listFilesOnly", "--clean", "--dry"]) => Some(Typecheck),
         ["go", "build", ..] if !has_option(&["-n"]) => Some(Build),
-        _ => None,
+        _ => package_script_typecheck(&args),
     }
 }
 

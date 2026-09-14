@@ -1177,7 +1177,19 @@ pub fn looks_like_build_task(title: &str) -> bool {
         .map(|c| c.to_ascii_lowercase())
         .collect();
 
-    !first_word.is_empty() && BUILD_TASK_VERBS.contains(&first_word.as_str())
+    if !first_word.is_empty() && BUILD_TASK_VERBS.contains(&first_word.as_str()) {
+        return true;
+    }
+    // "In src/rect.rs add a #[cfg(test)] mod tests …": the verb is not first,
+    // but a title that names a workspace path and carries a build verb is a
+    // code change all the same. A recorded pwrde run finished such a task
+    // with no edit, and the reviewer loop plus a redo cost two more loops.
+    let names_path = !crate::harness::outline::named_paths_for_texts(&[title]).is_empty();
+    names_path
+        && title
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|word| !word.is_empty())
+            .any(|word| BUILD_TASK_VERBS.contains(&word.to_ascii_lowercase().as_str()))
 }
 
 pub fn is_harness_tool(tool_name: &str) -> bool {
@@ -3848,6 +3860,9 @@ mod apply_harness_op_tests {
         assert!(!looks_like_build_task("verify the added export"));
         assert!(!looks_like_build_task("inspect module a"));
         assert!(!looks_like_build_task("run the tests"));
+        assert!(looks_like_build_task("In src/rect.rs add a #[cfg(test)] mod tests at the end of the file"));
+        assert!(!looks_like_build_task("In src/rect.rs, explain what char_rects returns for a full block"));
+        assert!(!looks_like_build_task("Summary of src/rect.rs: add nothing"));
     }
 
     /// The edit gate: a build-shaped task completed without any workspace

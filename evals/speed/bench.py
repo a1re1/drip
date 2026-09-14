@@ -18,6 +18,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -72,7 +73,8 @@ def transcript_metrics(path):
              rejections=0, read_only_nudges=0, nudges=0, output_cutoffs=0, patches=0, verifies=0,
              context_expired=0, tasks_finished=0, prompt_tokens=0, completion_tokens=0,
              cache_read_tokens=0, rejection_reasons=[], bash_ms=0, hedges=0, stall_timeouts=0,
-             hedge_wins=0, background_reports=0, review_waived=0)
+             hedge_wins=0, background_reports=0, review_waived=0,
+             first_token_ms=[])
     for line in open(path, errors="ignore"):
         try:
             d = json.loads(line)
@@ -86,6 +88,9 @@ def transcript_metrics(path):
         if kind == "inference":
             m["inferences"] += 1
             m["inference_ms"] += data.get("latencyMs") or 0
+            ftt = re.search(r"first token (\d+)ms\)$", detail)
+            if ftt:
+                m["first_token_ms"].append(int(ftt.group(1)))
             m["prompt_tokens"] += data.get("promptTokens") or 0
             m["completion_tokens"] += data.get("completionTokens") or 0
             m["cache_read_tokens"] += data.get("cacheReadTokens") or 0
@@ -341,17 +346,18 @@ def summarize_runs(runs):
             review_waived=sum(r.get("review_waived") or 0 for r in rs),
             nudges=sum(r.get("nudges") or 0 for r in rs),
             inference_s_max=max(((r.get("inference_ms") or 0) / 1000.0) for r in rs),
+            ftt_med=statistics.median([v for r in rs for v in (r.get("first_token_ms") or [])]) if any(r.get("first_token_ms") for r in rs) else 0,
         ))
     return rows
 
 
 def print_summary_runs(label, rows):
     print(f"\n== summary {label}")
-    print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'pass':>6} {'rej':>4} "
+    print(f"{'task':18} {'runs':>4} {'wall_med':>9} {'wall_min':>9} {'wall_max':>9} {'inf_med':>8} {'ftt_med':>8} {'pass':>6} {'rej':>4} "
           f"{'plan_med':>9} {'auth_med':>9} {'rev_med':>9} {'acache':>7} {'rcache':>7} {'hedges':>6} {'won':>4} {'waived':>7} {'nud':>4}")
     for s in rows:
         print(f"{s['task']:18} {s['runs']:>4} {s['wall_s_median']:>9.1f} {s['wall_s_min']:>9.1f} "
-              f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
+              f"{s['wall_s_max']:>9.1f} {s['inferences_median']:>8.1f} {s.get('ftt_med', 0):>8.1f} {s['hidden_pass_rate']:>6.0%} {s['rejections']:>4} "
               f"{s['plan_s_median']:>9.1f} {s['author_s_median']:>9.1f} {s['review_s_median']:>9.1f} {s.get('acache_median', 0):>7.0f} {s.get('rcache_median', 0):>7.0f} "
           f"{s.get('hedges', 0):>6} {s.get('hedge_wins', 0):>4} {s.get('review_waived', 0):>7} {s.get('nudges', 0):>4}")
 

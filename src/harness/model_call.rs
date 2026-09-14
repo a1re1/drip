@@ -75,6 +75,243 @@ pub const STALL_LATENCY_SAMPLES: usize = 8;
 // is dropped. Costs a duplicate request on the slow few percent of calls.
 pub const HEDGE_MULTIPLIER: u64 = 2;
 pub const HEDGE_FLOOR_MS: u64 = 8_000;
+/// Streaming requests: the floor of the first-token hedge point. A first
+/// attempt with no first token by HEDGE_MULTIPLIER × the model's median
+/// first-token time (never under this floor, never past the wall-clock
+/// hedge point) is raced against a second request. Recorded GLM calls show
+/// a first token within about a second in a normal window; the old
+/// wall-clock hedge waited a flat 8s and the second request then won 26 of
+/// 43 races. In a queued window (first tokens at 5–10s) the point rises
+/// with the median, so the race is not run against a provider that is
+/// uniformly slow.
+pub const FIRST_TOKEN_HEDGE_MS: u64 = 4_000;
+/// Streaming requests: a first attempt whose stream has gone quiet for this
+/// long after its first token is raced against a second request.
+pub const STREAM_STALL_HEDGE_MS: u64 = 15_000;
+/// How often the streaming hedge loop looks at the primary's progress.
+const HEDGE_POLL_MS: u64 = 200;
+
+/// What a streaming request has received so far, shared between the request
+/// future and the hedge loop that watches it.
+#[derive(Default)]
+pub struct RequestProgress {
+    started: std::sync::Mutex<Option<Instant>>,
+    first_token: std::sync::Mutex<Option<Instant>>,
+    last_byte: std::sync::Mutex<Option<Instant>>,
+}
+
+impl RequestProgress {
+    pub fn new() -> Self {
+        let progress = Self::default();
+        *progress.started.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        progress
+    }
+    fn touch(&self) {
+        *self.last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+    fn mark_first_token(&self) {
+        let mut first = self.first_token.lock().unwrap_or_else(|e| e.into_inner());
+        if first.is_none() {
+            *first = Some(Instant::now());
+        }
+    }
+    pub fn first_token_seen(&self) -> bool {
+        self.first_token.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+    /// Milliseconds from the request start to the first token, once seen.
+    pub fn first_token_ms(&self) -> Option<i64> {
+        let started = (*self.started.lock().unwrap_or_else(|e| e.into_inner()))?;
+        let first = (*self.first_token.lock().unwrap_or_else(|e| e.into_inner()))?;
+        Some(first.duration_since(started).as_millis() as i64)
+    }
+    pub fn since_last_byte(&self) -> Option<Duration> {
+        self.last_byte.lock().unwrap_or_else(|e| e.into_inner()).map(|at| at.elapsed())
+    }
+}
+
+/// The request body with streaming switched on (usage in the final chunk).
+pub fn with_stream_fields(request_body: &Value) -> String {
+    let mut body = request_body.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.insert("stream".to_string(), Value::Bool(true));
+        object.insert("stream_options".to_string(), serde_json::json!({ "include_usage": true }));
+    }
+    body.to_string()
+}
+
+fn is_event_stream(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+/// True for an SSE data line that carries model output (content, a tool
+/// call, or reasoning) or an error — not for a role-only first delta, a
+/// keepalive comment, or `[DONE]`.
+pub fn sse_line_carries_a_token(line: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(line) else { return false };
+    let Some(data) = text.trim().strip_prefix("data:") else { return false };
+    let data = data.trim();
+    if data == "[DONE]" || data.is_empty() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else { return false };
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return true;
+    }
+    value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let delta = choice.get("delta").unwrap_or(&Value::Null);
+                let non_empty = |key: &str| match delta.get(key) {
+                    Some(Value::String(text)) => !text.is_empty(),
+                    Some(Value::Array(items)) => !items.is_empty(),
+                    Some(Value::Null) | None => false,
+                    Some(_) => true,
+                };
+                non_empty("content") || non_empty("tool_calls") || non_empty("reasoning") || non_empty("reasoning_content")
+            })
+        })
+}
+
+/// Reads a streamed (SSE) response to its end, marking progress as bytes
+/// arrive and the first token as soon as a data line carries one.
+async fn read_event_stream(mut response: reqwest::Response, progress: &RequestProgress) -> Result<Vec<u8>, reqwest::Error> {
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut scanned = 0usize;
+    while let Some(chunk) = response.chunk().await? {
+        buffer.extend_from_slice(&chunk);
+        progress.touch();
+        if !progress.first_token_seen() {
+            while let Some(offset) = buffer[scanned..].iter().position(|byte| *byte == b'\n') {
+                let line = &buffer[scanned..scanned + offset];
+                scanned += offset + 1;
+                if sse_line_carries_a_token(line) {
+                    progress.mark_first_token();
+                    break;
+                }
+            }
+        }
+    }
+    Ok(buffer)
+}
+
+/// Folds the chunks of a streamed chat completion back into the one JSON
+/// body a non-streaming request returns, so everything after the transport
+/// (error envelopes, usage, tool-call parsing) stays unchanged. Content
+/// deltas concatenate; tool-call deltas merge by index with their argument
+/// fragments appended; the last usage object wins; an error chunk becomes
+/// the body's `error`.
+pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(sse);
+    let mut id: Option<Value> = None;
+    let mut model: Option<Value> = None;
+    let mut content = String::new();
+    let mut content_seen = false;
+    let mut finish_reason: Option<Value> = None;
+    let mut usage: Option<Value> = None;
+    let mut tool_calls: Vec<(u64, serde_json::Map<String, Value>)> = Vec::new();
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+        let data = data.trim();
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else { continue };
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            return serde_json::to_vec(&serde_json::json!({ "error": error })).unwrap_or_default();
+        }
+        if id.is_none() {
+            id = value.get("id").cloned().filter(|v| !v.is_null());
+        }
+        if model.is_none() {
+            model = value.get("model").cloned().filter(|v| !v.is_null());
+        }
+        if let Some(chunk_usage) = value.get("usage").filter(|v| v.is_object()) {
+            usage = Some(chunk_usage.clone());
+        }
+        for choice in value.get("choices").and_then(Value::as_array).into_iter().flatten() {
+            if let Some(reason) = choice.get("finish_reason").filter(|v| !v.is_null()) {
+                finish_reason = Some(reason.clone());
+            }
+            let Some(delta) = choice.get("delta") else { continue };
+            if let Some(Value::String(piece)) = delta.get("content") {
+                content_seen = true;
+                content.push_str(piece);
+            }
+            for (position, call) in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten().enumerate() {
+                let index = call.get("index").and_then(Value::as_u64).unwrap_or(position as u64);
+                let entry = match tool_calls.iter_mut().find(|(i, _)| *i == index) {
+                    Some((_, entry)) => entry,
+                    None => {
+                        tool_calls.push((index, serde_json::Map::new()));
+                        &mut tool_calls.last_mut().expect("just pushed").1
+                    }
+                };
+                if let Some(Value::String(call_id)) = call.get("id") {
+                    if !call_id.is_empty() {
+                        entry.insert("id".to_string(), Value::String(call_id.clone()));
+                    }
+                }
+                if let Some(Value::String(kind)) = call.get("type") {
+                    entry.insert("type".to_string(), Value::String(kind.clone()));
+                }
+                if let Some(function) = call.get("function") {
+                    let existing = entry.entry("function").or_insert_with(|| serde_json::json!({ "name": "", "arguments": "" }));
+                    if let (Some(Value::String(name)), Some(slot)) = (function.get("name"), existing.get_mut("name")) {
+                        if !name.is_empty() && slot.as_str().unwrap_or("").is_empty() {
+                            *slot = Value::String(name.clone());
+                        }
+                    }
+                    if let (Some(Value::String(fragment)), Some(Value::String(arguments))) = (function.get("arguments"), existing.get_mut("arguments")) {
+                        arguments.push_str(fragment);
+                    }
+                }
+            }
+        }
+    }
+    tool_calls.sort_by_key(|(index, _)| *index);
+    let mut message = serde_json::Map::new();
+    message.insert("role".to_string(), Value::String("assistant".to_string()));
+    message.insert("content".to_string(), if content_seen { Value::String(content) } else { Value::Null });
+    if !tool_calls.is_empty() {
+        message.insert(
+            "tool_calls".to_string(),
+            Value::Array(
+                tool_calls
+                    .into_iter()
+                    .map(|(_, mut entry)| {
+                        entry.entry("type").or_insert_with(|| Value::String("function".to_string()));
+                        Value::Object(entry)
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    let mut body = serde_json::Map::new();
+    if let Some(id) = id {
+        body.insert("id".to_string(), id);
+    }
+    if let Some(model) = model {
+        body.insert("model".to_string(), model);
+    }
+    body.insert(
+        "choices".to_string(),
+        serde_json::json!([{ "index": 0, "finish_reason": finish_reason, "message": Value::Object(message) }]),
+    );
+    if let Some(usage) = usage {
+        body.insert("usage".to_string(), usage);
+    }
+    serde_json::to_vec(&Value::Object(body)).unwrap_or_default()
+}
+
+fn streaming_rejection_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"(?i)stream").expect("streaming rejection regex"))
+}
 /// File under the drip home that remembers each model's recent latencies
 /// across runs, so the stall bound and hedge point apply from the first call.
 pub const LATENCY_STORE_FILE: &str = "latency.json";
@@ -117,6 +354,20 @@ pub fn save_latency_store(path: &std::path::Path, samples: &LatencySamples) {
 /// When to hedge a first attempt for a model with `samples` recent latencies:
 /// HEDGE_MULTIPLIER × median clamped to [floor, timeout/2]; None until enough
 /// samples exist or when hedging is disabled (floor 0).
+/// The streaming hedge point for a model with `samples` recent first-token
+/// times (ms): HEDGE_MULTIPLIER × median, clamped to
+/// [FIRST_TOKEN_HEDGE_MS, wall_delay_ms]; the floor until enough samples
+/// exist (and never past the wall-clock point).
+pub fn first_token_hedge_ms(samples: &[u64], wall_delay_ms: u64) -> u64 {
+    if samples.len() < STALL_TIMEOUT_MIN_SAMPLES {
+        return FIRST_TOKEN_HEDGE_MS.min(wall_delay_ms);
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    median.saturating_mul(HEDGE_MULTIPLIER).max(FIRST_TOKEN_HEDGE_MS).min(wall_delay_ms)
+}
+
 pub fn hedge_delay_ms(samples: &[u64], floor_ms: u64, timeout_ms: u64) -> Option<u64> {
     if floor_ms == 0 || samples.len() < STALL_TIMEOUT_MIN_SAMPLES {
         return None;
@@ -340,6 +591,8 @@ pub struct ModelCallRecord {
     pub hedged: bool,
     /// The second (hedged) request answered first.
     pub hedge_won: bool,
+    /// Milliseconds to the first streamed token of the request that won.
+    pub first_token_ms: Option<i64>,
 }
 
 /// A 429 that means "the account is out of credits" never resolves by waiting.
@@ -589,6 +842,9 @@ pub struct ModelCaller {
     sleep: SleepFn,
     /// Recent successful latencies per model, for the stall-aware first-attempt bound.
     latency_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
+    /// Recent first-token times per model from streamed replies (this run
+    /// only), the basis of the streaming hedge point.
+    first_token_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
     /// Codex lane for tool-bearing calls (the run's main conversation).
     codex_tool_lane: tokio::sync::Mutex<Option<CodexBridge>>,
     /// Codex lane for include_tools=false calls (run summaries), so they never
@@ -597,6 +853,9 @@ pub struct ModelCaller {
     /// Set once a provider rejected the harness-default reasoning effort;
     /// later base-model calls omit the field.
     reasoning_default_disabled: std::sync::atomic::AtomicBool,
+    /// Set once a provider rejected a streaming request; later calls send
+    /// non-streaming requests (and hedge on wall time as before).
+    streaming_disabled: std::sync::atomic::AtomicBool,
 }
 
 /// A codex bridge that could not start at all (missing binary, spawn error):
@@ -642,9 +901,11 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         latency_store,
         sleep,
         latency_samples: std::sync::Mutex::new(seeded),
+        first_token_samples: std::sync::Mutex::new(std::collections::HashMap::new()),
         codex_tool_lane: tokio::sync::Mutex::new(None),
         codex_summary_lane: tokio::sync::Mutex::new(None),
             reasoning_default_disabled: std::sync::atomic::AtomicBool::new(false),
+            streaming_disabled: std::sync::atomic::AtomicBool::new(false),
     }
 }
 
@@ -776,6 +1037,21 @@ impl ModelCaller {
     }
 
     /// The hedge point for this call's first attempt, if the model has enough history.
+    fn first_token_delay_for(&self, model: &str, wall_delay_ms: u64) -> u64 {
+        let samples = self.first_token_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let recent: Vec<u64> = samples.get(model).map(|r| r.iter().copied().collect()).unwrap_or_default();
+        first_token_hedge_ms(&recent, wall_delay_ms)
+    }
+
+    fn record_first_token(&self, model: &str, first_token_ms: i64) {
+        let mut samples = self.first_token_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let recent = samples.entry(model.to_string()).or_default();
+        recent.push_back(first_token_ms.max(0) as u64);
+        while recent.len() > STALL_LATENCY_SAMPLES {
+            recent.pop_front();
+        }
+    }
+
     fn hedge_delay_for(&self, model: &str, attempt: u32, timeout_ms: u64) -> Option<u64> {
         if attempt > 1 {
             return None;
@@ -794,31 +1070,54 @@ impl ModelCaller {
         delay_ms: u64,
         timeout_ms: u64,
         model: &str,
-    ) -> (RequestOutcome, bool)
+        first_token_delay: Option<u64>,
+    ) -> (RequestOutcome, bool, Option<i64>)
     where
-        F: Fn() -> Fut,
+        F: Fn() -> (Fut, Arc<RequestProgress>),
         Fut: Future<Output = RawResponse>,
     {
         let signal = self.deps.signal.as_ref();
         let started = Instant::now();
-        let primary = run_bounded_request(build(), timeout_ms, signal);
+        let (primary_future, primary_progress) = build();
+        let primary = run_bounded_request(primary_future, timeout_ms, signal);
         tokio::pin!(primary);
-        let delay = tokio::time::sleep(Duration::from_millis(delay_ms));
-        tokio::pin!(delay);
-        tokio::select! {
-            outcome = &mut primary => return (outcome, false),
-            () = &mut delay => {}
-        }
+        let reason = if let Some(first_token_delay) = first_token_delay {
+            // A streaming primary shows its health: hedge when no first
+            // token has arrived by the first-token point, or when the
+            // stream goes quiet mid-reply; a reply that is streaming
+            // normally is never raced however long it takes.
+            loop {
+                let poll = tokio::time::sleep(Duration::from_millis(HEDGE_POLL_MS));
+                tokio::pin!(poll);
+                tokio::select! {
+                    outcome = &mut primary => return (outcome, false, primary_progress.first_token_ms()),
+                    () = &mut poll => {}
+                }
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                if primary_progress.first_token_seen() {
+                    if let Some(quiet) = primary_progress.since_last_byte().filter(|quiet| quiet.as_millis() as u64 >= STREAM_STALL_HEDGE_MS) {
+                        break format!("has streamed nothing for {:.1}s after its first token", quiet.as_secs_f64());
+                    }
+                } else if elapsed_ms >= first_token_delay {
+                    break format!("has sent no first token after {:.1}s", elapsed_ms as f64 / 1000.0);
+                }
+            }
+        } else {
+            let delay = tokio::time::sleep(Duration::from_millis(delay_ms));
+            tokio::pin!(delay);
+            tokio::select! {
+                outcome = &mut primary => return (outcome, false, None),
+                () = &mut delay => {}
+            }
+            format!("has not answered after {:.1}s ({}× its typical latency)", delay_ms as f64 / 1000.0, HEDGE_MULTIPLIER)
+        };
         self.emit(
             HarnessEventType::HarnessOp,
-            format!(
-                "hedged model request: {model} has not answered after {:.1}s ({}× its typical latency) — racing a second request",
-                delay_ms as f64 / 1000.0,
-                HEDGE_MULTIPLIER
-            ),
+            format!("hedged model request: {model} {reason} — racing a second request"),
             None,
         );
-        let hedge = run_bounded_request(build(), timeout_ms, signal);
+        let (hedge_future, hedge_progress) = build();
+        let hedge = run_bounded_request(hedge_future, timeout_ms, signal);
         tokio::pin!(hedge);
         let (winner, outcome, hedge_won) = tokio::select! {
             outcome = &mut primary => ("first request", outcome, false),
@@ -830,7 +1129,8 @@ impl ModelCaller {
             format!("hedge resolved: the {winner} {} after {elapsed_ms}ms", outcome.describe()),
             None,
         );
-        (outcome, hedge_won)
+        let first_token_ms = if hedge_won { hedge_progress.first_token_ms() } else { primary_progress.first_token_ms() };
+        (outcome, hedge_won, first_token_ms)
     }
 
     fn record_latency(&self, model: &str, latency_ms: i64) {
@@ -1365,37 +1665,49 @@ impl ModelCaller {
 
         loop {
             let attempt_timeout_ms = self.attempt_timeout_ms(&model, attempt);
+            // OpenAI-compatible providers get a streaming request: the
+            // hedge then watches the first token instead of the clock, and
+            // the chunks are folded back into one response body below.
+            let streaming = !anthropic_native && !self.streaming_disabled.load(std::sync::atomic::Ordering::Relaxed);
+            let wire_body = if streaming { with_stream_fields(&request_body) } else { body.clone() };
             let build_request = || {
                 let client = self.http_client.clone();
                 let url = url.clone();
                 let header_map = header_map.clone();
-                let body = body.clone();
+                let body = wire_body.clone();
+                let progress = Arc::new(RequestProgress::new());
+                let tracker = progress.clone();
 
-                async move {
-                    let response = client.post(&url).headers(header_map).body(body).send().await?;
-                    let status = response.status().as_u16();
-                    let headers = response.headers().clone();
-                    let body = match response.bytes().await {
-                        Ok(bytes) => Ok(bytes.to_vec()),
-                        Err(error) => Err(error),
-                    };
+                (
+                    async move {
+                        let response = client.post(&url).headers(header_map).body(body).send().await?;
+                        let status = response.status().as_u16();
+                        let headers = response.headers().clone();
+                        let body = if streaming && is_event_stream(&headers) {
+                            read_event_stream(response, &tracker).await.map(|sse| assemble_streamed_response(&sse))
+                        } else {
+                            response.bytes().await.map(|bytes| bytes.to_vec())
+                        };
 
-                    Ok((status, headers, body))
-                }
+                        Ok((status, headers, body))
+                    },
+                    progress,
+                )
             };
-            let (outcome, call_hedged, call_hedge_won) =
+            let (outcome, call_hedged, call_hedge_won, call_first_token_ms) =
                 match self.hedge_delay_for(&model, attempt, attempt_timeout_ms) {
                     Some(delay_ms) => {
-                        let (outcome, hedge_won) = self
-                            .run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model)
+                        let first_token_delay = streaming.then(|| self.first_token_delay_for(&model, delay_ms));
+                        let (outcome, hedge_won, first_token_ms) = self
+                            .run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model, first_token_delay)
                             .await;
-                        (outcome, true, hedge_won)
+                        (outcome, true, hedge_won, first_token_ms)
                     }
-                    None => (
-                        run_bounded_request(build_request(), attempt_timeout_ms, self.deps.signal.as_ref()).await,
-                        false,
-                        false,
-                    ),
+                    None => {
+                        let (future, progress) = build_request();
+                        let outcome = run_bounded_request(future, attempt_timeout_ms, self.deps.signal.as_ref()).await;
+                        (outcome, false, false, progress.first_token_ms())
+                    }
                 };
 
             match outcome {
@@ -1591,6 +1903,22 @@ impl ModelCaller {
                             return Err(ContextOverflowError(message).into());
                         }
 
+                        // A provider that rejects streaming requests: send
+                        // non-streaming ones for the rest of the run.
+                        if status == 400
+                            && streaming
+                            && streaming_rejection_regex().is_match(&message)
+                            && !self.streaming_disabled.swap(true, std::sync::atomic::Ordering::Relaxed)
+                        {
+                            self.emit(
+                                HarnessEventType::RunWarning,
+                                format!(
+                                    "the provider rejected the streaming request ({message}) — retrying without streaming, and sending non-streaming requests for the rest of the run"
+                                ),
+                                None,
+                            );
+                            continue;
+                        }
                         // The harness-default effort on a provider that does not
                         // take the field: drop it for the run and retry this call.
                         if status == 400
@@ -1662,6 +1990,9 @@ impl ModelCaller {
 
                     let latency_ms = call_started_at.elapsed().as_millis() as i64;
                     self.record_latency(&model, latency_ms);
+                    if let Some(first_token_ms) = call_first_token_ms {
+                        self.record_first_token(&model, first_token_ms);
+                    }
                     (self.deps.on_usage)(
                         &data,
                         ModelCallRecord {
@@ -1671,6 +2002,7 @@ impl ModelCaller {
                             task_id: call_options.usage_task_id.clone(),
                             hedged: call_hedged,
                             hedge_won: call_hedge_won,
+                            first_token_ms: call_first_token_ms,
                         },
                     );
 
@@ -1899,6 +2231,136 @@ mod tests {
         (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
     }
 
+    /// A mock that answers one connection with a server-sent event stream
+    /// (`content-type: text/event-stream`), each line written as its own
+    /// chunk, so the streaming reader sees the reply arrive piecewise.
+    fn spawn_sse_mock_server(lines: Vec<&'static str>) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut data: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body_start = loop {
+                let read = stream.read(&mut chunk).unwrap_or(0);
+                assert!(read > 0, "client closed before sending a full request");
+                data.extend_from_slice(&chunk[..read]);
+                if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                        .unwrap_or(0);
+                    if data.len() >= pos + 4 + content_length {
+                        break pos + 4;
+                    }
+                }
+            };
+            let body: String = lines.iter().map(|line| format!("{line}\n\n")).collect();
+            let response = format!(
+                "HTTP/1.1 200 Test\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            for line in &lines {
+                stream.write_all(format!("{line}\n\n").as_bytes()).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            data[body_start..].to_vec()
+        });
+        (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
+    }
+
+    #[test]
+    fn a_streamed_reply_is_folded_back_into_one_response_body() {
+        let sse = concat!(
+            "data: {\"id\":\"r1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            ": keepalive\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"READ\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":1}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let body: Value = serde_json::from_slice(&assemble_streamed_response(sse.as_bytes())).unwrap();
+        assert_eq!(body["id"], "r1");
+        assert_eq!(body["model"], "m");
+        assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(body["choices"][0]["message"]["content"], "Hello");
+        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "READ");
+        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"path\":1}");
+        assert_eq!(body["usage"]["completion_tokens"], 7);
+        let parsed: OpenAICompatibleResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(parsed.usage.unwrap().total_tokens, Some(12));
+
+        let error = "data: {\"error\":{\"message\":\"overloaded\",\"code\":503}}\n\n";
+        let body: Value = serde_json::from_slice(&assemble_streamed_response(error.as_bytes())).unwrap();
+        assert_eq!(body["error"]["message"], "overloaded");
+
+        let empty: Value = serde_json::from_slice(&assemble_streamed_response(b"data: [DONE]\n\n")).unwrap();
+        assert!(empty["choices"][0]["message"]["content"].is_null());
+    }
+
+    #[test]
+    fn the_first_token_hedge_point_rises_with_the_median_first_token() {
+        assert_eq!(first_token_hedge_ms(&[], 8_000), 4_000, "the floor before any history");
+        assert_eq!(first_token_hedge_ms(&[900, 1_100], 8_000), 4_000, "the floor with too little history");
+        assert_eq!(first_token_hedge_ms(&[900, 1_100, 1_000], 8_000), 4_000, "a quick provider stays at the floor");
+        assert_eq!(first_token_hedge_ms(&[5_000, 6_000, 7_000], 20_000), 12_000, "a queued window doubles its median");
+        assert_eq!(first_token_hedge_ms(&[5_000, 6_000, 7_000], 8_000), 8_000, "never past the wall-clock point");
+        assert_eq!(first_token_hedge_ms(&[], 3_000), 3_000, "a wall-clock point under the floor wins");
+    }
+
+    #[test]
+    fn a_first_token_is_a_delta_with_output_not_a_role_or_keepalive() {
+        assert!(!sse_line_carries_a_token(b": keepalive"));
+        assert!(!sse_line_carries_a_token(b"data: [DONE]"));
+        assert!(!sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"role":"assistant","content":""}}]}"#));
+        assert!(!sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"content":null}}]}"#));
+        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"content":"H"}}]}"#));
+        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"reasoning":"thinking"}}]}"#));
+        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#));
+        assert!(sse_line_carries_a_token(br#"data: {"error":{"message":"nope"}}"#));
+    }
+
+    #[test]
+    fn the_wire_body_turns_streaming_on_without_touching_the_recorded_body() {
+        let request_body = serde_json::json!({ "model": "m", "messages": [], "stream": false });
+        let wire: Value = serde_json::from_str(&with_stream_fields(&request_body)).unwrap();
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["stream_options"]["include_usage"], true);
+        assert_eq!(request_body["stream"], false);
+    }
+
+    #[tokio::test]
+    async fn a_streaming_provider_reply_is_parsed_and_its_first_token_recorded() {
+        let (url, server) = spawn_sse_mock_server(vec![
+            r#"data: {"id":"r1","choices":[{"index":0,"delta":{"role":"assistant"}}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{"content":"streamed"}}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            "data: [DONE]",
+        ]);
+        let records: Arc<std::sync::Mutex<Vec<ModelCallRecord>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = records.clone();
+        let mut deps = test_deps(url);
+        deps.on_usage = Arc::new(move |_, record| sink.lock().unwrap().push(record));
+        let caller = create_model_caller(deps);
+        let response = caller.call_model(vec![user_message("hello")], None).await.unwrap();
+        assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("streamed")));
+        assert_eq!(response.usage.unwrap().total_tokens, Some(2));
+        let request: Value = serde_json::from_slice(&server.join().unwrap()).unwrap();
+        assert_eq!(request["stream"], true, "the wire request should ask for a stream: {request}");
+        assert_eq!(request["stream_options"]["include_usage"], true);
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].first_token_ms.is_some(), "the first-token time should be recorded: {:?}", records[0]);
+    }
+
     fn test_deps(url: String) -> ModelCallerDeps {
         ModelCallerDeps {
             cwd: None,
@@ -1993,7 +2455,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(2_500), "the hedge should answer long before the 3s primary: {:?}", started.elapsed());
         assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("hedged")));
         let events = events.lock().unwrap();
-        assert!(events.iter().any(|detail| detail.starts_with("hedged model request: test-model has not answered after 0.2s")), "{events:?}");
+        assert!(events.iter().any(|detail| detail.starts_with("hedged model request: test-model has sent no first token after 0.")), "{events:?}");
         let resolved = events.iter().find(|detail| detail.starts_with("hedge resolved: ")).expect("a hedge resolution event should be emitted");
         assert!(resolved.starts_with("hedge resolved: the second request completed after "), "{resolved}");
         let elapsed_ms: u64 = resolved.rsplit_once("after ").unwrap().1.trim_end_matches("ms").trim().parse().unwrap();
@@ -2114,7 +2576,8 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(body["model"], "test-model");
-        assert_eq!(body["stream"], false);
+        assert_eq!(body["stream"], true, "OpenAI-compatible requests ask for a stream");
+        assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
         assert!(body.get("prompt_cache_key").is_none());

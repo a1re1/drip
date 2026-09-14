@@ -1249,6 +1249,14 @@ body). Nine hundred of the twelve thousand GREPs in this machine's transcripts
 were followed by a READ starting at the line the GREP had just found — one
 extra model round each; the body arrives in the GREP's round instead.
 
+Inside a git checkout, GREP searches the files git knows about (tracked plus
+untracked-but-not-ignored, via `git ls-files -co --exclude-standard`) instead
+of walking the tree, so `target/`, `node_modules/`, a virtualenv or a stray
+build directory never get read. On this repo's checkout that is 265 files
+instead of 444,000: a repo-wide GREP with no glob had been taking eight
+seconds per call, and the model in one recorded run made twelve of them.
+Outside a work tree the walker still scans the directory.
+
 Model calls are bounded per attempt (240s by default). Once a model has three
 completed calls behind it, the first attempt of each call is bounded by eight
 times that model's recent median latency instead (never below 45s, never above

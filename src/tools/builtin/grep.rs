@@ -315,6 +315,24 @@ fn grep_files(
                 }
             }
         }
+    } else if let Some(files) = git_index_files(root_path) {
+        for path in files {
+            if total_matches >= max_results {
+                break;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            scan_file(
+                &path,
+                &name,
+                regex,
+                glob,
+                max_results,
+                context_lines,
+                &mut matches,
+                &mut matched_files,
+                &mut total_matches,
+            );
+        }
     } else {
         walk(
             root_path,
@@ -335,6 +353,94 @@ fn grep_files(
         matches,
         pattern: regex.to_string(),
         total_matches,
+    }
+}
+
+/// The files git knows about under `root` — tracked plus untracked-but-not-
+/// ignored — in locale order, or None when `root` is not inside a git work
+/// tree (or git is missing), in which case the walker scans the tree. On a
+/// Rust or Node checkout this is the difference between a few hundred files
+/// and the hundreds of thousands under `target/` or a stray build tree: a
+/// repo-wide GREP that read every one of them took eight seconds per call.
+fn git_index_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "-co", "--exclude-standard"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ignored = default_ignored_dirs();
+    let mut entries: Vec<(String, PathBuf)> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|rel| !rel.is_empty())
+        .filter(|rel| !rel.split('/').any(|part| ignored.contains(part)))
+        .map(|rel| (rel.to_string(), root.join(rel)))
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort_by(|a, b| crate::tools::helpers::locale_compare(&a.0, &b.0));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    Some(entries.into_iter().map(|(_, path)| path).collect())
+}
+
+/// Scan one regular file for matches (glob, size and binary checks
+/// included); shared by the walker and the git-index path.
+#[allow(clippy::too_many_arguments)]
+fn scan_file(
+    path: &Path,
+    name: &str,
+    regex: &Regex,
+    glob: Option<&str>,
+    max_results: usize,
+    context_lines: usize,
+    matches: &mut Vec<GrepMatch>,
+    matched_files: &mut HashSet<PathBuf>,
+    total_matches: &mut usize,
+) {
+    if let Some(g) = glob {
+        if !matches_glob(name, g) {
+            return;
+        }
+    }
+    let file_size = match fs::metadata(path) {
+        Ok(m) if m.is_file() => m.len(),
+        _ => return,
+    };
+    if file_size > MAX_FILE_SIZE {
+        return;
+    }
+    let buf = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    if is_binary_buffer(&buf) {
+        return;
+    }
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    for (i, line) in text.split('\n').enumerate() {
+        if *total_matches >= max_results {
+            break;
+        }
+        if regex.is_match(line) {
+            let match_text = if context_lines == 0 {
+                line.trim().chars().take(200).collect()
+            } else {
+                line.to_string()
+            };
+            matches.push(GrepMatch {
+                line: i + 1,
+                path: path.to_path_buf(),
+                text: match_text,
+            });
+            matched_files.insert(path.to_path_buf());
+            *total_matches += 1;
+        }
     }
 }
 
@@ -402,53 +508,17 @@ fn walk(
             continue;
         }
 
-        // Glob filter
-        if let Some(g) = glob {
-            if !matches_glob(&name_str, g) {
-                continue;
-            }
-        }
-
-        // Size check
-        let file_size = match fs::metadata(&entry_path) {
-            Ok(m) => m.len(),
-            Err(_) => continue,
-        };
-        if file_size > MAX_FILE_SIZE {
-            continue;
-        }
-
-        // Read and binary check
-        let buf = match fs::read(&entry_path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if is_binary_buffer(&buf) {
-            continue;
-        }
-
-        let text = String::from_utf8_lossy(&buf).into_owned();
-        let lines: Vec<&str> = text.split('\n').collect();
-
-        for (i, line) in lines.iter().enumerate() {
-            if *total_matches >= max_results {
-                break;
-            }
-            if regex.is_match(line) {
-                let match_text = if context_lines == 0 {
-                    line.trim().chars().take(200).collect()
-                } else {
-                    line.to_string()
-                };
-                matches.push(GrepMatch {
-                    line: i + 1,
-                    path: entry_path.clone(),
-                    text: match_text,
-                });
-                matched_files.insert(entry_path.clone());
-                *total_matches += 1;
-            }
-        }
+        scan_file(
+            &entry_path,
+            &name_str,
+            regex,
+            glob,
+            max_results,
+            context_lines,
+            matches,
+            matched_files,
+            total_matches,
+        );
     }
 }
 
@@ -1094,5 +1164,39 @@ mod tests {
         assert!(tc.contains("mod.py lines 1-80 — big:\n"), "tc={tc}");
         assert!(tc.contains("[body continues to line 122: READ offset 81 limit 42 for the rest]"), "tc={tc}");
         assert!(tc.contains("mod.py lines 124-125 — small:\n124\tdef small():\n125\t    return 1"), "tc={tc}");
+    }
+
+    #[test]
+    fn git_checkout_searches_the_index_and_skips_ignored_trees() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(root).args(args).output().expect("git runs")
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join("tracked.rs"), "fn needle_tracked() {}\n").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/junk.rs"), "fn needle_ignored() {}\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "needle_modules\n").unwrap();
+        assert!(git(&["add", ".gitignore", "tracked.rs"]).status.success());
+        fs::write(root.join("untracked.rs"), "fn needle_untracked() {}\n").unwrap();
+        let listed = git_index_files(root).expect("inside a work tree");
+        assert!(listed.iter().any(|p| p.ends_with("tracked.rs")), "{listed:?}");
+        assert!(listed.iter().any(|p| p.ends_with("untracked.rs")), "{listed:?}");
+        assert!(!listed.iter().any(|p| p.to_string_lossy().contains("target")), "{listed:?}");
+        assert!(!listed.iter().any(|p| p.to_string_lossy().contains("node_modules")), "{listed:?}");
+        let cwd = root.to_string_lossy().to_string();
+        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "needle_"}));
+        assert!(tc.contains("2 match(es) in 2 file(s)"), "tc={tc}");
+        assert!(tc.contains("tracked.rs:1:") && tc.contains("untracked.rs:1:"), "tc={tc}");
+        assert!(!tc.contains("junk.rs") && !tc.contains("index.js"), "tc={tc}");
+        // Outside a work tree the walker still answers.
+        let plain = tempfile::tempdir().unwrap();
+        fs::write(plain.path().join("a.rs"), "fn needle_plain() {}\n").unwrap();
+        assert!(git_index_files(plain.path()).is_none());
+        let (_, tc) = run_grep(&plain.path().to_string_lossy(), serde_json::json!({"pattern": "needle_"}));
+        assert!(tc.contains("a.rs:1:"), "tc={tc}");
     }
 }

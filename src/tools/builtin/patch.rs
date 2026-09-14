@@ -18,8 +18,12 @@ pub fn definition() -> Value {
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
+                    "append": {
+                        "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take.",
+                        "type": "string"
+                    },
                     "content": {
-                        "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; for an existing file prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
+                        "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; to add at the end of an existing file use append; otherwise prefer find + replace unless nearly every line changes or the file is only a few dozen lines.",
                         "type": "string"
                     },
                     "expectedOccurrences": {
@@ -31,8 +35,12 @@ pub fn definition() -> Value {
                         "items": {
                             "additionalProperties": false,
                             "properties": {
+                                "append": {
+                                    "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file.",
+                                    "type": "string"
+                                },
                                 "content": {
-                                    "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely.",
+                                    "description": "Full file content to write. Creates the file (and parent directories) or overwrites it entirely. Use for new files; to add at the end of an existing file use append.",
                                     "type": "string"
                                 },
                                 "expectedOccurrences": {
@@ -106,6 +114,8 @@ pub struct FileEntry {
     pub replace: Option<String>,
     pub expected_occurrences: Option<i64>,
     pub content: Option<String>,
+    /// Text added at the end of the file (append mode).
+    pub append: Option<String>,
 }
 
 /// What execute() hands complete():
@@ -131,6 +141,8 @@ pub struct ResolvedEntry {
     pub existing_text: Option<String>,
     /// The post-image that will be written
     pub new_text: String,
+    /// Lines added at the end of the file (append mode).
+    pub appended: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +293,44 @@ const DUPLICATE_GUARD_MIN_LINE_CHARS: usize = 12;
 const DUPLICATE_GUARD_RATIO: f64 = 0.8;
 
 /// Guard against duplicated-copy overwrites, the other small-model failure:
+/// Overwrites of an existing file where at least this many lines are
+/// re-sent unchanged get a note pointing at append / find + replace.
+pub const REEMISSION_NOTE_MIN_LINES: usize = 20;
+
+/// Non-blank lines of `new_text` that already stood in `old_text` (as a
+/// multiset), i.e. the lines the model re-typed for nothing.
+pub fn reemitted_line_count(old_text: &str, new_text: &str) -> usize {
+    let mut pool: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in old_text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()) {
+        *pool.entry(line).or_insert(0) += 1;
+    }
+    let mut count = 0usize;
+    for line in new_text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()) {
+        if let Some(left) = pool.get_mut(line) {
+            if *left > 0 {
+                *left -= 1;
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// The note on a whole-file overwrite that re-sent most of an existing
+/// file: 39 recorded overwrites re-emitted 59% of their lines unchanged,
+/// and one round re-sent a 44-line module four times.
+pub fn reemission_note(old_text: &str, new_text: &str) -> String {
+    let total = new_text.lines().filter(|line| !line.trim().is_empty()).count();
+    let unchanged = reemitted_line_count(old_text, new_text);
+    if total >= REEMISSION_NOTE_MIN_LINES && unchanged * 2 >= total {
+        format!(
+            " — {unchanged} of {total} lines were already in the file; append (for additions at the end) or find + replace sends only the new ones and costs the round less"
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// "content" = the existing file followed by a second (often lightly edited)
 /// copy of it — the model meant to change a hunk and instead appended the
 /// whole file again. The tail of such a write is made almost entirely of
@@ -556,6 +606,27 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 _ => return Err(anyhow!("[entry {}] Missing or empty \"path\".", i)),
             };
 
+            if let Some(append) = entry.get("append").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+                // A real find + replace beside an append is two edits to the
+                // same file: apply the pair first, then the append (the
+                // transaction chains same-path entries). A replace or content
+                // with no find is a stray echo of where the model meant to
+                // insert; the append alone is what it asked for.
+                let find = entry.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
+                let replace = entry.get("replace").and_then(Value::as_str);
+                if let (Some(find), Some(replace)) = (find, replace) {
+                    files.push(FileEntry {
+                        path: path.clone(),
+                        find: Some(find.to_string()),
+                        replace: Some(replace.to_string()),
+                        expected_occurrences: entry.get("expectedOccurrences").and_then(Value::as_i64),
+                        content: None,
+                        append: None,
+                    });
+                }
+                files.push(FileEntry { path: path.clone(), find: None, replace: None, expected_occurrences: None, content: None, append: Some(append.to_string()) });
+                continue;
+            }
             let content_present = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
             let find_empty = entry.get("find").and_then(Value::as_str) == Some("");
             let replace_empty = entry.get("replace").and_then(Value::as_str) == Some("");
@@ -648,6 +719,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                     .and_then(Value::as_str)
                     .filter(|text| !(text.is_empty() && has_find) && !stray_content)
                     .map(str::to_string) },
+                append: None,
             });
         }
 
@@ -671,6 +743,41 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     }
 
     let raw_path = get_required_string_argument(&args, "path")?;
+    // A single-file append rides the transaction path as its one entry.
+    if let Some(append) = args.get("append").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+        // Same leniency as the files[] form: a real find + replace runs first
+        // as its own chained entry; a stray replace or content is ignored.
+        let mut files = Vec::with_capacity(2);
+        let find = args.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
+        let replace = args.get("replace").and_then(Value::as_str);
+        if let (Some(find), Some(replace)) = (find, replace) {
+            files.push(FileEntry {
+                path: raw_path.clone(),
+                find: Some(find.to_string()),
+                replace: Some(replace.to_string()),
+                expected_occurrences: args.get("expectedOccurrences").and_then(Value::as_i64),
+                content: None,
+                append: None,
+            });
+        }
+        files.push(FileEntry { path: raw_path.clone(), find: None, replace: None, expected_occurrences: None, content: None, append: Some(append.to_string()) });
+        let display_path = format_tool_path(&workspace_root, &resolve_tool_path(&workspace_root, &raw_path));
+        return Ok(PatchToolPrepared {
+            display_input: format!("{} (append {} line(s))", display_path, append.lines().count()),
+            input: PatchToolInput {
+                files,
+                verification: None,
+                absolute_path: String::new(),
+                display_path: String::new(),
+                workspace_root,
+                content: None,
+                find: None,
+                replace: None,
+                expected_occurrences: None,
+                stray_content: false,
+            },
+        });
+    }
     // find/replace/content are read raw (not trimmed): leading and trailing whitespace is significant in file edits.
     let find = args.get("find").and_then(Value::as_str).map(str::to_string);
     // `content: ""` beside a find is a placeholder, not an overwrite (see the
@@ -902,6 +1009,53 @@ pub fn resolve_file_entry(
 ) -> Result<ResolvedEntry, String> {
     let tag = format!("[entry {} \"{}\"]", index, entry.path);
 
+    if let Some(append) = entry.append.as_deref() {
+        // --- append mode: the pre-image (chained or on disk) plus the new
+        // text at its end; a missing file is created.
+        let absolute_path_buf = crate::tools::helpers::resolve_tool_path(workspace_root, &entry.path);
+        let display_path = crate::tools::helpers::format_tool_path(workspace_root, &absolute_path_buf);
+        let absolute_path = absolute_path_buf.to_string_lossy().to_string();
+        let path_kind = match crate::tools::helpers::assert_patch_target_path(&absolute_path_buf, &display_path) {
+            Ok(kind) => kind,
+            Err(error) => return Err(error.to_string()),
+        };
+        let existing_text: Option<String> = match base_text {
+            Some(text) => Some(text.to_string()),
+            None if matches!(path_kind, crate::tools::helpers::ToolPathKind::File) => match std::fs::read_to_string(&absolute_path_buf) {
+                Ok(text) => Some(text),
+                Err(error) => return Err(format!("{} {}", tag, error)),
+            },
+            None => None,
+        };
+        let mut new_text = existing_text.clone().unwrap_or_default();
+        if !new_text.is_empty() && !new_text.ends_with('\n') {
+            new_text.push('\n');
+        }
+        new_text.push_str(append);
+        if !new_text.ends_with('\n') {
+            new_text.push('\n');
+        }
+        if let Some(existing) = existing_text.as_deref() {
+            if let Err(error) = assert_patch_keeps_file_parseable(&display_path, &absolute_path, existing, &new_text) {
+                return Err(error);
+            }
+        }
+        let appended = append.lines().count();
+        return Ok(ResolvedEntry {
+            absolute_path,
+            display_path,
+            content: None,
+            effective_find: None,
+            effective_replace: None,
+            occurrences: None,
+            match_lines: None,
+            crlf_note: None,
+            existing_text,
+            new_text,
+            appended: Some(appended),
+        });
+    }
+
     // Mutual-exclusion: content XOR find/replace
     if entry.content.is_some() && (entry.find.is_some() || entry.replace.is_some()) {
         return Err(format!(
@@ -985,6 +1139,7 @@ pub fn resolve_file_entry(
             crlf_note: None,
             existing_text,
             new_text: content,
+            appended: None,
         });
     }
 
@@ -1099,6 +1254,7 @@ pub fn resolve_file_entry(
         crlf_note: Some(crlf_note),
         existing_text: Some(existing_text),
         new_text,
+        appended: None,
     })
 }
 
@@ -1338,6 +1494,9 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                     let earlier = &mut resolved[earlier_index];
                     earlier.new_text = next.new_text;
                     earlier.occurrences = Some(earlier.occurrences.unwrap_or(0) + next.occurrences.unwrap_or(0));
+                    if let Some(appended) = next.appended {
+                        earlier.appended = Some(earlier.appended.unwrap_or(0) + appended);
+                    }
                     if let Some(lines) = next.match_lines {
                         earlier.match_lines.get_or_insert_with(Vec::new).extend(lines);
                     }
@@ -1352,10 +1511,20 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
             let line_summary = if entry.content.is_some() {
                 let verb = if entry.existing_text.is_some() { "Overwrote" } else { "Created" };
                 format!(
-                    "{}: {} {} line(s)",
+                    "{}: {} {} line(s){}",
                     entry.display_path,
                     verb.to_lowercase(),
-                    crate::tools::helpers::count_lines(&entry.new_text)
+                    crate::tools::helpers::count_lines(&entry.new_text),
+                    entry.existing_text.as_deref().map(|existing| reemission_note(existing, &entry.new_text)).unwrap_or_default()
+                )
+            } else if let Some(appended) = entry.appended {
+                let replaced = entry.occurrences.unwrap_or(0);
+                format!(
+                    "{}: appended {} line(s){}{}",
+                    entry.display_path,
+                    appended,
+                    if replaced > 0 { format!(" after replacing {} occurrence(s)", replaced) } else { String::new() },
+                    if entry.existing_text.is_none() { " (file created)" } else { "" }
                 )
             } else {
                 format!(
@@ -1415,7 +1584,12 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         let summary = if existing_text.is_none() {
             format!("Created {} with {} line(s).", display_path, crate::tools::helpers::count_lines(&content))
         } else {
-            format!("Overwrote {} with {} line(s).", display_path, crate::tools::helpers::count_lines(&content))
+            format!(
+                "Overwrote {} with {} line(s).{}",
+                display_path,
+                crate::tools::helpers::count_lines(&content),
+                reemission_note(existing_text.as_deref().unwrap_or_default(), &content)
+            )
         };
 
         return Ok(PatchToolExecution {
@@ -1648,6 +1822,63 @@ mod execute_tests {
             outcome.text
         );
         assert!(outcome.text.contains("notes.txt"), "diff header must name the display path");
+    }
+
+    #[test]
+    fn append_adds_at_the_end_creates_missing_files_and_chains() {
+        let dir = temp_workspace("append");
+        let ctx = ctx_for(&dir);
+        std::fs::write(dir.join("tests.py"), "import unittest\n\nclass A(unittest.TestCase):\n    pass").unwrap();
+        let outcome = execute(&serde_json::json!({"path": "tests.py", "append": "\n\nclass B(unittest.TestCase):\n    pass\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.starts_with("tests.py: appended 4 line(s)"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
+        assert!(text.starts_with("import unittest\n\nclass A(unittest.TestCase):\n    pass\n\n\nclass B"), "{text}");
+        assert!(text.ends_with("    pass\n"), "{text}");
+        let outcome = execute(&serde_json::json!({"files": [{"path": "new/notes.txt", "append": "first line"}]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("appended 1 line(s) (file created)"), "{}", outcome.text);
+        assert_eq!(std::fs::read_to_string(dir.join("new/notes.txt")).unwrap(), "first line\n");
+        let outcome = execute(&serde_json::json!({"files": [
+            {"path": "tests.py", "find": "class A(", "replace": "class A0("},
+            {"path": "tests.py", "append": "class C:\n    pass\n"}
+        ]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
+        assert!(text.contains("class A0(") && text.ends_with("class C:\n    pass\n"), "{text}");
+        // A stray replace (the model echoing where it meant to insert) beside
+        // an append is ignored; a real find + replace runs first, then the append.
+        let outcome = execute(&serde_json::json!({"files": [
+            {"path": "tests.py", "append": "class D:\n    pass\n", "replace": "class C:\n    pass\n"}
+        ]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.starts_with("tests.py: appended 2 line(s)"), "{}", outcome.text);
+        let outcome = execute(&serde_json::json!({"path": "tests.py", "append": "class E:\n    pass\n", "find": "class D:", "replace": "class D0:"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
+        assert!(text.contains("class D0:") && text.ends_with("class E:\n    pass\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overwrite_that_resends_most_of_a_file_says_so() {
+        use super::{reemission_note, reemitted_line_count};
+        let old: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        let mut new = old.clone();
+        new.push_str("line 31\nline 32\n");
+        assert_eq!(reemitted_line_count(&old, &new), 30);
+        assert!(reemission_note(&old, &new).contains("30 of 32 lines were already in the file"), "{}", reemission_note(&old, &new));
+        let rewritten: String = (1..=30).map(|i| format!("new {i}\n")).collect();
+        assert_eq!(reemission_note(&old, &rewritten), "", "a real rewrite gets no note");
+        assert_eq!(reemission_note("a\nb\n", "a\nb\nc\n"), "", "short files get no note");
+        let dir = temp_workspace("reemit");
+        let ctx = ctx_for(&dir);
+        std::fs::write(dir.join("m.py"), &old).unwrap();
+        let outcome = execute(&serde_json::json!({"path": "m.py", "content": new}), &ctx);
+        assert!(!outcome.failed && outcome.text.contains("were already in the file; append"), "{}", outcome.text);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2049,6 +2280,7 @@ mod execute_tests {
                 crlf_note: None,
                 existing_text: Some(original.to_string()),
                 new_text: "rewritten first\n".to_string(),
+                appended: None,
             },
             ResolvedEntry {
                 absolute_path: workspace.join("doomed/child.txt").to_string_lossy().to_string(),
@@ -2061,6 +2293,7 @@ mod execute_tests {
                 crlf_note: None,
                 existing_text: None,
                 new_text: "never lands\n".to_string(),
+                appended: None,
             },
         ];
 
@@ -2107,6 +2340,7 @@ mod execute_tests {
                 crlf_note: None,
                 existing_text: None,
                 new_text: "created then rolled back\n".to_string(),
+                appended: None,
             },
             ResolvedEntry {
                 absolute_path: workspace.join("blocker/doomed.txt").to_string_lossy().to_string(),
@@ -2119,6 +2353,7 @@ mod execute_tests {
                 crlf_note: None,
                 existing_text: None,
                 new_text: "never lands\n".to_string(),
+                appended: None,
             },
         ];
 
@@ -2154,6 +2389,7 @@ mod execute_tests {
             crlf_note: None,
             existing_text: Some("previous\n".to_string()),
             new_text: "rewritten\n".to_string(),
+            appended: None,
         }];
         let mut pre_images: std::collections::HashMap<usize, Option<Vec<u8>>> =
             std::collections::HashMap::new();

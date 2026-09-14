@@ -385,6 +385,27 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn a_stale_finish_reruns_the_declared_chain_unless_the_last_check_was_it() {
+        use super::rerun_keeps_goal_standing;
+        use crate::core::types::HarnessVerificationRecord;
+        let goal = "Fix the parser. `cargo test --lib harness` and `cargo test --test loop_smoke` must pass.";
+        let record = |command: &str| HarnessVerificationRecord {
+            at_iteration: 1,
+            command: command.to_string(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: None,
+            id: None,
+        };
+        assert!(!rerun_keeps_goal_standing(goal, &record("cargo test --lib harness::r#loop::one_test -- --nocapture"), &[]));
+        assert!(rerun_keeps_goal_standing(goal, &record("cargo test --lib harness"), &[]));
+        assert!(rerun_keeps_goal_standing(goal, &record("cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"), &[]));
+        assert!(rerun_keeps_goal_standing(goal, &record("pytest -q"), &["cargo test --lib harness && cargo test --test loop_smoke".to_string()]));
+        assert!(rerun_keeps_goal_standing("Fix the bug in `page`.", &record("pytest -q"), &[]));
+    }
+
+    #[test]
     fn plain_prose_check_commands_read_to_the_end_of_the_clause() {
         use super::plain_prose_check_commands;
         let goal = "Add the helper. Verify with cargo test --release --lib tools::builtin::patch. Do not commit, push, or open PRs.";
@@ -2764,6 +2785,16 @@ pub fn command_is_goal_declared(goal: &str, command: &str) -> bool {
         || goal_declared_check_chain(goal).is_some_and(|chain| normalize_command_shape(&chain) == shape)
 }
 
+/// Whether a stale finish should re-run the last record rather than the
+/// goal-declared chain: the record already is the declared check, the goal
+/// declares none, or the declared chain hung earlier.
+pub fn rerun_keeps_goal_standing(goal: &str, record: &crate::core::types::HarnessVerificationRecord, hung_commands: &[String]) -> bool {
+    match goal_declared_check_chain(goal) {
+        None => true,
+        Some(chain) => command_is_goal_declared(goal, &record.command) || hung_commands.iter().any(|hung| *hung == chain),
+    }
+}
+
 pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
     let mut commands: Vec<String> = Vec::new();
     for span in goal.split('`').skip(1).step_by(2) {
@@ -5133,7 +5164,7 @@ impl HarnessRun {
                 },
                 declared,
             )
-        } else if stale && rerunnable.is_some() && budget_left {
+        } else if stale && rerunnable.is_some() && budget_left && rerun_keeps_goal_standing(&self.state.goal, rerunnable.as_ref().unwrap(), &self.hung_commands) {
             // A re-run of a goal-declared command keeps its goal-declared
             // standing (anchor, review waiver): the bench showed a finish
             // whose harness-run check failed, then a fix, then a finish that
@@ -5144,6 +5175,22 @@ impl HarnessRun {
             (record, declared)
         } else if (unchecked || stale) && budget_left {
             let declared = goal_declared_check_chain(&self.state.goal);
+            if let (Some(chain), Some(record)) = (&declared, rerunnable.as_ref()) {
+                // The last check was narrower than the goal's own: a recorded
+                // run re-ran one test the model had picked, accepted the
+                // finish, and then spent a review loop running the two
+                // declared suites — the check that waives that review.
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    detail: format!(
+                        "stale finish: the last check ({}) is not the goal-declared check, so the harness runs the declared one ({}) instead — it carries the goal's acceptance and waives the review",
+                        truncate_text(&record.command, 100),
+                        truncate_text(chain, 160)
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+            }
             let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
             let Some(command) = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone())) else { return outcome };
             if let Some((_, source)) = &detected {

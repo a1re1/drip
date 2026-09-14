@@ -44,7 +44,10 @@ const SYMBOL_HITS_TIME_BUDGET_MS: u128 = 400;
 const SYMBOL_HIT_LINE_CHARS: usize = 110;
 
 fn is_symbol_token(token: &str) -> bool {
-    if token.len() < 4 || token.len() > 60 {
+    // Descriptive test names run long: 247 of 2,643 recorded goals named
+    // a symbol over 60 characters, and the outline skipped it — the model
+    // then spent its first round on a READ to find that definition.
+    if token.len() < 4 || token.len() > 120 {
         return false;
     }
     let bytes = token.as_bytes();
@@ -1334,5 +1337,14 @@ mod tests {
         assert_eq!(carried, vec!["m/f0.py"], "the 60K-char file is skipped, the small one after it still carried");
         assert!(section.unwrap().contains("== m/f0.py"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_test_names_count_as_goal_symbols() {
+        let name = "indented_append_to_a_brace_file_goes_inside_the_outermost_block";
+        assert_eq!(name.len(), 63);
+        let symbols = extract_goal_symbols(&[&format!("Add a test right after `{name}` in src/x.rs.")]);
+        assert_eq!(symbols, vec![name.to_string()]);
+        assert!(extract_goal_symbols(&[&format!("`{}`", "a_".repeat(70))]).is_empty());
     }
 }

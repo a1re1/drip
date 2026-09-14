@@ -385,6 +385,22 @@ mod goal_check_tests {
     }
 
     #[test]
+    fn an_append_takes_the_placement_the_goal_names() {
+        use super::{anchor_append_to_goal, goal_placement_anchor};
+        assert_eq!(goal_placement_anchor("Add a unit test named new_case right after `old_case` in src/x.rs."), Some((true, "old_case".to_string())));
+        assert_eq!(goal_placement_anchor("Insert the helper below the test parse_flags."), Some((true, "parse_flags".to_string())));
+        assert_eq!(goal_placement_anchor("Put it before fn runCommand."), Some((false, "runCommand".to_string())));
+        assert_eq!(goal_placement_anchor("Run it after the tests pass and before merging."), None);
+        let (input, note) = anchor_append_to_goal(r#"{"path":"src/x.rs","append":"fn new_case() {}"}"#, "Add new_case right after `old_case`.");
+        assert!(input.contains(r#""after":"old_case""#), "{input}");
+        assert!(note.is_some_and(|note| note.contains("after `old_case`")));
+        let (input, note) = anchor_append_to_goal(r#"{"files":[{"path":"a.rs","append":"x","before":"z"},{"path":"b.rs","append":"y"},{"path":"c.rs","find":"1","replace":"2"}]}"#, "before `old_case`");
+        assert!(note.is_some() && input.contains(r#""before":"z""#) && input.matches("old_case").count() == 1, "{input}");
+        let raw = r#"{"path":"src/x.rs","find":"a","replace":"b"}"#;
+        assert_eq!(anchor_append_to_goal(raw, "right after `old_case`"), (raw.to_string(), None));
+    }
+
+    #[test]
     fn a_stale_finish_reruns_the_declared_chain_unless_the_last_check_was_it() {
         use super::rerun_keeps_goal_standing;
         use crate::core::types::HarnessVerificationRecord;
@@ -2298,6 +2314,60 @@ pub const READ_WHOLE_FILE_MAX_CHARS: usize = 40_000;
 /// Rewrites a READ of a path already paged `prior_windows` times this loop
 /// into a whole-file read, returning the new input and the note to append;
 /// otherwise the input untouched.
+/// The definition a goal places new code next to — "right after
+/// `alpha`", "below the test beta", "before fn gamma" — as (after?, name).
+/// Only identifier-shaped names count (an underscore inside or a camel
+/// hump), so "after the tests pass" names nothing.
+pub fn goal_placement_anchor(goal: &str) -> Option<(bool, String)> {
+    let re = regex::Regex::new(
+        r"(?i)\b(?:right|immediately|directly|just)?\s*(after|below|following|before|above)\s+(?:the\s+)?(?:existing\s+)?(?:test|fn|function|method|def|struct|class|impl|const|enum|block|definition|helper)?\s*`?([A-Za-z_][A-Za-z0-9_]*)`?",
+    )
+    .ok()?;
+    for capture in re.captures_iter(goal) {
+        let name = capture.get(2)?.as_str();
+        let inner = &name[1..name.len().saturating_sub(1).max(1)];
+        let identifier_shaped = name.len() >= 4
+            && (inner.contains('_') || name.chars().zip(name.chars().skip(1)).any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase()));
+        if !identifier_shaped {
+            continue;
+        }
+        let word = capture.get(1)?.as_str().to_ascii_lowercase();
+        let after = matches!(word.as_str(), "after" | "below" | "following");
+        return Some((after, name.to_string()));
+    }
+    None
+}
+
+/// A PATCH append with no placement of its own takes the goal's: 3 of 3
+/// recorded appends under a goal that said "right after `X`" landed at
+/// the end of the file (or before its closing brace), and the model spent
+/// READ + PATCH rounds moving the text — or left it there.
+pub fn anchor_append_to_goal(raw_input: &str, goal: &str) -> (String, Option<String>) {
+    let Some((after, name)) = goal_placement_anchor(goal) else { return (raw_input.to_string(), None) };
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else { return (raw_input.to_string(), None) };
+    let key = if after { "after" } else { "before" };
+    let mut anchored = false;
+    let anchor_entry = |entry: &mut serde_json::Value, anchored: &mut bool| {
+        let has_append = entry.get("append").and_then(|value| value.as_str()).is_some_and(|text| !text.is_empty());
+        let placed = ["after", "before", "find"].iter().any(|field| entry.get(field).and_then(|value| value.as_str()).is_some_and(|text| !text.is_empty()));
+        if has_append && !placed {
+            entry[key] = serde_json::Value::String(name.clone());
+            *anchored = true;
+        }
+    };
+    if let Some(entries) = input.get_mut("files").and_then(|value| value.as_array_mut()) {
+        for entry in entries.iter_mut() {
+            anchor_entry(entry, &mut anchored);
+        }
+    } else {
+        anchor_entry(&mut input, &mut anchored);
+    }
+    if !anchored {
+        return (raw_input.to_string(), None);
+    }
+    (input.to_string(), Some(format!("append placed {key} `{name}` as the goal asks (pass after or before yourself to choose the place)")))
+}
+
 pub fn promote_read_to_whole_file(raw_input: &str, prior_windows: u32, cwd: &std::path::Path) -> (String, Option<String>) {
     if prior_windows < READ_WHOLE_FILE_AFTER {
         return (raw_input.to_string(), None);
@@ -7644,6 +7714,15 @@ impl HarnessRun {
             } else {
                 (raw_input, None)
             };
+            let (raw_input, anchor_note) = if tool_name == "PATCH" { anchor_append_to_goal(&raw_input, &self.state.goal) } else { (raw_input, None) };
+            if let Some(note) = anchor_note.as_deref() {
+                self.emit(HarnessEvent {
+                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    detail: note.to_string(),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::HarnessOp,
+                });
+            }
             let execution_started_at_ms = (self.now)().timestamp_millis();
             let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
@@ -7712,6 +7791,10 @@ impl HarnessRun {
                 tool_content.push_str(&note);
             }
             if let Some(note) = whole_file_note.as_deref() {
+                tool_content.push_str("\n");
+                tool_content.push_str(note);
+            }
+            if let Some(note) = anchor_note.as_deref().filter(|_| !execution.failed) {
                 tool_content.push_str("\n");
                 tool_content.push_str(note);
             }

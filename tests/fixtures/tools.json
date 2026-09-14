@@ -39,8 +39,16 @@
       "parameters": {
         "additionalProperties": false,
         "properties": {
+          "after": {
+            "description": "With append: the name of a function, test, class or other definition in the file; the appended text is placed right after that definition's block (indented to match) instead of at the end of the file.",
+            "type": "string"
+          },
           "append": {
-            "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take.",
+            "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take. Pass after or before with a definition name to place the text next to it.",
+            "type": "string"
+          },
+          "before": {
+            "description": "With append: the name of a definition in the file; the appended text is placed right before it (above its attributes or decorators).",
             "type": "string"
           },
           "content": {
@@ -56,8 +64,16 @@
             "items": {
               "additionalProperties": false,
               "properties": {
+                "after": {
+                  "description": "With append: a definition name in the file; the text is placed right after that definition's block.",
+                  "type": "string"
+                },
                 "append": {
-                  "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file.",
+                  "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file; pass after or before with a definition name to place it next to that definition.",
+                  "type": "string"
+                },
+                "before": {
+                  "description": "With append: a definition name in the file; the text is placed right before it.",
                   "type": "string"
                 },
                 "content": {

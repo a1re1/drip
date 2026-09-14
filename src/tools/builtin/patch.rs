@@ -18,8 +18,16 @@ pub fn definition() -> Value {
             "parameters": {
                 "additionalProperties": false,
                 "properties": {
+                    "after": {
+                        "description": "With append: the name of a function, test, class or other definition in the file; the appended text is placed right after that definition's block (indented to match) instead of at the end of the file.",
+                        "type": "string"
+                    },
                     "append": {
-                        "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take.",
+                        "description": "Text to add at the end of the file (a newline is inserted first when the file does not end with one; the file is created if missing). For new tests or functions at the end of an existing file this sends only the new lines — content re-sends the whole file and the unchanged lines cost the round their tokens take. Pass after or before with a definition name to place the text next to it.",
+                        "type": "string"
+                    },
+                    "before": {
+                        "description": "With append: the name of a definition in the file; the appended text is placed right before it (above its attributes or decorators).",
                         "type": "string"
                     },
                     "content": {
@@ -35,8 +43,16 @@ pub fn definition() -> Value {
                         "items": {
                             "additionalProperties": false,
                             "properties": {
+                                "after": {
+                                    "description": "With append: a definition name in the file; the text is placed right after that definition's block.",
+                                    "type": "string"
+                                },
                                 "append": {
-                                    "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file.",
+                                    "description": "Text to add at the end of the file (a newline is inserted first when needed; the file is created if missing). Sends only the new lines — use it for tests or functions added at the end of an existing file; pass after or before with a definition name to place it next to that definition.",
+                                    "type": "string"
+                                },
+                                "before": {
+                                    "description": "With append: a definition name in the file; the text is placed right before it.",
                                     "type": "string"
                                 },
                                 "content": {
@@ -116,6 +132,10 @@ pub struct FileEntry {
     pub content: Option<String>,
     /// Text added at the end of the file (append mode).
     pub append: Option<String>,
+    /// Append placed right after the definition block named here.
+    pub after: Option<String>,
+    /// Append placed right before the definition (and its attributes) named here.
+    pub before: Option<String>,
 }
 
 /// What execute() hands complete():
@@ -305,6 +325,111 @@ pub fn split_trailing_closers(text: &str) -> Option<(&str, &str)> {
 
 /// Note on the append summary when the text went before trailing closers.
 pub const APPEND_BEFORE_CLOSERS_NOTE: &str = " before the file's closing brace(s)";
+
+/// Keywords that open a definition; the word after one is the name.
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn", "def", "class", "struct", "enum", "impl", "trait", "mod", "function", "const", "static", "let", "var", "type",
+    "interface", "func", "macro_rules!",
+];
+/// Modifiers that may precede a definition keyword.
+const DEFINITION_MODIFIERS: &[&str] = &[
+    "pub", "pub(crate)", "pub(super)", "export", "default", "async", "unsafe", "extern", "private", "public", "protected",
+    "abstract", "final", "override", "declare",
+];
+
+/// The line (0-based) that defines `name` in `lines`: a definition keyword
+/// followed by the name, or a `it("name"` / `test("name"` / `describe("name"`
+/// call. Err names the reason when there is no such line or several.
+pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut hits: Vec<usize> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.contains(name) {
+            continue;
+        }
+        let mut words = trimmed.split_whitespace().peekable();
+        while words.peek().is_some_and(|word| DEFINITION_MODIFIERS.contains(word)) {
+            words.next();
+        }
+        let keyword_hit = match (words.next(), words.next()) {
+            (Some(keyword), Some(rest)) if DEFINITION_KEYWORDS.contains(&keyword) => {
+                let ident: String = rest.chars().take_while(|c| is_ident(*c)).collect();
+                ident == name
+            }
+            _ => false,
+        };
+        let call_hit = ["it(", "test(", "describe(", "it.only(", "test.only("].iter().any(|opener| {
+            trimmed.starts_with(opener) && {
+                let rest = trimmed[opener.len()..].trim_start();
+                rest.get(1..1 + name.len()) == Some(name)
+                    && rest.starts_with(|c| c == '"' || c == '\'' || c == '`')
+                    && rest.get(1 + name.len()..).is_some_and(|tail| tail.starts_with(|c| c == '"' || c == '\'' || c == '`'))
+            }
+        });
+        if keyword_hit || call_hit {
+            hits.push(index);
+        }
+    }
+    match hits.as_slice() {
+        [index] => Ok(*index),
+        [] => Err("is not defined in this file".to_string()),
+        many => Err(format!("is defined {} times in this file", many.len())),
+    }
+}
+
+/// `text` with `append` inserted right after (or before) the definition
+/// block named by the anchor: the block's end comes from the same brace
+/// and indentation walk the outline uses; `before` also steps over the
+/// attributes, decorators and doc comments above the definition. An
+/// unindented append joins an indented anchor at the anchor's indentation.
+/// Ok carries the new text and the line the text now starts on; Err the
+/// reason the anchor could not be used.
+pub fn anchored_insert(path: &str, text: &str, append: &str, anchor: &str, after: bool) -> Result<(String, usize), String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = find_definition_line(&lines, anchor)?;
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+    let insert_at = if after {
+        crate::harness::outline::definition_end(ext, &lines, start) + 1
+    } else {
+        let mut at = start;
+        while at > 0 {
+            let above = lines[at - 1].trim_start();
+            if above.starts_with("#[") || above.starts_with('@') || above.starts_with("///") || above.starts_with("/**") || above.starts_with("* ") || above.starts_with("*/") {
+                at -= 1;
+            } else {
+                break;
+            }
+        }
+        at
+    };
+    let anchor_indent: String = lines[start].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let body = append.trim_matches('\n');
+    let body_indented = body.lines().find(|line| !line.trim().is_empty()).is_some_and(|line| line.starts_with(' ') || line.starts_with('\t'));
+    let body: String = if !anchor_indent.is_empty() && !body_indented {
+        body.lines().map(|line| if line.trim().is_empty() { String::new() } else { format!("{anchor_indent}{line}") }).collect::<Vec<_>>().join("\n")
+    } else {
+        body.to_string()
+    };
+    let mut out: Vec<String> = lines[..insert_at].iter().map(|line| line.to_string()).collect();
+    if after && !out.is_empty() && !out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.push(String::new());
+    }
+    if !after && !out.is_empty() && !out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.push(String::new());
+    }
+    let first_line = out.len() + 1;
+    out.extend(body.lines().map(str::to_string));
+    if lines.get(insert_at).is_some_and(|line| !line.trim().is_empty()) {
+        out.push(String::new());
+    }
+    out.extend(lines[insert_at..].iter().map(|line| line.to_string()));
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') || !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    Ok((joined, first_line))
+}
 
 /// Note on the append summary when the text went before the main guard.
 pub const APPEND_BEFORE_GUARD_NOTE: &str = " before the `if __name__ == \"__main__\":` block";
@@ -814,9 +939,20 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                         expected_occurrences: entry.get("expectedOccurrences").and_then(Value::as_i64),
                         content: None,
                         append: None,
+                        after: None,
+                        before: None,
                     });
                 }
-                files.push(FileEntry { path: path.clone(), find: None, replace: None, expected_occurrences: None, content: None, append: Some(append.to_string()) });
+                files.push(FileEntry {
+                    path: path.clone(),
+                    find: None,
+                    replace: None,
+                    expected_occurrences: None,
+                    content: None,
+                    append: Some(append.to_string()),
+                    after: entry.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                    before: entry.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                });
                 continue;
             }
             let content_present = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
@@ -912,6 +1048,8 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                     .filter(|text| !(text.is_empty() && has_find) && !stray_content)
                     .map(str::to_string) },
                 append: None,
+                after: None,
+                before: None,
             });
         }
 
@@ -950,9 +1088,20 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 expected_occurrences: args.get("expectedOccurrences").and_then(Value::as_i64),
                 content: None,
                 append: None,
+                after: None,
+                before: None,
             });
         }
-        files.push(FileEntry { path: raw_path.clone(), find: None, replace: None, expected_occurrences: None, content: None, append: Some(append.to_string()) });
+        files.push(FileEntry {
+            path: raw_path.clone(),
+            find: None,
+            replace: None,
+            expected_occurrences: None,
+            content: None,
+            append: Some(append.to_string()),
+            after: args.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+            before: args.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+        });
         let display_path = format_tool_path(&workspace_root, &resolve_tool_path(&workspace_root, &raw_path));
         return Ok(PatchToolPrepared {
             display_input: format!("{} (append {} line(s))", display_path, append.lines().count()),
@@ -1224,8 +1373,26 @@ pub fn resolve_file_entry(
         let guard_split = if is_python { existing_text.as_deref().and_then(split_python_main_guard) } else { None };
         let closers_split = if !is_python && indented { existing_text.as_deref().and_then(split_trailing_closers) } else { None };
         let mut placement_note = "";
-        let mut new_text = match (guard_split, closers_split) {
-            (None, Some((head, closers))) => {
+        let mut anchor_note = String::new();
+        let anchored = match (entry.after.as_deref(), entry.before.as_deref(), existing_text.as_deref()) {
+            (Some(name), _, Some(text)) | (None, Some(name), Some(text)) => {
+                let after = entry.after.is_some();
+                match anchored_insert(&entry.path, text, append, name, after) {
+                    Ok((new_text, first_line)) => {
+                        anchor_note = format!(" {} `{name}` (the new text starts at line {first_line})", if after { "after" } else { "before" });
+                        Some(new_text)
+                    }
+                    Err(reason) => {
+                        anchor_note = format!(" (`{name}` {reason}, so the text went at the end instead)");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let mut new_text = match (anchored, guard_split, closers_split) {
+            (Some(text), _, _) => text,
+            (None, None, Some((head, closers))) => {
                 // Inside the outermost block: one blank line, the text, the
                 // closers as the file had them.
                 let mut text = head.trim_end_matches('\n').to_string();
@@ -1236,7 +1403,7 @@ pub fn resolve_file_entry(
                 placement_note = APPEND_BEFORE_CLOSERS_NOTE;
                 text
             }
-            (Some((head, guard)), _) => {
+            (None, Some((head, guard)), _) => {
                 // Before the guard: one blank line for an indented body
                 // continuation (a method joining the last class), two for a
                 // new top-level definition, then the guard restored after
@@ -1249,7 +1416,7 @@ pub fn resolve_file_entry(
                 placement_note = APPEND_BEFORE_GUARD_NOTE;
                 text
             }
-            (None, None) => {
+            (None, None, None) => {
                 let mut text = existing_text.clone().unwrap_or_default();
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
@@ -1275,7 +1442,7 @@ pub fn resolve_file_entry(
             effective_replace: None,
             occurrences: None,
             match_lines: None,
-            crlf_note: (!placement_note.is_empty()).then(|| placement_note.to_string()),
+            crlf_note: (!placement_note.is_empty() || !anchor_note.is_empty()).then(|| format!("{placement_note}{anchor_note}")),
             existing_text,
             new_text,
             appended: Some(appended),
@@ -2195,6 +2362,36 @@ mod execute_tests {
         assert!(split_python_main_guard("def f():\n    if __name__ == \"__main__\":\n        pass\n").is_none());
         let outcome = execute(&serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}), &ctx);
         assert!(!outcome.failed && !outcome.text.contains("block"), "{}", outcome.text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_after_a_named_definition_lands_after_its_block() {
+        let dir = temp_workspace("append-anchor");
+        let ctx = ctx_for(&dir);
+        let src = "mod tests {\n    use super::*;\n\n    #[test]\n    fn alpha() {\n        if true {\n            assert!(true);\n        }\n    }\n\n    #[test]\n    fn beta() {\n        assert!(true);\n    }\n}\n";
+        std::fs::write(dir.join("lib.rs"), src).unwrap();
+        let outcome = execute(&serde_json::json!({"path": "lib.rs", "after": "alpha", "append": "#[test]\nfn gamma() {\n    assert!(true);\n}\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        assert!(outcome.text.contains("after `alpha` (the new text starts at line 11)"), "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("lib.rs")).unwrap();
+        let expected = "mod tests {\n    use super::*;\n\n    #[test]\n    fn alpha() {\n        if true {\n            assert!(true);\n        }\n    }\n\n    #[test]\n    fn gamma() {\n        assert!(true);\n    }\n\n    #[test]\n    fn beta() {\n        assert!(true);\n    }\n}\n";
+        assert_eq!(text, expected);
+        // before: above the attribute of the anchor.
+        let outcome = execute(&serde_json::json!({"files": [{"path": "lib.rs", "before": "beta", "append": "    fn delta() {}\n"}]}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("lib.rs")).unwrap();
+        assert!(text.contains("    }\n\n    fn delta() {}\n\n    #[test]\n    fn beta() {"), "{text}");
+        // Unknown or ambiguous anchor: plain append with the reason in the summary.
+        let outcome = execute(&serde_json::json!({"path": "lib.rs", "after": "omega", "append": "// tail\n"}), &ctx);
+        assert!(!outcome.failed && outcome.text.contains("`omega` is not defined in this file, so the text went at the end instead"), "{}", outcome.text);
+        assert!(std::fs::read_to_string(dir.join("lib.rs")).unwrap().ends_with("}\n// tail\n"));
+        // Python: indentation-delimited block, decorator stepped over for before.
+        std::fs::write(dir.join("t.py"), "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n\n    @skip\n    def test_b(self):\n        pass\n").unwrap();
+        let outcome = execute(&serde_json::json!({"path": "t.py", "after": "test_a", "append": "def test_mid(self):\n    pass\n"}), &ctx);
+        assert!(!outcome.failed, "{}", outcome.text);
+        let text = std::fs::read_to_string(dir.join("t.py")).unwrap();
+        assert!(text.contains("        self.assertTrue(True)\n\n    def test_mid(self):\n        pass\n\n    @skip\n    def test_b(self):"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

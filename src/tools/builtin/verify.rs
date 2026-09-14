@@ -558,6 +558,28 @@ mod evidence_tests {
     }
 
     #[test]
+    fn compiler_evidence_sees_through_cd_and_redirection() {
+        // A directory change or a merged-stderr redirect is not part of the
+        // compiler invocation and must not sink a clean build to UNVERIFIED.
+        for (command, kind) in [
+            ("cd drip && cargo check", Kind::Typecheck),
+            ("cargo check 2>&1", Kind::Typecheck),
+            ("cargo build 2>&1", Kind::Build),
+            ("cd web && bunx tsc --noEmit 2>&1", Kind::Typecheck),
+            ("(cd drip && cargo build)", Kind::Build),
+            ("pushd crate && cargo check --all-targets", Kind::Typecheck),
+        ] {
+            let evidence = verification_evidence(command, "");
+            assert_eq!(evidence.kind, kind, "{command}");
+            assert!(evidence.verifies_work(), "{command}");
+        }
+        // A real second command hiding after the directory change stays rejected.
+        for command in ["cd x && rm -rf y && cargo build", "cd x; cargo build", "echo cargo build", "false && cargo build"] {
+            assert!(!verification_evidence(command, "").verifies_work(), "{command}");
+        }
+    }
+
+    #[test]
     fn legacy_records_load_but_do_not_render_as_verified() {
         let record: HarnessVerificationRecord = serde_json::from_value(json!({
             "atIteration":1,"command":"true","failed":false,"outputTail":""
@@ -662,11 +684,54 @@ pub fn marker_is_fabricated(command: &str) -> bool {
     false
 }
 
+/// Shell redirection operators are not part of the invoked program: a trailing
+/// `2>&1` (or `> log`, `2>/dev/null`, …) must not disqualify an otherwise
+/// recognized compiler command by tripping the `&`/`>` guard below.
+fn is_redirection(word: &str) -> bool {
+    matches!(word, "2>&1" | "1>&2" | "&>" | "2>&-" | "1>&-")
+        || word.starts_with('>')
+        || word.starts_with("2>")
+        || word.starts_with("1>")
+        || word.starts_with("&>")
+        || word.starts_with('<')
+}
+
+/// See through a leading `cd DIR &&` / `pushd DIR &&` (optionally wrapped in one
+/// or more paren layers) so build-evidence detection reads the real compiler
+/// command that follows. Only a bare directory change is stripped: the head
+/// before `&&` must be a single `cd`/`pushd` with no other control operator, so
+/// `cd x && rm -rf y && cargo build` keeps its extra `&&` and stays rejected.
+fn strip_dir_change(command: &str) -> &str {
+    let mut command = command.trim();
+    for _ in 0..4 {
+        if let Some(inner) = command.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) {
+            command = inner.trim();
+            continue;
+        }
+        if command.starts_with("cd ") || command.starts_with("pushd ") {
+            if let Some(idx) = command.find("&&") {
+                let head = &command[..idx];
+                if !head.contains([';', '|', '&', '\n', '`']) {
+                    command = command[idx + 2..].trim();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    command
+}
+
 /// Recognize actual compiler/build invocations, not mentions in echo commands
 /// or shell scripts. Complex wrappers can emit a custom assertion result.
 fn build_evidence_kind(command: &str) -> Option<crate::core::types::VerificationEvidenceKind> {
     use crate::core::types::VerificationEvidenceKind::{Build, Typecheck};
-    let words = shell_words::split(command).ok()?;
+    let command = strip_dir_change(command);
+    let words: Vec<String> = shell_words::split(command)
+        .ok()?
+        .into_iter()
+        .filter(|word| !is_redirection(word))
+        .collect();
     if words.iter().any(|word| word.contains([';', '|', '&', '\n', '`']) || word.contains("$(")
         || matches!(word.as_str(), "--help" | "-h" | "--version" | "-V" | "--list" | "--dry-run")) {
         return None;

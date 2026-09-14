@@ -1717,3 +1717,14 @@ evidence instead of re-deriving identical work.
 ## License
 
 MIT
+
+### Build-evidence detection sees through `cd` and redirections (#118)
+
+A clean `cargo check` or `cargo build` is real build evidence, but the model
+naturally runs it as `cd crate && cargo check` or `cargo build 2>&1`. Both forms
+used to fall to an UNVERIFIED "unknown runner" — the `&&` and the `2>&1` each
+tripped the `&` guard that keeps `echo cargo build` from being misread — so the
+model had to re-run the check a second, plainer way. Build-evidence detection
+now strips a leading `cd DIR &&` / `pushd DIR &&` (and one paren layer) and
+ignores redirection operators, while still rejecting any real second command in
+the chain. `tsc` clean-pass detection inherits the same normalization.

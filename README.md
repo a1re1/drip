@@ -1249,6 +1249,16 @@ first four files with up to six definitions each, the rest by count), for up
 to four words; the recorded runs of such a goal spent their first round on
 exactly that search.
 
+Tool arguments are repaired before a call is refused. Some models leak
+their native tool-call syntax into the JSON they were asked for
+(`"head</arg_value><arg_key>pattern": "fn x"`), and the call then fails on a
+missing required argument and costs a round: the segment after the last
+marker is used as the key (unless the intact key is also present), stray
+`<arg_key>` tags are stripped, and a `timeout` sent instead of `timeoutMs`
+is honoured (values under 1000 read as seconds). Thirty-four calls in this
+machine's transcripts since 10 September carried the marker, and several
+hundred sent `timeout`.
+
 A GREP hit names the definition it sits in (`  [in run_goal]`), and a GREP
 whose whole search matches at most three lines returns the body of every hit
 that is a definition line, numbered like a READ (up to 80 lines each, 6000

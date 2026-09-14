@@ -72,7 +72,7 @@ impl ToolOutcome {
 pub fn tool_arguments(args: &Value) -> Result<Map<String, Value>> {
     match args {
         Value::String(raw_input) => parse_tool_arguments(raw_input),
-        Value::Object(map) => Ok(map.clone()),
+        Value::Object(map) => Ok(crate::tools::helpers::repair_argument_keys(map.clone())),
         _ => Err(anyhow!("Tool arguments must be a JSON object.")),
     }
 }

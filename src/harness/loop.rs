@@ -5962,6 +5962,15 @@ impl HarnessRun {
                     let mut parts: Vec<String> = Vec::new();
                     // Short named files travel whole (the text a READ would
                     // return); the rest get outlines.
+                    if let Some(tree) = crate::harness::outline::repo_tree_for_prompt(&self.cwd) {
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            detail: format!("repository file list carried into {}'s first prompt ({} chars)", task.id, tree.chars().count()),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        parts.push(tree);
+                    }
                     let named_paths = crate::harness::outline::named_paths_for_texts(&texts);
                     let mut carry_paths = named_paths.clone();
                     carry_paths.extend(crate::harness::outline::definition_files_for_texts(&self.cwd, &texts, &named_paths));
@@ -5986,8 +5995,10 @@ impl HarnessRun {
                     parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &outline_paths));
                     parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
                     parts.extend(crate::harness::outline::definition_hits_for_texts(&self.cwd, &texts));
+                    let mut span_paths: Vec<String> = Vec::new();
                     if let Some(spans) = crate::harness::outline::definition_spans_for_texts(&self.cwd, &texts, &carried) {
                         let names: Vec<&str> = spans.lines().filter_map(|line| line.strip_prefix("== ")).map(|line| line.split(' ').next().unwrap_or(line)).collect();
+                        span_paths.extend(names.iter().filter_map(|name| name.rsplit_once(':').map(|(path, _)| path.to_string())));
                         self.emit(HarnessEvent {
                             data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
                             detail: format!("definition bodies carried into {}'s first prompt: {} ({} chars)", task.id, names.join(", "), spans.chars().count()),
@@ -5995,6 +6006,21 @@ impl HarnessRun {
                             r#type: HarnessEventType::HarnessOp,
                         });
                         parts.push(spans);
+                    }
+                    // The small tests that pair with the carried files by
+                    // name: the goal usually asks to extend them, and runs
+                    // spent a READ round on them to match their style.
+                    let mut sibling_sources = carry_paths.clone();
+                    sibling_sources.extend(span_paths);
+                    let siblings = crate::harness::outline::sibling_test_files(&self.cwd, &sibling_sources, &carried);
+                    if let (Some(bodies), tests) = crate::harness::outline::file_bodies_for_paths(&self.cwd, &siblings, crate::harness::outline::SIBLING_TESTS_HEADER) {
+                        self.emit(HarnessEvent {
+                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            detail: format!("sibling tests carried into {}'s first prompt: {} ({} chars)", task.id, tests.join(", "), bodies.chars().count()),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::HarnessOp,
+                        });
+                        parts.push(bodies);
                     }
                     // A later author task of the run sees what earlier tasks
                     // changed, with outlines of those files: planned runs
@@ -6022,7 +6048,7 @@ impl HarnessRun {
                         self.emit(HarnessEvent {
                             data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
                             detail: format!(
-                                "file outline: {} section(s), {} chars injected into {}'s first prompt (named file bodies, definition maps, symbol hits, changes so far)",
+                                "file outline: {} section(s), {} chars injected into {}'s first prompt (repository files, named file bodies, definition maps, symbol hits, sibling tests, changes so far)",
                                 parts.len(),
                                 text.chars().count(),
                                 task.id

@@ -161,6 +161,163 @@ fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
     Some(String::from_utf8_lossy(&output.stdout).lines().filter(|hit| !hit_in_dot_directory(hit)).map(str::to_string).collect())
 }
 
+/// Files git knows about (tracked plus untracked-but-not-ignored), sorted,
+/// with anything under a dot directory dropped — the run's own .dripdata
+/// state is not part of the project.
+pub(crate) fn tracked_files(cwd: &str) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty() && !path.split('/').any(|segment| segment.starts_with('.')))
+        .map(str::to_string)
+        .collect();
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+pub const REPO_TREE_MAX_FILES: usize = 120;
+pub const REPO_TREE_MAX_DIRS: usize = 40;
+pub const REPO_TREE_MAX_SUBDIRS: usize = 12;
+pub const REPO_TREE_MAX_CHARS: usize = 3_000;
+pub const REPO_TREE_HEADER: &str = "repository files (git ls-files, already listed — a DIR call returns these; nothing here needs a DIR round):";
+
+/// The repository's file list for the first prompt: every file grouped by
+/// directory when the project is small, else each top-level directory with
+/// its file count and immediate subdirectories. Five of 26 recorded bench
+/// runs opened with a DIR round (`tests`, `kvstore`, `.`) that this answers.
+pub fn repo_tree_for_prompt(cwd: &str) -> Option<String> {
+    let files = tracked_files(cwd)?;
+    if files.is_empty() {
+        return None;
+    }
+    Some(repo_tree_from_files(&files))
+}
+
+pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
+    use std::collections::BTreeMap;
+    let mut lines: Vec<String> = vec![REPO_TREE_HEADER.to_string()];
+    if files.len() <= REPO_TREE_MAX_FILES {
+        let mut by_dir: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for file in files {
+            let (dir, name) = file.rsplit_once('/').unwrap_or((".", file.as_str()));
+            by_dir.entry(dir.to_string()).or_default().push(name);
+        }
+        for (dir, names) in &by_dir {
+            lines.push(format!("  {dir}/: {}", names.join(" ")));
+        }
+    } else {
+        let mut top: BTreeMap<String, (usize, Vec<String>, Vec<&str>)> = BTreeMap::new();
+        for file in files {
+            match file.split_once('/') {
+                None => top.entry(".".to_string()).or_default().2.push(file.as_str()),
+                Some((dir, rest)) => {
+                    let entry = top.entry(dir.to_string()).or_default();
+                    entry.0 += 1;
+                    match rest.split_once('/') {
+                        Some((sub, _)) => {
+                            if !entry.1.iter().any(|seen| seen == sub) {
+                                entry.1.push(sub.to_string());
+                            }
+                        }
+                        None => entry.2.push(rest),
+                    }
+                }
+            }
+        }
+        lines.push(format!("  {} files; top-level directories with their counts and immediate subdirectories:", files.len()));
+        for (dir, (count, subdirs, names)) in top.iter().take(REPO_TREE_MAX_DIRS) {
+            if dir == "." {
+                lines.push(format!("  ./: {}", names.join(" ")));
+                continue;
+            }
+            let mut detail = format!("  {dir}/ ({count} files");
+            if !subdirs.is_empty() {
+                let shown: Vec<&str> = subdirs.iter().take(REPO_TREE_MAX_SUBDIRS).map(String::as_str).collect();
+                detail.push_str(&format!("; subdirs: {}", shown.join(" ")));
+                if subdirs.len() > REPO_TREE_MAX_SUBDIRS {
+                    detail.push_str(&format!(" +{}", subdirs.len() - REPO_TREE_MAX_SUBDIRS));
+                }
+            }
+            if !names.is_empty() {
+                let shown: Vec<&str> = names.iter().take(REPO_TREE_MAX_SUBDIRS).copied().collect();
+                detail.push_str(&format!("; files: {}", shown.join(" ")));
+                if names.len() > REPO_TREE_MAX_SUBDIRS {
+                    detail.push_str(&format!(" +{}", names.len() - REPO_TREE_MAX_SUBDIRS));
+                }
+            }
+            detail.push(')');
+            lines.push(detail);
+        }
+        if top.len() > REPO_TREE_MAX_DIRS {
+            lines.push(format!("  … {} more top-level directories", top.len() - REPO_TREE_MAX_DIRS));
+        }
+    }
+    let mut total = 0usize;
+    let mut kept: Vec<String> = Vec::new();
+    for line in lines {
+        total += line.chars().count() + 1;
+        if total > REPO_TREE_MAX_CHARS {
+            kept.push("  … (list truncated)".to_string());
+            break;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
+pub const SIBLING_TEST_MAX_LINES: usize = 80;
+pub const SIBLING_TEST_MAX_CHARS: usize = 3_000;
+pub const SIBLING_TESTS_MAX: usize = 2;
+pub const SIBLING_TESTS_HEADER: &str = "tests that already cover the files above, already read (extend these in the same PATCH as the source change; a READ returns exactly this text):";
+
+/// The small test files whose names pair with the carried source files
+/// (`tests/test_cli.py` for `kvstore/cli.py`; `_test`, `.test`, `.spec` and
+/// `_spec` suffixes too), at most SIBLING_TESTS_MAX of them, each within
+/// SIBLING_TEST_MAX_LINES / SIBLING_TEST_MAX_CHARS. Recorded ttl and
+/// big-file runs opened with a READ of exactly these to match the style of
+/// the tests the goal asks them to extend.
+pub fn sibling_test_files(cwd: &str, sources: &[String], skip: &[String]) -> Vec<String> {
+    let Some(files) = tracked_files(cwd) else { return Vec::new() };
+    let mut found: Vec<String> = Vec::new();
+    for source in sources.iter().filter(|source| !test_like_path(source)) {
+        if found.len() >= SIBLING_TESTS_MAX {
+            break;
+        }
+        let name = source.rsplit('/').next().unwrap_or(source);
+        let stem = name.split_once('.').map(|(stem, _)| stem).unwrap_or(name).to_ascii_lowercase();
+        if stem.is_empty() {
+            continue;
+        }
+        let wanted = [format!("test_{stem}"), format!("{stem}_test"), format!("{stem}.test"), format!("{stem}.spec"), format!("{stem}_spec"), format!("test{stem}")];
+        for candidate in files.iter().filter(|path| test_like_path(path)) {
+            if skip.iter().any(|s| s == candidate) || found.contains(candidate) || sources.contains(candidate) {
+                continue;
+            }
+            let file = candidate.rsplit('/').next().unwrap_or(candidate).to_ascii_lowercase();
+            let test_stem = file.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file.as_str());
+            if !wanted.iter().any(|w| w == test_stem) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(candidate)) else { continue };
+            if text.lines().count() <= SIBLING_TEST_MAX_LINES && text.chars().count() <= SIBLING_TEST_MAX_CHARS {
+                found.push(candidate.clone());
+                if found.len() >= SIBLING_TESTS_MAX {
+                    break;
+                }
+            }
+        }
+    }
+    found
+}
+
 pub(crate) fn test_like_path(path: &str) -> bool {
     const TREES: &[&str] = &[
         "test", "tests", "testing", "fixture", "fixtures", "eval", "evals", "example", "examples", "bench", "benches",
@@ -879,6 +1036,55 @@ mod tests {
         assert!(hits.contains("RoleTotals: src/a.rs:1 pub struct RoleTotals {} | src/a.rs:2 fn use_role_totals(x: RoleTotals) {}"), "{hits}");
         assert!(!hits.contains("src/b.rs"), "{hits}");
         assert!(hits.contains("missing_name: no hits"), "{hits}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repo_tree_lists_small_repos_by_directory_and_large_ones_by_top_level() {
+        let dir = std::env::temp_dir().join(format!("drip-repo-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(repo_tree_for_prompt(&cwd).is_none(), "not a repo");
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "README.md", "# x\n");
+        write(&dir, "kvstore/cli.py", "x\n");
+        write(&dir, "kvstore/store.py", "x\n");
+        write(&dir, "tests/test_cli.py", "x\n");
+        write(&dir, ".dripdata/sessions/s/state.json", "{}\n");
+        let tree = repo_tree_for_prompt(&cwd).unwrap();
+        assert!(tree.starts_with(REPO_TREE_HEADER), "{tree}");
+        assert!(tree.contains("\n  ./: README.md\n  kvstore/: cli.py store.py\n  tests/: test_cli.py"), "{tree}");
+        assert!(!tree.contains(".dripdata"), "{tree}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut files: Vec<String> = (0..130).map(|i| format!("src/harness/m{i}.rs")).collect();
+        files.extend(["src/lib.rs".to_string(), "src/main.rs".to_string(), "src/tools/a.rs".to_string(), "Cargo.toml".to_string(), "tests/t.rs".to_string()]);
+        files.sort();
+        let big = repo_tree_from_files(&files);
+        assert!(big.contains("135 files; top-level directories"), "{big}");
+        assert!(big.contains("  ./: Cargo.toml\n  src/ (133 files; subdirs: harness tools; files: lib.rs main.rs)\n  tests/ (1 files; files: t.rs)"), "{big}");
+        assert!(!big.contains("m17.rs"), "{big}");
+    }
+
+    #[test]
+    fn sibling_tests_pair_by_file_stem_and_stay_small() {
+        let dir = std::env::temp_dir().join(format!("drip-sibling-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_string_lossy().into_owned();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        write(&dir, "kvstore/cli.py", "x\n");
+        write(&dir, "kvstore/store.py", "x\n");
+        write(&dir, "kvstore/textutil.py", "x\n");
+        write(&dir, "tests/test_cli.py", "import unittest\n");
+        write(&dir, "tests/test_store.py", "import unittest\n");
+        write(&dir, "tests/test_textutil.py", &"x\n".repeat(SIBLING_TEST_MAX_LINES + 1));
+        let sources = vec!["kvstore/cli.py".to_string(), "kvstore/textutil.py".to_string(), "kvstore/store.py".to_string()];
+        let found = sibling_test_files(&cwd, &sources, &["tests/test_store.py".to_string()]);
+        assert_eq!(found, vec!["tests/test_cli.py".to_string()], "textutil's test is too long, store's is skipped");
+        let found = sibling_test_files(&cwd, &sources, &[]);
+        assert_eq!(found, vec!["tests/test_cli.py".to_string(), "tests/test_store.py".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

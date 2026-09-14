@@ -1336,6 +1336,13 @@ result reads `DELEGATE wall budget of Ns exhausted (…)` with what it
 finished, so the parent can resume it narrower or do the rest directly.
 The deadline also terminates whatever process the child had in flight (the
 first dogfood of the budget saw a full `cargo test` run on for 26s past it).
+The fourth READ window of one file in a loop returns the whole file when it
+is 1500 lines and 40K chars or fewer (the result says so), and that one
+result is allowed past the per-result cap — under the default 8000-char cap
+the first dogfood of this lever handed the model the head and tail of a 32KB
+file and it re-read the whole file twice more. A recorded run paged through
+an 845-line file in 66 windows, one round each, when a handful of full reads
+would have carried the same text.
 A BASH command over 1200 chars gets a note with its generation cost: a
 recorded "prepare the PR" run spent 739s of its 1202s of inference on 24
 calls whose 1200-4000-token shell scripts each waited 20-45s to be written

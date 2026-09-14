@@ -173,7 +173,31 @@ mod cycle_progress_tests {
 
 #[cfg(test)]
 mod goal_check_tests {
-    use super::goal_declared_check_commands;
+    use super::{explicit_finish_check, finish_recheck_reason, goal_declared_check_commands, FinishRecheck};
+
+    #[test]
+    fn a_failed_check_is_rechecked_only_after_an_edit() {
+        let failed = "harness: not accepted yet — this task edited the workspace but the most recent verification (python3 -m unittest) FAILED and nothing has passed since.";
+        assert_eq!(finish_recheck_reason(failed, 1), Some(FinishRecheck::Stale));
+        assert_eq!(finish_recheck_reason(failed, 0), None);
+        let stale = "harness: not accepted yet — this task edited the workspace but 2 workspace edit(s) landed after the last verification (cargo test).";
+        assert_eq!(finish_recheck_reason(stale, 2), Some(FinishRecheck::Stale));
+        assert_eq!(finish_recheck_reason(stale, 0), None);
+        let unchecked = "harness: not accepted yet — this task edited the workspace but no verification command (test/build/typecheck) has run at any point in this run.";
+        assert_eq!(finish_recheck_reason(unchecked, 0), Some(FinishRecheck::Unchecked));
+        assert_eq!(finish_recheck_reason("Task task-1 marked completed.", 3), None);
+    }
+
+    #[test]
+    fn a_finish_names_its_check_only_with_a_short_non_blank_string() {
+        assert_eq!(explicit_finish_check(r#"{"status":"completed","check":" cargo test -q "}"#).as_deref(), Some("cargo test -q"));
+        assert!(explicit_finish_check(r#"{"status":"completed","check":"   "}"#).is_none());
+        assert!(explicit_finish_check(r#"{"status":"completed","check":3}"#).is_none());
+        assert!(explicit_finish_check(r#"{"status":"completed"}"#).is_none());
+        assert!(explicit_finish_check("not json").is_none());
+        let long = format!(r#"{{"check":"{}"}}"#, "x".repeat(400));
+        assert!(explicit_finish_check(&long).is_none());
+    }
 
     #[test]
     fn goal_declared_check_commands_keeps_backticked_test_runners_only() {
@@ -1464,6 +1488,44 @@ pub fn record_edited_path(edited_paths: &mut Vec<String>, path: &str) {
 /// acceptance command: that check is task-provided, so it stays external
 /// even when its command names a file this run edited (the goal told us to
 /// run it against those files).
+/// Finish-time checks the harness runs per loop before it stops offering
+/// them and asks for a VERIFY instead.
+pub const FINISH_CHECKS_MAX_PER_LOOP: u32 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinishRecheck {
+    /// Nothing has ever run, or nothing correctness-class passed.
+    Unchecked,
+    /// Edits landed after the last check, or the last check failed and the
+    /// workspace changed since — a re-run can settle the finish.
+    Stale,
+}
+
+/// Why a bounced finish deserves a harness-run check, from the bounce text
+/// and the edits since the last verification. A failed last check with no
+/// edit since is not rechecked: the model has to change something first.
+pub fn finish_recheck_reason(bounce: &str, mutations_since: i64) -> Option<FinishRecheck> {
+    if bounce.contains("no verification command (test/build/typecheck) has run") || bounce.contains("no correctness-class evidence") {
+        return Some(FinishRecheck::Unchecked);
+    }
+    let edited_since = mutations_since > 0;
+    if edited_since && (bounce.contains("workspace edit(s) landed after the last verification") || bounce.contains("FAILED and nothing has passed since")) {
+        return Some(FinishRecheck::Stale);
+    }
+    None
+}
+
+/// The `check` a finish_task call names: the command the harness should
+/// run before judging the finish when nothing fresh has passed. 107 of 115
+/// recorded runs ended with a passing VERIFY round followed by a finish
+/// round for the same task; naming the check in the finish folds the two
+/// into one model turn. Blank and non-string values are ignored.
+pub fn explicit_finish_check(raw_input: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw_input).ok()?;
+    let command = value.get("check")?.as_str()?.trim();
+    (!command.is_empty() && command.chars().count() < 400).then(|| command.to_string())
+}
+
 pub const GOAL_DECLARED_CHECK_MARKER: &str = "harnessGoalDeclaredCheck";
 
 /// `declared_verification_anchor` plus one upgrade: a check the agent
@@ -3059,7 +3121,10 @@ pub struct LoopScope {
     pub plan_yield_requested: bool,
     /// The harness ran the goal-declared check on the agent's behalf once
     /// this loop; a second bounce is the model's to handle.
-    pub goal_check_used: bool,
+    /// Checks the harness ran for finish_task calls this loop (explicit
+    /// `check`, goal-declared, or detected project check); capped so a
+    /// finish that keeps failing cannot burn the loop on re-runs.
+    pub finish_checks_run: u32,
     /// Consecutive finish_task bounces of one anomaly family this loop
     /// (family key, count); see auto_unreconcile_repeated_bounce.
     pub finish_bounce: Option<(&'static str, u32)>,
@@ -4176,7 +4241,16 @@ impl HarnessRun {
                     // the project's own suite through a native runner settles
                     // the change just as well (most real goals declare no
                     // check; their reviews re-ran the same suite).
-                    ("the last VERIFY was the project suite with an external anchor", command)
+                    let named_in_finish = record
+                        .evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.anchor.as_ref())
+                        .and_then(|anchor| anchor.source.as_deref())
+                        .is_some_and(|source| source.starts_with("check named in finish_task"));
+                    (
+                        if named_in_finish { "the harness ran the project suite named in finish_task" } else { "the last VERIFY was the project suite with an external anchor" },
+                        command,
+                    )
                 } else {
                     return None;
                 }
@@ -4258,10 +4332,9 @@ impl HarnessRun {
         if tool_name != "finish_task" {
             return outcome;
         }
-        let stale = outcome.text.contains("workspace edit(s) landed after the last verification")
-            && self.state.mutations_since_verification.unwrap_or(0) > 0;
-        let unchecked = outcome.text.contains("no verification command (test/build/typecheck) has run")
-            || outcome.text.contains("no correctness-class evidence");
+        let recheck = finish_recheck_reason(&outcome.text, self.state.mutations_since_verification.unwrap_or(0));
+        let stale = recheck == Some(FinishRecheck::Stale);
+        let unchecked = recheck == Some(FinishRecheck::Unchecked);
         // Stale finish: re-run the record the agent already made. Unchecked
         // finish (nothing ran, or nothing external passed): run the check the
         // goal itself declares, once per loop, as task-provided evidence.
@@ -4274,9 +4347,44 @@ impl HarnessRun {
             .clone()
             .filter(|record| record.command.chars().count() < 200 && !record.command.starts_with("CHECK "));
         let mut detected_source: Option<&'static str> = None;
-        let (record, goal_declared) = if stale && rerunnable.is_some() {
-            (rerunnable.unwrap(), false)
-        } else if (unchecked || stale) && !scope.goal_check_used {
+        let mut explicit_source: Option<String> = None;
+        let explicit = explicit_finish_check(raw_input);
+        let budget_left = scope.finish_checks_run < FINISH_CHECKS_MAX_PER_LOOP;
+        let (record, goal_declared) = if (unchecked || stale) && explicit.is_some() && budget_left {
+            // The finish names its own check: run it now instead of bouncing
+            // the finish and paying a VERIFY round for the same command.
+            let command = explicit.unwrap_or_default();
+            let declared = goal_declared_check_commands(&self.state.goal)
+                .iter()
+                .any(|declared| normalize_command_shape(declared) == normalize_command_shape(&command));
+            if !declared {
+                explicit_source = Some(format!("check named in finish_task ({}), run by the harness", truncate_text(&command, 120)));
+            }
+            scope.finish_checks_run += 1;
+            (
+                HarnessVerificationRecord {
+                    at_iteration: self.state.iteration,
+                    command,
+                    failed: false,
+                    output_tail: String::new(),
+                    ran_no_tests: None,
+                    evidence: None,
+                    id: None,
+                },
+                declared,
+            )
+        } else if stale && rerunnable.is_some() && budget_left {
+            // A re-run of a goal-declared command keeps its goal-declared
+            // standing (anchor, review waiver): the bench showed a finish
+            // whose harness-run check failed, then a fix, then a finish that
+            // bounced for the failed record and cost a manual VERIFY round.
+            let record = rerunnable.unwrap();
+            let declared = goal_declared_check_commands(&self.state.goal)
+                .iter()
+                .any(|declared| normalize_command_shape(declared) == normalize_command_shape(&record.command));
+            scope.finish_checks_run += 1;
+            (record, declared)
+        } else if (unchecked || stale) && budget_left {
             let declared = goal_declared_check_commands(&self.state.goal).into_iter().next();
             let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
             let Some(command) = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone())) else { return outcome };
@@ -4289,7 +4397,7 @@ impl HarnessRun {
                     r#type: HarnessEventType::HarnessOp,
                 });
             }
-            scope.goal_check_used = true;
+            scope.finish_checks_run += 1;
             (
                 HarnessVerificationRecord {
                     at_iteration: self.state.iteration,
@@ -4315,6 +4423,8 @@ impl HarnessRun {
                 "coverage": "reportedClaim"
             });
             input[GOAL_DECLARED_CHECK_MARKER] = serde_json::json!(true);
+        } else if let Some(source) = &explicit_source {
+            input["anchor"] = serde_json::json!({ "kind": "external", "source": source, "coverage": "reportedClaim" });
         }
         if let Some(anchor) = record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref()) {
             let kind = match anchor.kind {
@@ -4351,6 +4461,8 @@ impl HarnessRun {
             }),
             detail: if goal_declared {
                 format!("harness ran the goal-declared check for the finish: {} -> {verdict}", truncate_text(&record.command, 120))
+            } else if explicit_source.is_some() {
+                format!("harness ran the check named in finish_task: {} -> {verdict}", truncate_text(&record.command, 120))
             } else {
                 format!("harness re-ran the last check after workspace edits: {} -> {verdict}", truncate_text(&record.command, 120))
             },
@@ -4362,7 +4474,7 @@ impl HarnessRun {
             return crate::harness::harness_tools::HarnessOpOutcome {
                 text: format!(
                     "harness: not accepted yet — the harness ran the {} ({}) and it FAILED. Fix the failure, then finish_task.\n{}",
-                    if detected_source.is_some() { "project check the harness detected (the goal declares none)" } else if goal_declared { "goal-declared check" } else { "last check again after your edits" },
+                    if detected_source.is_some() { "project check the harness detected (the goal declares none)" } else if goal_declared { "goal-declared check" } else if explicit_source.is_some() { "check named in finish_task" } else { "last check again after your edits" },
                     truncate_text(&record.command, 120),
                     truncate_text_keeping_ends(&execution.tool_content, 1200)
                 ),
@@ -4382,6 +4494,12 @@ impl HarnessRun {
         let mut op_context = op_context.clone();
         if goal_declared {
             op_context.review_waived = self.review_waiver_reason(Some(&record.command));
+        } else if explicit_source.is_some() {
+            // A named check the harness just ran is the run's last
+            // verification; the project-suite waiver judges it as such
+            // (native runner, external anchor, small change). Dogfood #67
+            // paid a four-call reviewer loop for a passing `cargo test`.
+            op_context.review_waived = self.review_waiver_reason(None);
         }
         let reapplied = apply_harness_op(&mut self.state, op, &op_context);
         if reapplied.text.contains("Review waived:") {
@@ -4396,7 +4514,7 @@ impl HarnessRun {
         crate::harness::harness_tools::HarnessOpOutcome {
             text: format!(
                 "harness {} {} -> {verdict}. {}",
-                if goal_declared { "ran the goal-declared check:" } else { "re-ran the last check after your edits:" },
+                if goal_declared { "ran the goal-declared check:" } else if explicit_source.is_some() { "ran the check named in finish_task:" } else { "re-ran the last check after your edits:" },
                 truncate_text(&record.command, 120),
                 reapplied.text
             ),
@@ -5120,7 +5238,7 @@ impl HarnessRun {
             concluded_naturally: false,
             planned_and_yielded: false,
             plan_yield_requested: false,
-            goal_check_used: false,
+            finish_checks_run: 0,
             finish_bounce: None,
             cycles_run: 0,
             digest_actions: Vec::new(),

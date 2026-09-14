@@ -344,7 +344,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "finish_task",
-                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external) or anchor=\"none\" with an anchorNote saying why no external anchor exists.",
+                "description": "Finish the current task (or the task named by taskId). Use status completed with a summary of what was done, status blocked with a summary of why and what is needed, or status unreconciled when the work is complete and internally consistent but a pre-registered expectation does not match and you cannot reconcile it — list it under anomalies instead of explaining it away. Completing requires at least one passing correctness-class check (VERIFY with anchor.kind=external, or the check you name here, run by the harness) or anchor=\"none\" with an anchorNote saying why no external anchor exists.",
                 "parameters": {
                     "properties": {
                         "anchor": {
@@ -377,6 +377,10 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                         "blockedOn": {
                             "description": "With status blocked: set to \"operator\" when the task needs material or information only the operator can supply (original data, credentials, a decision) and no amount of retrying or replanning can obtain it. The task is not reopened; once nothing else is workable the run ends blocked-on-input with the work so far intact, and the operator's resume prompt is delivered as the answer. Say exactly what is needed in the summary.",
                             "enum": ["operator"],
+                            "type": "string"
+                        },
+                        "check": {
+                            "description": "Command the harness runs before judging this finish when nothing fresh has passed since your last edit (the goal's declared acceptance command, or the project's test runner). Name it here instead of spending a VERIFY round on it: a pass completes the task in this same turn, a failure comes back to you with the output.",
                             "type": "string"
                         },
                         "confidence": {

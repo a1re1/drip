@@ -1468,9 +1468,14 @@ fix-and-finish never needs a manual VERIFY round in between. The harness
 runs at most three finish-time checks per loop.
 
 A single-task run whose goal-declared check the harness ran after the last
-edit, and which passed, skips the reviewer loop when the whole change (tracked
-diff plus new files) is at most a hundred lines: the finish reads `Review waived:
-…` and a `review waived` event records the check and the line count. Any task
+edit, and which passed, skips the reviewer loop when the change outside test
+files (tracked diff plus new files) is at most a hundred lines, and the whole
+change including tests at most five hundred: the finish reads `Review waived:
+…` and a `review waived` event records the check and both line counts. Test
+lines do not count against the bound because the check the waiver rests on
+just ran them; on the recorded bench every reviewer loop fired on 110–161
+total lines of which 38–75 were code, confirmed 7 of 7 with no finding, and
+in 5 of 7 re-ran the check the harness had already passed. Any task
 still awaiting review, or any remaining author work, keeps the review gate;
 so does a goal without a backticked check, since then the harness never ran
 one. The agent's own VERIFY of a goal-declared check counts the same way

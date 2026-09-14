@@ -154,7 +154,7 @@ fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
     Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect())
 }
 
-fn test_like_path(path: &str) -> bool {
+pub(crate) fn test_like_path(path: &str) -> bool {
     const TREES: &[&str] = &[
         "test", "tests", "testing", "fixture", "fixtures", "eval", "evals", "example", "examples", "bench", "benches",
         "benchmark", "benchmarks", "vendor", "third_party", "node_modules", "dist", "build", "target", "spec", "specs",

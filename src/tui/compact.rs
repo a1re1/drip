@@ -52,6 +52,16 @@ pub struct ToolGroupCell {
 	source: TranscriptEntry,
 }
 
+impl ToolGroupCell {
+	/// RFC3339 timestamp of the first folded call — "" for fixture/legacy rows.
+	fn source_at(&self) -> &str {
+		match &self.source {
+			TranscriptEntry::Event(event) => event.at.as_str(),
+			_ => "",
+		}
+	}
+}
+
 /// Presentation-only state machine folding tool activity per cycle.
 ///
 /// Generic over storage so the TUI app can project into its own cell vector
@@ -235,15 +245,17 @@ fn event_tool_name(event: &TranscriptEventEntry) -> String {
 		.to_string()
 }
 
-/// Render a tool group as the single painted summary row: dim iteration
-/// prefix, white `── N Tools called: … ──` summary, optional failed count.
+/// Render a tool group as the single painted summary row: dim `[  3 14:22:41]`
+/// iteration + local-clock prefix (taken from the first folded call), white
+/// `── N Tools called: … ──` summary, optional failed count.
 /// Clipping happens on the plain text BEFORE painting (drop the failed
 /// suffix first, then hard-clip with an ellipsis), so ANSI escapes stay
 /// balanced and the row always occupies exactly one line.
 pub fn render_tool_group(group: &ToolGroupCell, width: usize) -> Vec<String> {
 	let label = if group.count == 1 { "Tool called" } else { "Tools called" };
 	let summary = format!("\u{2500}\u{2500} {} {}: {} \u{2500}\u{2500}", group.count, label, group.tools.join(", "));
-	let mut plain = format!("[{:>3}] {}", group.iteration, summary);
+	let prefix = crate::tui::timeline::entry_prefix(group.iteration, group.source_at());
+	let mut plain = format!("{prefix}{summary}");
 
 	if group.failed > 0 {
 		plain.push_str(&format!(" ({} failed)", group.failed));
@@ -251,7 +263,7 @@ pub fn render_tool_group(group: &ToolGroupCell, width: usize) -> Vec<String> {
 
 	if width > 0 && string_width(&plain) > width {
 		if group.failed > 0 {
-			plain = format!("[{:>3}] {}", group.iteration, summary);
+			plain = format!("{prefix}{summary}");
 		}
 
 		if string_width(&plain) > width {
@@ -310,6 +322,8 @@ pub fn select_compact_tail_start(cells: &[CompactCell], terminal_rows: usize) ->
 
 /// Numbered cycle-transition preview row painted from an IterationStart
 /// detail ("cycle 2/5 — task-3: Title: plan text [budget 1234/60000 tokens]").
+/// Carries the same `[  2 14:23:41]` iteration + local-clock block as every
+/// other timeline row.
 /// Whitespace-flattened, width-aware: the budget indicator is retained but is
 /// the first thing dropped when the terminal is too narrow; the body is then
 /// hard-clipped so the row always occupies exactly one line. Clipping happens
@@ -322,11 +336,13 @@ pub fn render_cycle_transition(event: &TranscriptEventEntry, width: usize) -> Ve
 		None => (flat.clone(), None),
 	};
 
+	let prefix = crate::tui::timeline::entry_prefix(event.iteration, &event.at);
+
 	// Keep the budget indicator only while the whole row fits; otherwise the
 	// planning text is the part worth reading.
 	let mut plain = match &budget {
-		Some(b) if width == 0 || string_width(&format!("{body} {b}")) <= width => format!("{body} {b}"),
-		_ => body.clone(),
+		Some(b) if width == 0 || string_width(&format!("{prefix}{body} {b}")) <= width => format!("{prefix}{body} {b}"),
+		_ => format!("{prefix}{body}"),
 	};
 
 	if width > 0 && string_width(&plain) > width {
@@ -340,7 +356,13 @@ pub fn render_cycle_transition(event: &TranscriptEventEntry, width: usize) -> Ve
 		plain = clipped;
 	}
 
-	vec![c::white(&plain)]
+	if prefix.is_empty() {
+		return vec![c::white(&plain)];
+	}
+
+	let cut = plain.find(']').map(|i| i + 1).unwrap_or(0);
+	let (head, rest) = plain.split_at(cut);
+	vec![format!("{}{}", c::dim(head), c::white(rest))]
 }
 #[cfg(test)]
 mod tests {
@@ -912,6 +934,73 @@ mod tests {
 
 		for width in [20usize, 40, 80, 200] {
 			let rows = render_tool_group(group, width);
+			assert_eq!(rows.len(), 1, "width {width}");
+			assert!(string_width(&rows[0]) <= width, "width {width}: {:?}", strip_ansi(&rows[0]));
+		}
+	}
+
+	#[test]
+	fn tool_group_prefix_carries_the_first_calls_clock() {
+		let stamp = "2026-01-01T12:34:56.000Z";
+		let clock = crate::tui::timeline::clock_time(stamp).unwrap();
+		let source = TranscriptEntry::Event(TranscriptEventEntry {
+			at: stamp.to_string(),
+			data: None,
+			detail: "READ {\"path\":\"x\"}".to_string(),
+			goal_id: "g".to_string(),
+			iteration: 3,
+			kind: HarnessEventType::ToolCall,
+		});
+		let mut p = CompactProjection::new();
+		p.append(&source);
+		p.append(&source);
+		p.finalize();
+
+		let group = last_group(&p.cells);
+		assert_eq!(group.iteration, 3);
+		assert_eq!(
+			strip_ansi(&render_tool_group(group, 200)[0]),
+			format!("[  3 {clock}] ── 2 Tools called: READ ──")
+		);
+
+		// The clock never costs a row, at any width.
+		for width in [10usize, 20, 40, 200] {
+			let rows = render_tool_group(group, width);
+			assert_eq!(rows.len(), 1, "width {width}");
+			assert!(string_width(&rows[0]) <= width, "width {width}");
+		}
+
+		// Timestamp-less groups (fixtures, legacy rows) keep the plain block.
+		let mut bare = CompactProjection::new();
+		bare.append(&tool_call(1, "READ", "c1"));
+		bare.append(&tool_call(1, "READ", "c2"));
+		bare.finalize();
+		assert_eq!(
+			strip_ansi(&render_tool_group(last_group(&bare.cells), 200)[0]),
+			"[  1] ── 2 Tools called: READ ──"
+		);
+	}
+
+	#[test]
+	fn cycle_transition_row_carries_the_iteration_clock() {
+		let stamp = "2026-01-01T12:34:56.000Z";
+		let clock = crate::tui::timeline::clock_time(stamp).unwrap();
+		let event = TranscriptEventEntry {
+			at: stamp.to_string(),
+			data: None,
+			detail: "cycle 2/5 — task-2: wire the composer [budget 100/60000 tokens]".to_string(),
+			goal_id: "g".to_string(),
+			iteration: 2,
+			kind: HarnessEventType::IterationStart,
+		};
+
+		let row = strip_ansi(&render_cycle_transition(&event, 200)[0]);
+		assert!(row.starts_with(&format!("[  2 {clock}] cycle 2/5 — task-2: wire the composer")), "{row:?}");
+		assert!(row.ends_with("[budget 100/60000 tokens]"), "{row:?}");
+		assert!(!row.starts_with("[  2] "), "the clock must ride in the block: {row:?}");
+
+		for width in [10usize, 24, 60, 200] {
+			let rows = render_cycle_transition(&event, width);
 			assert_eq!(rows.len(), 1, "width {width}");
 			assert!(string_width(&rows[0]) <= width, "width {width}: {:?}", strip_ansi(&rows[0]));
 		}

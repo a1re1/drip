@@ -3,9 +3,7 @@
 //! The Ink components become pure functions that return already-painted ANSI
 //! rows: one String per terminal row, with no trailing newline.
 
-use crate::cli::transcript::{
-    format_model_route_lines, TranscriptEntry,
-};
+use crate::cli::transcript::{format_model_route_lines, TranscriptEntry};
 use crate::core::types::{HarnessEventType, HarnessRunReason};
 use crate::tui::markdown_ansi::render_markdown_ansi;
 use crate::tui::theme::{event_label, event_paint};
@@ -14,18 +12,50 @@ use crate::watch::ansi::{c, string_width, wrap_ansi};
 /// Collapse all whitespace runs to a single space, trim, and hard-cut to
 /// `max_chars` characters (appending "...") when longer.
 pub fn truncate_detail(detail: &str, max_chars: usize) -> String {
-    let flattened = detail.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string();
+    let flattened = detail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
 
     if flattened.chars().count() <= max_chars {
         return flattened;
     }
 
-    let cut: String = flattened.chars().take(max_chars.saturating_sub(3)).collect();
+    let cut: String = flattened
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect();
     format!("{}...", cut)
 }
 
-fn iteration_prefix(iteration: i64) -> String {
-    format!("[{:>3}] ", iteration)
+/// Wall-clock `HH:MM:SS` in the machine's local timezone for an RFC3339
+/// `at` value. `None` for empty or unparseable timestamps (legacy rows, test
+/// fixtures), so a row prefix can fall back to the plain `[  2]` block.
+pub fn clock_time(at: &str) -> Option<String> {
+    if at.is_empty() {
+        return None;
+    }
+
+    let parsed = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+
+    Some(
+        parsed
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
+    )
+}
+
+/// Timeline row prefix: `[  2 14:23:41] ` when the entry carries a timestamp,
+/// `[  2] ` otherwise. The clock is what lets an operator eyeball when each
+/// op / task / warn settled as a run advances.
+pub fn entry_prefix(iteration: i64, at: &str) -> String {
+    match clock_time(at) {
+        Some(clock) => format!("[{:>3} {}] ", iteration, clock),
+        None => format!("[{:>3}] ", iteration),
+    }
 }
 
 fn reason_string(reason: &HarnessRunReason) -> String {
@@ -42,7 +72,13 @@ pub fn render_timeline_cell(entry: &TranscriptEntry, width: usize) -> Vec<String
     // terminal itself.
     render_timeline_cell_rows(entry, width)
         .into_iter()
-        .flat_map(|row| if width > 0 && string_width(&row) > width { wrap_ansi(&row, width) } else { vec![row] })
+        .flat_map(|row| {
+            if width > 0 && string_width(&row) > width {
+                wrap_ansi(&row, width)
+            } else {
+                vec![row]
+            }
+        })
         .collect()
 }
 
@@ -74,8 +110,8 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
                     rows.push(event_paint(event.kind)("── run summary ──"));
                 } else {
                     rows.push(event_paint(event.kind)(&format!(
-                        "[{:>3}] {}",
-                        event.iteration,
+                        "{}{}",
+                        entry_prefix(event.iteration, &event.at),
                         event_label(event.kind)
                     )));
                 }
@@ -95,7 +131,7 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
                     c::dim
                 };
 
-                let mut line = c::dim(&iteration_prefix(event.iteration));
+                let mut line = c::dim(&entry_prefix(event.iteration, &event.at));
                 line.push_str(&event_paint(event.kind)(&label));
                 line.push_str(&detail_paint(&detail));
 
@@ -196,7 +232,9 @@ pub fn select_repaint_tail_start(entries: &[TranscriptEntry], terminal_rows: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::transcript::{TranscriptEventEntry, TranscriptNoteEntry, TranscriptRunEndEntry};
+    use crate::cli::transcript::{
+        TranscriptEventEntry, TranscriptNoteEntry, TranscriptRunEndEntry,
+    };
     use crate::watch::ansi::strip_ansi;
 
     fn note(text: &str) -> TranscriptEntry {
@@ -223,16 +261,122 @@ mod tests {
         let entry = TranscriptEntry::Event(TranscriptEventEntry {
             at: "2026-01-01T00:00:00.000Z".to_string(),
             data: None,
-            detail: "plan_tasks: Added 2 task(s): task-1: read greeting; task-2: slow step.".to_string(),
+            detail: "plan_tasks: Added 2 task(s): task-1: read greeting; task-2: slow step."
+                .to_string(),
             goal_id: "g".to_string(),
             iteration: 1,
             kind: HarnessEventType::HarnessOp,
         });
-        let rows: Vec<String> = render_timeline_cell(&entry, 60).iter().map(|row| strip_ansi(row)).collect();
+        let rows: Vec<String> = render_timeline_cell(&entry, 60)
+            .iter()
+            .map(|row| strip_ansi(row))
+            .collect();
+        // The clock rides in the iteration block and eats into the wrap budget.
+        let clock = clock_time("2026-01-01T00:00:00.000Z").unwrap();
         assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(rows[0].ends_with("task-1: read"), "{rows:?}");
-        assert_eq!(rows[1], "greeting; task-2: slow step.");
+        assert!(
+            rows[0].starts_with(&format!("[  1 {clock}] op")),
+            "{rows:?}"
+        );
+        assert!(rows[0].ends_with("task-1:"), "{rows:?}");
+        assert_eq!(rows[1], "read greeting; task-2: slow step.");
         assert!(rows.iter().all(|row| row.chars().count() <= 60));
+    }
+
+    #[test]
+    fn clock_time_shapes_and_rejects_non_timestamps() {
+        let shaped = clock_time("2026-01-01T12:00:00.000Z").unwrap();
+        assert_eq!(shaped.len(), 8, "{shaped:?}");
+        assert_eq!(
+            shaped.chars().filter(|ch| *ch == ':').count(),
+            2,
+            "{shaped:?}"
+        );
+        assert!(
+            shaped.chars().all(|ch| ch.is_ascii_digit() || ch == ':'),
+            "{shaped:?}"
+        );
+
+        assert_eq!(clock_time(""), None);
+        assert_eq!(clock_time("not a date"), None);
+
+        // Timezone-independent invariant: two instants an hour apart read one
+        // hour apart on whatever local clock the machine runs.
+        let minutes = |value: &str| -> i64 {
+            let mut parts = value.split(':');
+            let hh: i64 = parts.next().unwrap().parse().unwrap();
+            let mm: i64 = parts.next().unwrap().parse().unwrap();
+            hh * 60 + mm
+        };
+        let a = minutes(&clock_time("2026-01-01T12:00:00.000Z").unwrap());
+        let b = minutes(&clock_time("2026-01-01T13:00:00.000Z").unwrap());
+        assert_eq!((b - a).rem_euclid(24 * 60), 60);
+    }
+
+    #[test]
+    fn entry_prefix_carries_the_clock_and_falls_back_when_absent() {
+        let stamp = "2026-01-01T12:34:56.000Z";
+        let clock = clock_time(stamp).unwrap();
+        assert_eq!(entry_prefix(2, stamp), format!("[  2 {clock}] "));
+        assert_eq!(entry_prefix(2, ""), "[  2] ");
+        // Width of the block is stable regardless of the hour it names.
+        assert_eq!(string_width(&entry_prefix(12, stamp)), 15);
+    }
+
+    #[test]
+    fn event_rows_show_a_wall_clock_in_the_iteration_block() {
+        let stamp = "2026-01-01T12:34:56.000Z";
+        let clock = clock_time(stamp).unwrap();
+        let event = |kind: HarnessEventType, detail: &str| {
+            TranscriptEntry::Event(TranscriptEventEntry {
+                at: stamp.to_string(),
+                data: None,
+                detail: detail.to_string(),
+                goal_id: "g".to_string(),
+                iteration: 2,
+                kind,
+            })
+        };
+
+        // op / task / warn / cycle rows all carry the same block.
+        for (kind, label, detail) in [
+            (
+                HarnessEventType::HarnessOp,
+                "op",
+                "finish_task: task-1 marked completed",
+            ),
+            (
+                HarnessEventType::TaskFinished,
+                "task",
+                "task-1 done: added the timestamp",
+            ),
+            (
+                HarnessEventType::RunWarning,
+                "warn",
+                "verification anchor downgraded",
+            ),
+            (
+                HarnessEventType::IterationStart,
+                "cycle",
+                "cycle 2/5 — task-1: keep going",
+            ),
+            (HarnessEventType::ModelText, "text", "All done."),
+        ] {
+            let rows: Vec<String> = render_timeline_cell(&event(kind, detail), 120)
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect();
+            let first = rows[0].clone();
+            assert!(
+                first.starts_with(&format!("[  2 {clock}] {label}")),
+                "{kind:?}: {first:?}"
+            );
+            let word = detail.split_whitespace().next().unwrap();
+            assert!(
+                rows.iter().any(|row| row.contains(word)),
+                "{kind:?}: {rows:?}"
+            );
+        }
     }
 
     #[test]

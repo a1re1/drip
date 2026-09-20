@@ -787,8 +787,13 @@ In the interactive TUI (`drip --tui`), back-to-back tool activity within a
 cycle is folded into a single summary row such as
 
 ```
-[  3] ── 5 Tools called: READ, PATCH, BASH ──
+[  3 14:22:41] ── 5 Tools called: READ, PATCH, BASH ──
 ```
+
+Every numbered row's block carries the local wall-clock time (`HH:MM:SS`)
+alongside the cycle number, so the scrollback shows when each op, task,
+warn or tool summary settled as the run advances. The clock of a folded
+tool row is the first call in that group.
 
 The count updates in place while the tools run, and the row is finalized
 once the cycle ends. Each new cycle begins with a short transition line

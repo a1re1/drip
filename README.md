@@ -807,6 +807,23 @@ session JSONL and remains visible in `dripw`, the headless output and the
 logs. Replays, session switches and terminal resizes use the same compact
 projection, so raw tool rows are not re-revealed.
 
+## Queueing and steering mid-run (TUI)
+
+While a run is in flight the TUI composer stays editable. `Enter` does not
+start a second run against the same session: it **queues** the composer text,
+shown as a `N queued — shift+enter steers the running goal with one` hint row
+under the box. Queued messages are drained into the next goal once the running
+run finishes.
+
+`Shift+Enter` **steers** the run that is going right now: it writes the next
+queued message to the session inbox — the same handoff `drip --send` uses —
+which the harness consumes as operator steering. The message stays queued if
+that write fails, so a steer is never lost silently.
+
+Shift+Enter is only distinguishable from Enter in terminals that report
+modified keys natively (`ESC[13;2u` or `ESC` `CR`); elsewhere it behaves like
+plain Enter and the message is queued instead.
+
 ## Watch TUI (`dripw`)
 
 `dripw` is a read-only, lazygit-style watcher for drip sessions — run it in a

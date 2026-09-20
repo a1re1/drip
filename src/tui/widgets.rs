@@ -54,8 +54,19 @@ pub struct ComposerProps<'a> {
     pub selected_skill_index: usize,
     pub selected_suggestion_index: usize,
     pub skill_suggestions: &'a [(String, String)],
+    pub queued_count: usize,
     pub slash_suggestions: &'a [&'a SlashCommandSpec],
     pub text: &'a str,
+}
+
+/// Clamp a hint row to the terminal width and pad it, so every composer row
+/// is exactly `width` wide like the painted box above it.
+fn composer_hint_row(text: &str, width: usize) -> String {
+    let mut row: String = text.chars().take(width).collect();
+    while row.chars().count() < width {
+        row.push(' ');
+    }
+    row
 }
 
 /// Port of the Ink `Composer` component.
@@ -173,6 +184,26 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
         }
     }
 
+    // The queue/steer affordance rides under the box: what enter does, and
+    // how to push a queued message into the run that is going right now.
+    let dim = paint(DIM_COLOR);
+    // Kept short enough to survive one line at a normal terminal width.
+    let hint = if props.disabled {
+        if props.queued_count > 0 {
+            "enter queues · shift+enter steers with next queued message".to_string()
+        } else {
+            "enter queues · shift+enter steers the run".to_string()
+        }
+    } else if props.queued_count > 0 {
+        format!(
+            "{} queued — shift+enter steers the running goal with one",
+            props.queued_count
+        )
+    } else {
+        "enter sends · shift+enter steers with a queued message".to_string()
+    };
+    rows.push(dim(&composer_hint_row(&hint, width)));
+
     rows
 }
 
@@ -287,6 +318,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
+            queued_count: 0,
             slash_suggestions: &[],
             text: "abc",
         };
@@ -304,13 +336,15 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
+            queued_count: 0,
             slash_suggestions: &[],
             text: "line one\nline two",
         };
         let rows = plain(&render_composer(&props, 20));
-        // ╭, "❯ line one", "  line two", ╰ — continuation rows sit under the
-        // text; the cursor on the newline is an inverse cell after "one".
-        assert_eq!(rows.len(), 4, "{rows:?}");
+        // ╭, "❯ line one", "  line two", ╰, plus the enter/shift+enter hint
+        // row — continuation rows sit under the text; the cursor on the
+        // newline is an inverse cell after "one".
+        assert_eq!(rows.len(), 5, "{rows:?}");
         assert_eq!(rows[1].trim_end_matches(" │").trim_end(), "│ ❯ line one");
         assert_eq!(rows[2].trim_end_matches(" │").trim_end(), "│   line two");
         assert!(rows.iter().all(|row| row.chars().count() == 20), "{rows:?}");
@@ -327,6 +361,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
+            queued_count: 0,
             slash_suggestions: &[],
             text: "@hel",
         };
@@ -349,6 +384,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &[],
             text: "/na",
         };
@@ -384,6 +420,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &[],
             text: "/navi",
         };
@@ -402,6 +439,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
+            queued_count: 0,
             slash_suggestions: &[],
             text: "",
         };
@@ -410,6 +448,55 @@ mod tests {
             .iter()
             .any(|row| row.contains("running — press esc to stop the run")));
         assert!(!rows.iter().any(|row| row.contains("\u{1b}[7m")));
+    }
+
+    #[test]
+    fn composer_hints_queue_and_steer_while_a_run_owns_the_composer() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued_count: 0,
+            slash_suggestions: &[],
+            text: "",
+        };
+        let rows = plain(&render_composer(&props, 60));
+        assert!(
+            rows.iter().any(|row| row.contains("enter queues")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("shift+enter steers the run")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn composer_counts_queued_prompts_once_idle() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued_count: 2,
+            slash_suggestions: &[],
+            text: "",
+        };
+        let rows = plain(&render_composer(&props, 60));
+        assert!(rows.iter().any(|row| row.contains("2 queued")), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("shift+enter steers the running goal")),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -463,6 +550,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &[],
             text: "/an",
         };
@@ -487,6 +575,7 @@ mod tests {
             selected_skill_index: 2,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &[],
             text: "/na",
         };
@@ -511,6 +600,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &builtins,
             text: "/",
         };
@@ -538,6 +628,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
+            queued_count: 0,
             slash_suggestions: &[],
             text: "/navis",
         };

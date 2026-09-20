@@ -139,6 +139,7 @@ fn help_text() -> String {
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
+            "  while a goal runs — enter queues the message for the next run; shift+enter steers the running goal with the next queued message",
             "  esc — clear the composer, or stop the running goal",
             "  ctrl+c — exit",
         ]
@@ -154,6 +155,25 @@ fn clip_ansi(row: &str, width: usize) -> String {
         return row.to_string();
     }
     wrap_ansi(row, width).into_iter().next().unwrap_or_default()
+}
+
+use std::collections::VecDeque;
+
+/// Append one operator message to a session's inbox — the same handoff
+/// `drip --send` uses. The running goal consumes it at its next cycle boundary
+/// and treats it as operator steering that outranks the original goal.
+fn append_operator_message(inbox_path: &Path, text: &str) -> std::io::Result<()> {
+    let line = format!("{}\n", serde_json::json!({ "at": now_iso(), "text": text }));
+    // A live TUI session may not have materialized its directory yet; the
+    // inbox is worthless if a steer silently disappears.
+    if let Some(parent) = inbox_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(inbox_path)?;
+    std::io::Write::write_all(&mut file, line.as_bytes())
 }
 
 fn now_iso() -> String {
@@ -224,6 +244,7 @@ enum Key {
     Paste(String),
     Return,
     Right,
+    ShiftReturn,
     Tab,
     Text(String),
     Up,
@@ -283,6 +304,13 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         return Vec::new();
     }
 
+    // Shift+enter has no portable byte of its own: terminals send either the
+    // kitty/xterm modifyOtherKeys form (ESC 13;2u) or the classic ESC CR.
+    // Checked before the generic CSI branch, which would drop both.
+    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
+        return vec![Key::ShiftReturn];
+    }
+
     if chunk[0] == 0x1b {
         if chunk.len() == 1 {
             return vec![Key::Escape];
@@ -324,6 +352,14 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
             byte if byte < 0x20 => Key::Ignored,
             _ => Key::Text(String::from_utf8_lossy(chunk).into_owned()),
         }];
+    }
+
+    // Shift+enter has no portable byte of its own: terminals either send the
+    // kitty/xterm modifyOtherKeys form (ESC 13;2u), the classic ESC CR, or a
+    // bare LF for ctrl+enter. Only the first two are shift+enter (a ctrl+enter
+    // LF is not; it decodes as Return so a stray LF cannot silently steer).
+    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
+        return vec![Key::ShiftReturn];
     }
 
     let text = String::from_utf8_lossy(chunk).into_owned();
@@ -459,6 +495,10 @@ struct TuiApp {
     paths: SessionPaths,
     pending_cells: Vec<TranscriptEntry>,
     prompt_history: PromptHistory,
+    /// Prompts typed while a run was in flight. `enter` stacks them for the
+    /// NEXT run; `shift+enter` pops the head and steers the running goal with
+    /// it immediately (the inbox handoff), so a queue never becomes a dead end.
+    queued_prompts: VecDeque<String>,
     pending_detail: Option<String>,
     quit: bool,
     resize_at: Option<Instant>,
@@ -605,6 +645,7 @@ impl TuiApp {
             pending_cells: Vec::new(),
             pending_detail: None,
             prompt_history: PromptHistory::new(64),
+            queued_prompts: VecDeque::new(),
             quit: false,
             resize_at: None,
             rows,
@@ -767,6 +808,7 @@ impl TuiApp {
                     skill_suggestions: &self.skill_suggestions,
                     slash_suggestions: &slash,
                     text: &self.text,
+                    queued_count: self.queued_prompts.len(),
                 },
                 self.cols,
             ));
@@ -1092,6 +1134,13 @@ impl TuiApp {
 
         self.apply_edit(String::new(), 0);
 
+        // A run in flight can still be typed to, but enter must not start a
+        // second run against the same session: it queues the prompt instead.
+        if self.running {
+            self.queue_prompt(submitted);
+            return;
+        }
+
         if let Some(command) = parse_slash_command(&submitted) {
             self.dispatch_command(&command.name, &command.args);
             return;
@@ -1127,6 +1176,67 @@ impl TuiApp {
             submitted
         };
         self.run_goal(goal);
+    }
+
+    /// Enter while a run is in flight: hold the prompt for the NEXT run. It is
+    /// deliberately not written to the session inbox — that handoff is what
+    /// steering is — so a queued message only reaches the agent once the
+    /// running goal has ended (or the operator promotes it with shift+enter).
+    fn queue_prompt(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.prompt_history.record(&text);
+        self.queued_prompts.push_back(text.clone());
+        self.push_info(format!(
+            "queued for the next run: {text} (shift+enter steers the running goal with it now)"
+        ));
+        self.repaint();
+    }
+
+    /// Shift+enter while a run is in flight: promote the next queued prompt
+    /// (or, with an empty queue, whatever is in the composer) into the live
+    /// session's inbox. The harness picks it up at its next cycle boundary and
+    /// treats it as steering that outranks the original goal, so a queue is
+    /// never a dead end while the run is still going.
+    fn steer_running_goal(&mut self) {
+        let next = match self.queued_prompts.pop_front() {
+            Some(queued) if !queued.trim().is_empty() => Some(queued),
+            Some(_) => None,
+            None => {
+                let typed = self.text.trim().to_string();
+                if typed.is_empty() {
+                    None
+                } else {
+                    self.apply_edit(String::new(), 0);
+                    self.prompt_history.record(&typed);
+                    Some(typed)
+                }
+            }
+        };
+
+        let Some(text) = next else {
+            self.push_info(
+                "nothing to steer with — type a message, or queue one with enter first.",
+            );
+            self.repaint();
+            return;
+        };
+
+        match append_operator_message(Path::new(&self.paths.inbox_path), &text) {
+            Ok(()) => self.push_info(format!(
+                "steering the running goal: {text} (it lands at the next cycle boundary)"
+            )),
+            Err(error) => {
+                // Losing the message silently would be the worst outcome: put
+                // it back at the head of the queue and say so loudly.
+                self.push_error(format!(
+                    "could not steer the running goal ({error}) — kept in the queue"
+                ));
+                self.queued_prompts.push_front(text);
+            }
+        }
+        self.repaint();
     }
 
     // ----- keys -----------------------------------------------------------
@@ -1209,7 +1319,44 @@ impl TuiApp {
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
-                _ => {}
+                // Enter queues for the next run; shift+enter promotes the head
+                // of that queue into the LIVE run as steering.
+                Key::Return => self.submit(),
+                Key::ShiftReturn => self.steer_running_goal(),
+                // The composer stays editable while a run is in flight, so a
+                // message can be composed (and corrected) before queueing.
+                Key::Backspace | Key::Delete => {
+                    let chars: Vec<char> = self.text.chars().collect();
+                    let cursor = self.cursor.min(chars.len());
+                    if cursor > 0 {
+                        let mut next: String = chars[..cursor - 1].iter().collect();
+                        next.extend(chars[cursor..].iter());
+                        self.apply_edit(next, cursor - 1);
+                    }
+                }
+                Key::Left => {
+                    let text = self.text.clone();
+                    let cursor = self.cursor.saturating_sub(1);
+                    self.apply_edit(text, cursor);
+                }
+                Key::Right => {
+                    let text = self.text.clone();
+                    let cursor = self.cursor + 1;
+                    self.apply_edit(text, cursor);
+                }
+                Key::Ctrl('a') => {
+                    let text = self.text.clone();
+                    self.apply_edit(text, 0);
+                }
+                Key::Ctrl('e') => {
+                    let text = self.text.clone();
+                    let len = text.chars().count();
+                    self.apply_edit(text, len);
+                }
+                Key::Ctrl('u') => self.apply_edit(String::new(), 0),
+                Key::Paste(raw) => self.on_paste(&raw),
+                Key::Text(text) => self.insert_text(&text),
+                Key::Up | Key::Down | Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
             }
             return;
         }
@@ -1226,6 +1373,13 @@ impl TuiApp {
 
         match key {
             Key::Escape => self.apply_edit(String::new(), 0),
+            // Idle shift+enter: drain the queue into a run, else it just sends
+            // what is typed (the idle composer has no running goal to steer).
+            Key::ShiftReturn => match self.queued_prompts.pop_front() {
+                Some(next) if !next.trim().is_empty() => self.run_goal(next),
+                Some(_) => {}
+                None => self.submit(),
+            },
             Key::Return => {
                 // Enter accepts an open menu selection unless the text already matches it exactly.
                 if menu_length > 0 {
@@ -2432,6 +2586,14 @@ impl TuiApp {
             Err(SessionGoalError::Run(message)) => self.push_error(message),
         }
         self.finish_run();
+        // A prompt queued while the run was in flight is what the operator
+        // wanted next: the run ending is the moment the queue drains into a
+        // fresh goal. Steering (shift+enter) is the other way out of it.
+        if let Some(next) = self.queued_prompts.pop_front() {
+            if !next.trim().is_empty() {
+                self.run_goal(next);
+            }
+        }
     }
 
     // ----- terminal pane title --------------------------------------------
@@ -3145,6 +3307,7 @@ mod tests {
                 Key::Paste(_) => "paste",
                 Key::Return => "return",
                 Key::Right => "right",
+                Key::ShiftReturn => "shift-return",
                 Key::Tab => "tab",
                 Key::Text(_) => "text",
                 Key::Up => "up",
@@ -3167,6 +3330,17 @@ mod tests {
             _ => panic!("ctrl+v expected"),
         }
         assert_eq!(kinds(&decode_input("é".as_bytes(), &mut paste)), vec!["text"]);
+        // shift+enter arrives as a modifyOtherKeys sequence or the classic
+        // ESC CR; a multi-byte chunk is never reinterpreted as shift+enter.
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[13;2u", &mut paste)),
+            vec!["shift-return"]
+        );
+        assert_eq!(
+            kinds(&decode_input(b"\x1b\r", &mut paste)),
+            vec!["shift-return"]
+        );
+        assert_eq!(kinds(&decode_input(b"a\r", &mut paste)), vec!["paste"]);
     }
 
     #[test]
@@ -4388,6 +4562,106 @@ mod skill_activation_tests {
             "no skill activation may be recorded"
         );
     }
+
+    #[test]
+    fn enter_while_running_queues_instead_of_starting_a_second_run() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "next goal".to_string();
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.queued_prompts.len(), 1);
+        assert_eq!(fixture.app.queued_prompts[0], "next goal");
+        assert!(
+            fixture.app.text.is_empty(),
+            "the composer clears once queued"
+        );
+        assert!(fixture.app.abort.is_none(), "queuing must not start a run");
+        assert!(
+            !Path::new(&fixture.app.paths.inbox_path).exists(),
+            "a queued prompt must not steer the live run"
+        );
+    }
+
+    #[test]
+    fn shift_enter_while_running_steers_with_the_next_queued_message() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "first".to_string();
+        fixture.app.on_key(Key::Return);
+        fixture.app.text = "second".to_string();
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.queued_prompts.len(), 2);
+
+        fixture.app.on_key(Key::ShiftReturn);
+
+        assert_eq!(
+            fixture.app.queued_prompts.len(),
+            1,
+            "shift+enter consumes exactly one queued message"
+        );
+        assert_eq!(fixture.app.queued_prompts[0], "second");
+        let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
+            .expect("steering writes the session inbox");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(
+            parsed["text"], "first",
+            "the head of the queue is the message that steers"
+        );
+        assert!(parsed["at"].as_str().is_some(), "{parsed}");
+    }
+
+    #[test]
+    fn shift_enter_while_running_with_an_empty_queue_steers_the_typed_message() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "steer me now".to_string();
+        fixture.app.on_key(Key::ShiftReturn);
+        let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
+            .expect("steering writes the session inbox");
+        let parsed: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed["text"], "steer me now");
+        assert!(fixture.app.text.is_empty());
+        assert!(fixture.app.queued_prompts.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_with_nothing_to_steer_reports_it_and_writes_no_inbox() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.on_key(Key::ShiftReturn);
+        assert!(!Path::new(&fixture.app.paths.inbox_path).exists());
+        assert!(
+            fixture
+                .app
+                .cells
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("nothing to steer"))),
+            "an empty shift+enter must say so"
+        );
+    }
+
+    #[test]
+    fn run_end_drains_the_queue_into_the_next_goal() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "queued goal".to_string();
+        fixture.app.on_key(Key::Return);
+        fixture
+            .app
+            .on_run_done(Err(SessionGoalError::Run("boom".to_string())));
+        assert!(
+            fixture.app.queued_prompts.is_empty(),
+            "the run ending drains the queue"
+        );
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == "queued goal")
+            ),
+            "the queued prompt becomes the next goal"
+        );
+    }
 }
 
 /// Focused tests for prompt-recall wiring: Up/Down order, exact draft
@@ -4399,8 +4673,8 @@ mod prompt_history_wiring_tests {
     use super::*;
     use std::sync::mpsc;
 
-    struct HistoryFixture {
-        app: TuiApp,
+    pub(super) struct HistoryFixture {
+        pub(super) app: TuiApp,
         _cwd: tempfile::TempDir,
         _home: tempfile::TempDir,
         _project: tempfile::TempDir,
@@ -4408,7 +4682,7 @@ mod prompt_history_wiring_tests {
         _mention_rx: mpsc::Receiver<(u64, String)>,
     }
 
-    fn make_history_app(skills: &[&str]) -> HistoryFixture {
+    pub(super) fn make_history_app(skills: &[&str]) -> HistoryFixture {
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let home = tempfile::tempdir().expect("home tempdir");
         let project = tempfile::tempdir().expect("project tempdir");

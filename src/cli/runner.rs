@@ -24,6 +24,10 @@ use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 /// Arguments for a goal run: working directory, goal text, and the prior
 /// goal context handed to the model.
 pub struct CliGoalRunArgs {
+    /// Resolved skill-classifier route (None: classification disabled).
+    pub classifier: Option<crate::harness::classifier::ClassifierRoute>,
+    /// Discovered skills the classifier may compose per loop.
+    pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
     pub cwd: String,
     pub goal: String,
     pub goal_context: Option<String>,
@@ -359,6 +363,8 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
     let inbox_path = args.inbox_path.clone();
     let facts_cwd = cwd_path.clone();
     let options = SolidStateHarnessOptions {
+        classifier: args.classifier.clone(),
+        skill_pool: args.skill_pool.clone(),
         collect_operator_messages: inbox_path.as_ref().map(|path| {
             let path = path.clone();
             Box::new(move |consumed_count: i64| -> Vec<OperatorInboxEntry> {

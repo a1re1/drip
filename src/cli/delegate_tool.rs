@@ -206,6 +206,10 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     // the parent's tool call — children never get ask_user.
                     ask_user_enabled: false,
                     ask_user_timeout_seconds: None,
+                    // Children never classify: the parent already composed its
+                    // own skills, and a child's prompts are its own.
+                    classifier: None,
+                    skill_pool: Vec::new(),
                     cwd: wiring.cwd.clone(),
                     goal: goal.clone(),
                     goal_context: Some(format!(

@@ -25,6 +25,7 @@ Keys:
   j / k         Move selection down / up
   ↑ / ↓         Move selection up / down
   [ / ]         Scroll transcript back / forward  (also h / l, ← / →)
+  wheel         Scroll the transcript, or the shell log, under the pointer
   q / Ctrl+C    Quit
 
 dripw shows sessions started in the current directory or any directory beneath it.

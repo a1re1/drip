@@ -18,13 +18,15 @@ use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRe
 use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
-use crate::watch::render::{diff_lines, render_frame, SessionsMode, WatchViewModel};
+use crate::watch::mouse::parse_sgr_mouse;
+use crate::watch::render::{diff_lines, render_frame, transcript_region, SessionsMode, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
 const TAIL_MS: u64 = 300; // transcript tail poll
 const REPLAY_LIMIT: usize = 100; // entries replayed when focusing a session
 const PAGE: i64 = 8; // lines per [ ] / h / l scroll step
+const WHEEL_LINES: i64 = 3; // lines per scroll-wheel notch
 const MAX_TRANSCRIPT: usize = 4000; // cap retained entries
 const MAX_SHELL_LOG: usize = 4000; // cap retained raw stdout/stderr lines
 
@@ -173,7 +175,9 @@ impl WatchApp {
         }
         self.running = true;
 
-        write_out(&format!("{}{}{}", term::ALT_SCREEN, term::HIDE_CURSOR, term::CLEAR));
+        // Mouse tracking is on for the app's lifetime so the wheel reports the
+        // hovered cell; every exit path below turns it back off.
+        write_out(&format!("{}{}{}{}", term::ALT_SCREEN, term::HIDE_CURSOR, term::CLEAR, term::ENABLE_MOUSE));
 
         let mut raw = RawMode::enable();
 
@@ -181,7 +185,7 @@ impl WatchApp {
         // a cursor-less alt screen: leave the screen before the message prints.
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            write_out(&format!("{}{}", term::SHOW_CURSOR, term::MAIN_SCREEN));
+            write_out(&format!("{}{}{}", term::DISABLE_MOUSE, term::SHOW_CURSOR, term::MAIN_SCREEN));
             default_hook(info);
         }));
 
@@ -218,7 +222,7 @@ impl WatchApp {
             let wait = next_list.min(next_tail).saturating_duration_since(Instant::now());
 
             match self.rx.recv_timeout(wait) {
-                Ok(Msg::Key(key)) => self.on_key(&key),
+                Ok(Msg::Key(key)) => self.on_input(&key),
                 Ok(Msg::Procs(procs)) => self.on_procs(procs),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => self.stop(),
@@ -226,7 +230,7 @@ impl WatchApp {
         }
 
         raw.restore();
-        write_out(&format!("{}{}", term::SHOW_CURSOR, term::MAIN_SCREEN));
+        write_out(&format!("{}{}{}", term::DISABLE_MOUSE, term::SHOW_CURSOR, term::MAIN_SCREEN));
 
         std::process::exit(0);
     }
@@ -623,6 +627,29 @@ impl WatchApp {
             self.scroll_transcript(PAGE);
             self.draw();
         }
+    }
+
+    /// A stdin chunk is either a mouse report or ordinary key text.
+    fn on_input(&mut self, chunk: &str) {
+        match parse_sgr_mouse(chunk) {
+            Some(scroll) => self.on_mouse_scroll(scroll),
+            None => self.on_key(chunk),
+        }
+    }
+
+    /// Wheel over the `[0]` pane scrolls it — older lines on wheel up, newer
+    /// on wheel down — but only while the pointer hovers the pane, so a wheel
+    /// over the list panes does not move the log ("hovering" behaviour).
+    fn on_mouse_scroll(&mut self, scroll: crate::watch::mouse::MouseScroll) {
+        let (cols, rows) = terminal_size();
+        let Some(region) = transcript_region(&self.vm, cols, rows) else {
+            return;
+        };
+        if !scroll.inside(region) {
+            return;
+        }
+        self.scroll_transcript(scroll.delta(WHEEL_LINES));
+        self.draw();
     }
 
     fn mv(&mut self, delta: i64) {

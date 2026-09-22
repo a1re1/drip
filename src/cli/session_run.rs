@@ -68,6 +68,11 @@ impl std::fmt::Display for SessionGoalError {
 pub struct SessionGoalArgs<'a> {
     /// Opt-in `--ask` clarification surveys (the ask_user tool).
     pub ask_user_enabled: bool,
+    /// Resolved skill-classifier route (None: classification disabled).
+    pub classifier: Option<crate::harness::classifier::ClassifierRoute>,
+    /// Discovered skills the classifier may compose per loop (explicit
+    /// `--skill` activations are excluded — they are already in the prompt).
+    pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
     /// `--ask-timeout <seconds>` override for the survey answer wait.
     pub ask_user_timeout_seconds: Option<i64>,
     pub cwd: String,
@@ -260,6 +265,8 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
 
     let result = run_cli_goal(CliGoalRunArgs {
         ask_user_enabled: args.ask_user_enabled,
+        classifier: args.classifier.clone(),
+        skill_pool: args.skill_pool.clone(),
         ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: args.cwd.clone(),
         goal: args.goal.clone(),

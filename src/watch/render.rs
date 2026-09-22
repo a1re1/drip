@@ -625,7 +625,7 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · j/k move · [/] h/l scroll log · q quit";
+const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · j/k move · [/] h/l/wheel scroll log · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -740,6 +740,37 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     all.join("\n")
 }
 
+// ── Mouse hit-testing ────────────────────────────────────────────────────────
+
+/// The 1-based inclusive rectangle of the `[0]` pane — the transcript, or the
+/// shell-log box when the Shells pane is focused — as
+/// `(row_start, row_end, col_start, col_end)`.
+///
+/// Mirrors exactly the layout `render_frame` uses (portrait stacks the pane
+/// full-width at the bottom; landscape puts it in the right column), so a
+/// wheel event's hovered cell can be tested against it. `None` when the
+/// terminal is too small to paint the frame at all.
+pub fn transcript_region(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<(usize, usize, usize, usize)> {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    if cols < 20 || rows < 8 {
+        return None;
+    }
+    let body_h = rows - 1;
+    if cols < PORTRAIT_MAX_COLS {
+        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
+        let top: usize = heights[..3].iter().sum();
+        let height = heights[3];
+        if height == 0 {
+            return None;
+        }
+        Some((top + 1, top + height, 1, cols))
+    } else {
+        let left_w = (cols * 2 / 5).max(30).min(cols - 20);
+        Some((1, body_h, left_w + 1, cols))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +877,36 @@ mod tests {
         assert_eq!(portrait_heights(40, &[2, 5, 0, 0]).iter().sum::<usize>(), 40);
         assert_eq!(portrait_heights(10, &[20, 20, 20, 0]).iter().sum::<usize>(), 10);
         assert!(portrait_heights(40, &[2, 5, 0, 0]).iter().all(|&h| h >= 1));
+    }
+
+    #[test]
+    fn transcript_region_matches_the_rendered_pane() {
+        let vm = empty_vm();
+
+        // Portrait: full width, last body pane above the footer.
+        let (cols, rows) = (80usize, 40usize);
+        let frame = render_frame(&vm, cols, rows);
+        let plain: Vec<String> = frame.split('\n').map(strip_ansi).collect();
+        let (r0, r1, c0, c1) = transcript_region(&vm, cols, rows).expect("portrait region");
+        assert_eq!(c0, 1);
+        assert_eq!(c1, cols);
+        assert_eq!(r1, rows - 1, "transcript ends at the last body row");
+        assert_eq!(plain[r0 - 1].chars().nth(c0 - 1), Some('╭'));
+        assert_eq!(plain[r1 - 1].chars().nth(c1 - 1), Some('╯'));
+
+        // Landscape: right column, top body row to the last body row.
+        let (cols, rows) = (120usize, 40usize);
+        let frame = render_frame(&vm, cols, rows);
+        let plain: Vec<String> = frame.split('\n').map(strip_ansi).collect();
+        let (r0, r1, c0, c1) = transcript_region(&vm, cols, rows).expect("landscape region");
+        assert_eq!(r0, 1);
+        assert_eq!(r1, rows - 1);
+        assert_eq!(plain[r0 - 1].chars().nth(c0 - 1), Some('╭'));
+        assert_eq!(plain[r1 - 1].chars().nth(c1 - 1), Some('╯'));
+        // The [0] title sits inside the region, at the pane's first content column.
+        assert_eq!(plain[r0 - 1].chars().nth(c0), Some('─'));
+        let title_at = plain[r0 - 1].find("[0]").expect("transcript title");
+        assert!(title_at >= c0 - 1 && title_at < c1);
     }
 
     #[test]

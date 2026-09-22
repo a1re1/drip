@@ -686,6 +686,115 @@ provides `architect`/`author` (no reviewer). A skill suggesting
 `review: reviewer` under `planned` simply falls back to the configured
 default for that stage until you add a `reviewer` role to your `roles.json`.
 
+## Skill classifier (jev)
+
+Discovered skills are not all useful at once. With a classifier configured, drip
+asks a [jev](https://typesafe.ai) Decisions model one small question per loop —
+"would this skill help with the current task?" — and composes only the skills
+that pass into that loop's system prompt. The classifier **never** replaces
+explicit `--skill` activations: those are always in the prompt, and they are
+excluded from the candidate pool. Every failure (bad profile, HTTP error,
+timeout, malformed answer, unreadable `classifiers.json`) is non-fatal: drip
+warns on stderr and runs with the explicit skills only.
+
+### Settings
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `runtime.classifier_profile_id` | `""` | Model profile id used for classification; empty disables the feature |
+| `runtime.classifier_timeout_ms` | `"8000"` | Whole-selection budget per loop (and per requirements pass) |
+
+### Flags
+
+- `--classifier <profile-id>` — classify with this profile for this run
+  (overrides the setting).
+- `--no-classifier` — hard off, regardless of flag order.
+
+### Model profiles
+
+The classifier profile is an ordinary model profile; point it at jev:
+
+```json
+{"id":"jev","label":"Jev (OpenRouter)","model":"~typesafe/jev-latest","provider":"openrouter","apiKeyRef":"env:OPENROUTER_API_KEY"}
+```
+
+```json
+{"id":"jev-direct","model":"jev-latest","provider":"typesafe","apiKeyRef":"env:TYPESAFE_API_KEY"}
+```
+
+The `typesafe` provider (`baseUrl` defaults to `https://api.typesafe.ai/v1`) is
+only valid on the classifier profile. The decisions endpoint is derived from the
+profile's base URL: `/v1` is stripped and `/alpha/decisions` appended for
+`openrouter`, `/systemone` for `typesafe`. Credentials resolve exactly like any
+other profile (`apiKey` / `apiKeyRef`, `env:` refs reading `~/.drip/env.vars`)
+and are never logged.
+
+### Requirements cache
+
+The first pass asks, per skill and per capability (one tool, or one MCP server),
+whether following the skill requires it. Answers land in
+`~/.drip/skill-requirements.sqlite` keyed on **the skill body hash plus the
+capability descriptor hash**, so editing the skill markdown (or a tool
+description, or an MCP server's tool list) re-asks, and nothing else does. A
+skill whose classifier call fails is treated as satisfiable by everything — the
+feature never hides a skill because the classifier was down. The cache is
+incremental and safe to delete.
+
+A skill that declares `requirements` in `classifiers.json` skips the classifier
+entirely and stores no cache row: the author stated it.
+
+### Selection rules
+
+- **Unauthored skills** (no `relevance` block): one batched request, one yes/no
+  question each, against the loop state. A skill is included when its
+  probability is ≥ 0.6; included skills are ranked by score and **capped to
+  the top 4**.
+- **Authored skills** (`relevance` in `classifiers.json`): one request each,
+  with the author's questions verbatim and the same state. The score is
+  `clamp(<formula>, 0, 1)` (or, with no `formula`, the maximum answer value).
+  The skill is included when the score is ≥ its own `threshold` (default 0.6).
+  **No cap applies** to authored skills.
+- Selected skills come first by score, then unauthored ones by score. All
+  requests for one selection run concurrently inside the timeout.
+- A skill whose requirements (known, at probability ≥ 0.7) are not all present
+  in the loop's tool/MCP surface is filtered out before any request is made.
+
+### `classifiers.json`
+
+Optional sidecar next to a skill's `SKILL.md`. Built-in skills can never have
+one.
+
+```json
+{
+  "relevance": {
+    "threshold": 0.65,
+    "questions": {
+      "is_migration": { "type": "noul", "instructions": "Does the task change a database schema?" },
+      "risk": { "type": "score", "instructions": "How risky is the change?", "criteria": ["trivial", "moderate", "data-loss possible"] },
+      "phase": { "type": "choice", "instructions": "Which phase is this?", "criteria": { "design": null, "implement": null, "review": null } }
+    },
+    "formula": "0.5 * is_migration + 0.3 * risk + 0.2 * max(phase.implement, phase.review)"
+  },
+  "requirements": { "tools": ["BASH", "PATCH"], "mcpServers": [] }
+}
+```
+
+`questions` are native jev questions, sent verbatim. In a formula, a bare
+question id resolves to that answer normalized to 0..1, and `id.member`
+resolves to one option/level probability:
+
+| Question type | Bare id | `id.member` |
+| --- | --- | --- |
+| `noul` | probability of yes | — |
+| `choice` | probability of the chosen (top) option | probability of that named option |
+| `score` | chosen level position / (levels − 1) | probability of that numeric level |
+
+Formula grammar: decimal literals; identifiers `[A-Za-z_][A-Za-z0-9_]*` with an
+optional `.member` (`phase.implement`, `risk.0`); `+ - * /` with the usual
+precedence; unary minus; parentheses; and `max(a,b,...)`, `min(a,b,...)`,
+`clamp(x,lo,hi)`, `abs(x)`. An unknown variable or a syntax error drops that
+skill with a warning; division by zero yields 0.
+
 ## Code review (`--review`)
 
 `drip --review` reviews the branch's diff against the repo's default branch
@@ -812,18 +921,19 @@ projection, so raw tool rows are not re-revealed.
 
 While a run is in flight the TUI composer stays editable. `Enter` does not
 start a second run against the same session: it **queues** the composer text,
-shown as a `N queued — shift+enter steers the running goal with one` hint row
-under the box. Queued messages are drained into the next goal once the running
-run finishes.
+listed above the input in send order (never in the timeline). Queued messages
+are drained into the next goal once the running run finishes.
 
-`Shift+Enter` **steers** the run that is going right now: it writes the next
-queued message to the session inbox — the same handoff `drip --send` uses —
-which the harness consumes as operator steering. The message stays queued if
-that write fails, so a steer is never lost silently.
+`Ctrl+S` **steers** the run that is going right now through the session inbox
+— the same handoff `drip --send` uses — which the harness consumes as operator
+steering. With text in the composer it steers with that text and leaves the
+queue alone; with an empty composer it steers with the **whole queue**, in
+order, and flushes it. Whatever fails to reach the inbox stays queued, so a
+steer is never lost silently.
 
-Shift+Enter is only distinguishable from Enter in terminals that report
-modified keys natively (`ESC[13;2u` or `ESC` `CR`); elsewhere it behaves like
-plain Enter and the message is queued instead.
+The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
+arrives as a single byte instead of pausing output; shift+enter is deliberately
+not a binding because most terminals report it as plain Enter.
 
 ## Watch TUI (`dripw`)
 
@@ -838,6 +948,8 @@ dripw
 Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, plus the
 transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
+Hovering the transcript (or the shell log with `[3]` focused) and rolling the
+scroll wheel scrolls it too — older lines up, newer down.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 

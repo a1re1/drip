@@ -715,18 +715,25 @@ excluded from the candidate pool. Every failure (bad profile, HTTP error,
 timeout, malformed answer, unreadable `classifiers.json`) is non-fatal: drip
 warns on stderr and runs with the explicit skills only.
 
+The interactive TUI (`drip --tui`) runs the same classifier over a shared pool
+construction and announces the resolved route in its transcript. Setting
+`runtime.classifier_in_tui` to `false` (or passing `--no-classifier`) keeps that
+session on explicit `/skill` toggles only.
+
 ### Settings
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `runtime.classifier_profile_id` | `""` | Model profile id used for classification; empty disables the feature |
 | `runtime.classifier_timeout_ms` | `"8000"` | Whole-selection budget per loop (and per requirements pass) |
+| `runtime.classifier_in_tui` | `""` (on) | Interactive TUI only: `false`/`0`/`no`/`off` keeps that session on explicit `/skill` toggles; anything else (including absent) runs the classifier there too |
 
 ### Flags
 
 - `--classifier <profile-id>` — classify with this profile for this run
   (overrides the setting).
-- `--no-classifier` — hard off, regardless of flag order.
+- `--no-classifier` — hard off, regardless of flag order. Both flags apply
+  to `drip --tui` as well.
 
 ### Model profiles
 

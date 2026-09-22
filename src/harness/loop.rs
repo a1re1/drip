@@ -4300,7 +4300,6 @@ mod dynamic_skills_tests {
         assert!(!start.detail.contains("[skills:"), "{}", start.detail);
         std::mem::forget(dir);
     }
-
 }
 
 /// Options for constructing a `SolidStateHarness`. Every optional field is

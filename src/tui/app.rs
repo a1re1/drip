@@ -140,6 +140,7 @@ fn help_text() -> String {
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run; shift+enter steers the running goal with the next queued message",
+            "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
             "  esc — clear the composer, or stop the running goal",
             "  ctrl+c — exit",
         ]
@@ -1134,14 +1135,24 @@ impl TuiApp {
 
         self.apply_edit(String::new(), 0);
 
+        let command = parse_slash_command(&submitted);
+
         // A run in flight can still be typed to, but enter must not start a
         // second run against the same session: it queues the prompt instead.
+        // /rename is the exception: it never touches the run (only the pane
+        // title and session.json), so it applies immediately instead of
+        // sitting in the queue until the goal finishes.
         if self.running {
-            self.queue_prompt(submitted);
+            match command {
+                Some(command) if command.name == "rename" => {
+                    self.dispatch_command(&command.name, &command.args);
+                }
+                _ => self.queue_prompt(submitted),
+            }
             return;
         }
 
-        if let Some(command) = parse_slash_command(&submitted) {
+        if let Some(command) = command {
             self.dispatch_command(&command.name, &command.args);
             return;
         }
@@ -2675,12 +2686,10 @@ impl TuiApp {
     /// `/rename` entry point: with no non-whitespace argument the session is
     /// renamed from its transcript (background model call); with an argument
     /// the user's literal name is applied directly — no profile, transcript,
-    /// or generated-name word rules.
+    /// or generated-name word rules. Works while a goal runs too: the new
+    /// label lands on the busy title (spinner intact), and the epoch bumps
+    /// make any in-flight auto-title reply stale so it cannot clobber it.
     fn rename(&mut self, args: &str) {
-        if self.running {
-            self.push_error("A goal is running; /rename is disabled until it finishes.");
-            return;
-        }
         let manual = args.trim();
         if manual.is_empty() {
             self.begin_rename();
@@ -3760,7 +3769,7 @@ mod rename_tests {
     }
 
     #[test]
-    fn rename_command_is_recognized_and_busy_sessions_are_refused() {
+    fn rename_command_is_recognized_and_never_starts_a_goal() {
         let dir = temp_dir("dispatch");
         let _home = TempHome(dir.clone());
         let mut app = rename_app(&dir);
@@ -3769,11 +3778,57 @@ mod rename_tests {
         app.dispatch_command("rename", "");
         assert!(!app.running);
         assert_eq!(app.rename_epoch, 0);
-        // A busy session refuses /rename without scheduling another rename.
+    }
+
+    #[test]
+    fn manual_rename_applies_while_a_goal_is_running() {
+        let dir = temp_dir("busy-manual");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
         app.running = true;
-        app.dispatch_command("rename", "");
-        assert!(app.running);
-        assert_eq!(app.rename_epoch, 0);
+        app.pane_title = Some(PaneTitle::new("goal fallback"));
+        app.pane_title
+            .as_mut()
+            .unwrap()
+            .set_busy(true, Instant::now());
+        let title_epoch = app.title_epoch;
+        app.dispatch_command("rename", "Mid-run name");
+        assert!(app.running, "/rename must not end or restart the run");
+        assert_eq!(
+            read_session_name(Path::new(&app.paths.meta_path)).as_deref(),
+            Some("Mid-run name"),
+            "the literal name persists to session.json during the run"
+        );
+        let title = app.pane_title.as_ref().unwrap();
+        assert_eq!(title.label(), "Mid-run name");
+        assert!(title.is_busy(), "renaming keeps the spinner running");
+        assert!(
+            app.title_epoch > title_epoch,
+            "an in-flight auto-title reply must become stale"
+        );
+    }
+
+    #[test]
+    fn submit_dispatches_rename_immediately_while_running_but_queues_other_input() {
+        let dir = temp_dir("busy-submit");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.running = true;
+        app.text = "/rename Renamed live".to_string();
+        app.submit();
+        assert!(app.queued_prompts.is_empty(), "/rename must not wait in the queue");
+        assert_eq!(
+            read_session_name(Path::new(&app.paths.meta_path)).as_deref(),
+            Some("Renamed live")
+        );
+        // Other slash commands and plain text still queue for the next run.
+        app.text = "/help".to_string();
+        app.submit();
+        app.text = "next goal".to_string();
+        app.submit();
+        assert_eq!(app.queued_prompts.len(), 2);
+        assert_eq!(app.queued_prompts[0], "/help");
+        assert_eq!(app.queued_prompts[1], "next goal");
     }
 
     #[test]
@@ -3899,21 +3954,6 @@ mod rename_tests {
         let session = app.session.clone();
         app.switch_session(session);
         assert_eq!(label(&app), multiword, "resume must restore the manual name");
-    }
-
-    #[test]
-    fn busy_sessions_refuse_manual_renames() {
-        let dir = temp_dir("manual-busy");
-        let _home = TempHome(dir.clone());
-        let mut app = rename_app(&dir);
-        app.pane_title = Some(PaneTitle::new("ship the release"));
-        app.running = true;
-        app.dispatch_command("rename", "Ops");
-        assert!(app.running);
-        assert_eq!(app.rename_epoch, 0, "busy refusal must not bump the epoch");
-        assert_eq!(label(&app), "ship the release");
-        let meta = std::path::PathBuf::from(&app.paths.meta_path);
-        assert_eq!(crate::tui::session_name::read_session_name(&meta), None);
     }
 
     #[test]

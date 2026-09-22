@@ -4845,9 +4845,10 @@ mod prompt_history_wiring_tests {
         fixture.app.submit();
         let wrapped = "aaaa bbbb cccc dddd eeee";
         type_into(&mut fixture.app, wrapped);
-        // Body width 18: the draft wraps into "aaaa bbbb cccc " + the tail, so
-        // the end-of-text cursor sits on the second visual line.
-        assert_eq!(composer_lines(wrapped, 18), vec![0..15, 15..24]);
+        // Body width 17 at 20 columns: the draft wraps into "aaaa bbbb cccc " +
+        // the tail, so the end-of-text cursor sits on the second visual line.
+        assert_eq!(composer_text_width(20), 17);
+        assert_eq!(composer_lines(wrapped, 17), vec![0..15, 15..24]);
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, wrapped, "no recall from a lower line");
         assert!(!fixture.app.prompt_history.is_browsing());

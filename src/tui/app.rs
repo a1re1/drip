@@ -1367,6 +1367,7 @@ impl TuiApp {
             Ok(()) => {
                 self.survey = None;
                 self.overlay = None;
+                self.set_title_waiting(false);
                 self.push_info("chat reply recorded — the run continues");
             }
             Err(error) => {
@@ -1515,6 +1516,7 @@ impl TuiApp {
                     self.overlay = None;
                     if kind == OverlayKind::Question {
                         self.survey = None;
+                        self.set_title_waiting(false);
                         self.push_info(
                             "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
                         );
@@ -1558,6 +1560,7 @@ impl TuiApp {
         // reply is typed like any message and Enter reaches submit().
         if matches!(key, Key::Escape) && self.survey.as_ref().is_some_and(|state| state.chat_mode) {
             self.survey = None;
+            self.set_title_waiting(false);
             self.push_info(
                 "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
             );
@@ -1876,6 +1879,7 @@ impl TuiApp {
             // The exact file the blocked harness thread polls (loop.rs answers_path()).
             answers_path: Path::new(&self.paths.state_path).with_file_name("answers.jsonl"),
         });
+        self.set_title_waiting(true);
         self.open_survey_question();
     }
 
@@ -1943,6 +1947,7 @@ impl TuiApp {
         if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::Question) {
             self.overlay = None;
         }
+        self.set_title_waiting(false);
         self.push_info(message.to_string());
     }
 
@@ -1963,6 +1968,7 @@ impl TuiApp {
             Ok(()) => {
                 self.survey = None;
                 self.overlay = None;
+                self.set_title_waiting(false);
                 self.push_info("clarification answers recorded — the run continues");
             }
             Err(error) => {
@@ -3259,6 +3265,19 @@ impl TuiApp {
             let escape = title.set_busy(false, Instant::now());
             crate::tui::pane_title::emit(escape.as_deref());
         }
+    }
+
+    /// Mirrors the operator-blocked state onto the pane title: while an
+    /// ask_user survey waits for an answer the spinner becomes `?` (a spinner
+    /// would claim progress the blocked run is not making); recording the
+    /// answers, dismissing the survey, or ending the run restores it.
+    fn set_title_waiting(&mut self, waiting: bool) -> Option<String> {
+        let escape = self
+            .pane_title
+            .as_mut()
+            .and_then(|title| title.set_waiting(waiting, Instant::now()));
+        crate::tui::pane_title::emit(escape.as_deref());
+        escape
     }
 
     // ----- main loop ------------------------------------------------------
@@ -5727,6 +5746,41 @@ mod survey_tests {
         assert!(rows
             .iter()
             .any(|row| row.contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+    }
+
+    #[test]
+    fn survey_waiting_flips_the_pane_title_between_question_mark_and_spinner() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        // A live run with a spinning title, then the ask_user survey arrives.
+        fixture.app.pane_title = Some(PaneTitle::new("add authentication"));
+        assert!(fixture
+            .app
+            .pane_title
+            .as_mut()
+            .expect("pane title")
+            .set_busy(true, Instant::now())
+            .is_some());
+        fixture.app.begin_survey(survey());
+        assert!(
+            fixture
+                .app
+                .pane_title
+                .as_ref()
+                .expect("pane title")
+                .is_waiting(),
+            "a pending survey shows the waiting marker instead of the spinner"
+        );
+        // Esc dismisses the survey (nothing written): the spinner returns.
+        fixture.app.on_key(Key::Escape);
+        assert!(
+            !fixture
+                .app
+                .pane_title
+                .as_ref()
+                .expect("pane title")
+                .is_waiting(),
+            "dismissing the survey resumes the spinner"
+        );
     }
 
     #[test]

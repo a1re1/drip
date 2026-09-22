@@ -1285,6 +1285,10 @@ cancel, or exit the spinner is removed and the bare label remains.
 
 - The label starts as a deterministic 3–5-word summary of your goal (its
   first usable words, or `drip` when nothing usable remains).
+- While the run is blocked on an `ask_user` question the spinner is
+  replaced by `?` — the run is waiting on you, not working. Recording the
+  answers (or dismissing the survey with Esc, or the run ending) restores
+  the spinner.
 - If the lightweight title profile is reachable, drip replaces the label
   with a 3–5-word title generated from the initial goal of the session
   (default profile: `glm-5-3-flash` via OpenRouter). This is one short

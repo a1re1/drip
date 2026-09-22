@@ -86,6 +86,12 @@ pub struct ParsedCliArgs {
     pub mcp: Vec<String>,
     /// Spawn no MCP servers and expose no MCP tools, regardless of roles.
     pub no_mcp: bool,
+    /// Skill-classifier model profile for this run (overrides
+    /// runtime.classifier_profile_id).
+    pub classifier: Option<String>,
+    /// Hard-disable the skill classifier for this run, whatever the profile
+    /// setting says.
+    pub no_classifier: bool,
     /// Opt this run into operator clarification surveys (enables the ask_user tool).
     pub ask: bool,
     /// Opt this run out of the clarification surveys the config default turns on.
@@ -248,6 +254,8 @@ impl Default for ParsedCliArgs {
             allow_net: false,
             mcp: Vec::new(),
             no_mcp: false,
+            classifier: None,
+            no_classifier: false,
             ask: false,
             no_ask: false,
             ask_timeout_secs: None,
@@ -697,6 +705,18 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--no-mcp" => {
                 parsed.no_mcp = true;
+            }
+            "--classifier" => {
+                if let Some(value) = take_required_value(argv, index, "--classifier", &mut parsed.errors) {
+                    parsed.classifier = Some(value);
+                    index += 1;
+                }
+            }
+            "--no-classifier" => {
+                // A hard off: the route resolution checks this first, so the
+                // outcome does not depend on flag order relative to
+                // --classifier.
+                parsed.no_classifier = true;
             }
             "--ask" => {
                 parsed.ask = true;
@@ -1187,6 +1207,31 @@ mod tests {
         assert!(parsed.no_mcp);
         assert!(parsed.mcp.is_empty());
         assert!(parse(&["--mcp"]).errors.iter().any(|problem| problem.contains("--mcp")));
+    }
+
+    #[test]
+    fn classifier_flags_parse_and_hard_disable_wins_regardless_of_order() {
+        let plain = parse(&["goal"]);
+        assert!(plain.classifier.is_none());
+        assert!(!plain.no_classifier);
+
+        let disabled = parse(&["--no-classifier", "goal"]);
+        assert!(disabled.no_classifier);
+        assert!(disabled.classifier.is_none());
+
+        // --no-classifier wins even when --classifier comes after it.
+        let both = parse(&["--no-classifier", "--classifier", "jev", "goal"]);
+        assert!(both.no_classifier);
+        assert_eq!(both.classifier.as_deref(), Some("jev"));
+
+        let override_only = parse(&["--classifier", "jev-direct", "goal"]);
+        assert!(!override_only.no_classifier);
+        assert_eq!(override_only.classifier.as_deref(), Some("jev-direct"));
+        assert!(override_only.errors.is_empty(), "{:?}", override_only.errors);
+
+        let dangling = parse(&["--classifier"]);
+        assert!(dangling.classifier.is_none());
+        assert!(dangling.errors.iter().any(|error| error.contains("--classifier requires a value.")));
     }
 
     // --- strict argument validation ---

@@ -9,5 +9,7 @@
   "runtime.role_bindings": "{}",
   "runtime.terminal_title_enabled": "true",
   "runtime.terminal_title_profile_id": "glm-5-3-flash",
-  "runtime.terminal_title_timeout_ms": "8000"
+  "runtime.terminal_title_timeout_ms": "8000",
+  "runtime.classifier_profile_id": "",
+  "runtime.classifier_timeout_ms": "8000"
 }

@@ -1621,23 +1621,26 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
         .map(|event| event.detail.clone())
         .collect();
     assert_eq!(loop_starts.len(), 4, "{loop_starts:?}");
+    // The detail reads `loop N[ [skills: …]][ [tools: …]] [role: R] — phase`, so
+    // the surface segments sit between the iteration and the role: match the
+    // role/phase suffix with `contains` rather than a prefix.
     assert!(
-        loop_starts[0].starts_with("loop 1 [role: planner] — planning"),
+        loop_starts[0].contains("[role: planner] — planning"),
         "{}",
         loop_starts[0]
     );
     assert!(
-        loop_starts[1].starts_with("loop 2 [role: author] — task-1"),
+        loop_starts[1].contains("[role: author] — task-1"),
         "{}",
         loop_starts[1]
     );
     assert!(
-        loop_starts[2].starts_with("loop 3 [role: replanner] — replanning"),
+        loop_starts[2].contains("[role: replanner] — replanning"),
         "{}",
         loop_starts[2]
     );
     assert!(
-        loop_starts[3].starts_with("loop 4 [role: planner] — replanning"),
+        loop_starts[3].contains("[role: planner] — replanning"),
         "{}",
         loop_starts[3]
     );

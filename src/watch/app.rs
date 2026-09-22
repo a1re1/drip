@@ -338,7 +338,7 @@ impl WatchApp {
                 let mut all = std::mem::take(&mut self.vm.transcript);
                 all.extend(added);
                 self.vm.transcript = trim_transcript(&all, MAX_TRANSCRIPT);
-                // The [4] Skills pane is a projection of the transcript's
+                // The [4] Skills & Tools pane is a projection of the transcript's
                 // loop-start telemetry, so it is refreshed with it — a skill
                 // loaded into a new loop appears the moment the loop starts.
                 self.vm.skill_loads = skill_loads(&self.vm.transcript);
@@ -605,15 +605,15 @@ impl WatchApp {
             return;
         }
 
-        // Focus the Skills pane — a read-only projection of the focused
-        // session's loop-start skill telemetry, so there is nothing to select.
+        // Focus the Skills & Tools pane — a read-only projection of the
+        // focused session's loop-start telemetry, so there is nothing to select.
         if key == "4" {
             self.vm.focus = 4;
             self.draw();
             return;
         }
 
-        // Tab cycles Sessions → Tasks → Shells → Skills
+        // Tab cycles Sessions → Tasks → Shells → Skills & Tools
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
@@ -674,7 +674,7 @@ impl WatchApp {
     /// A left click on a list row focuses that pane and moves its selection to
     /// the row under the pointer — the navigation `j`/`k` and Tab give, aimed
     /// with the mouse. Selecting a session also re-focuses its transcript; the
-    /// Skills pane has no selection, so a click on it only focuses it. A click
+    /// Skills & Tools pane has no selection, so a click on it only focuses it.
     /// anywhere else (a border, the transcript, blank space) is ignored, so the
     /// wheel keeps its scroll-only meaning.
     fn on_mouse_click(&mut self, col: usize, row: usize) {
@@ -705,7 +705,7 @@ impl WatchApp {
                 self.sync_shell_log();
             }
             _ => {
-                // The Skills pane is read-only: a click just focuses it.
+                // The Skills & Tools pane is read-only: a click just focuses it.
                 self.vm.focus = 4;
             }
         }
@@ -1028,11 +1028,12 @@ mod tests {
     }
 
     #[test]
-    fn a_skills_click_focuses_the_read_only_pane() {
+    fn a_skills_and_tools_click_focuses_the_read_only_pane() {
         let mut app = WatchApp::new(project(), "/r".into());
         app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
             iteration: 1,
             skills: vec!["navis".into()],
+            tools: vec!["READ".into()],
         }];
         let (cols, rows) = (100usize, 30usize);
         let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];

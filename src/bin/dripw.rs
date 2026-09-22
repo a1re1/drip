@@ -26,7 +26,12 @@ Keys:
   ↑ / ↓         Move selection up / down
   [ / ]         Scroll transcript back / forward  (also h / l, ← / →)
   wheel         Scroll the transcript, or the shell log, under the pointer
+  click         Focus the pane you clicked and select the row under the pointer
   q / Ctrl+C    Quit
+
+Clicking a row of the Sessions, Tasks or Shells pane focuses that pane and
+selects the row under the pointer; clicking a session also focuses its
+transcript.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 

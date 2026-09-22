@@ -398,11 +398,11 @@
     "type": "function",
     "function": {
       "name": "ask_user",
-      "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Ask ONLY while planning — right after the operator's goal or a new operator message and before the first task starts; never mid-task, once the plan is executing decide from the goal, the operator's messages and the repository. Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing. If the operator chose \"chat about this\", their reply is free-form discussion of the whole survey: take it as the answer, and you may ask ONE refined survey before you replan.",
+      "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Ask while planning — right after the operator's goal or a new operator message and before the first task starts; never mid-task, once the plan is executing decide from the goal, the operator's messages and the repository (the one exception is the final blocked-on-input survey the harness offers the operator). Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing. If the operator chose \"chat about this\", their reply is free-form discussion of the whole survey: take it as the answer, and you may ask ONE refined survey before you replan.",
       "parameters": {
         "properties": {
           "questions": {
-            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first).",
+            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first). Set multiple: true for a select-all-that-apply question.",
             "items": {
               "properties": {
                 "allow_other": {
@@ -412,6 +412,10 @@
                 "header": {
                   "description": "Short label shown above the question.",
                   "type": "string"
+                },
+                "multiple": {
+                  "description": "When true this question is a select-all-that-apply: the operator toggles several options before confirming, and the answer arrives as the picked labels joined with a comma.",
+                  "type": "boolean"
                 },
                 "options": {
                   "description": "2-4 choices; put your best guess first.",

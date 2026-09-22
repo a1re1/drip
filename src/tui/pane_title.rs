@@ -15,7 +15,10 @@
 //! Behavior: a short stable label (derived deterministically from the initial
 //! goal, optionally replaced later by a generated 3-5 word title) plus a
 //! time-driven braille loading spinner while the harness is busy. No
-//! percentage is ever invented. Updates are deduplicated (identical titles
+//! percentage is ever invented. While the harness is blocked on an ask_user
+//! survey the prefix is the waiting marker `?` instead of a spinner (a
+//! spinner would claim progress the blocked run is not making). Updates are
+//! deduplicated (identical titles
 //! are never re-emitted) and throttled (spinner advances at most once per
 //! `SPINNER_INTERVAL_MS`). The idle state is the bare label without a
 //! spinner.
@@ -29,6 +32,10 @@ pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"
 
 /// Minimum real-time spacing between two spinner frames.
 pub const SPINNER_INTERVAL_MS: u64 = 100;
+
+/// Prefix shown while the harness is blocked on an ask_user survey: the run
+/// waits on the operator, so the title must not pretend to be working.
+pub const WAITING_FRAME: &str = "?";
 
 /// Hard word budget for any title (generated or fallback).
 pub const MAX_TITLE_WORDS: usize = 5;
@@ -212,6 +219,7 @@ pub fn emit(escape: Option<&str>) {
 pub struct PaneTitle {
     label: String,
     busy: bool,
+    awaiting: bool,
     busy_since: Option<Instant>,
     last_emitted: Option<String>,
     last_emit_at: Option<Instant>,
@@ -224,6 +232,7 @@ impl PaneTitle {
         Self {
             label: fallback_title(goal),
             busy: false,
+            awaiting: false,
             busy_since: None,
             last_emitted: None,
             last_emit_at: None,
@@ -238,11 +247,24 @@ impl PaneTitle {
         self.busy
     }
 
+    /// True while the title waits on an operator answer (ask_user survey).
+    pub fn is_waiting(&self) -> bool {
+        self.awaiting
+    }
+
+    /// The spinner animates only while working; a waiting title stays static.
+    fn allows_spinner(&self) -> bool {
+        !self.awaiting
+    }
+
     /// The escape for the current state, deduplicated against what was last
     /// emitted. Does not advance the throttle clock.
     fn candidate(&self, now: Instant) -> Option<String> {
-        let frame = if self.busy {
+        let frame = if self.busy && self.allows_spinner() {
             Some(frame_for(now - self.busy_since.unwrap_or(now)))
+        } else if self.busy {
+            // Waiting on the operator: a spinner would claim progress.
+            Some(WAITING_FRAME)
         } else {
             None
         };
@@ -282,6 +304,17 @@ impl PaneTitle {
         }
         self.busy = busy;
         self.busy_since = busy.then_some(now);
+        self.update(now)
+    }
+
+    /// Marks the title as waiting on an operator answer (ask_user survey):
+    /// the spinner prefix becomes `?` and stays static. Returns the escape to
+    /// emit when the rendered title changes.
+    pub fn set_waiting(&mut self, waiting: bool, now: Instant) -> Option<String> {
+        if self.awaiting == waiting {
+            return None;
+        }
+        self.awaiting = waiting;
         self.update(now)
     }
 
@@ -490,5 +523,49 @@ mod tests {
         assert!(!inner.contains('\x1b'));
         // 5 label words plus the one spinner frame.
         assert!(inner.split_whitespace().count() <= MAX_TITLE_WORDS + 1);
+    }
+
+    #[test]
+    fn waiting_replaces_the_spinner_and_resumes_it_after_answer() {
+        let start = Instant::now();
+        let mut title = PaneTitle::new("fix login bug");
+        let busy = title.set_busy(true, start).expect("busy emits first frame");
+        assert_eq!(busy, osc2("⠋ fix login bug"));
+
+        // The run blocks on an ask_user survey: the spinner becomes `?`.
+        assert_eq!(
+            title.set_waiting(true, start + Duration::from_millis(10)),
+            Some(osc2("? fix login bug"))
+        );
+        // A redundant set dedupes, and waiting is static: ticks emit nothing.
+        assert_eq!(
+            title.set_waiting(true, start + Duration::from_millis(20)),
+            None
+        );
+        assert_eq!(title.tick(start + Duration::from_millis(150)), None);
+        assert_eq!(title.tick(start + Duration::from_secs(1)), None);
+
+        // Answers recorded: the spinner resumes with the current frame.
+        let resumed = title
+            .set_waiting(false, start + Duration::from_millis(1000))
+            .expect("resume emits the spinner again");
+        assert_eq!(resumed, osc2("⠋ fix login bug"));
+        let advanced = title
+            .tick(start + Duration::from_millis(1100))
+            .expect("frames advance again");
+        assert_ne!(advanced, resumed);
+
+        // Waiting follows the run, not the title: a title that never went
+        // busy shows the bare label, and going busy while waiting shows `?`.
+        let mut idle = PaneTitle::new("fix login bug");
+        assert_eq!(idle.set_waiting(true, start), Some(osc2("fix login bug")));
+        assert_eq!(
+            idle.set_busy(true, start + Duration::from_millis(1)),
+            Some(osc2("? fix login bug"))
+        );
+        assert_eq!(
+            idle.set_busy(false, start + Duration::from_millis(2)),
+            Some(osc2("fix login bug"))
+        );
     }
 }

@@ -16,17 +16,11 @@ use crate::core::home::DripProject;
 use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRecord};
 use crate::watch::ansi::term;
-use crate::watch::data::{
-    classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail,
-};
-use crate::watch::mouse::{parse_mouse_event, MouseEvent};
+use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
-use crate::watch::render::{
-    diff_lines, list_row_at, render_frame, transcript_region, SessionsMode, WatchViewModel,
-};
-use crate::watch::shelllog::{
-    read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES,
-};
+use crate::watch::mouse::{parse_mouse_event, MouseEvent};
+use crate::watch::render::{diff_lines, list_row_at, render_frame, skill_loads, transcript_region, SessionsMode, WatchViewModel};
+use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
 const TAIL_MS: u64 = 300; // transcript tail poll
@@ -71,6 +65,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         shell_log_files: Vec::new(),
         tasks: Vec::new(),
         sel_task: 0,
+        skill_loads: Vec::new(),
     }
 }
 
@@ -104,11 +99,7 @@ fn same_list(a: &[String], b: &[String]) -> bool {
 /// The rows visible under `mode`: Running → running only, Recent → recent
 /// only, All → running followed by recent. Both inputs are already sorted
 /// newest-first, so All is a plain concatenation with no re-sort.
-fn visible_sessions(
-    mode: SessionsMode,
-    running: &[SessionRecord],
-    recent: &[SessionRecord],
-) -> Vec<SessionRecord> {
+fn visible_sessions(mode: SessionsMode, running: &[SessionRecord], recent: &[SessionRecord]) -> Vec<SessionRecord> {
     match mode {
         SessionsMode::Running => running.to_vec(),
         SessionsMode::Recent => recent.to_vec(),
@@ -197,13 +188,7 @@ impl WatchApp {
 
         // Mouse tracking is on for the app's lifetime so the wheel reports the
         // hovered cell; every exit path below turns it back off.
-        write_out(&format!(
-            "{}{}{}{}",
-            term::ALT_SCREEN,
-            term::HIDE_CURSOR,
-            term::CLEAR,
-            term::ENABLE_MOUSE
-        ));
+        write_out(&format!("{}{}{}{}", term::ALT_SCREEN, term::HIDE_CURSOR, term::CLEAR, term::ENABLE_MOUSE));
 
         let mut raw = RawMode::enable();
 
@@ -211,12 +196,7 @@ impl WatchApp {
         // a cursor-less alt screen: leave the screen before the message prints.
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            write_out(&format!(
-                "{}{}{}",
-                term::DISABLE_MOUSE,
-                term::SHOW_CURSOR,
-                term::MAIN_SCREEN
-            ));
+            write_out(&format!("{}{}{}", term::DISABLE_MOUSE, term::SHOW_CURSOR, term::MAIN_SCREEN));
             default_hook(info);
         }));
 
@@ -250,9 +230,7 @@ impl WatchApp {
                 break;
             }
 
-            let wait = next_list
-                .min(next_tail)
-                .saturating_duration_since(Instant::now());
+            let wait = next_list.min(next_tail).saturating_duration_since(Instant::now());
 
             match self.rx.recv_timeout(wait) {
                 Ok(Msg::Key(key)) => self.on_input(&key),
@@ -263,12 +241,7 @@ impl WatchApp {
         }
 
         raw.restore();
-        write_out(&format!(
-            "{}{}{}",
-            term::DISABLE_MOUSE,
-            term::SHOW_CURSOR,
-            term::MAIN_SCREEN
-        ));
+        write_out(&format!("{}{}{}", term::DISABLE_MOUSE, term::SHOW_CURSOR, term::MAIN_SCREEN));
 
         std::process::exit(0);
     }
@@ -365,6 +338,10 @@ impl WatchApp {
                 let mut all = std::mem::take(&mut self.vm.transcript);
                 all.extend(added);
                 self.vm.transcript = trim_transcript(&all, MAX_TRANSCRIPT);
+                // The [4] Skills pane is a projection of the transcript's
+                // loop-start telemetry, so it is refreshed with it — a skill
+                // loaded into a new loop appears the moment the loop starts.
+                self.vm.skill_loads = skill_loads(&self.vm.transcript);
                 dirty = true;
             }
         }
@@ -493,10 +470,7 @@ impl WatchApp {
     /// before the frame is drawn, so a later click can be resolved back to the
     /// row the user actually saw.
     fn snapshot_panes(&mut self) {
-        self.painted_task_ids = crate::watch::render::ordered_tasks(&self.vm.tasks)
-            .iter()
-            .map(|t| t.id.clone())
-            .collect();
+        self.painted_task_ids = crate::watch::render::ordered_tasks(&self.vm.tasks).iter().map(|t| t.id.clone()).collect();
         self.painted_shell_pids = self.vm.shells.iter().map(|p| p.pid).collect();
     }
 
@@ -513,27 +487,17 @@ impl WatchApp {
         // (no mtime) clears the cache so its later appearance is picked up.
         let src = record.map(|r| {
             let state_path = session_paths_for(&self.project, r).state_path;
-            let mtime = std::fs::metadata(&state_path)
-                .and_then(|m| m.modified())
-                .ok();
+            let mtime = std::fs::metadata(&state_path).and_then(|m| m.modified()).ok();
             (state_path, mtime)
         });
         if let Some((path, Some(mtime))) = &src {
-            if self
-                .tasks_src
-                .as_ref()
-                .is_some_and(|(p, m)| p == path && m == mtime)
-            {
+            if self.tasks_src.as_ref().is_some_and(|(p, m)| p == path && m == mtime) {
                 return;
             }
         }
         let tasks = src
             .as_ref()
-            .and_then(|(path, _)| {
-                crate::core::state::load_harness_state(Path::new(path))
-                    .ok()
-                    .flatten()
-            })
+            .and_then(|(path, _)| crate::core::state::load_harness_state(Path::new(path)).ok().flatten())
             .map(|state| state.tasks)
             .unwrap_or_default();
         self.tasks_src = src.and_then(|(path, mtime)| mtime.map(|m| (path, m)));
@@ -570,6 +534,7 @@ impl WatchApp {
         let mut tail = TranscriptTail::new(&paths.transcript_path, REPLAY_LIMIT);
         // Consume the replay batch immediately so the pane fills on focus.
         self.vm.transcript = trim_transcript(&tail.poll(), MAX_TRANSCRIPT);
+        self.vm.skill_loads = skill_loads(&self.vm.transcript);
         self.tail = Some(tail);
     }
 
@@ -584,10 +549,7 @@ impl WatchApp {
                 match stdin.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tx
-                            .send(Msg::Key(String::from_utf8_lossy(&buf[..n]).into_owned()))
-                            .is_err()
-                        {
+                        if tx.send(Msg::Key(String::from_utf8_lossy(&buf[..n]).into_owned())).is_err() {
                             break;
                         }
                     }
@@ -643,11 +605,20 @@ impl WatchApp {
             return;
         }
 
-        // Tab cycles Sessions → Tasks → Shells
+        // Focus the Skills pane — a read-only projection of the focused
+        // session's loop-start skill telemetry, so there is nothing to select.
+        if key == "4" {
+            self.vm.focus = 4;
+            self.draw();
+            return;
+        }
+
+        // Tab cycles Sessions → Tasks → Shells → Skills
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
                 2 => 3,
+                3 => 4,
                 _ => 1,
             };
             if self.vm.focus == 3 {
@@ -702,9 +673,10 @@ impl WatchApp {
 
     /// A left click on a list row focuses that pane and moves its selection to
     /// the row under the pointer — the navigation `j`/`k` and Tab give, aimed
-    /// with the mouse. Selecting a session also re-focuses its transcript. A
-    /// click anywhere else (a border, the transcript, blank space) is ignored,
-    /// so the wheel keeps its scroll-only meaning.
+    /// with the mouse. Selecting a session also re-focuses its transcript; the
+    /// Skills pane has no selection, so a click on it only focuses it. A click
+    /// anywhere else (a border, the transcript, blank space) is ignored, so the
+    /// wheel keeps its scroll-only meaning.
     fn on_mouse_click(&mut self, col: usize, row: usize) {
         let (cols, rows) = terminal_size();
         self.click_at(col, row, cols, rows);
@@ -727,10 +699,14 @@ impl WatchApp {
                 self.vm.focus = 2;
                 self.vm.sel_task = self.painted_task_row(index);
             }
-            _ => {
+            2 => {
                 self.vm.focus = 3;
                 self.vm.sel_shell = self.painted_shell_row(index);
                 self.sync_shell_log();
+            }
+            _ => {
+                // The Skills pane is read-only: a click just focuses it.
+                self.vm.focus = 4;
             }
         }
         self.draw();
@@ -757,32 +733,20 @@ impl WatchApp {
     /// clicked. Falls back to `index` for a row painted before the first
     /// snapshot or whose task is gone.
     fn painted_task_row(&self, index: usize) -> usize {
-        let Some(id) = self.painted_task_ids.get(index) else {
-            return index;
-        };
-        crate::watch::render::ordered_tasks(&self.vm.tasks)
-            .iter()
-            .position(|t| &t.id == id)
-            .unwrap_or(index)
+        let Some(id) = self.painted_task_ids.get(index) else { return index };
+        crate::watch::render::ordered_tasks(&self.vm.tasks).iter().position(|t| &t.id == id).unwrap_or(index)
     }
 
     /// The shells index of the process painted on row `index`, found again by
     /// pid so a refreshed `ps` snapshot cannot move the selection off it.
     fn painted_shell_row(&self, index: usize) -> usize {
-        let Some(pid) = self.painted_shell_pids.get(index) else {
-            return index;
-        };
-        self.vm
-            .shells
-            .iter()
-            .position(|p| p.pid == *pid)
-            .unwrap_or(index)
+        let Some(pid) = self.painted_shell_pids.get(index) else { return index };
+        self.vm.shells.iter().position(|p| p.pid == *pid).unwrap_or(index)
     }
 
     fn mv(&mut self, delta: i64) {
         if self.vm.focus == 1 {
-            self.vm.sel_session =
-                clamp_sel(self.vm.sel_session as i64 + delta, self.vm.sessions.len());
+            self.vm.sel_session = clamp_sel(self.vm.sel_session as i64 + delta, self.vm.sessions.len());
             self.sync_focused();
         } else if self.vm.focus == 2 {
             // Selecting a task only moves the highlight.
@@ -795,11 +759,7 @@ impl WatchApp {
 
     // +delta scrolls toward newer lines (down), -delta toward older.
     fn scroll_transcript(&mut self, delta: i64) {
-        let len = if self.vm.focus == 3 {
-            self.vm.shell_log_lines.len()
-        } else {
-            self.vm.transcript.len()
-        } as i64;
+        let len = if self.vm.focus == 3 { self.vm.shell_log_lines.len() } else { self.vm.transcript.len() } as i64;
         let scroll = self.vm.transcript_scroll as i64;
         if delta < 0 {
             self.vm.following = false;
@@ -941,12 +901,7 @@ mod tests {
     }
 
     fn proc(pid: i64, command: &str) -> PsProc {
-        PsProc {
-            pid,
-            ppid: 1,
-            etime_sec: Some(3),
-            command: command.into(),
-        }
+        PsProc { pid, ppid: 1, etime_sec: Some(3), command: command.into() }
     }
 
     #[test]
@@ -954,23 +909,14 @@ mod tests {
         let running = vec![record("run-1"), record("run-2")];
         let recent = vec![record("old-1"), record("old-2")];
 
-        assert_eq!(
-            ids(&visible_sessions(SessionsMode::Running, &running, &recent)),
-            vec!["run-1", "run-2"]
-        );
-        assert_eq!(
-            ids(&visible_sessions(SessionsMode::Recent, &running, &recent)),
-            vec!["old-1", "old-2"]
-        );
+        assert_eq!(ids(&visible_sessions(SessionsMode::Running, &running, &recent)), vec!["run-1", "run-2"]);
+        assert_eq!(ids(&visible_sessions(SessionsMode::Recent, &running, &recent)), vec!["old-1", "old-2"]);
         assert_eq!(
             ids(&visible_sessions(SessionsMode::All, &running, &recent)),
             vec!["run-1", "run-2", "old-1", "old-2"]
         );
         assert!(visible_sessions(SessionsMode::Running, &[], &recent).is_empty());
-        assert_eq!(
-            ids(&visible_sessions(SessionsMode::All, &[], &recent)),
-            vec!["old-1", "old-2"]
-        );
+        assert_eq!(ids(&visible_sessions(SessionsMode::All, &[], &recent)), vec!["old-1", "old-2"]);
     }
 
     #[test]
@@ -1029,10 +975,7 @@ mod tests {
         app.click_at(c0 + 3, r0 + 2, cols, rows);
         assert_eq!(app.vm.focus, 1);
         assert_eq!(app.vm.sel_session, 1);
-        assert_eq!(
-            app.focused_id, "s-2",
-            "the transcript follows the clicked session"
-        );
+        assert_eq!(app.focused_id, "s-2", "the transcript follows the clicked session");
 
         // A border row is not a row: the selection stays put.
         app.click_at(c0 + 3, r0, cols, rows);
@@ -1045,10 +988,7 @@ mod tests {
     #[test]
     fn a_task_click_focuses_the_tasks_pane_and_follows_the_painted_row() {
         let mut app = WatchApp::new(project(), "/r".into());
-        app.vm.tasks = vec![
-            task("task-1", HarnessTaskStatus::Pending),
-            task("task-2", HarnessTaskStatus::Pending),
-        ];
+        app.vm.tasks = vec![task("task-1", HarnessTaskStatus::Pending), task("task-2", HarnessTaskStatus::Pending)];
         app.snapshot_panes();
         // task-2 goes in progress after the paint and sorts to the top.
         app.vm.tasks[1].status = HarnessTaskStatus::InProgress;
@@ -1058,10 +998,7 @@ mod tests {
         app.click_at(c0 + 3, r0 + 1, cols, rows);
         assert_eq!(app.vm.focus, 2);
         let ordered = crate::watch::render::ordered_tasks(&app.vm.tasks);
-        assert_eq!(
-            ordered[app.vm.sel_task].id, "task-1",
-            "the row painted there, not the row number"
-        );
+        assert_eq!(ordered[app.vm.sel_task].id, "task-1", "the row painted there, not the row number");
     }
 
     #[test]
@@ -1076,10 +1013,7 @@ mod tests {
         let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[2];
         app.click_at(c0 + 3, r0 + 2, cols, rows);
         assert_eq!(app.vm.focus, 3);
-        assert_eq!(
-            app.vm.sel_shell, 2,
-            "the pid painted on that row, not the row number"
-        );
+        assert_eq!(app.vm.sel_shell, 2, "the pid painted on that row, not the row number");
         assert_eq!(app.vm.shells[app.vm.sel_shell].pid, 22);
     }
 
@@ -1091,5 +1025,26 @@ mod tests {
         assert!(vm.tasks.is_empty());
         assert_eq!(vm.sel_session, 0);
         assert_eq!(vm.sel_task, 0);
+    }
+
+    #[test]
+    fn a_skills_click_focuses_the_read_only_pane() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 1,
+            skills: vec!["navis".into()],
+        }];
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];
+
+        app.click_at(c0 + 3, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 4);
+
+        // A `4` key and Tab reach the same pane; Tab wraps back to Sessions.
+        app.on_key("1");
+        app.on_key("4");
+        assert_eq!(app.vm.focus, 4);
+        app.on_key("\t");
+        assert_eq!(app.vm.focus, 1);
     }
 }

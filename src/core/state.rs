@@ -2521,6 +2521,7 @@ mod tests {
                     },
                 ],
                 allow_other: true,
+                multiple: false,
             }],
         }
     }

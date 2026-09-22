@@ -456,12 +456,24 @@ quality and its effect on answers are measured by the benchmark in
 
 Clarification surveys are on by default: the `ask_user` harness tool lets the model
 ask a staged survey of multiple-choice questions (each with suggested options, a
-free-text "Type something" answer, and "Chat about this" for one free-form reply to
-the whole survey) when the goal is ambiguous or an approach tradeoff needs the
-operator's call, then revise its plan around the answers before implementing. The
+free-text "Type something" answer typed inline, and "Chat about this" for one
+free-form reply to the whole survey) when the goal is ambiguous or an approach
+tradeoff needs the operator's call, then revise its plan around the answers before
+implementing.
+
+In the TUI, picking "Type something." opens an inline field on that question:
+type the answer and press Enter to record it (Esc goes back to the choices), so a
+question can carry extra thoughts the listed options do not cover. A question the
+model marks `"multiple": true` becomes a select-all-that-apply step: space toggles
+`[x]` on each option you want, the arrows move, and Enter on "Confirm selection"
+records all the marked labels in one answer (the model receives them comma-joined). The
 model may only ask while planning — right after the goal or a fresh operator message
 (`--send`, or a queued/steered TUI message) and before the first task loop starts;
-once the plan is executing the tool is withheld and the run finishes on its own.
+once the plan is executing the tool is withheld. One exception: when nothing workable
+remains and a task is blocked on operator input, the harness itself offers a final
+survey drawn from the blocked tasks before ending the run — the answers reopen those
+tasks (and unblock their dependents) so the run continues, while no answer (or a
+timeout) ends it `awaiting-input` with the survey preserved for `--resume`.
 The defaults live in `~/.drip/config.json`: `runtime.ask_user_interactive` (the TUI)
 and `runtime.ask_user_headless` (headless runs), each `"true"` unless set to `"false"`.
 `--no-ask` turns surveys off for a run and `--ask` forces them on; either explicit
@@ -703,18 +715,25 @@ excluded from the candidate pool. Every failure (bad profile, HTTP error,
 timeout, malformed answer, unreadable `classifiers.json`) is non-fatal: drip
 warns on stderr and runs with the explicit skills only.
 
+The interactive TUI (`drip --tui`) runs the same classifier over a shared pool
+construction and announces the resolved route in its transcript. Setting
+`runtime.classifier_in_tui` to `false` (or passing `--no-classifier`) keeps that
+session on explicit `/skill` toggles only.
+
 ### Settings
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `runtime.classifier_profile_id` | `""` | Model profile id used for classification; empty disables the feature |
 | `runtime.classifier_timeout_ms` | `"8000"` | Whole-selection budget per loop (and per requirements pass) |
+| `runtime.classifier_in_tui` | `""` (on) | Interactive TUI only: `false`/`0`/`no`/`off` keeps that session on explicit `/skill` toggles; anything else (including absent) runs the classifier there too |
 
 ### Flags
 
 - `--classifier <profile-id>` — classify with this profile for this run
   (overrides the setting).
-- `--no-classifier` — hard off, regardless of flag order.
+- `--no-classifier` — hard off, regardless of flag order. Both flags apply
+  to `drip --tui` as well.
 
 ### Model profiles
 
@@ -951,13 +970,23 @@ sessions or the session index.
 dripw
 ```
 
-Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, plus the
-transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
+Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills, plus the
+transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
 Clicking a row of the Sessions, Tasks or Shells pane focuses that pane and
 selects the row under the pointer (clicking a session also focuses its
-transcript). Hovering the transcript (or the shell log with `[3]` focused) and
-rolling the scroll wheel scrolls it too — older lines up, newer down.
+transcript); the `[4]` Skills pane is read-only, so a click on it just focuses
+it. Hovering the transcript (or the shell log with `[3]` focused) and rolling
+the scroll wheel scrolls it too — older lines up, newer down.
+
+The `[4]` Skills pane shows what the focused session's loops actually loaded:
+the harness writes the composed skill set on every loop-start telemetry event
+(the classifier's picks plus the run's base-prompt `--skill` activations,
+deduped in composition order), and dripw reads those events straight out of the
+session transcript. The pane lists a roll-up of every skill loaded across the
+run with how many loops loaded it, then each loop's own set in order, so you can
+see what a run had access to at a given point and how the sets moved as it ran.
+Sessions recorded before this telemetry existed just show the empty state.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 
@@ -1281,6 +1310,10 @@ cancel, or exit the spinner is removed and the bare label remains.
 
 - The label starts as a deterministic 3–5-word summary of your goal (its
   first usable words, or `drip` when nothing usable remains).
+- While the run is blocked on an `ask_user` question the spinner is
+  replaced by `?` — the run is waiting on you, not working. Recording the
+  answers (or dismissing the survey with Esc, or the run ending) restores
+  the spinner.
 - If the lightweight title profile is reachable, drip replaces the label
   with a 3–5-word title generated from the initial goal of the session
   (default profile: `glm-5-3-flash` via OpenRouter). This is one short

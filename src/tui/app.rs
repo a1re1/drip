@@ -115,6 +115,12 @@ pub struct TuiBootstrap {
     /// Opt-in custom status-line command from the persisted drip config; None
     /// keeps the built-in status bar. Never imported from ~/.claude.
     pub status_line: Option<crate::core::config::StatusLineSetting>,
+    /// `--classifier <profile-id>` override for this TUI run (headless
+    /// parity: it wins over `runtime.classifier_profile_id`).
+    pub classifier: Option<String>,
+    /// `--no-classifier`: hard off inside the TUI too, whatever the setting
+    /// says.
+    pub no_classifier: bool,
 }
 
 // Harness events can arrive far faster than the terminal can usefully paint;
@@ -324,6 +330,10 @@ const SURVEY_OTHER_ID: &str = "\u{0}other";
 /// survey instead of answering the questions one by one.
 const SURVEY_CHAT_ID: &str = "\u{0}chat";
 
+/// Sentinel PickerItem id for the confirm row of a "select all that apply"
+/// question: Enter there records every option marked with space.
+const SURVEY_CONFIRM_ID: &str = "\u{0}confirm";
+
 /// A live ask_user survey being answered one question at a time. The harness
 /// thread stays blocked on answers.jsonl; the overlay/composer only collect.
 struct SurveyState {
@@ -333,6 +343,9 @@ struct SurveyState {
     answers: Vec<HarnessSurveyAnswer>,
     /// Some while the operator is typing a free-text "Other…" answer.
     other_input: Option<String>,
+    /// Option indices marked with space on a "select all that apply" question
+    /// (always empty for a single-choice question).
+    multiple_picks: Vec<usize>,
     /// The last question the survey showed; a failed chat write reopens it.
     last_question: usize,
     /// Set when the operator chose "Chat about this": the survey stays alive
@@ -928,15 +941,28 @@ impl TuiApp {
         let Some(question) = state.survey.questions.get(state.current) else {
             return render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols);
         };
-        let listed = if question.allow_other {
-            overlay.items.len().saturating_sub(2)
+        // The escape-hatch rows carry sentinel ids starting with NUL; every
+        // row before the first sentinel is a listed option, whatever the mix
+        // of confirm/free-text/chat rows this question generated.
+        let listed = overlay
+            .items
+            .iter()
+            .position(|item| item.id.starts_with('\u{0}'))
+            .unwrap_or(overlay.items.len());
+        // An empty slice on a single-choice question: render_survey reads a
+        // non-empty slice as "this is a select-all-that-apply question".
+        let toggled: Vec<bool> = if question.multiple {
+            (0..listed)
+                .map(|index| state.multiple_picks.contains(&index))
+                .collect()
         } else {
-            overlay.items.len().saturating_sub(1)
+            Vec::new()
         };
         render_survey(
             &question.header,
             &question.question,
             &overlay.items[..listed],
+            &toggled,
             question.allow_other,
             overlay.selected,
             state.current + 1,
@@ -1430,6 +1456,7 @@ impl TuiApp {
             Ok(()) => {
                 self.survey = None;
                 self.overlay = None;
+                self.set_title_waiting(false);
                 self.push_info("chat reply recorded — the run continues");
             }
             Err(error) => {
@@ -1547,6 +1574,8 @@ impl TuiApp {
                         .to_string();
                     if !text.is_empty() {
                         self.record_survey_answer(None, Some(text));
+                    } else {
+                        self.push_info("type a free-text answer, or esc to go back to the choices");
                     }
                 }
                 Key::Escape => {
@@ -1594,6 +1623,7 @@ impl TuiApp {
                     self.overlay = None;
                     if kind == OverlayKind::Question {
                         self.survey = None;
+                        self.set_title_waiting(false);
                         self.push_info(
                             "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
                         );
@@ -1607,6 +1637,14 @@ impl TuiApp {
                         Some(item) => self.on_pick(kind, item),
                         None => {}
                     }
+                }
+                // Space marks an option on a "select all that apply"
+                // question: it toggles the highlighted row and leaves the
+                // overlay open, so several marks can be built up before the
+                // confirm row records them all.
+                Key::Text(text) if overlay.kind == OverlayKind::Question && text == " " => {
+                    let selected = overlay.selected;
+                    self.toggle_multi_pick(selected);
                 }
                 Key::Up => overlay.selected = overlay.selected.saturating_sub(1),
                 Key::Down | Key::Tab => {
@@ -1640,6 +1678,7 @@ impl TuiApp {
         // reply is typed like any message and Enter reaches submit().
         if matches!(key, Key::Escape) && self.survey.as_ref().is_some_and(|state| state.chat_mode) {
             self.survey = None;
+            self.set_title_waiting(false);
             self.push_info(
                 "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
             );
@@ -1994,11 +2033,13 @@ impl TuiApp {
             current: 0,
             answers: Vec::new(),
             other_input: None,
+            multiple_picks: Vec::new(),
             last_question: 0,
             chat_mode: false,
             // The exact file the blocked harness thread polls (loop.rs answers_path()).
             answers_path: Path::new(&self.paths.state_path).with_file_name("answers.jsonl"),
         });
+        self.set_title_waiting(true);
         self.open_survey_question();
     }
 
@@ -2016,6 +2057,15 @@ impl TuiApp {
                 label: option.label.clone(),
             })
             .collect();
+        if question.multiple {
+            // "Select all that apply": space toggles the option rows and this
+            // row records the marks (render_survey numbers it identically).
+            items.push(PickerItem {
+                detail: Some("enter records the options marked [x]".to_string()),
+                id: SURVEY_CONFIRM_ID.to_string(),
+                label: "Confirm selection".to_string(),
+            });
+        }
         if question.allow_other {
             items.push(PickerItem {
                 detail: Some("answer with free text instead".to_string()),
@@ -2045,6 +2095,58 @@ impl TuiApp {
         });
     }
 
+    /// Space on a "select all that apply" question: flip one option's mark.
+    /// A row that is not a listed option (or a plain question) is a no-op.
+    fn toggle_multi_pick(&mut self, index: usize) {
+        let Some(state) = self.survey.as_mut() else {
+            return;
+        };
+        let Some(question) = state.survey.questions.get(state.current) else {
+            return;
+        };
+        if !question.multiple || index >= question.options.len() {
+            return;
+        }
+        if state.multiple_picks.contains(&index) {
+            state.multiple_picks.retain(|picked| *picked != index);
+        } else {
+            state.multiple_picks.push(index);
+            state.multiple_picks.sort_unstable();
+        }
+    }
+
+    /// Enter on the "Confirm selection" row: record every marked option of a
+    /// "select all that apply" question as one comma-joined choice — the same
+    /// shape `validate_survey_answers` splits apart at the harness end.
+    fn confirm_multi_picks(&mut self) {
+        let labels: Vec<String> = {
+            let Some(state) = self.survey.as_ref() else {
+                return;
+            };
+            let Some(question) = state.survey.questions.get(state.current) else {
+                return;
+            };
+            if !question.multiple {
+                return;
+            }
+            state
+                .multiple_picks
+                .iter()
+                .filter_map(|index| {
+                    question
+                        .options
+                        .get(*index)
+                        .map(|option| option.label.clone())
+                })
+                .collect()
+        };
+        if labels.is_empty() {
+            self.push_info("mark at least one option with space before confirming");
+            return;
+        }
+        self.record_survey_answer(Some(labels.join(", ")), None);
+    }
+
     fn record_survey_answer(&mut self, choice: Option<String>, other: Option<String>) {
         let done = {
             let Some(state) = self.survey.as_mut() else {
@@ -2056,6 +2158,7 @@ impl TuiApp {
                 other,
             });
             state.other_input = None;
+            state.multiple_picks.clear();
             state.last_question = state.current;
             state.current += 1;
             state.current >= state.survey.questions.len()
@@ -2080,6 +2183,7 @@ impl TuiApp {
         {
             self.overlay = None;
         }
+        self.set_title_waiting(false);
         self.push_info(message.to_string());
     }
 
@@ -2106,6 +2210,7 @@ impl TuiApp {
             Ok(()) => {
                 self.survey = None;
                 self.overlay = None;
+                self.set_title_waiting(false);
                 self.push_info("clarification answers recorded — the run continues");
             }
             Err(error) => {
@@ -2166,7 +2271,9 @@ impl TuiApp {
     fn on_pick(&mut self, kind: OverlayKind, item: PickerItem) {
         match kind {
             OverlayKind::Question => {
-                if item.id == SURVEY_OTHER_ID {
+                if item.id == SURVEY_CONFIRM_ID {
+                    self.confirm_multi_picks();
+                } else if item.id == SURVEY_OTHER_ID {
                     if let Some(state) = self.survey.as_mut() {
                         state.other_input = Some(String::new());
                     }
@@ -3280,6 +3387,69 @@ impl TuiApp {
             .collect();
         let hooks = self.config.hooks.clone();
 
+        // The skill classifier is config-driven on every surface, the TUI
+        // included: a resolved `runtime.classifier_profile_id` turns it on here
+        // exactly as it does headless, and `runtime.classifier_in_tui = "false"`
+        // keeps the TUI on its explicit /skill toggles only. Resolved before
+        // the run thread starts so the announce line and any warnings land in
+        // this run's transcript — at the cost of a one-time stall before the
+        // first paint on a cold requirements cache (one HTTP round-trip per
+        // unknown skill); moving the build behind the run task is a follow-up.
+        let classifier_pool = {
+            let settings = self.config.settings.clone();
+            if crate::cli::classifier_pool::tui_classifier_pool_enabled(
+                &settings,
+                self.bootstrap.no_classifier,
+            ) {
+                let env = self.merged_env();
+                let active_names: std::collections::HashSet<String> =
+                    skills.iter().map(|skill| skill.name.clone()).collect();
+                let tools = builtin_tool_pack(tool_options.clone());
+                let pool_args = crate::cli::classifier_pool::ClassifierPoolArgs {
+                    active_skill_names: &active_names,
+                    cwd: &self.bootstrap.cwd,
+                    disabled: false,
+                    env: &env,
+                    home: &self.bootstrap.home,
+                    // The TUI tool pack carries no MCP tools at all, so the
+                    // requirements pass sees no MCP capabilities here. The
+                    // headless path adds one entry per server it spawned; a
+                    // skill whose requirements need MCP is classified as
+                    // unsatisfiable in the TUI, which matches what the run can
+                    // actually invoke.
+                    mcp_servers: Vec::new(),
+                    profile_override: self.bootstrap.classifier.as_deref(),
+                    settings: &settings,
+                    tools: &tools,
+                };
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(
+                        crate::cli::classifier_pool::build_classifier_pool(pool_args),
+                    ),
+                    // Every other failure in this sequence reports through the
+                    // transcript; a runtime that cannot be built must not be the
+                    // one exception, or classification silently disappears.
+                    Err(error) => {
+                        self.push_error(format!(
+                            "classifier: tokio runtime unavailable ({error}) — skill classification is off for this run"
+                        ));
+                        Default::default()
+                    }
+                }
+            } else {
+                Default::default()
+            }
+        };
+        for warning in &classifier_pool.warnings {
+            self.push_info(warning.clone());
+        }
+        if let Some(announce) = classifier_pool.announce.clone() {
+            self.push_info(announce);
+        }
+
         std::thread::spawn(move || {
             // A panic anywhere below must still release the composer: the
             // guard reports it as a failed run unless the thread finishes normally.
@@ -3313,10 +3483,11 @@ impl TuiApp {
             let result = runtime.block_on(run_session_goal(SessionGoalArgs {
                 ask_user_enabled,
                 ask_user_timeout_seconds,
-                // The TUI owns its own /skill toggles; the opt-in classifier is
-                // a headless-CLI feature (see README §Skill classifier).
-                classifier: None,
-                skill_pool: Vec::new(),
+                // Config-driven like the headless path: the route and the
+                // pool were resolved (settings + env) before this run thread
+                // started.
+                classifier: classifier_pool.route.clone(),
+                skill_pool: classifier_pool.skills.clone(),
                 cwd,
                 goal: goal_text,
                 goal_context,
@@ -3571,6 +3742,19 @@ impl TuiApp {
             let escape = title.set_busy(false, Instant::now());
             crate::tui::pane_title::emit(escape.as_deref());
         }
+    }
+
+    /// Mirrors the operator-blocked state onto the pane title: while an
+    /// ask_user survey waits for an answer the spinner becomes `?` (a spinner
+    /// would claim progress the blocked run is not making); recording the
+    /// answers, dismissing the survey, or ending the run restores it.
+    fn set_title_waiting(&mut self, waiting: bool) -> Option<String> {
+        let escape = self
+            .pane_title
+            .as_mut()
+            .and_then(|title| title.set_waiting(waiting, Instant::now()));
+        crate::tui::pane_title::emit(escape.as_deref());
+        escape
     }
 
     // ----- main loop ------------------------------------------------------
@@ -4527,6 +4711,8 @@ mod rename_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, _rx) = mpsc::channel::<Msg>();
         let (mention_tx, _mention_rx) = mpsc::channel::<(u64, String)>();
@@ -4985,6 +5171,8 @@ mod skill_activation_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
@@ -5771,6 +5959,8 @@ mod prompt_history_wiring_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
@@ -6067,6 +6257,34 @@ mod survey_tests {
     use super::*;
     use crate::core::types::{HarnessSurveyOption, HarnessSurveyQuestion};
 
+    /// A "select all that apply" question: same shape, `multiple: true`.
+    fn multiple_question(
+        header: &str,
+        prompt: &str,
+        options: &[(&str, &str)],
+        allow_other: bool,
+    ) -> HarnessSurveyQuestion {
+        let mut question = question(header, prompt, options, allow_other);
+        question.multiple = true;
+        question
+    }
+
+    fn multiple_survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![multiple_question(
+                "Scope",
+                "Which parts should change?",
+                &[
+                    ("Docs", "update the readme"),
+                    ("Picker", "the survey overlay"),
+                    ("Tests", "new coverage"),
+                ],
+                true,
+            )],
+        }
+    }
+
     fn question(
         header: &str,
         prompt: &str,
@@ -6084,6 +6302,7 @@ mod survey_tests {
                 })
                 .collect(),
             allow_other,
+            multiple: false,
         }
     }
 
@@ -6134,6 +6353,41 @@ mod survey_tests {
             .iter()
             .any(|row| row
                 .contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+    }
+
+    #[test]
+    fn survey_waiting_flips_the_pane_title_between_question_mark_and_spinner() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        // A live run with a spinning title, then the ask_user survey arrives.
+        fixture.app.pane_title = Some(PaneTitle::new("add authentication"));
+        assert!(fixture
+            .app
+            .pane_title
+            .as_mut()
+            .expect("pane title")
+            .set_busy(true, Instant::now())
+            .is_some());
+        fixture.app.begin_survey(survey());
+        assert!(
+            fixture
+                .app
+                .pane_title
+                .as_ref()
+                .expect("pane title")
+                .is_waiting(),
+            "a pending survey shows the waiting marker instead of the spinner"
+        );
+        // Esc dismisses the survey (nothing written): the spinner returns.
+        fixture.app.on_key(Key::Escape);
+        assert!(
+            !fixture
+                .app
+                .pane_title
+                .as_ref()
+                .expect("pane title")
+                .is_waiting(),
+            "dismissing the survey resumes the spinner"
+        );
     }
 
     #[test]
@@ -6268,5 +6522,114 @@ mod survey_tests {
             std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
         assert!(written.contains("\"chat\":\"use pol\""), "{written}");
+    }
+
+    #[test]
+    fn a_multiple_question_renders_marks_a_confirm_row_and_the_toggle_footer() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(multiple_survey());
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] 1. Docs")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("❯ [ ] 1. Docs")),
+            "{rows:?}"
+        );
+        // Three options + confirm + "Type something." + chat.
+        assert!(
+            rows.iter().any(|row| row.contains("4. Confirm selection")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("5. Type something.")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("6. Chat about this")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Space toggles · Enter confirms the selection")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn space_marks_options_and_the_confirm_row_records_them_joined() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        let survey = multiple_survey();
+        fixture.app.begin_survey(survey.clone());
+        // Space on the highlighted row marks it, then Down+Space marks a second.
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            rows.iter().any(|row| row.contains("[x] 1. Docs")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] 2. Picker")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[x] 3. Tests")),
+            "{rows:?}"
+        );
+        // Down to the confirm row (index 3) and Enter: one joined choice.
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Return);
+        assert!(
+            fixture.app.survey.is_none(),
+            "the last question finishes the survey"
+        );
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
+        assert!(written.contains("\"choice\":\"Docs, Tests\""), "{written}");
+        // The harness end validates that exact shape against the survey.
+        let record: HarnessSurveyAnswers =
+            serde_json::from_str(written.lines().next().expect("one line")).expect("valid record");
+        assert!(
+            crate::harness::harness_tools::validate_survey_answers(&survey, &record).is_ok(),
+            "a joined multi-select choice validates: {record:?}"
+        );
+    }
+
+    #[test]
+    fn confirming_with_nothing_marked_keeps_the_survey_open() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(multiple_survey());
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Return);
+        let state = fixture.app.survey.as_ref().expect("survey stays open");
+        assert!(state.answers.is_empty(), "nothing is recorded");
+        assert!(fixture.app.cells.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Info(note)
+                if note.text == "mark at least one option with space before confirming"
+        )));
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        assert!(!path.exists(), "nothing is written");
+    }
+
+    #[test]
+    fn space_is_a_no_op_on_a_single_choice_question() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        let state = fixture.app.survey.as_ref().expect("survey still open");
+        assert_eq!(
+            state.current, 0,
+            "space never advances a single-choice survey"
+        );
+        assert!(state.answers.is_empty());
     }
 }

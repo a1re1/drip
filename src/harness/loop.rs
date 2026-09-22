@@ -5566,6 +5566,94 @@ mod dynamic_skills_tests {
             "a skill filtered by requirements must be decided without a classifier call"
         );
     }
+
+    // The loop-start telemetry must report the skills the loop actually has
+    // access to: the run's explicit --skill activations (which live in the
+    // base prompt, not the classifier pool) plus the classifier selection.
+    #[tokio::test]
+    async fn loop_start_records_base_and_dynamic_skills_and_omits_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink: std::sync::Arc<std::sync::Mutex<Vec<HarnessEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = sink.clone();
+        let mut run = HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            base_skills: vec!["navis".to_string()],
+            on_event: Some(std::sync::Arc::new(move |event| {
+                collected.lock().unwrap().push(event)
+            })),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap();
+        // "navis" is also selected dynamically on purpose: the base entry must
+        // not be duplicated in the field.
+        run.dynamic_skills = vec![
+            crate::cli::skills::LoadedCliSkill {
+                content: "body".to_string(),
+                name: "navis".to_string(),
+                role_hints: None,
+            },
+            crate::cli::skills::LoadedCliSkill {
+                content: "body".to_string(),
+                name: "verify-before-done".to_string(),
+                role_hints: None,
+            },
+        ];
+
+        let _scope = run.begin_loop();
+
+        let events = sink.lock().unwrap();
+        let start = events
+            .iter()
+            .find(|event| event.r#type == HarnessEventType::LoopStart)
+            .expect("begin_loop must emit a loop-start event");
+        let skills = start
+            .data
+            .as_ref()
+            .expect("loop-start carries data")
+            .skills
+            .as_ref()
+            .expect("a loop with skills must record them");
+        assert_eq!(skills.as_slice(), ["navis", "verify-before-done"]);
+        assert!(
+            start.detail.contains("[skills: navis, verify-before-done]"),
+            "the prose suffix must mirror the field: {}",
+            start.detail
+        );
+        std::mem::forget(dir);
+
+        // No base and no dynamic skills: the field is omitted, not empty.
+        let dir = tempfile::tempdir().unwrap();
+        let sink: std::sync::Arc<std::sync::Mutex<Vec<HarnessEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = sink.clone();
+        let mut run = HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            on_event: Some(std::sync::Arc::new(move |event| {
+                collected.lock().unwrap().push(event)
+            })),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap();
+
+        let _scope = run.begin_loop();
+
+        let events = sink.lock().unwrap();
+        let start = events
+            .iter()
+            .find(|event| event.r#type == HarnessEventType::LoopStart)
+            .unwrap();
+        assert!(
+            start.data.as_ref().unwrap().skills.is_none(),
+            "an empty skill set must omit the field"
+        );
+        assert!(!start.detail.contains("[skills:"), "{}", start.detail);
+        std::mem::forget(dir);
+    }
 }
 
 /// Options for constructing a `SolidStateHarness`. Every optional field is
@@ -5646,6 +5734,12 @@ pub struct SolidStateHarnessOptions {
     /// default, and never the explicit --skill activations (those are already
     /// in the base prompt).
     pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
+    /// Names of the run's explicit `--skill` activations. They are already
+    /// composed into the base system prompt (so they never appear in
+    /// `skill_pool`), but the loop-start telemetry records them alongside the
+    /// classifier selection: a run driven only by `--skill` composes no
+    /// dynamic skills at all, and would otherwise report no skills.
+    pub base_skills: Vec<String>,
     pub system_prompt: Option<String>,
     pub telemetry: Option<PartialHarnessTelemetryConfig>,
     pub redact_secrets: Vec<(String, String)>,
@@ -5774,6 +5868,9 @@ pub struct HarnessRun {
     /// operator message, false once a task loop starts (ask_user is useless
     /// while a plan already executes).
     pub ask_window_open: bool,
+    /// The terminal blocked-on-input moment offered its one operator
+    /// clarification survey already; never offered twice in one run.
+    pub late_survey_offered: bool,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
     pub aborted: bool,
@@ -6420,6 +6517,7 @@ impl HarnessRun {
             direct_plan_checked: false,
             ask_user_awaiting: false,
             ask_window_open: true,
+            late_survey_offered: false,
             answers_path: run_answers_path,
             continue_command: None,
             aborted: false,
@@ -6664,6 +6762,98 @@ impl HarnessRun {
 
     /// Block after a question event until a complete matching answer batch
     /// arrives in answers.jsonl (~500 ms poll), the run aborts, or the
+    /// The terminal blocked-on-input moment is a last chance to clarify: with
+    /// ask_user enabled and nothing workable left, offer ONE survey built from
+    /// the operator-blocked tasks instead of ending the run silently. Answers
+    /// reopen those tasks (and revive their dependents) so the run continues; a
+    /// timeout preserves the survey for `--resume`; every other path returns
+    /// false and the caller ends the run exactly as before. At most one offer
+    /// per run, so a blocked loop never surveys the operator repeatedly.
+    async fn try_late_clarification(&mut self) -> bool {
+        if !self.options.ask_user_enabled || self.late_survey_offered {
+            return false;
+        }
+        // A survey already pending (a timed-out offer being resumed) belongs to
+        // the operator: never stack a second one on top of it.
+        if self.state.pending_questions.is_some() {
+            return false;
+        }
+        let blockers: Vec<(String, String)> = core_state::operator_blocked_tasks(&self.state)
+            .iter()
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    task.summary.clone().unwrap_or_else(|| task.title.clone()),
+                )
+            })
+            .collect();
+        if blockers.is_empty() {
+            return false;
+        }
+        self.late_survey_offered = true;
+        let questions: Vec<crate::core::types::HarnessSurveyQuestion> = blockers
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(index, (id, detail))| crate::core::types::HarnessSurveyQuestion {
+                header: format!("Blocker {}", index + 1),
+                question: format!(
+                    "Task {id} is blocked on operator input: {detail}. How should the run proceed?"
+                ),
+                options: vec![
+                    crate::core::types::HarnessSurveyOption {
+                        label: "Supply what is missing".to_string(),
+                        description: "Reply with the material or decision that task is waiting on; the run reopens it.".to_string(),
+                    },
+                    crate::core::types::HarnessSurveyOption {
+                        label: "Stop here".to_string(),
+                        description: "End the run with the work already done and leave this task blocked.".to_string(),
+                    },
+                ],
+                allow_other: true,
+                multiple: false,
+            })
+            .collect();
+        let survey = crate::core::types::QuestionSurvey {
+            answers_cursor: None,
+            questions,
+        };
+        self.state.pending_questions = Some(survey.clone());
+        self.ask_window_open = true;
+        self.persist();
+        self.emit(HarnessEvent {
+            data: None,
+            detail:
+                "blocked on operator input — offering a clarification survey before ending the run"
+                    .to_string(),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::StallRecovery,
+        });
+        self.emit_question_event(&survey);
+        match self.run_survey_block(survey).await {
+            SurveyWait::Answered => {
+                // The answer is a fresh operator message: it reopens the tasks
+                // that were waiting on it (and unblocks their dependents) via
+                // the same policy `--resume` uses.
+                let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
+                self.emit(HarnessEvent {
+                    data: None,
+                    detail: format!(
+                        "operator answered the blocked-on-input survey — reopened {} task(s)",
+                        reopened.len()
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::StallRecovery,
+                });
+                self.persist();
+                !reopened.is_empty()
+            }
+            // Aborted or timed out: the caller's own end-of-run handling
+            // (aborted result / awaiting-input) takes over from here.
+            _ => false,
+        }
+    }
+
     /// ask_user timeout expires. On timeout the pending survey is preserved
     /// and the run is flagged to end with reason "awaiting-input".
     async fn run_survey_block(&mut self, survey: crate::core::types::QuestionSurvey) -> SurveyWait {
@@ -7895,6 +8085,18 @@ impl HarnessRun {
             if core_state::get_current_task(&self.state).is_none()
                 && !core_state::operator_blocked_tasks(&self.state).is_empty()
             {
+                // Before ending the run blocked-on-input, give the operator the
+                // one chance to answer through the survey pipeline; an answer
+                // reopens the blocked work and the loop continues.
+                if self.try_late_clarification().await {
+                    continue;
+                }
+                if self.ask_user_awaiting {
+                    return Some(self.awaiting_input_result());
+                }
+                if self.aborted {
+                    return Some(self.aborted_result());
+                }
                 self.blocked_on_input = true;
                 break;
             }
@@ -8422,17 +8624,23 @@ impl HarnessRun {
         };
 
         // the loop-start event.
-        let skills_suffix = if self.dynamic_skills.is_empty() {
+        // The skills this loop composed, kept both as prose (the detail a
+        // human reads) and as structure (the loop-start event's `skills`,
+        // which dripw and the browser UI read instead of parsing the prose).
+        // The set is the run's explicit --skill activations (already composed
+        // into the base prompt) followed by this loop's classifier selection,
+        // deduped by name: a --skill-driven run composes no dynamic skills, so
+        // without the base set its telemetry field would be empty.
+        let mut loaded_skills: Vec<String> = self.options.base_skills.clone();
+        for skill in &self.dynamic_skills {
+            if !loaded_skills.contains(&skill.name) {
+                loaded_skills.push(skill.name.clone());
+            }
+        }
+        let skills_suffix = if loaded_skills.is_empty() {
             String::new()
         } else {
-            format!(
-                " [skills: {}]",
-                self.dynamic_skills
-                    .iter()
-                    .map(|skill| skill.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!(" [skills: {}]", loaded_skills.join(", "))
         };
         let detail = format!(
             "loop {}{}{} — {}",
@@ -8455,6 +8663,7 @@ impl HarnessRun {
         self.emit(HarnessEvent {
             data: Some(HarnessEventData {
                 r#loop: Some(self.state.r#loop),
+                skills: if loaded_skills.is_empty() { None } else { Some(loaded_skills) },
                 task_id: current_task_id.clone(),
                 ..Default::default()
             }),
@@ -11563,6 +11772,7 @@ mod ask_user_survey_tests {
                     },
                 ],
                 allow_other: true,
+                multiple: false,
             }],
         }
     }
@@ -11585,6 +11795,7 @@ mod ask_user_survey_tests {
                         },
                     ],
                     allow_other: true,
+                    multiple: false,
                 },
                 HarnessSurveyQuestion {
                     header: "Scope".into(),
@@ -11600,6 +11811,7 @@ mod ask_user_survey_tests {
                         },
                     ],
                     allow_other: false,
+                    multiple: false,
                 },
             ],
         }
@@ -12026,6 +12238,145 @@ mod ask_user_survey_tests {
     /// now() calls so the poll survives a few real 500 ms sleeps; a writer
     /// thread appends at ~150 ms. A pathological environment still times out
     /// via the 60 s jumps instead of hanging.
+    /// Seeds one operator-blocked task the way the model does (finish_task with
+    /// blockedOn), so the late-clarification path sees exactly the reported
+    /// blocked-on-input state.
+    fn seed_operator_blocked_task(run: &mut HarnessRun, title: &str, summary: &str) -> String {
+        let tasks = crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from(title)],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        let id = tasks[0].id.clone();
+        crate::core::state::finish_task(
+            &mut run.state,
+            crate::core::state::HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary,
+                task_id: Some(&id),
+                confidence: None,
+            },
+        );
+        if let Some(task) = crate::core::state::get_task_by_id_mut(&mut run.state, &id) {
+            task.blocked_on = Some(crate::core::types::HarnessTaskBlocker::Operator);
+        }
+        id
+    }
+
+    /// The accepted late survey reopens the blocked task (clearing its blocker)
+    /// so the run continues, and the offer is spent — a second block cannot
+    /// trigger a second survey.
+    #[tokio::test]
+    async fn late_clarification_reopens_the_operator_blocked_task_after_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A stepped clock: the first 8 now() calls hold still (so the poll loop
+        // can see the answer land), then it jumps past the 1s timeout.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let clock_ticks = ticks.clone();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now: NowFn = Arc::new(move || {
+            let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
+            base + chrono::Duration::seconds(if step < 8 { 0 } else { 60 * (step - 7) })
+        });
+        let mut run = test_run_in(&dir, move |o| {
+            o.ask_user_enabled = true;
+            o.now = Some(now);
+        })
+        .await;
+        let id = seed_operator_blocked_task(
+            &mut run,
+            "add authentication",
+            "which app should receive authentication?",
+        );
+        let path = run.answers_path().unwrap();
+        let writer = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            crate::core::state::answers::append_answers(&writer, &batch(0, "Poll")).unwrap();
+        });
+        assert!(
+            run.try_late_clarification().await,
+            "an answered late survey must reopen the blocked task"
+        );
+        let task = crate::core::state::get_task_by_id(&run.state, &id).unwrap();
+        assert_eq!(
+            task.status,
+            HarnessTaskStatus::Pending,
+            "the blocked task goes back to pending"
+        );
+        assert!(
+            task.blocked_on.is_none(),
+            "the operator's answer clears the blocker"
+        );
+        assert!(
+            run.state.pending_questions.is_none(),
+            "the survey is consumed"
+        );
+        assert!(run.late_survey_offered, "the one offer is recorded");
+        let second =
+            seed_operator_blocked_task(&mut run, "choose a provider", "which sign-in provider?");
+        assert!(
+            !run.try_late_clarification().await,
+            "the late survey is offered at most once per run"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &second)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "a later block is not surveyed again"
+        );
+    }
+
+    /// `--no-ask` (and any other disabled mode) leaves the terminal path
+    /// exactly as it was: no survey staged, the offer unspent.
+    #[tokio::test]
+    async fn late_clarification_is_skipped_when_ask_user_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |o| o.ask_user_enabled = false).await;
+        seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        assert!(
+            !run.try_late_clarification().await,
+            "--no-ask must end blocked-on-input with no survey"
+        );
+        assert!(run.state.pending_questions.is_none(), "no survey is staged");
+        assert!(
+            !run.late_survey_offered,
+            "the disabled path never spends the offer"
+        );
+    }
+
+    /// A late survey nobody answers does not continue the run and does not
+    /// vanish: the run ends awaiting-input with the survey preserved for
+    /// `--resume`, and the task stays blocked.
+    #[tokio::test]
+    async fn an_unanswered_late_survey_is_preserved_for_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |o| o.ask_user_enabled = true).await;
+        let id = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        assert!(
+            !run.try_late_clarification().await,
+            "an unanswered survey does not continue the run"
+        );
+        assert!(
+            run.ask_user_awaiting,
+            "the run ends awaiting-input rather than blocked-on-input"
+        );
+        assert!(
+            run.state.pending_questions.is_some(),
+            "the timed-out survey survives for --resume"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &id)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "with no answer the task stays blocked"
+        );
+    }
+
     #[tokio::test]
     async fn live_answers_inject_the_directive_prefixed_summary_once() {
         let dir = tempfile::tempdir().unwrap();

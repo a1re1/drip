@@ -674,14 +674,24 @@ fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
         return vec![plain("  no skill telemetry yet", c::dim)];
     }
     let all = all_loaded_skills(&vm.skill_loads);
-    let mut rows = vec![plain(format!("all loaded skills ({})", all.len()), c::accent)];
+    let mut rows = vec![plain(
+        format!("all loaded skills ({})", all.len()),
+        c::accent,
+    )];
     for (name, count) in all {
-        let suffix = if count > 1 { format!(" · {count} loops") } else { String::new() };
+        let suffix = if count > 1 {
+            format!(" · {count} loops")
+        } else {
+            String::new()
+        };
         rows.push(plain(format!("  {name}{suffix}"), c::white));
     }
     rows.push(plain("", c::dim));
     for load in &vm.skill_loads {
-        rows.push(plain(format!("loop {} · {}", load.iteration, load.skills.len()), c::accent));
+        rows.push(plain(
+            format!("loop {} · {}", load.iteration, load.skills.len()),
+            c::accent,
+        ));
         for name in &load.skills {
             rows.push(plain(format!("  {name}"), c::gray));
         }
@@ -1359,8 +1369,20 @@ mod tests {
             task("task-5", "cut one", HarnessTaskStatus::Dropped),
         ];
         let rows = task_rows(&vm, 24, 10);
-        assert_eq!(task_texts(&rows), vec!["◐ active one", "○ pending one", "● done one", "✗ stuck one", "○ cut one"]);
-        assert!(rows[0].selected, "the focused pane highlights the selected task");
+        assert_eq!(
+            task_texts(&rows),
+            vec![
+                "◐ active one",
+                "○ pending one",
+                "● done one",
+                "✗ stuck one",
+                "○ cut one"
+            ]
+        );
+        assert!(
+            rows[0].selected,
+            "the focused pane highlights the selected task"
+        );
     }
 
     #[test]
@@ -1373,7 +1395,10 @@ mod tests {
             task("task-2", "b", HarnessTaskStatus::Pending),
             task("task-3", "c", HarnessTaskStatus::Completed),
         ];
-        assert_eq!(task_count_note(&tasks).as_deref(), Some("2 pending · 1 completed"));
+        assert_eq!(
+            task_count_note(&tasks).as_deref(),
+            Some("2 pending · 1 completed")
+        );
         let mut vm = empty_vm();
         vm.tasks = tasks;
         assert_eq!(tasks_title(&vm), "[2] Tasks (3)");
@@ -1384,8 +1409,15 @@ mod tests {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
-        let mut tasks: Vec<HarnessTask> =
-            (0..10).map(|i| task(&format!("task-{i}"), &format!("t{i}"), HarnessTaskStatus::Pending)).collect();
+        let mut tasks: Vec<HarnessTask> = (0..10)
+            .map(|i| {
+                task(
+                    &format!("task-{i}"),
+                    &format!("t{i}"),
+                    HarnessTaskStatus::Pending,
+                )
+            })
+            .collect();
         tasks.push(task("task-x", "active", HarnessTaskStatus::InProgress));
         vm.tasks = tasks;
         // The window starts at the selected row: first row selected shows the

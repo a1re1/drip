@@ -775,6 +775,7 @@ pub fn load_skill_content(
                 }
             }
         }
+
         content.push(bytes[i] as char);
         i += 1;
     }
@@ -784,6 +785,26 @@ pub fn load_skill_content(
         name: skill.name.clone(),
         role_hints: frontmatter.roles,
     })
+}
+
+/// Loads a discovered skill through the loader that understands its path.
+///
+/// Built-in skills ship embedded in the binary behind a `<builtin>/...`
+/// pseudo-path that has no file on disk (a project or user `skills/` directory
+/// that shadows a built-in still reports that pseudo-path), so the
+/// file-reading roles loader fails on them with "No such file or directory".
+/// Every caller that loads a *discovered* skill — the classifier pool and the
+/// headless `--skill` activation pool — goes through here so built-ins load
+/// from the embedded constants and real files load from disk.
+pub fn load_any_skill_content(
+    skill: &CliSkill,
+    args: Option<&HashMap<String, String>>,
+) -> Result<LoadedCliSkill, String> {
+    if skill.path.starts_with("<builtin>") {
+        load_skill_content(skill, args)
+    } else {
+        crate::cli::roles::load_skill_content(skill, args).map_err(|error| error.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------

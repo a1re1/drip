@@ -47,8 +47,8 @@ use crate::cli::session_run::{
     run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
 };
 use crate::cli::skills::{
-    load_skill_activation, load_skill_content, resolve_effective_activation, save_skill_activation,
-    LoadedCliSkill, ResolveEffectiveActivationArgs, SessionRunConfig, SkillActivationEntry,
+    load_skill_activation, resolve_effective_activation, save_skill_activation, LoadedCliSkill,
+    ResolveEffectiveActivationArgs, SessionRunConfig, SkillActivationEntry,
 };
 use crate::cli::state_summary::{build_state_summary_json, format_state_summary};
 use crate::cli::transcript::{
@@ -1021,7 +1021,11 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 return 1;
             };
 
-            match load_skill_content(matched, Some(&requested.args)) {
+            // Discovered skills go through the path-aware loader: a built-in
+            // (or a real `skills/<name>` dir that shadows one) reports the
+            // `<builtin>/...` pseudo-path and has no file on disk, so the
+            // file-reading roles loader would fail it outright.
+            match crate::cli::skills::load_any_skill_content(matched, Some(&requested.args)) {
                 Ok(loaded) => active_skills.push(loaded),
                 Err(error) => {
                     // Bad skill args (missing required, unknown key) are usage errors.
@@ -1217,7 +1221,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 continue;
             }
 
-            let loaded = match load_skill_content(&skill, None) {
+            let loaded = match crate::cli::skills::load_any_skill_content(&skill, None) {
                 Ok(loaded) => loaded,
                 Err(error) => {
                     eprintln!("classifier: {error} — skipping this skill");

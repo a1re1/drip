@@ -13,7 +13,6 @@ use std::path::Path;
 use indexmap::IndexMap;
 
 use crate::cli::marketplaces::discover_all_skills;
-use crate::cli::roles::load_skill_content;
 use crate::cli::skills::CliSkill;
 use crate::core::home::DripHome;
 use crate::core::skill_requirements::{ensure_requirements, Capability, SkillRequirements};
@@ -112,7 +111,7 @@ pub async fn build_classifier_pool(args: ClassifierPoolArgs<'_>) -> ClassifierPo
             continue;
         }
 
-        let loaded = match load_skill_content(&skill, None) {
+        let loaded = match crate::cli::skills::load_any_skill_content(&skill, None) {
             Ok(loaded) => loaded,
             Err(error) => {
                 pool.warnings
@@ -294,6 +293,41 @@ mod classifier_pool_tests {
         for value in ["false", "FALSE ", "0", "no", "off"] {
             let s = settings(&[(crate::core::config::CLASSIFIER_IN_TUI_SETTING_ID, value)]);
             assert!(!classifier_enabled_in_tui(&s), "{value:?} must disable");
+        }
+    }
+
+    #[test]
+    fn builtin_pool_skills_load_through_the_embedded_loader() {
+        // Regression: built-ins ship embedded in the binary behind a
+        // `<builtin>/...` pseudo-path, so the file-reading roles loader failed
+        // on every one of them and the classifier pool dropped the whole
+        // surface with "No such file or directory (os error 2)".
+        for name in [
+            "commit-discipline",
+            "cs-reference",
+            "debug-root-cause",
+            "hooks-setup",
+            "migration-discipline",
+            "praeparare",
+            "refactor-safely",
+            "review-independently",
+            "tdd",
+            "verify-before-done",
+        ] {
+            let skill = CliSkill {
+                description: String::new(),
+                key: None,
+                name: name.to_string(),
+                path: format!("<builtin>/{name}/SKILL.md"),
+                source: crate::cli::skills::SkillSource::Builtin,
+            };
+            let loaded = crate::cli::skills::load_any_skill_content(&skill, None)
+                .unwrap_or_else(|error| panic!("built-in {name} must load: {error}"));
+            assert!(!loaded.content.is_empty());
+            assert!(
+                loaded.content.contains(&format!("name: {name}")),
+                "{name} loaded unexpected content"
+            );
         }
     }
 }

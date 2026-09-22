@@ -895,7 +895,7 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
                     continue;
                 };
 
-                match load_skill_content(skill, None) {
+                match crate::cli::skills::load_any_skill_content(skill, None) {
                     Ok(loaded) => {
                         // Compose through the shared composer so role-embedded
                         // skills get the same "# Skill role hints (advisory)"

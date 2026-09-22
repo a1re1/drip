@@ -40,9 +40,7 @@ use crate::cli::mentions::{
     get_active_chat_file_mention, replace_active_chat_file_mention, resolve_goal_mentions,
 };
 use crate::cli::paste::{sanitize_pasted_input, DISABLE_BRACKETED_PASTE, ENABLE_BRACKETED_PASTE};
-use crate::cli::roles::{
-    load_skill_content, resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource,
-};
+use crate::cli::roles::{resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource};
 use crate::cli::session_run::{
     run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
 };
@@ -2640,11 +2638,7 @@ impl TuiApp {
         // "<builtin>/..." pseudo-path, with no file on disk), so they must load
         // through the skills loader, which understands that pseudo-path; the
         // roles loader reads project/user/marketplace skills from real files.
-        let loaded = if skill.path.starts_with("<builtin>") {
-            crate::cli::skills::load_skill_content(&skill, None)
-        } else {
-            load_skill_content(&skill, None).map_err(|error| error.to_string())
-        };
+        let loaded = crate::cli::skills::load_any_skill_content(&skill, None);
         match loaded {
             Ok(loaded) => {
                 self.active_skills.push(loaded);

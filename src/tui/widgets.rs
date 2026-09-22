@@ -320,8 +320,9 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     // the two can never disagree.
     let text_width = composer_text_width(width);
     let lines = composer_lines(display, text_width);
-    let cursor_line = if props.disabled {
-        // A run owns the composer: no cursor cell is drawn.
+    let cursor_line = if placeholder {
+        // Only the run placeholder hides the cursor: a draft typed while a
+        // goal runs keeps its cursor cell so the writer can see where they are.
         usize::MAX
     } else {
         composer_cursor_position(display, text_width, props.cursor).0
@@ -826,6 +827,26 @@ mod tests {
             .iter()
             .any(|row| row.contains("running — press esc to stop the run")));
         assert!(!rows.iter().any(|row| row.contains("\u{1b}[7m")));
+    }
+
+    #[test]
+    fn composer_keeps_the_cursor_on_a_draft_typed_while_a_run_owns_it() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 3,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued_count: 0,
+            session_name: None,
+            slash_suggestions: &[],
+            text: "queued draft",
+        };
+        let rows = render_composer(&props, 60);
+        let body = rows.iter().find(|row| row.contains("ed draft")).unwrap();
+        assert!(body.contains(&format!("que{INVERSE_ON}u{INVERSE_OFF}ed")), "{body:?}");
     }
 
     #[test]

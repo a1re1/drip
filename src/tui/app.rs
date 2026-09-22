@@ -1385,7 +1385,11 @@ impl TuiApp {
                 Key::Ctrl('u') => self.apply_edit(String::new(), 0),
                 Key::Paste(raw) => self.on_paste(&raw),
                 Key::Text(text) => self.insert_text(&text),
-                Key::Up | Key::Down | Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
+                // A draft typed mid-run gets the same visual-line cursor
+                // movement and history recall as an idle composer.
+                Key::Up => self.recall_older_prompt(),
+                Key::Down => self.recall_newer_prompt(),
+                Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
             }
             return;
         }

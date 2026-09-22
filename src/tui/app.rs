@@ -67,7 +67,10 @@ use crate::tui::compact::{
 	render_compact_cell, render_tool_group, select_compact_tail_start,
 	CompactCell, CompactEmitter,
 };
-use crate::tui::widgets::{render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps};
+use crate::tui::widgets::{
+    composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
+    render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps,
+};
 use crate::watch::ansi::{string_width, wrap_ansi};
 
 /// What `drip --tui` needs from entry.rs to start.
@@ -403,6 +406,7 @@ impl PromptHistory {
     }
 
     /// Whether a navigation walk is in progress (Up started, not yet ended).
+    #[cfg(test)]
     fn is_browsing(&self) -> bool {
         self.browsing.is_some()
     }
@@ -1004,17 +1008,24 @@ impl TuiApp {
         self.refresh_mentions();
     }
 
-    /// Recalls the previous prompt into the composer. Navigation is entered
-    /// only when the cursor sits on the first line (the unsent composer text
-    /// is saved as the draft); once browsing, repeated Up presses walk older
-    /// entries regardless of the cursor line.
+    /// Display columns the composer body has at this terminal width, the
+    /// same layout `render_composer` draws.
+    fn composer_text_width(&self) -> usize {
+        composer_text_width(self.cols)
+    }
+
+    /// Up arrow. Moving one VISUAL line up inside the wrapped text takes
+    /// precedence, keeping the column (clamped to the shorter line); only on
+    /// the top visual line does Up recall the previous prompt, saving the
+    /// unsent composer text as the draft. Once browsing, repeated Up presses
+    /// keep walking older entries from the top line.
     fn recall_older_prompt(&mut self) {
-        if !self.prompt_history.is_browsing() {
-            let chars: Vec<char> = self.text.chars().collect();
-            let cursor = self.cursor.min(chars.len());
-            if chars[..cursor].iter().any(|&c| c == '\n') {
-                return;
-            }
+        let width = self.composer_text_width();
+        let (line, column) = composer_cursor_position(&self.text, width, self.cursor);
+        if line > 0 {
+            let cursor = composer_cursor_at(&self.text, width, line - 1, column);
+            self.apply_edit(self.text.clone(), cursor);
+            return;
         }
         if let Some(text) = self.prompt_history.older(&self.text) {
             let cursor = text.chars().count();
@@ -1022,18 +1033,19 @@ impl TuiApp {
         }
     }
 
-    /// Steps toward newer prompts while browsing, restoring the exact draft
-    /// past the newest entry. Navigation is entered only from the last line;
-    /// once browsing, Down walks newer regardless of the cursor line, and it
-    /// stays a no-op when not browsing.
+    /// Down arrow. Moving one VISUAL line down inside the wrapped text takes
+    /// precedence, so a multi-line recalled entry keeps the cursor inside it;
+    /// only from the last visual line does Down step to the newer entry, or
+    /// restore the exact draft past the newest one (`newer()` is itself a
+    /// no-op returning None when not browsing).
     fn recall_newer_prompt(&mut self) {
-        // `newer()` itself is a no-op returning None when not browsing.
-        if !self.prompt_history.is_browsing() {
-            let chars: Vec<char> = self.text.chars().collect();
-            let cursor = self.cursor.min(chars.len());
-            if chars[cursor..].iter().any(|&c| c == '\n') {
-                return;
-            }
+        let width = self.composer_text_width();
+        let (line, column) = composer_cursor_position(&self.text, width, self.cursor);
+        let last_line = composer_lines(&self.text, width).len() - 1;
+        if line < last_line {
+            let cursor = composer_cursor_at(&self.text, width, line + 1, column);
+            self.apply_edit(self.text.clone(), cursor);
+            return;
         }
         if let Some(text) = self.prompt_history.newer() {
             let cursor = text.chars().count();
@@ -4773,6 +4785,75 @@ mod prompt_history_wiring_tests {
     }
 
     #[test]
+    fn up_on_a_wrapped_continuation_line_moves_the_cursor_and_does_not_recall() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 20;
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        let wrapped = "aaaa bbbb cccc dddd eeee";
+        type_into(&mut fixture.app, wrapped);
+        // Body width 18: the draft wraps into "aaaa bbbb cccc " + the tail, so
+        // the end-of-text cursor sits on the second visual line.
+        assert_eq!(composer_lines(wrapped, 18), vec![0..15, 15..24]);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, wrapped, "no recall from a lower line");
+        assert!(!fixture.app.prompt_history.is_browsing());
+        assert_eq!(fixture.app.cursor, 9, "same column on the line above");
+
+        // From the top visual line the same key recalls the older prompt.
+        fixture.app.apply_edit(wrapped.to_string(), 3);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "recorded goal");
+    }
+
+    #[test]
+    fn up_on_a_lower_line_of_a_multiline_draft_moves_instead_of_recalling() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 40;
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        let draft = "first line\nsecond line";
+        type_into(&mut fixture.app, draft);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, draft, "no recall from the second line");
+        assert!(!fixture.app.prompt_history.is_browsing());
+        assert_eq!(fixture.app.cursor, 10, "column clamped to the shorter line");
+
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "recorded goal", "top line recalls");
+    }
+
+    #[test]
+    fn down_moves_within_a_recalled_entry_before_stepping_newer() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 40;
+        type_into(&mut fixture.app, "newest line");
+        fixture.app.submit();
+        let older = "alpha\nbeta\ngamma";
+        type_into(&mut fixture.app, older);
+        fixture.app.submit();
+        type_into(&mut fixture.app, "unsent draft");
+
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, older);
+        // Cursor at the end of "alpha": Down stays inside the entry.
+        fixture.app.apply_edit(older.to_string(), 5);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, older, "still inside the recalled entry");
+        assert_eq!(fixture.app.cursor, 10, "one visual line down");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, older, "still inside the recalled entry");
+        assert_eq!(fixture.app.cursor, 15, "second line down, column clamped");
+
+        // On the last visual line Down leaves the entry: this entry IS the
+        // newest, so it restores the exact draft in one step.
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "exact draft restored");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "browsing ended: no-op");
+    }
+
+    #[test]
     fn down_restores_exact_draft_and_noops_outside_browsing() {
         let mut fixture = make_history_app(&[]);
         type_into(&mut fixture.app, "recorded goal");
@@ -4816,22 +4897,27 @@ mod prompt_history_wiring_tests {
 
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, older_multiline, "first Up recalls newest");
-        // Recall leaves the cursor at the end of the multiline entry, but the
-        // walk continues: browsing bypasses the first-line entry gate.
+        // Recall leaves the cursor at the end of the multiline entry, which is
+        // its LAST visual line: one Up moves to the first line before the walk
+        // continues older.
+        fixture.app.on_key(Key::Up);
+        assert_eq!(
+            fixture.app.text, older_multiline,
+            "second Up moves inside the entry"
+        );
+        assert_eq!(fixture.app.cursor, 12, "top line, column clamped to its end");
         fixture.app.on_key(Key::Up);
         assert_eq!(
             fixture.app.text, "newest single line",
-            "second Up walks past a multiline entry"
+            "Up from the first line walks older"
         );
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, "newest single line", "clamped at oldest");
 
         fixture.app.on_key(Key::Down);
-        assert_eq!(fixture.app.text, older_multiline);
-        // Off the last line mid-browsing, Down still walks newer.
-        for _ in 0..25 {
-            fixture.app.on_key(Key::Left);
-        }
+        assert_eq!(fixture.app.text, older_multiline, "Down steps newer");
+        // A recalled multiline entry leaves the cursor on its last visual line,
+        // so the next Down restores the exact draft.
         fixture.app.on_key(Key::Down);
         assert_eq!(
             fixture.app.text, "draft being typed",
@@ -4860,13 +4946,20 @@ mod prompt_history_wiring_tests {
         fixture.app.apply_edit(multiline.to_string(), 0);
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, "alpha\nbeta");
-        // While browsing, the last-line gate no longer applies: a mid-text
-        // Down still walks newer and restores the exact draft.
+        // While browsing, Down first walks the cursor down the recalled entry;
+        // only from its last visual line does it step newer and restore the
+        // exact draft.
         fixture.app.apply_edit("alpha\nbeta".to_string(), 2);
         fixture.app.on_key(Key::Down);
         assert_eq!(
+            fixture.app.text, "alpha\nbeta",
+            "browsing Down mid-entry: stays inside"
+        );
+        assert_eq!(fixture.app.cursor, 8, "second visual line, column kept");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
             fixture.app.text, multiline,
-            "browsing Down mid-text: draft restored"
+            "last line steps newer: draft restored"
         );
         fixture.app.on_key(Key::Down);
         assert_eq!(fixture.app.text, multiline, "browsing ended: Down no-op");

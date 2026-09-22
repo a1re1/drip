@@ -5,7 +5,7 @@
 
 use crate::cli::images::GoalImageAttachment;
 use crate::tui::theme::{paint, ACCENT_COLOR, DIM_COLOR};
-use crate::watch::ansi::{fit, string_width, wrap_ansi};
+use crate::watch::ansi::{char_width, fit, string_width, wrap_ansi};
 
 use crate::cli::commands::SlashCommandSpec;
 
@@ -43,6 +43,141 @@ pub fn boxed(rows: Vec<String>, width: usize, color: &str) -> Vec<String> {
     }
     out.push(paint(&format!("╰{horizontal}╯")));
     out
+}
+
+/// Visual lines of the composer text: the char-index range of every row a
+/// terminal draws for `text_width` columns of body space. Paragraphs are split
+/// on `'\n'` and each is greedily word-wrapped: a word that would overflow
+/// starts on the next line, the space it broke at stays at the end of the
+/// upper line, and a single word wider than `text_width` is hard-broken. An
+/// empty text is one empty line (`0..0`), a trailing `'\n'` adds a final empty
+/// line, and the separator itself is never inside a range.
+pub fn composer_lines(text: &str, text_width: usize) -> Vec<std::ops::Range<usize>> {
+    let width = text_width.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut paragraph_start = 0usize;
+    loop {
+        match chars[paragraph_start..].iter().position(|&c| c == '\n') {
+            Some(offset) => {
+                let paragraph_end = paragraph_start + offset;
+                wrap_paragraph(&chars, paragraph_start, paragraph_end, width, &mut lines);
+                paragraph_start = paragraph_end + 1;
+            }
+            None => {
+                wrap_paragraph(&chars, paragraph_start, chars.len(), width, &mut lines);
+                break;
+            }
+        }
+    }
+    lines
+}
+
+fn wrap_paragraph(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    width: usize,
+    lines: &mut Vec<std::ops::Range<usize>>,
+) {
+    if start == end {
+        lines.push(start..end);
+        return;
+    }
+    let mut line_start = start;
+    while line_start < end {
+        let mut last_space: Option<usize> = None;
+        let mut column = 0usize;
+        let mut index = line_start;
+        let mut line_end = line_start;
+        while index < end {
+            let cell = char_width(chars[index] as u32);
+            if column + cell > width && index > line_start {
+                break;
+            }
+            if chars[index] == ' ' {
+                last_space = Some(index);
+            }
+            column += cell;
+            index += 1;
+            line_end = index;
+            if column >= width {
+                break;
+            }
+        }
+        if line_end < end {
+            if chars[line_end] == ' ' {
+                // The line filled exactly at a word boundary: the space
+                // belongs to the upper line (clipped when drawn) so the
+                // continuation row never starts with a stray blank.
+                line_end += 1;
+            } else if let Some(space) = last_space {
+                // Break at the last space so it stays on the upper line.
+                line_end = space + 1;
+            }
+        }
+        lines.push(line_start..line_end);
+        line_start = line_end;
+    }
+}
+
+/// Visual `(line_index, column)` of the char-index `cursor`: the display-column
+/// offset of `cursor` inside its wrapped line. A cursor exactly at a wrap point
+/// belongs to the column-0 start of the lower line.
+pub fn composer_cursor_position(text: &str, text_width: usize, cursor: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let lines = composer_lines(text, text_width);
+    let target = cursor.min(chars.len());
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains(&target) {
+            return (index, display_columns(text, line.start, target));
+        }
+        // A cursor sitting on a paragraph break renders at the end of the
+        // line that break closes, not at the start of the next one.
+        if line.end == target && chars.get(target) == Some(&'\n') {
+            return (index, display_columns(text, line.start, line.end));
+        }
+    }
+    let last = lines.len() - 1;
+    (last, display_columns(text, lines[last].start, lines[last].end))
+}
+
+/// Inverse of `composer_cursor_position`: the char index sitting `column`
+/// display columns into visual line `line_index`. The column is clamped to the
+/// line's end, and to the nearest char boundary when a wide char straddles it.
+pub fn composer_cursor_at(text: &str, text_width: usize, line_index: usize, column: usize) -> usize {
+    let lines = composer_lines(text, text_width);
+    let line = match lines.get(line_index) {
+        Some(line) => line.clone(),
+        None => return text.chars().count(),
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut used = 0usize;
+    let mut index = line.start;
+    while index < line.end {
+        let cell = char_width(chars[index] as u32);
+        if used + cell > column {
+            break;
+        }
+        used += cell;
+        index += 1;
+    }
+    index
+}
+
+fn display_columns(text: &str, start: usize, end: usize) -> usize {
+    text.chars()
+        .skip(start)
+        .take(end - start)
+        .map(|c| char_width(c as u32))
+        .sum()
+}
+
+/// Display columns the composer body gets at terminal `width`: the two-column
+/// `❯ `/indent prefix and one spare column for the inverse cursor cell at the
+/// end of a full line are reserved, so a body row never exceeds `width`.
+pub fn composer_text_width(width: usize) -> usize {
+    width.max(6) - 3
 }
 
 /// Composer render inputs.
@@ -108,44 +243,69 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
 
     let border_color = if props.disabled { DIM_COLOR } else { ACCENT_COLOR };
     let prefix_paint = paint(border_color);
-    let body = if props.disabled {
-        let dim = paint(DIM_COLOR);
-        if props.text.is_empty() {
-            dim("running — press esc to stop the run")
-        } else {
-            dim(props.text)
-        }
+    let dim = paint(DIM_COLOR);
+    // A disabled composer with empty text shows the run placeholder instead.
+    let placeholder = props.disabled && props.text.is_empty();
+    let display: &str = if placeholder {
+        "running — press esc to stop the run"
     } else {
-        let before: String = props.text.chars().take(props.cursor).collect();
-        let at: String = props.text.chars().skip(props.cursor).take(1).collect();
-        let after: String = props.text.chars().skip(props.cursor + 1).collect();
-        // A cursor on a newline is drawn as an inverse cell at the line's end,
-        // then the break — never an inverse sequence spanning the split below.
-        let (at, after) = match at.as_str() {
-            "" => (" ".to_string(), after),
-            "\n" => (" ".to_string(), format!("\n{after}")),
-            _ => (at, after),
-        };
-        format!("{before}{INVERSE_ON}{at}{INVERSE_OFF}{after}")
+        props.text
     };
-    // The prompt is a fixed-width sibling of the text in ink, so every line of
-    // a multi-line goal (and every wrapped continuation) sits under the first
-    // character of the text, inside the box.
-    let inner = width.max(6) - 4;
-    let text_width = inner.saturating_sub(2).max(1);
-    let mut body_rows: Vec<String> = Vec::new();
-    for line in body.split('\n') {
-        // The inverse cursor cell drawn on a newline may sit one column past
-        // the text width; the box's inner width still has room for it, and
-        // wrap_ansi would otherwise drop it as a break space.
-        let line_width = if line.ends_with(&format!("{INVERSE_ON} {INVERSE_OFF}")) { text_width + 1 } else { text_width };
-        let pieces = if string_width(line) <= line_width { vec![line.to_string()] } else { wrap_ansi(line, line_width) };
-        for piece in pieces {
-            let lead = if body_rows.is_empty() { prefix_paint("❯ ") } else { "  ".to_string() };
-            body_rows.push(format!("{lead}{piece}"));
+    // Body rows: `❯ ` on the first row and a two-space indent on every
+    // continuation row, so the text starts at column 2 on every row. Wrapping
+    // comes from `composer_lines`, the same layout cursor movement uses, so
+    // the two can never disagree.
+    let text_width = composer_text_width(width);
+    let lines = composer_lines(display, text_width);
+    let cursor_line = if props.disabled {
+        // A run owns the composer: no cursor cell is drawn.
+        usize::MAX
+    } else {
+        composer_cursor_position(display, text_width, props.cursor).0
+    };
+    let text_chars: Vec<char> = display.chars().collect();
+
+    let rule = dim(&"─".repeat(width));
+    rows.push(rule.clone());
+    for (index, line) in lines.iter().enumerate() {
+        let lead = if index == 0 {
+            prefix_paint("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let mut cells: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for (offset, ch) in text_chars[line.start..line.end].iter().enumerate() {
+            let cell = char_width(*ch as u32);
+            // A wide char straddling the wrap column is clipped so the inverse
+            // cursor cell never escapes the body width.
+            if used + cell > text_width {
+                break;
+            }
+            used += cell;
+            if index == cursor_line && line.start + offset == props.cursor {
+                cells.push(format!("{INVERSE_ON}{ch}{INVERSE_OFF}"));
+            } else {
+                cells.push(ch.to_string());
+            }
         }
+        if index == cursor_line {
+            if props.cursor >= line.end {
+                // Cursor at the line end or on the newline after it: an
+                // inverse cell on the blank column (`composer_text_width`
+                // keeps one spare column for it on a full line).
+                cells.push(format!("{INVERSE_ON} {INVERSE_OFF}"));
+            } else if !cells.iter().any(|cell| cell.contains(INVERSE_ON)) {
+                // The cursor column lands inside a wide char: draw the inverse
+                // cell at the char boundary just before it.
+                cells.push(format!("{INVERSE_ON} {INVERSE_OFF}"));
+            }
+        }
+        let body = cells.concat();
+        let body = if props.disabled { dim(&body) } else { body };
+        rows.push(format!("{lead}{body}"));
     }
-    rows.extend(boxed(body_rows, width, border_color));
+    rows.push(rule);
 
     let show_slash_menu = !props.disabled && !props.slash_suggestions.is_empty();
     let show_mention_menu =
@@ -327,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_keeps_multi_line_text_inside_the_box() {
+    fn composer_renders_multi_line_text_between_rules() {
         let props = ComposerProps {
             attachments: &[],
             cursor: 8,
@@ -341,13 +501,120 @@ mod tests {
             text: "line one\nline two",
         };
         let rows = plain(&render_composer(&props, 20));
-        // ╭, "❯ line one", "  line two", ╰, plus the enter/shift+enter hint
-        // row — continuation rows sit under the text; the cursor on the
-        // newline is an inverse cell after "one".
+        // Rule, "❯ line one" (the cursor on the newline is an inverse cell at
+        // the line end), the two-space continuation row, the closing rule, then
+        // the enter/shift+enter hint.
         assert_eq!(rows.len(), 5, "{rows:?}");
-        assert_eq!(rows[1].trim_end_matches(" │").trim_end(), "│ ❯ line one");
-        assert_eq!(rows[2].trim_end_matches(" │").trim_end(), "│   line two");
-        assert!(rows.iter().all(|row| row.chars().count() == 20), "{rows:?}");
+        assert_eq!(rows[0], "─".repeat(20), "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "❯ line one", "{rows:?}");
+        assert_eq!(rows[2], "  line two", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(20), "{rows:?}");
+        assert!(rows[4].contains("enter sends"), "{rows:?}");
+    }
+
+    #[test]
+    fn composer_renders_wrapped_rows_with_a_two_space_indent() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued_count: 0,
+            slash_suggestions: &[],
+            text: "aaaa bbbb cccc dddd eeee",
+        };
+        let rows = plain(&render_composer(&props, 20));
+        // Body width is 18, so the break space ends the first row and the tail
+        // continues under it, still starting at column 2.
+        assert_eq!(rows[0], "─".repeat(20), "{rows:?}");
+        assert_eq!(rows[1], "❯ aaaa bbbb cccc ", "{rows:?}");
+        assert_eq!(rows[2], "  dddd eeee", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(20), "{rows:?}");
+    }
+
+    #[test]
+    fn composer_lines_wraps_at_spaces_and_owns_the_break_space() {
+        // "one two" fills the 7 columns exactly; the space after it is
+        // absorbed by the upper line so "three" starts flush at column 0.
+        assert_eq!(composer_lines("one two three", 7), vec![0..8, 8..13]);
+        assert_eq!(composer_lines("one twos three", 7), vec![0..4, 4..9, 9..14]);
+        assert_eq!(
+            composer_lines("aaaa bbbb cccc dddd eeee", 18),
+            vec![0..15, 15..24]
+        );
+    }
+
+    #[test]
+    fn composer_lines_hard_breaks_a_word_longer_than_the_width() {
+        assert_eq!(composer_lines("abcdefghij", 4), vec![0..4, 4..8, 8..10]);
+        assert_eq!(composer_lines("abcdef", 6), vec![0..6]);
+    }
+
+    #[test]
+    fn composer_lines_splits_paragraphs_and_keeps_empty_lines() {
+        assert_eq!(composer_lines("", 10), vec![0..0]);
+        assert_eq!(composer_lines("aa\nbb", 10), vec![0..2, 3..5]);
+        assert_eq!(composer_lines("aa\n", 10), vec![0..2, 3..3]);
+        assert_eq!(composer_lines("aa\n\nbb", 10), vec![0..2, 3..3, 4..6]);
+    }
+
+    #[test]
+    fn composer_cursor_position_puts_a_wrap_point_on_the_lower_line() {
+        let text = "one twos three";
+        assert_eq!(composer_cursor_position(text, 7, 4), (1, 0));
+        assert_eq!(composer_cursor_at(text, 7, 1, 0), 4);
+        assert_eq!(composer_cursor_position(text, 7, 3), (0, 3));
+        assert_eq!(composer_cursor_position(text, 7, 14), (2, 5));
+        assert_eq!(
+            composer_cursor_at(text, 7, 2, 99),
+            14,
+            "column clamped to the line end"
+        );
+        // A cursor on the absorbed space after a full line stays on that line,
+        // one column past the text; the next index starts the lower line.
+        assert_eq!(composer_cursor_position("one two three", 7, 7), (0, 7));
+        assert_eq!(composer_cursor_position("one two three", 7, 8), (1, 0));
+        assert_eq!(composer_cursor_at(text, 7, 9, 0), 14, "line out of range");
+        // A cursor on a paragraph break belongs to the end of the upper line.
+        assert_eq!(composer_cursor_position("aa\nbb", 7, 2), (0, 2));
+        assert_eq!(composer_cursor_at("aa\nbb", 7, 0, 2), 2);
+    }
+
+    #[test]
+    fn composer_cursor_helpers_round_trip_every_boundary() {
+        for text in ["one two three", "aa\nbb", ""] {
+            let width = 7;
+            let total = text.chars().count();
+            for cursor in 0..=total {
+                let (line, column) = composer_cursor_position(text, width, cursor);
+                assert_eq!(
+                    composer_cursor_at(text, width, line, column),
+                    cursor,
+                    "text {text:?} cursor {cursor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn composer_cursor_helpers_clamp_wide_char_boundaries() {
+        let text = "你好世界";
+        assert_eq!(composer_lines(text, 4), vec![0..2, 2..4]);
+        assert_eq!(composer_cursor_position(text, 4, 2), (1, 0));
+        assert_eq!(composer_cursor_position(text, 4, 1), (0, 2));
+        assert_eq!(
+            composer_cursor_at(text, 4, 0, 1),
+            0,
+            "nearest boundary before the wide char"
+        );
+        assert_eq!(composer_cursor_at(text, 4, 0, 2), 1);
+        for cursor in 0..=text.chars().count() {
+            let (line, column) = composer_cursor_position(text, 4, cursor);
+            assert_eq!(composer_cursor_at(text, 4, line, column), cursor);
+        }
     }
 
     #[test]
@@ -371,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_menu_rows_render_above_the_composer_box() {
+    fn skill_menu_rows_render_above_the_top_rule() {
         let skills = vec![
             ("navis".to_string(), "test skill navis".to_string()),
             ("nada".to_string(), "test skill nada".to_string()),
@@ -394,15 +661,16 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[1].trim_end(), "    /nada — test skill nada");
-        assert!(rows[2].starts_with("╭"), "{rows:?}");
-        let box_index = rows.iter().position(|row| row.starts_with("╭")).unwrap();
-        assert!(
-            rows.iter()
-                .take(box_index)
-                .any(|row| row.contains("/navis")),
-            "menu rows must come before the box"
-        );
-        assert!(!rows.iter().skip(box_index).any(|row| row.contains("navis")));
+        assert_eq!(rows[2], "─".repeat(40), "{rows:?}");
+        let rule_index = rows
+            .iter()
+            .position(|row| row.chars().all(|c| c == '─'))
+            .unwrap();
+        assert_eq!(rule_index, 2, "menu rows must come before the top rule");
+        assert!(!rows
+            .iter()
+            .skip(rule_index)
+            .any(|row| row.contains("navis")));
     }
 
     #[test]
@@ -583,7 +851,7 @@ mod tests {
         assert!(rows[0].contains("    /navis — one"), "{rows:?}");
         assert!(rows[1].contains("    /nada — two"), "{rows:?}");
         assert!(rows[2].contains("▸ /nab — three"), "{rows:?}");
-        assert!(rows[3].starts_with("╭"), "{rows:?}");
+        assert!(rows[3].chars().all(|c| c == '─'), "{rows:?}");
     }
 
     #[test]

@@ -456,9 +456,17 @@ quality and its effect on answers are measured by the benchmark in
 
 Clarification surveys are on by default: the `ask_user` harness tool lets the model
 ask a staged survey of multiple-choice questions (each with suggested options, a
-free-text "Type something" answer, and "Chat about this" for one free-form reply to
-the whole survey) when the goal is ambiguous or an approach tradeoff needs the
-operator's call, then revise its plan around the answers before implementing. The
+free-text "Type something" answer typed inline, and "Chat about this" for one
+free-form reply to the whole survey) when the goal is ambiguous or an approach
+tradeoff needs the operator's call, then revise its plan around the answers before
+implementing.
+
+In the TUI, picking "Type something." opens an inline field on that question:
+type the answer and press Enter to record it (Esc goes back to the choices), so a
+question can carry extra thoughts the listed options do not cover. A question the
+model marks `"multiple": true` becomes a select-all-that-apply step: space toggles
+`[x]` on each option you want, the arrows move, and Enter on "Confirm selection"
+records all the marked labels in one answer (the model receives them comma-joined). The
 model may only ask while planning — right after the goal or a fresh operator message
 (`--send`, or a queued/steered TUI message) and before the first task loop starts;
 once the plan is executing the tool is withheld. One exception: when nothing workable

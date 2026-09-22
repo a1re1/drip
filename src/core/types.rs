@@ -822,6 +822,11 @@ pub struct HarnessSurveyQuestion {
 	/// When true (the default) the operator may answer with free text instead of a listed option.
 	#[serde(default = "default_allow_other")]
 	pub allow_other: bool,
+	/// A "select all that apply" question: the operator toggles several options
+	/// before confirming, and the recorded answer joins the picked labels with
+	/// ", " inside the single `choice` field.
+	#[serde(default)]
+	pub multiple: bool,
 }
 
 fn default_allow_other() -> bool {

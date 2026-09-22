@@ -306,6 +306,10 @@ const SURVEY_OTHER_ID: &str = "\u{0}other";
 /// survey instead of answering the questions one by one.
 const SURVEY_CHAT_ID: &str = "\u{0}chat";
 
+/// Sentinel PickerItem id for the confirm row of a "select all that apply"
+/// question: Enter there records every option marked with space.
+const SURVEY_CONFIRM_ID: &str = "\u{0}confirm";
+
 /// A live ask_user survey being answered one question at a time. The harness
 /// thread stays blocked on answers.jsonl; the overlay/composer only collect.
 struct SurveyState {
@@ -315,6 +319,9 @@ struct SurveyState {
     answers: Vec<HarnessSurveyAnswer>,
     /// Some while the operator is typing a free-text "Other…" answer.
     other_input: Option<String>,
+    /// Option indices marked with space on a "select all that apply" question
+    /// (always empty for a single-choice question).
+    multiple_picks: Vec<usize>,
     /// The last question the survey showed; a failed chat write reopens it.
     last_question: usize,
     /// Set when the operator chose "Chat about this": the survey stays alive
@@ -888,15 +895,28 @@ impl TuiApp {
         let Some(question) = state.survey.questions.get(state.current) else {
             return render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols);
         };
-        let listed = if question.allow_other {
-            overlay.items.len().saturating_sub(2)
+        // The escape-hatch rows carry sentinel ids starting with NUL; every
+        // row before the first sentinel is a listed option, whatever the mix
+        // of confirm/free-text/chat rows this question generated.
+        let listed = overlay
+            .items
+            .iter()
+            .position(|item| item.id.starts_with('\u{0}'))
+            .unwrap_or(overlay.items.len());
+        // An empty slice on a single-choice question: render_survey reads a
+        // non-empty slice as "this is a select-all-that-apply question".
+        let toggled: Vec<bool> = if question.multiple {
+            (0..listed)
+                .map(|index| state.multiple_picks.contains(&index))
+                .collect()
         } else {
-            overlay.items.len().saturating_sub(1)
+            Vec::new()
         };
         render_survey(
             &question.header,
             &question.question,
             &overlay.items[..listed],
+            &toggled,
             question.allow_other,
             overlay.selected,
             state.current + 1,
@@ -1476,6 +1496,8 @@ impl TuiApp {
                         .to_string();
                     if !text.is_empty() {
                         self.record_survey_answer(None, Some(text));
+                    } else {
+                        self.push_info("type a free-text answer, or esc to go back to the choices");
                     }
                 }
                 Key::Escape => {
@@ -1529,13 +1551,24 @@ impl TuiApp {
                         None => {}
                     }
                 }
+                // Space marks an option on a "select all that apply"
+                // question: it toggles the highlighted row and leaves the
+                // overlay open, so several marks can be built up before the
+                // confirm row records them all.
+                Key::Text(text) if overlay.kind == OverlayKind::Question && text == " " => {
+                    let selected = overlay.selected;
+                    self.toggle_multi_pick(selected);
+                }
                 Key::Up => overlay.selected = overlay.selected.saturating_sub(1),
                 Key::Down | Key::Tab => {
-                    overlay.selected = (overlay.selected + 1).min(overlay.items.len().saturating_sub(1));
+                    overlay.selected =
+                        (overlay.selected + 1).min(overlay.items.len().saturating_sub(1));
                 }
                 // Digit keys jump: the question overlay confirms that row
                 // immediately, every other picker just highlights it.
-                Key::Text(text) if !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()) => {
+                Key::Text(text)
+                    if !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()) =>
+                {
                     let number: usize = text.parse().unwrap_or(0);
                     if number >= 1 && number <= overlay.items.len() {
                         overlay.selected = number - 1;
@@ -1871,6 +1904,7 @@ impl TuiApp {
             current: 0,
             answers: Vec::new(),
             other_input: None,
+            multiple_picks: Vec::new(),
             last_question: 0,
             chat_mode: false,
             // The exact file the blocked harness thread polls (loop.rs answers_path()).
@@ -1891,6 +1925,15 @@ impl TuiApp {
                 label: option.label.clone(),
             })
             .collect();
+        if question.multiple {
+            // "Select all that apply": space toggles the option rows and this
+            // row records the marks (render_survey numbers it identically).
+            items.push(PickerItem {
+                detail: Some("enter records the options marked [x]".to_string()),
+                id: SURVEY_CONFIRM_ID.to_string(),
+                label: "Confirm selection".to_string(),
+            });
+        }
         if question.allow_other {
             items.push(PickerItem {
                 detail: Some("answer with free text instead".to_string()),
@@ -1914,15 +1957,70 @@ impl TuiApp {
         self.overlay = Some(Overlay { filter: String::new(), items, kind: OverlayKind::Question, selected: 0, title });
     }
 
+    /// Space on a "select all that apply" question: flip one option's mark.
+    /// A row that is not a listed option (or a plain question) is a no-op.
+    fn toggle_multi_pick(&mut self, index: usize) {
+        let Some(state) = self.survey.as_mut() else {
+            return;
+        };
+        let Some(question) = state.survey.questions.get(state.current) else {
+            return;
+        };
+        if !question.multiple || index >= question.options.len() {
+            return;
+        }
+        if state.multiple_picks.contains(&index) {
+            state.multiple_picks.retain(|picked| *picked != index);
+        } else {
+            state.multiple_picks.push(index);
+            state.multiple_picks.sort_unstable();
+        }
+    }
+
+    /// Enter on the "Confirm selection" row: record every marked option of a
+    /// "select all that apply" question as one comma-joined choice — the same
+    /// shape `validate_survey_answers` splits apart at the harness end.
+    fn confirm_multi_picks(&mut self) {
+        let labels: Vec<String> = {
+            let Some(state) = self.survey.as_ref() else {
+                return;
+            };
+            let Some(question) = state.survey.questions.get(state.current) else {
+                return;
+            };
+            if !question.multiple {
+                return;
+            }
+            state
+                .multiple_picks
+                .iter()
+                .filter_map(|index| {
+                    question
+                        .options
+                        .get(*index)
+                        .map(|option| option.label.clone())
+                })
+                .collect()
+        };
+        if labels.is_empty() {
+            self.push_info("mark at least one option with space before confirming");
+            return;
+        }
+        self.record_survey_answer(Some(labels.join(", ")), None);
+    }
+
     fn record_survey_answer(&mut self, choice: Option<String>, other: Option<String>) {
         let done = {
-            let Some(state) = self.survey.as_mut() else { return };
+            let Some(state) = self.survey.as_mut() else {
+                return;
+            };
             state.answers.push(HarnessSurveyAnswer {
                 index: state.current as i64,
                 choice,
                 other,
             });
             state.other_input = None;
+            state.multiple_picks.clear();
             state.last_question = state.current;
             state.current += 1;
             state.current >= state.survey.questions.len()
@@ -2014,7 +2112,9 @@ impl TuiApp {
     fn on_pick(&mut self, kind: OverlayKind, item: PickerItem) {
         match kind {
             OverlayKind::Question => {
-                if item.id == SURVEY_OTHER_ID {
+                if item.id == SURVEY_CONFIRM_ID {
+                    self.confirm_multi_picks();
+                } else if item.id == SURVEY_OTHER_ID {
                     if let Some(state) = self.survey.as_mut() {
                         state.other_input = Some(String::new());
                     }
@@ -5675,7 +5775,40 @@ mod survey_tests {
     use super::*;
     use crate::core::types::{HarnessSurveyOption, HarnessSurveyQuestion};
 
-    fn question(header: &str, prompt: &str, options: &[(&str, &str)], allow_other: bool) -> HarnessSurveyQuestion {
+    /// A "select all that apply" question: same shape, `multiple: true`.
+    fn multiple_question(
+        header: &str,
+        prompt: &str,
+        options: &[(&str, &str)],
+        allow_other: bool,
+    ) -> HarnessSurveyQuestion {
+        let mut question = question(header, prompt, options, allow_other);
+        question.multiple = true;
+        question
+    }
+
+    fn multiple_survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![multiple_question(
+                "Scope",
+                "Which parts should change?",
+                &[
+                    ("Docs", "update the readme"),
+                    ("Picker", "the survey overlay"),
+                    ("Tests", "new coverage"),
+                ],
+                true,
+            )],
+        }
+    }
+
+    fn question(
+        header: &str,
+        prompt: &str,
+        options: &[(&str, &str)],
+        allow_other: bool,
+    ) -> HarnessSurveyQuestion {
         HarnessSurveyQuestion {
             header: header.to_string(),
             question: prompt.to_string(),
@@ -5687,6 +5820,7 @@ mod survey_tests {
                 })
                 .collect(),
             allow_other,
+            multiple: false,
         }
     }
 
@@ -5700,13 +5834,20 @@ mod survey_tests {
                     &[("Poll", "watch the file"), ("Channel", "read the pipe")],
                     true,
                 ),
-                question("Scope", "Include tests?", &[("Yes", "with tests"), ("No", "without")], false),
+                question(
+                    "Scope",
+                    "Include tests?",
+                    &[("Yes", "with tests"), ("No", "without")],
+                    false,
+                ),
             ],
         }
     }
 
     fn plain(rows: &[String]) -> Vec<String> {
-        rows.iter().map(|row| crate::watch::ansi::strip_ansi(row)).collect()
+        rows.iter()
+            .map(|row| crate::watch::ansi::strip_ansi(row))
+            .collect()
     }
 
     fn type_text(app: &mut TuiApp, text: &str) {
@@ -5831,5 +5972,114 @@ mod survey_tests {
         let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
         assert!(written.contains("\"chat\":\"use pol\""), "{written}");
+    }
+
+    #[test]
+    fn a_multiple_question_renders_marks_a_confirm_row_and_the_toggle_footer() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(multiple_survey());
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] 1. Docs")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("❯ [ ] 1. Docs")),
+            "{rows:?}"
+        );
+        // Three options + confirm + "Type something." + chat.
+        assert!(
+            rows.iter().any(|row| row.contains("4. Confirm selection")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("5. Type something.")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("6. Chat about this")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Space toggles · Enter confirms the selection")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn space_marks_options_and_the_confirm_row_records_them_joined() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        let survey = multiple_survey();
+        fixture.app.begin_survey(survey.clone());
+        // Space on the highlighted row marks it, then Down+Space marks a second.
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            rows.iter().any(|row| row.contains("[x] 1. Docs")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[ ] 2. Picker")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("[x] 3. Tests")),
+            "{rows:?}"
+        );
+        // Down to the confirm row (index 3) and Enter: one joined choice.
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Return);
+        assert!(
+            fixture.app.survey.is_none(),
+            "the last question finishes the survey"
+        );
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
+        assert!(written.contains("\"choice\":\"Docs, Tests\""), "{written}");
+        // The harness end validates that exact shape against the survey.
+        let record: HarnessSurveyAnswers =
+            serde_json::from_str(written.lines().next().expect("one line")).expect("valid record");
+        assert!(
+            crate::harness::harness_tools::validate_survey_answers(&survey, &record).is_ok(),
+            "a joined multi-select choice validates: {record:?}"
+        );
+    }
+
+    #[test]
+    fn confirming_with_nothing_marked_keeps_the_survey_open() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(multiple_survey());
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Down);
+        fixture.app.on_key(Key::Return);
+        let state = fixture.app.survey.as_ref().expect("survey stays open");
+        assert!(state.answers.is_empty(), "nothing is recorded");
+        assert!(fixture.app.cells.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Info(note)
+                if note.text == "mark at least one option with space before confirming"
+        )));
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        assert!(!path.exists(), "nothing is written");
+    }
+
+    #[test]
+    fn space_is_a_no_op_on_a_single_choice_question() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        let state = fixture.app.survey.as_ref().expect("survey still open");
+        assert_eq!(
+            state.current, 0,
+            "space never advances a single-choice survey"
+        );
+        assert!(state.answers.is_empty());
     }
 }

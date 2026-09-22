@@ -4414,6 +4414,9 @@ pub struct HarnessRun {
     /// operator message, false once a task loop starts (ask_user is useless
     /// while a plan already executes).
     pub ask_window_open: bool,
+    /// The terminal blocked-on-input moment offered its one operator
+    /// clarification survey already; never offered twice in one run.
+    pub late_survey_offered: bool,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
     pub aborted: bool,
@@ -5002,6 +5005,7 @@ impl HarnessRun {
             direct_plan_checked: false,
             ask_user_awaiting: false,
             ask_window_open: true,
+            late_survey_offered: false,
             answers_path: run_answers_path,
             continue_command: None,
             aborted: false,
@@ -5243,12 +5247,100 @@ impl HarnessRun {
 
     /// Block after a question event until a complete matching answer batch
     /// arrives in answers.jsonl (~500 ms poll), the run aborts, or the
+    /// The terminal blocked-on-input moment is a last chance to clarify: with
+    /// ask_user enabled and nothing workable left, offer ONE survey built from
+    /// the operator-blocked tasks instead of ending the run silently. Answers
+    /// reopen those tasks (and revive their dependents) so the run continues; a
+    /// timeout preserves the survey for `--resume`; every other path returns
+    /// false and the caller ends the run exactly as before. At most one offer
+    /// per run, so a blocked loop never surveys the operator repeatedly.
+    async fn try_late_clarification(&mut self) -> bool {
+        if !self.options.ask_user_enabled || self.late_survey_offered {
+            return false;
+        }
+        // A survey already pending (a timed-out offer being resumed) belongs to
+        // the operator: never stack a second one on top of it.
+        if self.state.pending_questions.is_some() {
+            return false;
+        }
+        let blockers: Vec<(String, String)> = core_state::operator_blocked_tasks(&self.state)
+            .iter()
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    task.summary.clone().unwrap_or_else(|| task.title.clone()),
+                )
+            })
+            .collect();
+        if blockers.is_empty() {
+            return false;
+        }
+        self.late_survey_offered = true;
+        let questions: Vec<crate::core::types::HarnessSurveyQuestion> = blockers
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(index, (id, detail))| crate::core::types::HarnessSurveyQuestion {
+                header: format!("Blocker {}", index + 1),
+                question: format!(
+                    "Task {id} is blocked on operator input: {detail}. How should the run proceed?"
+                ),
+                options: vec![
+                    crate::core::types::HarnessSurveyOption {
+                        label: "Supply what is missing".to_string(),
+                        description: "Reply with the material or decision that task is waiting on; the run reopens it.".to_string(),
+                    },
+                    crate::core::types::HarnessSurveyOption {
+                        label: "Stop here".to_string(),
+                        description: "End the run with the work already done and leave this task blocked.".to_string(),
+                    },
+                ],
+                allow_other: true,
+            })
+            .collect();
+        let survey = crate::core::types::QuestionSurvey {
+            answers_cursor: None,
+            questions,
+        };
+        self.state.pending_questions = Some(survey.clone());
+        self.ask_window_open = true;
+        self.persist();
+        self.emit(HarnessEvent {
+            data: None,
+            detail:
+                "blocked on operator input — offering a clarification survey before ending the run"
+                    .to_string(),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::StallRecovery,
+        });
+        self.emit_question_event(&survey);
+        match self.run_survey_block(survey).await {
+            SurveyWait::Answered => {
+                // The answer is a fresh operator message: it reopens the tasks
+                // that were waiting on it (and unblocks their dependents) via
+                // the same policy `--resume` uses.
+                let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
+                self.emit(HarnessEvent {
+                    data: None,
+                    detail: format!(
+                        "operator answered the blocked-on-input survey — reopened {} task(s)",
+                        reopened.len()
+                    ),
+                    iteration: self.state.iteration,
+                    r#type: HarnessEventType::StallRecovery,
+                });
+                self.persist();
+                !reopened.is_empty()
+            }
+            // Aborted or timed out: the caller's own end-of-run handling
+            // (aborted result / awaiting-input) takes over from here.
+            _ => false,
+        }
+    }
+
     /// ask_user timeout expires. On timeout the pending survey is preserved
     /// and the run is flagged to end with reason "awaiting-input".
-    async fn run_survey_block(
-        &mut self,
-        survey: crate::core::types::QuestionSurvey,
-    ) -> SurveyWait {
+    async fn run_survey_block(&mut self, survey: crate::core::types::QuestionSurvey) -> SurveyWait {
         let Some(answers_path) = self.answers_path() else {
             self.ask_user_awaiting = true;
             return SurveyWait::Aborted;
@@ -6282,6 +6374,18 @@ impl HarnessRun {
             if core_state::get_current_task(&self.state).is_none()
                 && !core_state::operator_blocked_tasks(&self.state).is_empty()
             {
+                // Before ending the run blocked-on-input, give the operator the
+                // one chance to answer through the survey pipeline; an answer
+                // reopens the blocked work and the loop continues.
+                if self.try_late_clarification().await {
+                    continue;
+                }
+                if self.ask_user_awaiting {
+                    return Some(self.awaiting_input_result());
+                }
+                if self.aborted {
+                    return Some(self.aborted_result());
+                }
                 self.blocked_on_input = true;
                 break;
             }
@@ -9875,6 +9979,145 @@ mod ask_user_survey_tests {
     /// now() calls so the poll survives a few real 500 ms sleeps; a writer
     /// thread appends at ~150 ms. A pathological environment still times out
     /// via the 60 s jumps instead of hanging.
+    /// Seeds one operator-blocked task the way the model does (finish_task with
+    /// blockedOn), so the late-clarification path sees exactly the reported
+    /// blocked-on-input state.
+    fn seed_operator_blocked_task(run: &mut HarnessRun, title: &str, summary: &str) -> String {
+        let tasks = crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from(title)],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        let id = tasks[0].id.clone();
+        crate::core::state::finish_task(
+            &mut run.state,
+            crate::core::state::HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary,
+                task_id: Some(&id),
+                confidence: None,
+            },
+        );
+        if let Some(task) = crate::core::state::get_task_by_id_mut(&mut run.state, &id) {
+            task.blocked_on = Some(crate::core::types::HarnessTaskBlocker::Operator);
+        }
+        id
+    }
+
+    /// The accepted late survey reopens the blocked task (clearing its blocker)
+    /// so the run continues, and the offer is spent — a second block cannot
+    /// trigger a second survey.
+    #[tokio::test]
+    async fn late_clarification_reopens_the_operator_blocked_task_after_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        // A stepped clock: the first 8 now() calls hold still (so the poll loop
+        // can see the answer land), then it jumps past the 1s timeout.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let clock_ticks = ticks.clone();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let now: NowFn = Arc::new(move || {
+            let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
+            base + chrono::Duration::seconds(if step < 8 { 0 } else { 60 * (step - 7) })
+        });
+        let mut run = test_run_in(&dir, move |o| {
+            o.ask_user_enabled = true;
+            o.now = Some(now);
+        })
+        .await;
+        let id = seed_operator_blocked_task(
+            &mut run,
+            "add authentication",
+            "which app should receive authentication?",
+        );
+        let path = run.answers_path().unwrap();
+        let writer = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            crate::core::state::answers::append_answers(&writer, &batch(0, "Poll")).unwrap();
+        });
+        assert!(
+            run.try_late_clarification().await,
+            "an answered late survey must reopen the blocked task"
+        );
+        let task = crate::core::state::get_task_by_id(&run.state, &id).unwrap();
+        assert_eq!(
+            task.status,
+            HarnessTaskStatus::Pending,
+            "the blocked task goes back to pending"
+        );
+        assert!(
+            task.blocked_on.is_none(),
+            "the operator's answer clears the blocker"
+        );
+        assert!(
+            run.state.pending_questions.is_none(),
+            "the survey is consumed"
+        );
+        assert!(run.late_survey_offered, "the one offer is recorded");
+        let second =
+            seed_operator_blocked_task(&mut run, "choose a provider", "which sign-in provider?");
+        assert!(
+            !run.try_late_clarification().await,
+            "the late survey is offered at most once per run"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &second)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "a later block is not surveyed again"
+        );
+    }
+
+    /// `--no-ask` (and any other disabled mode) leaves the terminal path
+    /// exactly as it was: no survey staged, the offer unspent.
+    #[tokio::test]
+    async fn late_clarification_is_skipped_when_ask_user_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |o| o.ask_user_enabled = false).await;
+        seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        assert!(
+            !run.try_late_clarification().await,
+            "--no-ask must end blocked-on-input with no survey"
+        );
+        assert!(run.state.pending_questions.is_none(), "no survey is staged");
+        assert!(
+            !run.late_survey_offered,
+            "the disabled path never spends the offer"
+        );
+    }
+
+    /// A late survey nobody answers does not continue the run and does not
+    /// vanish: the run ends awaiting-input with the survey preserved for
+    /// `--resume`, and the task stays blocked.
+    #[tokio::test]
+    async fn an_unanswered_late_survey_is_preserved_for_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |o| o.ask_user_enabled = true).await;
+        let id = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        assert!(
+            !run.try_late_clarification().await,
+            "an unanswered survey does not continue the run"
+        );
+        assert!(
+            run.ask_user_awaiting,
+            "the run ends awaiting-input rather than blocked-on-input"
+        );
+        assert!(
+            run.state.pending_questions.is_some(),
+            "the timed-out survey survives for --resume"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &id)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "with no answer the task stays blocked"
+        );
+    }
+
     #[tokio::test]
     async fn live_answers_inject_the_directive_prefixed_summary_once() {
         let dir = tempfile::tempdir().unwrap();

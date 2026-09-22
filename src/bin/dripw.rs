@@ -19,8 +19,9 @@ Options:
   --help, -h    Print this help text and exit
 
 Keys:
-  1 / 2 / 3     Focus the Running, Recent, or Shells panel
+  1 / 2 / 3     Focus the Sessions, Tasks, or Shells panel
   Tab           Cycle between panels
+  r             Cycle the Sessions filter: running → recent → all
   j / k         Move selection down / up
   ↑ / ↓         Move selection up / down
   [ / ]         Scroll transcript back / forward  (also h / l, ← / →)

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::cli::transcript::{format_model_route_lines, TranscriptEntry};
 use crate::core::sessions::SessionRecord;
+use crate::core::types::{HarnessTask, HarnessTaskStatus};
 use crate::watch::ansi::{c, char_width, fit, string_width, strip_ansi};
 use crate::watch::ps::PsProc;
 pub use crate::watch::transcript_view::{flatten_transcript, RowCell};
@@ -22,24 +23,48 @@ const MIN_PANE: usize = 3; // border+border + 1 content row
 /// 1 | 2 | 3
 pub type FocusPane = u8;
 
-/// Which session list owns the transcript/shells: Running or Recent. Unlike
-/// `focus`, this never becomes 3 — drilling into the Shells pane must not move
-/// the session selection out from under the shells being inspected.
-pub type SessionFocus = u8;
+/// Which slice of the session index the [1] Sessions pane shows. `r` cycles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionsMode {
+    Running,
+    Recent,
+    All,
+}
+
+impl SessionsMode {
+    /// Running → Recent → All → Running.
+    pub fn next(self) -> Self {
+        match self {
+            SessionsMode::Running => SessionsMode::Recent,
+            SessionsMode::Recent => SessionsMode::All,
+            SessionsMode::All => SessionsMode::Running,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionsMode::Running => "running",
+            SessionsMode::Recent => "recent",
+            SessionsMode::All => "all",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct WatchViewModel {
     /// Epoch ms — the only clock render_frame may read.
     pub now: i64,
-    pub running: Vec<SessionRecord>,
-    pub recent: Vec<SessionRecord>,
+    /// The [1] Sessions pane's filter.
+    pub mode: SessionsMode,
+    /// Rows visible under `mode`, already filtered by the app: Running → the
+    /// live-lease sessions, Recent → all others, All → running then recent.
+    pub sessions: Vec<SessionRecord>,
     /// Lease started_at as epoch ms, keyed by session id (running only).
     pub started_at_ms: HashMap<String, i64>,
     pub focus: FocusPane,
-    pub session_focus: SessionFocus,
-    /// Absolute index into running / recent (clamped by the app).
-    pub sel_running: usize,
-    pub sel_recent: usize,
+    /// Selection index into `sessions` (clamped by the app). The transcript
+    /// always follows this row.
+    pub sel_session: usize,
     pub transcript: Vec<TranscriptEntry>,
     /// When true, footer_note on the transcript pane reads "following".
     pub following: bool,
@@ -54,6 +79,10 @@ pub struct WatchViewModel {
     /// Files discovered behind the selected shell's fd 1/2 — tells the empty
     /// states "no tailable fds" and "tailing, nothing yet" apart.
     pub shell_log_files: Vec<String>,
+    /// The focused session's task ledger (empty when it has none / unreadable).
+    pub tasks: Vec<HarnessTask>,
+    /// Selection index into the ordered task list (used when focus == 2).
+    pub sel_task: usize,
 }
 
 // ── Time helpers (pure; exported for tests) ──────────────────────────────────
@@ -332,45 +361,105 @@ fn recent_row(r: &SessionRecord, now: i64, inner_w: usize, selected: bool) -> Ro
     selectable(format!("{}{}", fit(&main, left_w, true), right), status_dot_color(&r.status), selected)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ListKind {
-    Running,
-    Recent,
+fn empty_sessions_msg(mode: SessionsMode) -> &'static str {
+    match mode {
+        SessionsMode::Running => "  no running sessions",
+        SessionsMode::Recent => "  no recent sessions",
+        SessionsMode::All => "  no sessions yet",
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn session_rows(
-    list: &[SessionRecord],
-    sel: usize,
-    focused: bool,
-    inner_w: usize,
-    inner_h: usize,
-    kind: ListKind,
-    now: i64,
-    started_at_ms: &HashMap<String, i64>,
-) -> Vec<RowCell> {
-    if list.is_empty() {
-        return vec![plain("  no sessions yet", c::dim)];
+/// Rows for the [1] Sessions pane under `vm.mode`. A record draws a live
+/// elapsed timer while `started_at_ms` knows it and its relative age
+/// otherwise, so All mode mixes both.
+fn session_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell> {
+    if vm.sessions.is_empty() {
+        return vec![plain(empty_sessions_msg(vm.mode), c::dim)];
     }
-    let start = scroll_start(sel, list.len(), inner_h);
-    (start..list.len().min(start + inner_h))
+    let focused = vm.focus == 1;
+    let start = scroll_start(vm.sel_session, vm.sessions.len(), inner_h);
+    (start..vm.sessions.len().min(start + inner_h))
         .map(|i| {
-            let r = &list[i];
-            let selected = focused && i == sel;
-            match kind {
-                ListKind::Running => running_row(r, now, started_at_ms.get(&r.id).copied(), inner_w, selected),
-                ListKind::Recent => recent_row(r, now, inner_w, selected),
+            let r = &vm.sessions[i];
+            let selected = focused && i == vm.sel_session;
+            match vm.started_at_ms.get(&r.id).copied() {
+                Some(started) => running_row(r, vm.now, Some(started), inner_w, selected),
+                None => recent_row(r, vm.now, inner_w, selected),
             }
         })
         .collect()
 }
 
+// ── Task rows (the [2] Tasks pane) ───────────────────────────────────────────
+
+/// in_progress tasks float to the top; everything else keeps ledger order.
+/// Mirrors the active/rest split in web/src/components/detail-panel.tsx.
+fn ordered_tasks(tasks: &[HarnessTask]) -> Vec<&HarnessTask> {
+    let mut out: Vec<&HarnessTask> = tasks.iter().filter(|t| t.status == HarnessTaskStatus::InProgress).collect();
+    out.extend(tasks.iter().filter(|t| t.status != HarnessTaskStatus::InProgress));
+    out
+}
+
+/// The status glyph and its ink. The browser UI's TaskRow draws a bordered
+/// circle filled for terminal states; a one-cell glyph per status is the
+/// terminal equivalent, not a copy of that scheme.
+fn task_glyph(status: HarnessTaskStatus) -> (&'static str, fn(&str) -> String) {
+    match status {
+        HarnessTaskStatus::InProgress => ("◐", c::accent as fn(&str) -> String),
+        HarnessTaskStatus::Pending => ("○", c::dim as fn(&str) -> String),
+        HarnessTaskStatus::Completed => ("●", c::green as fn(&str) -> String),
+        HarnessTaskStatus::Blocked => ("✗", c::red as fn(&str) -> String),
+        // Dropped keeps pending's hollow glyph, dimmed like its struck title.
+        HarnessTaskStatus::Dropped => ("○", c::dim as fn(&str) -> String),
+    }
+}
+
+fn task_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell> {
+    let tasks = ordered_tasks(&vm.tasks);
+    if tasks.is_empty() {
+        return vec![plain("  no task ledger yet", c::dim)];
+    }
+    let focused = vm.focus == 2;
+    let start = scroll_start(vm.sel_task, tasks.len(), inner_h);
+    (start..tasks.len().min(start + inner_h))
+        .map(|i| {
+            let (glyph, color) = task_glyph(tasks[i].status);
+            // An untitled task still needs a visible handle: fall back to its id.
+            let label = if tasks[i].title.trim().is_empty() { tasks[i].id.as_str() } else { tasks[i].title.as_str() };
+            let text = fit(&format!("{glyph} {label}"), inner_w, true);
+            selectable(text, color, focused && i == vm.sel_task)
+        })
+        .collect()
+}
+
+/// `3 pending · 1 completed` — the statuses present, in a fixed order, zero
+/// counts omitted. None when the ledger is empty.
+fn task_count_note(tasks: &[HarnessTask]) -> Option<String> {
+    if tasks.is_empty() {
+        return None;
+    }
+    let counts: [(HarnessTaskStatus, &str); 5] = [
+        (HarnessTaskStatus::InProgress, "in progress"),
+        (HarnessTaskStatus::Pending, "pending"),
+        (HarnessTaskStatus::Completed, "completed"),
+        (HarnessTaskStatus::Blocked, "blocked"),
+        (HarnessTaskStatus::Dropped, "dropped"),
+    ];
+    let parts: Vec<String> = counts
+        .iter()
+        .filter_map(|&(status, label)| {
+            let n = tasks.iter().filter(|t| t.status == status).count();
+            (n > 0).then(|| format!("{n} {label}"))
+        })
+        .collect();
+    Some(parts.join(" · "))
+}
+
 // ── Shell rows ───────────────────────────────────────────────────────────────
 
-/// True when the currently focused selection is a running (live-lease) session.
+/// True when the currently selected session is a running (live-lease) one.
 fn focused_is_running(vm: &WatchViewModel) -> bool {
-    let (list, sel) = if vm.session_focus == 1 { (&vm.running, vm.sel_running) } else { (&vm.recent, vm.sel_recent) };
-    list.get(sel).is_some_and(|r| vm.started_at_ms.contains_key(&r.id))
+    vm.sessions.get(vm.sel_session).is_some_and(|r| vm.started_at_ms.contains_key(&r.id))
 }
 
 fn shell_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell> {
@@ -495,12 +584,12 @@ fn transcript_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<R
 
 // ── Titles / footer notes ────────────────────────────────────────────────────
 
-fn running_title(vm: &WatchViewModel) -> String {
-    format!("[1] Running ({})", vm.running.len())
+fn sessions_title(vm: &WatchViewModel) -> String {
+    format!("[1] Sessions · {} ({})", vm.mode.label(), vm.sessions.len())
 }
 
-fn recent_title(vm: &WatchViewModel) -> String {
-    format!("[2] Recent ({})", vm.recent.len())
+fn tasks_title(vm: &WatchViewModel) -> String {
+    format!("[2] Tasks ({})", vm.tasks.len())
 }
 
 fn shells_title(vm: &WatchViewModel) -> String {
@@ -516,9 +605,8 @@ fn shell_log_title(vm: &WatchViewModel) -> String {
 }
 
 fn transcript_title(vm: &WatchViewModel) -> String {
-    let (list, sel) = if vm.session_focus == 1 { (&vm.running, vm.sel_running) } else { (&vm.recent, vm.sel_recent) };
-    let Some(r) = list.get(sel) else { return "[0] Transcript".to_string() };
-    let status = if vm.session_focus == 1 && vm.started_at_ms.contains_key(&r.id) { "running" } else { r.status.as_str() };
+    let Some(r) = vm.sessions.get(vm.sel_session) else { return "[0] Transcript".to_string() };
+    let status = if vm.started_at_ms.contains_key(&r.id) { "running" } else { r.status.as_str() };
     format!("[0] {} · {status} · {}", short_id(&r.id), goal_text(r))
 }
 
@@ -531,7 +619,7 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · j/k move · [/] h/l scroll log · q quit";
+const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · j/k move · [/] h/l scroll log · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -548,29 +636,22 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     let footer = c::dim(&fit(FOOTER_HINT, cols, true));
     let body_h = rows - 1;
 
-    let run_focused = vm.focus == 1;
-    let recent_focused = vm.focus == 2;
+    let sessions_focused = vm.focus == 1;
+    let tasks_focused = vm.focus == 2;
 
-    let mk_running = |w: usize, h: usize, height: usize| -> Vec<String> {
+    let mk_sessions = |w: usize, h: usize, height: usize| -> Vec<String> {
         render_pane(
             w,
             height,
-            &running_title(vm),
-            run_focused,
-            &session_rows(&vm.running, vm.sel_running, run_focused, w.saturating_sub(2), h, ListKind::Running, vm.now, &vm.started_at_ms),
-            pos_note(vm.sel_running, vm.running.len()).as_deref(),
+            &sessions_title(vm),
+            sessions_focused,
+            &session_rows(vm, w.saturating_sub(2), h),
+            pos_note(vm.sel_session, vm.sessions.len()).as_deref(),
         )
     };
 
-    let mk_recent = |w: usize, h: usize, height: usize| -> Vec<String> {
-        render_pane(
-            w,
-            height,
-            &recent_title(vm),
-            recent_focused,
-            &session_rows(&vm.recent, vm.sel_recent, recent_focused, w.saturating_sub(2), h, ListKind::Recent, vm.now, &vm.started_at_ms),
-            pos_note(vm.sel_recent, vm.recent.len()).as_deref(),
-        )
+    let mk_tasks = |w: usize, h: usize, height: usize| -> Vec<String> {
+        render_pane(w, height, &tasks_title(vm), tasks_focused, &task_rows(vm, w.saturating_sub(2), h), task_count_note(&vm.tasks).as_deref())
     };
 
     let mk_shells = |w: usize, height: usize| -> Vec<String> {
@@ -613,10 +694,10 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     let body: Vec<String> = if cols < PORTRAIT_MAX_COLS {
         // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
         // transcript absorbs the reclaimed rows.
-        let heights = portrait_heights(body_h, &[vm.running.len(), vm.recent.len(), vm.shells.len(), 0]);
+        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
         let (h1, h2, h3, h0) = (heights[0], heights[1], heights[2], heights[3]);
-        let mut body = mk_running(cols, h1.saturating_sub(2), h1);
-        body.extend(mk_recent(cols, h2.saturating_sub(2), h2));
+        let mut body = mk_sessions(cols, h1.saturating_sub(2), h1);
+        body.extend(mk_tasks(cols, h2.saturating_sub(2), h2));
         body.extend(mk_shells(cols, h3));
         body.extend(mk_zero(cols, h0));
         body
@@ -624,10 +705,10 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
         // Landscape: left [1]/[2]/Shells (~40% width), right full-height [0].
         let left_w = (cols * 2 / 5).max(30).min(cols - 20);
         let right_w = cols - left_w;
-        // Content-hug running and shells; recent takes the rest of the left column.
-        let run_desired = vm.running.len().max(1) + 2;
+        // Content-hug sessions and shells; tasks takes the rest of the left column.
+        let sessions_desired = vm.sessions.len().max(1) + 2;
         let shells_desired = vm.shells.len().max(1) + 2;
-        let mut h1 = run_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
+        let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
         let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + MIN_PANE)));
         let mut h2 = body_h as i64 - h1 as i64 - h3 as i64;
         if h2 < MIN_PANE as i64 {
@@ -637,8 +718,8 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
             h3 = capped[2];
         }
         let h2 = h2.max(0) as usize;
-        let mut left = mk_running(left_w, h1.saturating_sub(2), h1);
-        left.extend(mk_recent(left_w, h2.saturating_sub(2), h2));
+        let mut left = mk_sessions(left_w, h1.saturating_sub(2), h1);
+        left.extend(mk_tasks(left_w, h2.saturating_sub(2), h2));
         left.extend(mk_shells(left_w, h3));
         let right = mk_zero(right_w, body_h);
         hconcat(&left, &right)
@@ -661,13 +742,11 @@ mod tests {
     fn empty_vm() -> WatchViewModel {
         WatchViewModel {
             now: 0,
-            running: vec![],
-            recent: vec![],
+            mode: SessionsMode::Running,
+            sessions: vec![],
             started_at_ms: HashMap::new(),
             focus: 1,
-            session_focus: 1,
-            sel_running: 0,
-            sel_recent: 0,
+            sel_session: 0,
             transcript: vec![],
             following: true,
             transcript_scroll: 0,
@@ -675,7 +754,42 @@ mod tests {
             sel_shell: 0,
             shell_log_lines: vec![],
             shell_log_files: vec![],
+            tasks: vec![],
+            sel_task: 0,
         }
+    }
+
+    fn task(id: &str, title: &str, status: HarnessTaskStatus) -> HarnessTask {
+        HarnessTask {
+            activations: None,
+            created_at_iteration: 0,
+            depends_on: None,
+            footprint: None,
+            dropped_exhausted: None,
+            finished_at_iteration: None,
+            id: id.into(),
+            notes: vec![],
+            reopen_count: None,
+            review_of: None,
+            reviews: None,
+            review_round: None,
+            awaiting_review_by: None,
+            role: None,
+            loops_run: None,
+            stall_count: 0,
+            status,
+            summary: None,
+            title: title.into(),
+            verify_nudged: None,
+            edit_nudged: None,
+            confidence: None,
+            blocked_on: None,
+            recovery_history: None,
+        }
+    }
+
+    fn task_texts(rows: &[RowCell]) -> Vec<String> {
+        rows.iter().map(|r| r.text.trim_end().to_string()).collect()
     }
 
     fn record(id: &str, goal: &str) -> SessionRecord {
@@ -750,8 +864,11 @@ mod tests {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
-        vm.running.push(record("aaaaaaaa-1", "run a goal that is rather long so it gets clipped by the pane"));
-        vm.recent.push(record("bbbbbbbb-2", "old goal"));
+        vm.mode = SessionsMode::All;
+        vm.sessions.push(record("aaaaaaaa-1", "run a goal that is rather long so it gets clipped by the pane"));
+        vm.sessions.push(record("bbbbbbbb-2", "old goal"));
+        vm.started_at_ms.insert("aaaaaaaa-1".into(), 0);
+        vm.tasks = vec![task("task-1", "port types", HarnessTaskStatus::Pending), task("task-2", "wire it up", HarnessTaskStatus::InProgress)];
         vm.shells.push(PsProc { pid: 12, ppid: 1, etime_sec: Some(61), command: "bash -c sleep".into() });
         for (cols, rows) in [(100, 30), (60, 24), (19, 5), (120, 8)] {
             let frame = render_frame(&vm, cols, rows);
@@ -765,5 +882,115 @@ mod tests {
         assert!(frame.contains("[0] Shell · 12"));
         assert!(frame.contains("Log · 12"));
         assert!(widths(&frame).iter().all(|&x| x == 100));
+    }
+
+    #[test]
+    fn sessions_mode_cycles_through_all_three_and_back() {
+        assert_eq!(SessionsMode::Running.next(), SessionsMode::Recent);
+        assert_eq!(SessionsMode::Recent.next(), SessionsMode::All);
+        assert_eq!(SessionsMode::All.next(), SessionsMode::Running);
+        assert_eq!(SessionsMode::Running.label(), "running");
+        assert_eq!(SessionsMode::Recent.label(), "recent");
+        assert_eq!(SessionsMode::All.label(), "all");
+    }
+
+    #[test]
+    fn sessions_title_names_the_mode_and_count() {
+        let mut vm = empty_vm();
+        vm.mode = SessionsMode::Recent;
+        vm.sessions.push(record("aaaaaaaa-1", "old goal"));
+        assert_eq!(sessions_title(&vm), "[1] Sessions · recent (1)");
+        vm.mode = SessionsMode::Running;
+        assert_eq!(sessions_title(&vm), "[1] Sessions · running (1)");
+        vm.mode = SessionsMode::All;
+        assert_eq!(sessions_title(&vm), "[1] Sessions · all (1)");
+    }
+
+    #[test]
+    fn sessions_empty_state_follows_the_mode() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        assert_eq!(session_rows(&vm, 20, 5)[0].text, "  no running sessions");
+        vm.mode = SessionsMode::Recent;
+        assert_eq!(session_rows(&vm, 20, 5)[0].text, "  no recent sessions");
+        vm.mode = SessionsMode::All;
+        assert_eq!(session_rows(&vm, 20, 5)[0].text, "  no sessions yet");
+    }
+
+    #[test]
+    fn all_mode_mixes_live_timers_and_relative_times() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.mode = SessionsMode::All;
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:30Z").unwrap().timestamp_millis();
+        vm.now = now;
+        vm.sessions.push(record("aaaaaaaa-1", "live"));
+        vm.sessions.push(record("bbbbbbbb-2", "old"));
+        vm.started_at_ms.insert("aaaaaaaa-1".into(), now - 65_000);
+        let rows = session_rows(&vm, 40, 5);
+        assert!(rows[0].text.contains("1:05"), "{}", rows[0].text);
+        assert!(rows[1].text.contains("1m"), "{}", rows[1].text);
+    }
+
+    #[test]
+    fn task_rows_put_in_progress_first_with_expected_glyphs() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.focus = 2;
+        vm.tasks = vec![
+            task("task-1", "pending one", HarnessTaskStatus::Pending),
+            task("task-2", "active one", HarnessTaskStatus::InProgress),
+            task("task-3", "done one", HarnessTaskStatus::Completed),
+            task("task-4", "stuck one", HarnessTaskStatus::Blocked),
+            task("task-5", "cut one", HarnessTaskStatus::Dropped),
+        ];
+        let rows = task_rows(&vm, 24, 10);
+        assert_eq!(task_texts(&rows), vec!["◐ active one", "○ pending one", "● done one", "✗ stuck one", "○ cut one"]);
+        assert!(rows[0].selected, "the focused pane highlights the selected task");
+    }
+
+    #[test]
+    fn task_count_note_summarizes_present_statuses() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        assert_eq!(task_count_note(&[]), None);
+        let tasks = vec![
+            task("task-1", "a", HarnessTaskStatus::Pending),
+            task("task-2", "b", HarnessTaskStatus::Pending),
+            task("task-3", "c", HarnessTaskStatus::Completed),
+        ];
+        assert_eq!(task_count_note(&tasks).as_deref(), Some("2 pending · 1 completed"));
+        let mut vm = empty_vm();
+        vm.tasks = tasks;
+        assert_eq!(tasks_title(&vm), "[2] Tasks (3)");
+    }
+
+    #[test]
+    fn task_rows_follow_the_scroll_window() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        let mut tasks: Vec<HarnessTask> =
+            (0..10).map(|i| task(&format!("task-{i}"), &format!("t{i}"), HarnessTaskStatus::Pending)).collect();
+        tasks.push(task("task-x", "active", HarnessTaskStatus::InProgress));
+        vm.tasks = tasks;
+        // The window starts at the selected row: first row selected shows the
+        // floated in_progress task, last row selected shows the ledger's end.
+        vm.sel_task = 0;
+        assert_eq!(task_texts(&task_rows(&vm, 24, 2)), vec!["◐ active", "○ t0"]);
+        vm.sel_task = 10;
+        assert_eq!(task_texts(&task_rows(&vm, 24, 3)), vec!["○ t7", "○ t8", "○ t9"]);
+    }
+
+    #[test]
+    fn empty_task_ledger_renders_the_empty_row_and_no_note() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let vm = empty_vm();
+        assert_eq!(task_count_note(&vm.tasks), None);
+        assert_eq!(task_rows(&vm, 24, 5)[0].text, "  no task ledger yet");
     }
 }

@@ -112,7 +112,9 @@ fn looks_like_etime(s: &str) -> bool {
     if groups.len() < 2 {
         return false;
     }
-    groups.iter().all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()))
+    groups
+        .iter()
+        .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()))
 }
 
 // Parse a `ps` etime token ([[dd-]hh:]mm:ss) into seconds.
@@ -123,7 +125,10 @@ pub fn parse_etime(s: &str) -> i64 {
         days = s[..dash].parse::<i64>().unwrap_or(0);
         rest = &s[dash + 1..];
     }
-    let parts: Vec<i64> = rest.split(':').map(|x| x.parse::<i64>().unwrap_or(0)).collect();
+    let parts: Vec<i64> = rest
+        .split(':')
+        .map(|x| x.parse::<i64>().unwrap_or(0))
+        .collect();
     let sec = match parts.len() {
         3 => parts[0] * 3600 + parts[1] * 60 + parts[2],
         2 => parts[0] * 60 + parts[1],
@@ -160,7 +165,10 @@ pub fn descendants(root_pid: i64, procs: &[PsProc]) -> Vec<PsProc> {
 
 /// Snapshot the live process table (pid/ppid/etime/command).
 pub fn list_processes() -> Vec<PsProc> {
-    match Command::new("ps").args(["-axo", "pid=,ppid=,etime=,command="]).output() {
+    match Command::new("ps")
+        .args(["-axo", "pid=,ppid=,etime=,command="])
+        .output()
+    {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             parse_ps(&stdout)
@@ -212,11 +220,36 @@ mod tests {
     #[test]
     fn test_descendants() {
         let procs = vec![
-            PsProc { pid: 1, ppid: 0, etime_sec: None, command: "init".to_string() },
-            PsProc { pid: 10, ppid: 1, etime_sec: None, command: "session".to_string() },
-            PsProc { pid: 20, ppid: 10, etime_sec: None, command: "sh".to_string() },
-            PsProc { pid: 30, ppid: 20, etime_sec: None, command: "grandchild".to_string() },
-            PsProc { pid: 40, ppid: 999, etime_sec: None, command: "unrelated".to_string() },
+            PsProc {
+                pid: 1,
+                ppid: 0,
+                etime_sec: None,
+                command: "init".to_string(),
+            },
+            PsProc {
+                pid: 10,
+                ppid: 1,
+                etime_sec: None,
+                command: "session".to_string(),
+            },
+            PsProc {
+                pid: 20,
+                ppid: 10,
+                etime_sec: None,
+                command: "sh".to_string(),
+            },
+            PsProc {
+                pid: 30,
+                ppid: 20,
+                etime_sec: None,
+                command: "grandchild".to_string(),
+            },
+            PsProc {
+                pid: 40,
+                ppid: 999,
+                etime_sec: None,
+                command: "unrelated".to_string(),
+            },
         ];
         let kids = descendants(10, &procs);
         let pids: Vec<i64> = kids.iter().map(|p| p.pid).collect();

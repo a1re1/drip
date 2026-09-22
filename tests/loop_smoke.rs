@@ -8,10 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use drip::core::types::{HarnessEvent, HarnessRunReason, HarnessTaskStatus};
 use drip::harness::r#loop::{run_solid_state_harness, SolidStateHarnessOptions};
-use drip::tools::async_jobs::{create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions};
+use drip::tools::async_jobs::{
+    create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions,
+};
 
 /// Serves one canned response per connection, in order.
-fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+fn spawn_scripted_server(
+    responses: Vec<String>,
+) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
@@ -23,14 +27,19 @@ fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHa
                 match listener.accept() {
                     Ok(connection) => break connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(std::time::Instant::now() < deadline, "scripted endpoint did not receive the expected call");
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "scripted endpoint did not receive the expected call"
+                        );
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(error) => panic!("accept: {error}"),
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
             let mut data: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 8192];
             let body_start = loop {
@@ -41,14 +50,19 @@ fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHa
                     let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
                     let len = head
                         .lines()
-                        .find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
                         .unwrap_or(0);
                     if data.len() >= pos + 4 + len {
                         break pos + 4;
                     }
                 }
             };
-            bodies.push(serde_json::from_slice(&data[body_start..]).unwrap_or(serde_json::Value::Null));
+            bodies.push(
+                serde_json::from_slice(&data[body_start..]).unwrap_or(serde_json::Value::Null),
+            );
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 response_body.len(),
@@ -59,7 +73,10 @@ fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHa
         }
         bodies
     });
-    (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
+    (
+        format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        handle,
+    )
 }
 
 fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> String {
@@ -82,7 +99,12 @@ fn tool_calls_response(calls: Vec<(&str, &str, serde_json::Value)>) -> String {
     .to_string()
 }
 
-fn narrated_tool_call_response(text: &str, id: &str, name: &str, arguments: serde_json::Value) -> String {
+fn narrated_tool_call_response(
+    text: &str,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> String {
     serde_json::json!({
         "choices": [{"message": {"content": text, "tool_calls": [{"id": id, "type": "function", "function": {"name": name, "arguments": arguments.to_string()}}]}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5}
@@ -101,33 +123,78 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
         let sink = events.clone();
         let mut tools = drip::tools::pack::builtin_tool_pack(Default::default());
-        tools.iter_mut().find(|tool| tool.name == "PATCH").unwrap().name = writer.into();
+        tools
+            .iter_mut()
+            .find(|tool| tool.name == "PATCH")
+            .unwrap()
+            .name = writer.into();
         let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
         let (url, server) = spawn_scripted_server(vec![
-            tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"]})),
-            tool_call_response("w", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+            tool_call_response(
+                "p",
+                "plan_tasks",
+                serde_json::json!({"tasks":["produce artifact"]}),
+            ),
+            tool_call_response(
+                "w",
+                writer,
+                serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+            ),
             tool_call_response("v", "VERIFY", serde_json::json!({"command":"true"})),
-            tool_call_response("f1", "finish_task", serde_json::json!({"status":"completed","summary":"done"})),
-            tool_call_response("f2", "finish_task", serde_json::json!({"status":"completed","summary":"done"})),
+            tool_call_response(
+                "f1",
+                "finish_task",
+                serde_json::json!({"status":"completed","summary":"done"}),
+            ),
+            tool_call_response(
+                "f2",
+                "finish_task",
+                serde_json::json!({"status":"completed","summary":"done"}),
+            ),
             tool_call_response("a", route, serde_json::json!({"command":assertion})),
-            tool_call_response("bad-write", "BASH", serde_json::json!({"command":"printf corrupt > artifact.txt; exit 9"})),
-            tool_call_response("stale", "finish_task", serde_json::json!({"status":"completed","summary":"earlier check passed"})),
-            tool_call_response("restore", writer, serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+            tool_call_response(
+                "bad-write",
+                "BASH",
+                serde_json::json!({"command":"printf corrupt > artifact.txt; exit 9"}),
+            ),
+            tool_call_response(
+                "stale",
+                "finish_task",
+                serde_json::json!({"status":"completed","summary":"earlier check passed"}),
+            ),
+            tool_call_response(
+                "restore",
+                writer,
+                serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+            ),
             tool_call_response("fresh", route, serde_json::json!({"command":assertion})),
-            tool_call_response("f3", "finish_task", serde_json::json!({"status":"completed","summary":"one assertion passed","confidence":"high","anchor":"none","anchorNote":"the assertion script is self-authored; no external fixture exists"})),
+            tool_call_response(
+                "f3",
+                "finish_task",
+                serde_json::json!({"status":"completed","summary":"one assertion passed","confidence":"high","anchor":"none","anchorNote":"the assertion script is self-authored; no external fixture exists"}),
+            ),
             text_response("Artifact verified."),
         ]);
         let result = run_solid_state_harness(SolidStateHarnessOptions {
-            cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a verified artifact".into(),
-            max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+            cwd: Some(dir.path().to_string_lossy().into()),
+            goal: "produce a verified artifact".into(),
+            max_iterations: Some(6),
+            model: Some("mock".into()),
+            summarize_run: Some(true),
+            url: Some(url),
             tools,
             on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
             state_path: Some(dir.path().join("state.json")),
-            tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-                cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
-            })),
+            tool_services: Some(create_chat_tool_runtime_services(
+                CreateChatToolRuntimeServicesOptions {
+                    cwd: Some(dir.path().into()),
+                    jobs_root: Some(dir.path().join("jobs")),
+                },
+            )),
             ..Default::default()
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         server.join().unwrap();
         assert_eq!(result.reason, HarnessRunReason::Completed, "{route}");
         let records = result.state.verifications.as_ref().unwrap();
@@ -139,14 +206,52 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
         assert!(!records[0].evidence.as_ref().unwrap().verifies_work());
         assert!(records[1].evidence.as_ref().unwrap().verifies_work());
         assert_eq!(records[1].evidence.as_ref().unwrap().executed, 1);
-        assert!(records[2].failed, "the harness re-run sees the corrupt artifact: {route}");
+        assert!(
+            records[2].failed,
+            "the harness re-run sees the corrupt artifact: {route}"
+        );
         assert!(records[3].evidence.as_ref().unwrap().verifies_work());
-        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.contains("not accepted yet — this task edited")).count(), 2, "{route}");
-        assert_eq!(events.lock().unwrap().iter().filter(|event| event.detail.starts_with("harness re-ran the last check after workspace edits")).count(), 1, "{route}");
-        assert_eq!(std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(), "correct\n");
-        let anchor = result.state.completion_anchor.as_ref().expect("completion anchor recorded");
-        assert_eq!(anchor.kind, drip::core::types::CompletionAnchorKind::None, "{route}");
-        assert_eq!(anchor.claimed_confidence, Some(drip::core::types::ClaimedConfidence::High), "{route}");
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.detail.contains("not accepted yet — this task edited"))
+                .count(),
+            2,
+            "{route}"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event
+                    .detail
+                    .starts_with("harness re-ran the last check after workspace edits"))
+                .count(),
+            1,
+            "{route}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifact.txt")).unwrap(),
+            "correct\n"
+        );
+        let anchor = result
+            .state
+            .completion_anchor
+            .as_ref()
+            .expect("completion anchor recorded");
+        assert_eq!(
+            anchor.kind,
+            drip::core::types::CompletionAnchorKind::None,
+            "{route}"
+        );
+        assert_eq!(
+            anchor.claimed_confidence,
+            Some(drip::core::types::ClaimedConfidence::High),
+            "{route}"
+        );
     }
 }
 
@@ -162,38 +267,101 @@ async fn stale_finish_is_reverified_by_the_harness_without_another_round() {
     let tools = drip::tools::pack::builtin_tool_pack(Default::default());
     let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"]})),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"draft\n"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["produce artifact"]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"draft\n"}),
+        ),
         tool_call_response("a", "VERIFY", serde_json::json!({"command":"true"})),
         // Edit after the check, then finish: stale, so the harness re-runs
         // the assertion itself and accepts the finish in this round.
-        tool_call_response("w2", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
+        tool_call_response(
+            "w2",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
         tool_call_response("a2", "VERIFY", serde_json::json!({"command":assertion})),
-        tool_call_response("w3", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"done","anchor":"none","anchorNote":"self-authored assertion only"})),
+        tool_call_response(
+            "w3",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"done","anchor":"none","anchorNote":"self-authored assertion only"}),
+        ),
         text_response("Artifact verified."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
-        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a verified artifact".into(),
-        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "produce a verified artifact".into(),
+        max_iterations: Some(6),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
         tools,
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(dir.path().join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
         ..Default::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let records = result.state.verifications.as_ref().unwrap();
-    assert_eq!(records.len(), 3, "true, the assertion, and the harness re-run of the assertion");
+    assert_eq!(
+        records.len(),
+        3,
+        "true, the assertion, and the harness re-run of the assertion"
+    );
     assert!(!records[2].failed);
     assert_eq!(records[2].command, records[1].command);
     let events = events.lock().unwrap();
-    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
-    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness re-ran the last check after workspace edits")).count(), 1);
-    assert!(events.iter().any(|event| event.detail.starts_with("finish_task: harness re-ran the last check after your edits")), "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.starts_with("finish_task")).collect::<Vec<_>>());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.detail.contains("not accepted yet"))
+            .count(),
+        0,
+        "no bounce reached the model"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event
+                .detail
+                .starts_with("harness re-ran the last check after workspace edits"))
+            .count(),
+        1
+    );
+    assert!(
+        events.iter().any(|event| event
+            .detail
+            .starts_with("finish_task: harness re-ran the last check after your edits")),
+        "{:?}",
+        events
+            .iter()
+            .map(|e| e.detail.clone())
+            .filter(|d| d.starts_with("finish_task"))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// A finish with no check run at all: the harness runs the check the goal
@@ -206,9 +374,21 @@ async fn unchecked_finish_runs_the_goal_declared_check() {
     let sink = events.clone();
     let tools = drip::tools::pack::builtin_tool_pack(Default::default());
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["add the test"]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"}),
+        ),
         text_response("Test added."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -225,19 +405,65 @@ async fn unchecked_finish_runs_the_goal_declared_check() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let records = result.state.verifications.as_ref().unwrap();
     assert_eq!(records.len(), 1, "only the harness-run goal check");
     assert!(!records[0].failed);
-    assert_eq!(records[0].command, "python3 -m unittest discover -s tests -q");
-    let anchor = records[0].evidence.as_ref().unwrap().anchor.clone().expect("anchor recorded");
-    assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::External);
+    assert_eq!(
+        records[0].command,
+        "python3 -m unittest discover -s tests -q"
+    );
+    let anchor = records[0]
+        .evidence
+        .as_ref()
+        .unwrap()
+        .anchor
+        .clone()
+        .expect("anchor recorded");
+    assert_eq!(
+        anchor.kind,
+        drip::core::types::VerificationAnchorKind::External
+    );
     let events = events.lock().unwrap();
-    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.detail.contains("not accepted yet"))
+            .count(),
+        0,
+        "no bounce reached the model"
+    );
     // The check ran when the PATCH landed (run_edit_check); the finish that
     // followed without further edits was accepted on that record.
-    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check after this round's edits")).count(), 1, "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.starts_with("harness ran")).collect::<Vec<_>>());
-    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event
+                .detail
+                .starts_with("harness ran the goal-declared check after this round's edits"))
+            .count(),
+        1,
+        "{:?}",
+        events
+            .iter()
+            .map(|e| e.detail.clone())
+            .filter(|d| d.starts_with("harness ran"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event
+                .detail
+                .starts_with("harness ran the goal-declared check for the finish"))
+            .count(),
+        0
+    );
 }
 
 /// A completion report instead of finish_task, on a workspace the edit check
@@ -267,13 +493,42 @@ async fn verified_narration_is_accepted_as_the_finish() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let events = events.lock().unwrap();
     let details: Vec<String> = events.iter().map(|e| e.detail.clone()).collect();
-    assert_eq!(details.iter().filter(|d| d.starts_with("narration accepted as finish_task")).count(), 1, "{details:?}");
-    assert!(details.iter().any(|d| d.starts_with("finish_task:") && d.contains("marked completed")), "{details:?}");
-    assert_eq!(details.iter().filter(|d| d.starts_with("loop ")).count(), 1, "the task must not be re-seeded in a second loop: {details:?}");
-    assert_eq!(result.state.tasks.iter().filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed).count(), 1);
+    assert_eq!(
+        details
+            .iter()
+            .filter(|d| d.starts_with("narration accepted as finish_task"))
+            .count(),
+        1,
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.starts_with("finish_task:") && d.contains("marked completed")),
+        "{details:?}"
+    );
+    assert_eq!(
+        details.iter().filter(|d| d.starts_with("loop ")).count(),
+        1,
+        "the task must not be re-seeded in a second loop: {details:?}"
+    );
+    assert_eq!(
+        result
+            .state
+            .tasks
+            .iter()
+            .filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed)
+            .count(),
+        1
+    );
 }
 
 /// A completion report sent in the same response as the edits: the goal's
@@ -309,13 +564,43 @@ async fn completion_report_sent_with_the_edits_is_accepted_as_the_finish() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let events = events.lock().unwrap();
     let details: Vec<String> = events.iter().map(|e| e.detail.clone()).collect();
-    assert_eq!(details.iter().filter(|d| d.starts_with("narration accepted as finish_task") && d.contains("sent with this round's edits")).count(), 1, "{details:?}");
-    assert!(details.iter().any(|d| d.starts_with("finish_task:") && d.contains("marked completed")), "{details:?}");
-    assert_eq!(details.iter().filter(|d| d.starts_with("loop ")).count(), 1, "{details:?}");
-    assert_eq!(result.state.tasks.iter().filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed).count(), 1);
+    assert_eq!(
+        details
+            .iter()
+            .filter(|d| d.starts_with("narration accepted as finish_task")
+                && d.contains("sent with this round's edits"))
+            .count(),
+        1,
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d.starts_with("finish_task:") && d.contains("marked completed")),
+        "{details:?}"
+    );
+    assert_eq!(
+        details.iter().filter(|d| d.starts_with("loop ")).count(),
+        1,
+        "{details:?}"
+    );
+    assert_eq!(
+        result
+            .state
+            .tasks
+            .iter()
+            .filter(|t| t.status == drip::core::types::HarnessTaskStatus::Completed)
+            .count(),
+        1
+    );
 }
 
 /// Two PATCH calls in one response: the check runs once, after the last of
@@ -330,10 +615,22 @@ async fn edit_check_runs_once_after_the_last_patch_of_a_response() {
     let tools = drip::tools::pack::builtin_tool_pack(Default::default());
     let (url, server) = spawn_scripted_server(vec![
         tool_calls_response(vec![
-            ("w1", "PATCH", serde_json::json!({"path":"pkg/__init__.py","content":"def add(a, b):\n    return a + b\n"})),
-            ("w2", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\nfrom pkg import add\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(add(1, 1), 2)\n"})),
+            (
+                "w1",
+                "PATCH",
+                serde_json::json!({"path":"pkg/__init__.py","content":"def add(a, b):\n    return a + b\n"}),
+            ),
+            (
+                "w2",
+                "PATCH",
+                serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\nfrom pkg import add\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(add(1, 1), 2)\n"}),
+            ),
         ]),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added add and its test","anchor":"none","anchorNote":"nothing ran"})),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"added add and its test","anchor":"none","anchorNote":"nothing ran"}),
+        ),
         text_response("Done."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -350,20 +647,41 @@ async fn edit_check_runs_once_after_the_last_patch_of_a_response() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let events = events.lock().unwrap();
     let details: Vec<String> = events.iter().map(|e| e.detail.clone()).collect();
     // Tool-call events are emitted after the call runs, so order them by
     // which PATCH result carries the check's trailer instead.
-    let checks: Vec<&String> = details.iter().filter(|d| d.starts_with("harness ran the goal-declared check after this round's edits")).collect();
+    let checks: Vec<&String> = details
+        .iter()
+        .filter(|d| d.starts_with("harness ran the goal-declared check after this round's edits"))
+        .collect();
     assert_eq!(checks.len(), 1, "{details:?}");
     assert!(checks[0].contains("-> passed"), "{}", checks[0]);
     // The test file exists only after the second PATCH: a check that ran
     // between the two would have found no tests at all.
     let records = result.state.verifications.as_ref().unwrap();
     assert_eq!(records.len(), 1, "one harness-run check");
-    assert_eq!(records[0].evidence.as_ref().unwrap().executed, 1, "the check ran before tests/test_ok.py existed: {:?}", records[0]);
-    assert_eq!(events.iter().filter(|event| event.detail.starts_with("harness ran the goal-declared check for the finish")).count(), 0);
+    assert_eq!(
+        records[0].evidence.as_ref().unwrap().executed,
+        1,
+        "the check ran before tests/test_ok.py existed: {:?}",
+        records[0]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event
+                .detail
+                .starts_with("harness ran the goal-declared check for the finish"))
+            .count(),
+        0
+    );
 }
 
 /// A stale finish whose last check cannot be re-run (the record keeps only a
@@ -376,11 +694,27 @@ async fn stale_finish_with_unrerunnable_check_falls_back_to_the_goal_check() {
     let tools = drip::tools::pack::builtin_tool_pack(Default::default());
     let long_check = format!("python3 - <<'EOF'\n# {}\nprint('ok')\nEOF", "x".repeat(220));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["add the test"]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"}),
+        ),
         tool_call_response("v", "VERIFY", serde_json::json!({"command":long_check})),
-        tool_call_response("w2", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(2 + 2, 4)\n"})),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"self-authored probe only"})),
+        tool_call_response(
+            "w2",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(2 + 2, 4)\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"self-authored probe only"}),
+        ),
         text_response("Test added."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -397,14 +731,37 @@ async fn stale_finish_with_unrerunnable_check_falls_back_to_the_goal_check() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let records = result.state.verifications.as_ref().unwrap();
     // Each PATCH lands the goal check (run_edit_check) around the long probe;
     // the finish is accepted on the last of them without a re-run.
-    assert_eq!(records.len(), 3, "goal check, the long probe, goal check: {:?}", records.iter().map(|r| r.command.clone()).collect::<Vec<_>>());
-    assert_eq!(records[2].command, "python3 -m unittest discover -s tests -q");
+    assert_eq!(
+        records.len(),
+        3,
+        "goal check, the long probe, goal check: {:?}",
+        records
+            .iter()
+            .map(|r| r.command.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        records[2].command,
+        "python3 -m unittest discover -s tests -q"
+    );
     let events = events.lock().unwrap();
-    assert_eq!(events.iter().filter(|event| event.detail.contains("not accepted yet")).count(), 0, "no bounce reached the model");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.detail.contains("not accepted yet"))
+            .count(),
+        0,
+        "no bounce reached the model"
+    );
 }
 
 /// A task that keeps editing but never calls finish_task is bounded by the
@@ -416,35 +773,76 @@ async fn task_loop_budget_blocks_a_task_that_never_finishes() {
     let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
     let sink = events.clone();
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["never done"]})),
-        tool_call_response("w1", "PATCH", serde_json::json!({"path":"a.txt","content":"one\n"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["never done"]}),
+        ),
+        tool_call_response(
+            "w1",
+            "PATCH",
+            serde_json::json!({"path":"a.txt","content":"one\n"}),
+        ),
         text_response("still going"),
-        tool_call_response("w2", "PATCH", serde_json::json!({"path":"a.txt","content":"two\n"})),
+        tool_call_response(
+            "w2",
+            "PATCH",
+            serde_json::json!({"path":"a.txt","content":"two\n"}),
+        ),
         text_response("still going"),
         text_response("Budget spent."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
-        cwd: Some(dir.path().to_string_lossy().into()), goal: "never finish".into(),
-        max_iterations: Some(10), max_loops: Some(3), task_loop_limit: Some(2),
-        model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
-        r#loop: Some(drip::harness::roles::PartialHarnessLoopConfig { max_cycles: Some(1), ..Default::default() }),
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "never finish".into(),
+        max_iterations: Some(10),
+        max_loops: Some(3),
+        task_loop_limit: Some(2),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
+        r#loop: Some(drip::harness::roles::PartialHarnessLoopConfig {
+            max_cycles: Some(1),
+            ..Default::default()
+        }),
         tools: drip::tools::pack::builtin_tool_pack(Default::default()),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(dir.path().join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
         ..Default::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let bodies = server.join().unwrap();
     let task = &result.state.tasks[0];
     assert_eq!(task.loops_run, Some(2));
-    assert_eq!(task.status, drip::core::types::HarnessTaskStatus::Blocked, "{:?}", task.summary);
-    assert!(task.summary.as_deref().unwrap_or_default().contains("budget 2"));
+    assert_eq!(
+        task.status,
+        drip::core::types::HarnessTaskStatus::Blocked,
+        "{:?}",
+        task.summary
+    );
+    assert!(task
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("budget 2"));
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.detail.contains("auto-blocked after 2 task loops (task loop budget 2)")));
+    assert!(events.iter().any(|event| event
+        .detail
+        .contains("auto-blocked after 2 task loops (task loop budget 2)")));
     let texts: Vec<String> = bodies.iter().map(|b| b.to_string()).collect();
-    assert!(texts.iter().any(|t| t.contains("task loop budget: this is task loop 2 of 2")), "last-loop warning reaches the model");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("task loop budget: this is task loop 2 of 2")),
+        "last-loop warning reaches the model"
+    );
 }
 
 /// A cycle that edited the workspace earns the loop one more cycle instead
@@ -457,9 +855,21 @@ async fn a_cycle_that_edits_extends_the_loop_by_one_cycle() {
     let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
     let sink = events.clone();
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["add the test"]})),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["add the test"]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"}),
+        ),
         text_response("Test added."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -477,10 +887,25 @@ async fn a_cycle_that_edits_extends_the_loop_by_one_cycle() {
         ..Default::default()
     }).await.unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     assert_eq!(result.r#loops, 2, "planning loop + one extended task loop");
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.detail.starts_with("cycle budget extended to 2")), "{:?}", events.iter().map(|e| e.detail.clone()).filter(|d| d.contains("cycle")).collect::<Vec<_>>());
+    assert!(
+        events
+            .iter()
+            .any(|event| event.detail.starts_with("cycle budget extended to 2")),
+        "{:?}",
+        events
+            .iter()
+            .map(|e| e.detail.clone())
+            .filter(|d| d.contains("cycle"))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Plan mode auto: a small goal that declares its own check gets one direct
@@ -491,8 +916,16 @@ async fn plan_mode_auto_seeds_a_direct_task_for_a_small_goal() {
     let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
     let sink = events.clone();
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"})),
-        tool_call_response("f", "finish_task", serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"})),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"tests/test_ok.py","content":"import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"added the test","anchor":"none","anchorNote":"nothing ran"}),
+        ),
         text_response("Test added."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -509,13 +942,26 @@ async fn plan_mode_auto_seeds_a_direct_task_for_a_small_goal() {
         ..Default::default()
     }).await.unwrap();
     let bodies = server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     assert_eq!(result.r#loops, 1, "no planning loop");
     assert_eq!(result.state.tasks.len(), 1);
-    assert!(result.state.tasks[0].notes.iter().any(|note| note.starts_with("direct task: the planner was skipped")));
+    assert!(result.state.tasks[0]
+        .notes
+        .iter()
+        .any(|note| note.starts_with("direct task: the planner was skipped")));
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.detail.starts_with("direct task seeded, planner skipped (plan mode Auto)")));
-    assert!(bodies[0].to_string().contains("tests/test_ok.py"), "the first call already carries the task");
+    assert!(events.iter().any(|event| event
+        .detail
+        .starts_with("direct task seeded, planner skipped (plan mode Auto)")));
+    assert!(
+        bodies[0].to_string().contains("tests/test_ok.py"),
+        "the first call already carries the task"
+    );
 }
 
 /// A declared anomaly whose own observed text reports success (exit 0, 0
@@ -528,34 +974,73 @@ async fn self_passing_anomalies_do_not_end_the_run_unreconciled() {
     let sink = events.clone();
     let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks":["produce artifact"], "expectations":[{"subject":"suite result","expected":"all pass"}]})),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
-        tool_call_response("v", "VERIFY", serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact fixture"}})),
-        tool_call_response("f", "finish_task", serde_json::json!({
-            "status":"unreconciled","summary":"done","confidence":"high","anchor":"none","anchorNote":"fixture",
-            "observations":[{"subject":"suite result","observed":"exit 0; 83 pass / 0 fail","matches":false}],
-            "anomalies":[{"subject":"suite result","expected":"all pass","observed":"exit 0; 83 pass / 0 fail","note":"test count drifted from the baseline"}]
-        })),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["produce artifact"], "expectations":[{"subject":"suite result","expected":"all pass"}]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
+        tool_call_response(
+            "v",
+            "VERIFY",
+            serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact fixture"}}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({
+                "status":"unreconciled","summary":"done","confidence":"high","anchor":"none","anchorNote":"fixture",
+                "observations":[{"subject":"suite result","observed":"exit 0; 83 pass / 0 fail","matches":false}],
+                "anomalies":[{"subject":"suite result","expected":"all pass","observed":"exit 0; 83 pass / 0 fail","note":"test count drifted from the baseline"}]
+            }),
+        ),
         text_response("Artifact produced."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
-        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a measured artifact".into(),
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "produce a measured artifact".into(),
         plan_mode: Some("always".into()),
-        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        max_iterations: Some(6),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
         tools: drip::tools::pack::builtin_tool_pack(Default::default()),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(dir.path().join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
         ..Default::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     server.join().unwrap();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     assert!(result.state.anomalies.is_empty());
-    assert!(result.state.tasks[0].notes.iter().any(|note| note.starts_with("non-blocking anomaly")), "{:?}", result.state.tasks[0].notes);
+    assert!(
+        result.state.tasks[0]
+            .notes
+            .iter()
+            .any(|note| note.starts_with("non-blocking anomaly")),
+        "{:?}",
+        result.state.tasks[0].notes
+    );
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.detail.contains("did not block completion")));
+    assert!(events
+        .iter()
+        .any(|event| event.detail.contains("did not block completion")));
 }
 
 /// The expectation gate end to end: an "external" anchor on a check that
@@ -569,66 +1054,151 @@ async fn mismatched_expectation_ends_unreconciled_with_exit_zero() {
     let sink = events.clone();
     let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({
-            "tasks":["produce artifact"],
-            "expectations":[{"subject":"artifact sign","expected":"positive"}]
-        })),
-        tool_call_response("w", "PATCH", serde_json::json!({"path":"artifact.txt","content":"correct\n"})),
-        tool_call_response("v", "VERIFY", serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact.txt fixture"}})),
-        tool_call_response("f1", "finish_task", serde_json::json!({
-            "status":"completed","summary":"done","confidence":"high","anchor":"none","anchorNote":"no external fixture",
-            "observations":[{"subject":"artifact sign","observed":"negative","matches":false}]
-        })),
-        tool_call_response("f2", "finish_task", serde_json::json!({
-            "status":"unreconciled","summary":"done","confidence":"low","anchor":"none","anchorNote":"no external fixture",
-            "observations":[{"subject":"artifact sign","observed":"negative","matches":false}],
-            "anomalies":[{"subject":"artifact sign","expected":"positive","observed":"negative","note":"cannot reconcile"}]
-        })),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({
+                "tasks":["produce artifact"],
+                "expectations":[{"subject":"artifact sign","expected":"positive"}]
+            }),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
+        tool_call_response(
+            "v",
+            "VERIFY",
+            serde_json::json!({"command":assertion,"anchor":{"kind":"external","source":"artifact.txt fixture"}}),
+        ),
+        tool_call_response(
+            "f1",
+            "finish_task",
+            serde_json::json!({
+                "status":"completed","summary":"done","confidence":"high","anchor":"none","anchorNote":"no external fixture",
+                "observations":[{"subject":"artifact sign","observed":"negative","matches":false}]
+            }),
+        ),
+        tool_call_response(
+            "f2",
+            "finish_task",
+            serde_json::json!({
+                "status":"unreconciled","summary":"done","confidence":"low","anchor":"none","anchorNote":"no external fixture",
+                "observations":[{"subject":"artifact sign","observed":"negative","matches":false}],
+                "anomalies":[{"subject":"artifact sign","expected":"positive","observed":"negative","note":"cannot reconcile"}]
+            }),
+        ),
         text_response("Artifact produced; sign unreconciled."),
     ]);
     let state_path = dir.path().join("session").join("state.json");
     let result = run_solid_state_harness(SolidStateHarnessOptions {
-        cwd: Some(dir.path().to_string_lossy().into()), goal: "produce a measured artifact".into(),
-        max_iterations: Some(6), model: Some("mock".into()), summarize_run: Some(true), url: Some(url),
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "produce a measured artifact".into(),
+        max_iterations: Some(6),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
         tools: drip::tools::pack::builtin_tool_pack(Default::default()),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(state_path.clone()),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(dir.path().into()), jobs_root: Some(dir.path().join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
         ..Default::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     server.join().unwrap();
 
-    assert_eq!(result.reason, HarnessRunReason::Unreconciled, "error: {:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Unreconciled,
+        "error: {:?}",
+        result.error_message
+    );
     assert_eq!(result.state.anomalies.len(), 1);
     // Both valid measurements persist, including the refused clean finish.
     assert_eq!(result.state.expectations[0].observations.len(), 2);
-    let anchor = result.state.verifications.as_ref().unwrap()[0].evidence.as_ref().unwrap().anchor.clone().expect("anchor recorded");
-    assert_eq!(anchor.kind, drip::core::types::VerificationAnchorKind::SelfAuthored, "names the edited artifact");
-    assert!(anchor.downgraded_reason.as_deref().unwrap_or_default().contains("artifact.txt"));
+    let anchor = result.state.verifications.as_ref().unwrap()[0]
+        .evidence
+        .as_ref()
+        .unwrap()
+        .anchor
+        .clone()
+        .expect("anchor recorded");
+    assert_eq!(
+        anchor.kind,
+        drip::core::types::VerificationAnchorKind::SelfAuthored,
+        "names the edited artifact"
+    );
+    assert!(anchor
+        .downgraded_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("artifact.txt"));
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.detail.contains("anchor downgraded to self-authored")));
-    assert!(events.iter().any(|event| event.detail.contains("P1 against the model")));
+    assert!(events
+        .iter()
+        .any(|event| event.detail.contains("anchor downgraded to self-authored")));
+    assert!(events
+        .iter()
+        .any(|event| event.detail.contains("P1 against the model")));
 
-    let record = drip::cli::run_record::build_run_record(&drip::cli::run_record::BuildRunRecordArgs {
-        ended_at: "2026-01-01T00:00:00.000Z", goal: "produce a measured artifact", goal_id: "g1",
-        max_iterations: Some(6), max_loops: None, pending_operator_messages: 0, plan_mode: None, result: &result,
-    });
+    let record =
+        drip::cli::run_record::build_run_record(&drip::cli::run_record::BuildRunRecordArgs {
+            ended_at: "2026-01-01T00:00:00.000Z",
+            goal: "produce a measured artifact",
+            goal_id: "g1",
+            max_iterations: Some(6),
+            max_loops: None,
+            pending_operator_messages: 0,
+            plan_mode: None,
+            result: &result,
+        });
     assert_eq!(record.reason, "unreconciled");
-    assert_eq!(record.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
-    let finished = result.state.tasks.iter().find(|task| task.id == "task-1").expect("finished task in state");
-    assert_eq!(finished.status, drip::core::types::HarnessTaskStatus::Completed);
-    assert_eq!(finished.confidence, Some(drip::core::types::ClaimedConfidence::Low));
-    let payload = drip::cli::headless_output::headless_result_payload(drip::cli::headless_output::HeadlessResultArgs {
-        record: &record, result_path: "/r", session_id: "s", session_id_prefix: "s", state_path: "/s", transcript_path: "/t",
-    });
+    assert_eq!(
+        record.anomalies.as_ref().map(|anomalies| anomalies.len()),
+        Some(1)
+    );
+    let finished = result
+        .state
+        .tasks
+        .iter()
+        .find(|task| task.id == "task-1")
+        .expect("finished task in state");
+    assert_eq!(
+        finished.status,
+        drip::core::types::HarnessTaskStatus::Completed
+    );
+    assert_eq!(
+        finished.confidence,
+        Some(drip::core::types::ClaimedConfidence::Low)
+    );
+    let payload = drip::cli::headless_output::headless_result_payload(
+        drip::cli::headless_output::HeadlessResultArgs {
+            record: &record,
+            result_path: "/r",
+            session_id: "s",
+            session_id_prefix: "s",
+            state_path: "/s",
+            transcript_path: "/t",
+        },
+    );
     assert_eq!(payload.exit_code, 0);
     assert!(payload.continue_command.is_none());
 
     let state_value = serde_json::to_value(&result.state).expect("state serializes");
-    let tasks_json = state_value["tasks"].as_array().expect("tasks array in serialized state");
-    let f2 = tasks_json.iter().find(|task| task["id"] == "task-1").expect("finished task serialized");
+    let tasks_json = state_value["tasks"]
+        .as_array()
+        .expect("tasks array in serialized state");
+    let f2 = tasks_json
+        .iter()
+        .find(|task| task["id"] == "task-1")
+        .expect("finished task serialized");
     assert_eq!(f2["confidence"], serde_json::json!("low"), "{state_value}");
 }
 
@@ -640,9 +1210,17 @@ async fn plan_finish_summary_completes_the_run() {
 
     let (url, server) = spawn_scripted_server(vec![
         // Loop 1 (planning): plan_tasks, then a text turn ends the loop.
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["work on the file"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["work on the file"]}),
+        ),
         // Loop 2 (task-1): finish_task ends the loop and completes the goal.
-        tool_call_response("call-2", "finish_task", serde_json::json!({"status": "completed", "summary": "wrote it"})),
+        tool_call_response(
+            "call-2",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "wrote it"}),
+        ),
         // Run summary (text-only call).
         text_response("All done: the file was written."),
     ]);
@@ -657,10 +1235,12 @@ async fn plan_finish_summary_completes_the_run() {
         summarize_run: Some(true),
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(state_path.clone()),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(temp.clone()),
-            jobs_root: Some(temp.join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
         url: Some(url),
         // Keep latency memory off the operator's real ~/.drip/latency.json:
         // a non-empty store emits a harness-op seed event before loop-start,
@@ -672,14 +1252,34 @@ async fn plan_finish_summary_completes_the_run() {
     let result = run_solid_state_harness(options).await.expect("run starts");
     let bodies = server.join().unwrap();
 
-    let kinds_debug: Vec<String> = events.lock().unwrap().iter().map(|e| format!("{:?}: {}", e.r#type, e.detail.chars().take(160).collect::<String>())).collect();
-    assert_eq!(result.reason, HarnessRunReason::Completed, "error: {:?}\nevents: {:#?}", result.error_message, kinds_debug);
+    let kinds_debug: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            format!(
+                "{:?}: {}",
+                e.r#type,
+                e.detail.chars().take(160).collect::<String>()
+            )
+        })
+        .collect();
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "error: {:?}\nevents: {:#?}",
+        result.error_message,
+        kinds_debug
+    );
     assert_eq!(result.iterations, 2);
     assert_eq!(result.r#loops, 2);
     assert_eq!(result.state.tasks.len(), 1);
     assert_eq!(result.state.tasks[0].status, HarnessTaskStatus::Completed);
     assert_eq!(result.state.tasks[0].summary.as_deref(), Some("wrote it"));
-    assert_eq!(result.state.run_summary.as_ref().map(|s| s.text.as_str()), Some("All done: the file was written."));
+    assert_eq!(
+        result.state.run_summary.as_ref().map(|s| s.text.as_str()),
+        Some("All done: the file was written.")
+    );
     assert_eq!(result.usage.calls, 3);
     assert!(state_path.exists(), "state persisted");
 
@@ -687,25 +1287,47 @@ async fn plan_finish_summary_completes_the_run() {
     // soon as plan_tasks lands (no narration round); the summary call sends
     // no tools.
     assert_eq!(bodies.len(), 3);
-    assert!(bodies[0]["tools"].as_array().map_or(false, |t| t.iter().any(|t| t["function"]["name"] == "plan_tasks")));
-    assert!(bodies[2]["tools"].is_null() || bodies[2]["tools"].as_array().map_or(true, |t| t.is_empty()));
+    assert!(bodies[0]["tools"].as_array().map_or(false, |t| t
+        .iter()
+        .any(|t| t["function"]["name"] == "plan_tasks")));
+    assert!(
+        bodies[2]["tools"].is_null()
+            || bodies[2]["tools"].as_array().map_or(true, |t| t.is_empty())
+    );
     // Loop 2 opens on its own fresh snapshot (a harness-only planning
     // exchange carries nothing over).
     assert_eq!(bodies[1]["messages"][0]["role"], "system");
     assert_eq!(bodies[0]["messages"][0]["role"], "system");
-    assert!(bodies[0]["messages"][1]["content"].as_str().unwrap().contains("goal: write the file"));
+    assert!(bodies[0]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("goal: write the file"));
 
     let kinds: Vec<String> = events
         .lock()
         .unwrap()
         .iter()
-        .map(|event| serde_json::to_value(&event.r#type).unwrap().as_str().unwrap().to_string())
+        .map(|event| {
+            serde_json::to_value(&event.r#type)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
     let expected = [
-        "loop-start", "iteration-start", "inference", "harness-op",
-        "loop-start", "iteration-start", "inference", "task-finished",
+        "loop-start",
+        "iteration-start",
+        "inference",
+        "harness-op",
+        "loop-start",
+        "iteration-start",
+        "inference",
+        "task-finished",
         // The summary call reports usage too, so it emits its own inference event.
-        "inference", "run-summary", "run-complete",
+        "inference",
+        "run-summary",
+        "run-complete",
     ];
     assert_eq!(kinds, expected, "event kinds");
 }
@@ -732,8 +1354,16 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
     let temp_dir = tempfile::tempdir().unwrap();
     let temp = temp_dir.path().to_path_buf();
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["first", "second"]})),
-        tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["first", "second"]}),
+        ),
+        tool_call_response(
+            "b",
+            "finish_task",
+            serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"}),
+        ),
         text_response("Loop budget spent."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -743,10 +1373,12 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
         model: Some("mock".to_string()),
         summarize_run: Some(true),
         state_path: Some(temp.join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(temp.clone()),
-            jobs_root: Some(temp.join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
         url: Some(url),
         ..Default::default()
     })
@@ -754,10 +1386,18 @@ async fn max_loops_ends_the_run_after_that_many_task_loops() {
     .expect("run starts");
     server.join().unwrap();
 
-    assert_eq!(result.reason, HarnessRunReason::MaxLoops, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::MaxLoops,
+        "{:?}",
+        result.error_message
+    );
     assert_eq!(result.r#loops, 2);
     assert_eq!(result.state.tasks[1].status, HarnessTaskStatus::Pending);
-    assert_eq!(result.usage.calls, 3, "no third loop was started (plan, blocked finish, summary)");
+    assert_eq!(
+        result.usage.calls, 3,
+        "no third loop was started (plan, blocked finish, summary)"
+    );
 }
 
 /// A task blocked on operator input is a terminal state: with nothing else
@@ -779,11 +1419,19 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
     let sink = events.clone();
 
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["restore the chunks"]})),
-        tool_call_response("b", "finish_task", serde_json::json!({
-            "status": "blocked", "blockedOn": "operator", "confidence": "low",
-            "summary": "need the original copies of chunks 3 and 7"
-        })),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["restore the chunks"]}),
+        ),
+        tool_call_response(
+            "b",
+            "finish_task",
+            serde_json::json!({
+                "status": "blocked", "blockedOn": "operator", "confidence": "low",
+                "summary": "need the original copies of chunks 3 and 7"
+            }),
+        ),
         text_response("Blocked on the operator."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -801,12 +1449,24 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
     .expect("run starts");
     server.join().unwrap();
 
-    assert_eq!(result.reason, HarnessRunReason::BlockedOnInput, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::BlockedOnInput,
+        "{:?}",
+        result.error_message
+    );
     assert_eq!(result.r#loops, 2, "no replanning loop ran after the block");
     let task = &result.state.tasks[0];
     assert_eq!(task.status, HarnessTaskStatus::Blocked);
-    assert_eq!(task.blocked_on, Some(drip::core::types::HarnessTaskBlocker::Operator));
-    assert!(events.lock().unwrap().iter().any(|event| event.detail.contains("Blocked on operator input")));
+    assert_eq!(
+        task.blocked_on,
+        Some(drip::core::types::HarnessTaskBlocker::Operator)
+    );
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event.detail.contains("Blocked on operator input")));
 
     // Resume with the same goal and no reply: nothing to do, no model call.
     let (url_idle, server_idle) = spawn_scripted_server(vec![]);
@@ -837,11 +1497,15 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
         text: "the originals are in /backup/chunks".to_string(),
     }]);
     let (url_reply, server_reply) = spawn_scripted_server(vec![
-        tool_call_response("f", "finish_task", serde_json::json!({
-            "status": "completed", "confidence": "high", "anchor": "none",
-            "anchorNote": "restored from the operator's backup; no external fixture exists",
-            "summary": "restored from /backup/chunks"
-        })),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({
+                "status": "completed", "confidence": "high", "anchor": "none",
+                "anchorNote": "restored from the operator's backup; no external fixture exists",
+                "summary": "restored from /backup/chunks"
+            }),
+        ),
         text_response("Restored."),
     ]);
     let resumed = run_solid_state_harness(SolidStateHarnessOptions {
@@ -858,11 +1522,23 @@ async fn blocked_on_operator_input_ends_the_run_until_a_reply_arrives() {
     .await
     .expect("reply resume starts");
     server_reply.join().unwrap();
-    assert_eq!(resumed.reason, HarnessRunReason::Completed, "{:?}", resumed.error_message);
+    assert_eq!(
+        resumed.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        resumed.error_message
+    );
     let task = &resumed.state.tasks[0];
     assert_eq!(task.status, HarnessTaskStatus::Completed);
     assert_eq!(task.blocked_on, None);
-    assert!(task.notes.iter().any(|note| note.contains("Operator input received: the originals are in /backup/chunks")), "{:?}", task.notes);
+    assert!(
+        task.notes
+            .iter()
+            .any(|note| note
+                .contains("Operator input received: the originals are in /backup/chunks")),
+        "{:?}",
+        task.notes
+    );
 }
 
 /// Replanning runs under the replanning binding; a replanning loop that
@@ -876,17 +1552,33 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
     let sink = events.clone();
     let (url, server) = spawn_scripted_server(vec![
         // Loop 1 (planning → planner).
-        tool_call_response("p", "plan_tasks", serde_json::json!({"tasks": ["fix the thing"]})),
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["fix the thing"]}),
+        ),
         // Loop 2 (task-1 → author) blocks.
-        tool_call_response("b", "finish_task", serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"})),
+        tool_call_response(
+            "b",
+            "finish_task",
+            serde_json::json!({"status": "blocked", "summary": "stuck", "confidence": "low"}),
+        ),
         // Loop 3 (replanning → replanner) only takes notes: no workable ledger.
-        tool_call_response("o", "observe", serde_json::json!({"note": "still thinking"})),
+        tool_call_response(
+            "o",
+            "observe",
+            serde_json::json!({"note": "still thinking"}),
+        ),
         text_response("nothing to add"),
         // Loop 4 (replanning → planner, escalated) resolves the block by id.
-        tool_call_response("f", "finish_task", serde_json::json!({
-            "taskId": "task-1", "status": "completed", "confidence": "high", "anchor": "none",
-            "anchorNote": "the earlier block was spurious; no external fixture exists", "summary": "already done"
-        })),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({
+                "taskId": "task-1", "status": "completed", "confidence": "high", "anchor": "none",
+                "anchorNote": "the earlier block was spurious; no external fixture exists", "summary": "already done"
+            }),
+        ),
         text_response("Done."),
     ]);
     let result = run_solid_state_harness(SolidStateHarnessOptions {
@@ -902,10 +1594,12 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
         }),
         roles: Some(vec![role("planner"), role("replanner"), role("author")]),
         state_path: Some(temp.join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(temp.clone()),
-            jobs_root: Some(temp.join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
         url: Some(url),
         ..Default::default()
     })
@@ -913,7 +1607,12 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
     .expect("run starts");
     server.join().unwrap();
 
-    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
     let loop_starts: Vec<String> = events
         .lock()
         .unwrap()
@@ -925,8 +1624,24 @@ async fn replanning_uses_the_cheap_role_and_escalates_when_it_gets_nowhere() {
     // The detail reads `loop N[ [skills: …]][ [tools: …]] [role: R] — phase`, so
     // the surface segments sit between the iteration and the role: match the
     // role/phase suffix with `contains` rather than a prefix.
-    assert!(loop_starts[0].contains("[role: planner] — planning"), "{}", loop_starts[0]);
-    assert!(loop_starts[1].contains("[role: author] — task-1"), "{}", loop_starts[1]);
-    assert!(loop_starts[2].contains("[role: replanner] — replanning"), "{}", loop_starts[2]);
-    assert!(loop_starts[3].contains("[role: planner] — replanning"), "{}", loop_starts[3]);
+    assert!(
+        loop_starts[0].contains("[role: planner] — planning"),
+        "{}",
+        loop_starts[0]
+    );
+    assert!(
+        loop_starts[1].contains("[role: author] — task-1"),
+        "{}",
+        loop_starts[1]
+    );
+    assert!(
+        loop_starts[2].contains("[role: replanner] — replanning"),
+        "{}",
+        loop_starts[2]
+    );
+    assert!(
+        loop_starts[3].contains("[role: planner] — replanning"),
+        "{}",
+        loop_starts[3]
+    );
 }

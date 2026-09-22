@@ -3,8 +3,8 @@
 // (camelCase JSON); `anthropic_content` is the internal bookkeeping field,
 // stripped from payload messages by build_transport_request_payload.
 use crate::harness::chat_types::{
-    ChatMessage, ChatRoleTag, ChatRuntimeContext, WorkingFileScope,
-    serialize_chat_message_for_context,
+    serialize_chat_message_for_context, ChatMessage, ChatRoleTag, ChatRuntimeContext,
+    WorkingFileScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -65,10 +65,7 @@ impl Default for TransportRequestMessage {
     }
 }
 
-pub fn build_multimodal_user_content(
-    text: &str,
-    image_data_urls: &[String],
-) -> TransportContent {
+pub fn build_multimodal_user_content(text: &str, image_data_urls: &[String]) -> TransportContent {
     if image_data_urls.is_empty() {
         return TransportContent::Text(text.to_string());
     }
@@ -98,8 +95,7 @@ pub fn transport_content_to_text(content: Option<&TransportContent>) -> String {
             .map(|part| match part {
                 TransportContentPart::Text { text } => text.clone(),
                 TransportContentPart::ImageUrl { image_url } => {
-                    let head: String =
-                        image_url.url.chars().take(40).collect();
+                    let head: String = image_url.url.chars().take(40).collect();
                     format!("[image: {head}...]")
                 }
             })
@@ -191,8 +187,7 @@ pub struct TransportStreamOptions {
     pub include_usage: bool,
 }
 
-pub const DEFAULT_CHAT_COMPLETIONS_URL: &str =
-    "http://localhost:4100/v1/chat/completions";
+pub const DEFAULT_CHAT_COMPLETIONS_URL: &str = "http://localhost:4100/v1/chat/completions";
 pub const DEFAULT_CHAT_MODEL: &str = "llama3.1-8B";
 
 // Tuned for small local models (llama 3.1 8B): decision rule first, few-shot
@@ -240,12 +235,12 @@ pub fn normalize_openai_compatible_tool_call(
     tool_call: OpenAICompatibleToolCall,
 ) -> OpenAICompatibleToolCall {
     OpenAICompatibleToolCall {
-        function: tool_call.function.map(|function| {
-            OpenAICompatibleToolCallFunction {
+        function: tool_call
+            .function
+            .map(|function| OpenAICompatibleToolCallFunction {
                 arguments: function.arguments,
                 name: function.name,
-            }
-        }),
+            }),
         id: tool_call.id,
         tool_type: Some("function".to_string()),
     }
@@ -271,21 +266,21 @@ fn build_history_transport_message(message: &ChatMessage) -> TransportRequestMes
                 name: None,
                 role: ChatRoleTag::Assistant,
                 tool_call_id: None,
-                tool_calls: Some(assistant_tool_calls
-                    .iter()
-                    .map(|tool_call| {
-                        normalize_openai_compatible_tool_call(
-                            OpenAICompatibleToolCall {
+                tool_calls: Some(
+                    assistant_tool_calls
+                        .iter()
+                        .map(|tool_call| {
+                            normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
                                 function: Some(OpenAICompatibleToolCallFunction {
                                     arguments: tool_call.input.clone(),
                                     name: Some(tool_call.tool_name.clone()),
                                 }),
                                 id: Some(tool_call.id.clone()),
                                 tool_type: None,
-                            },
-                        )
-                    })
-                    .collect()),
+                            })
+                        })
+                        .collect(),
+                ),
                 anthropic_content: None,
             };
         }
@@ -323,14 +318,15 @@ fn build_context_message(context: &ChatRuntimeContext) -> String {
         parts.push(format!("working_file: {}", context.working_file.path));
         parts.push(format!(
             "working_file_exists: {}",
-            if context.working_file.exists { "true" } else { "false" }
+            if context.working_file.exists {
+                "true"
+            } else {
+                "false"
+            }
         ));
 
         if let Some(text) = &context.working_file.text {
-            parts.push(format!(
-                "working_file_text:\n{}",
-                truncate_text(text, 4000)
-            ));
+            parts.push(format!("working_file_text:\n{}", truncate_text(text, 4000)));
         }
     } else {
         parts.push("workspace_scope: cwd".to_string());
@@ -393,7 +389,11 @@ pub fn build_transport_request_payload(
 ) -> TransportRequestPayload {
     let (tool_choice, tools) = match &args.tools {
         Some(tools) if !tools.is_empty() => (
-            Some(args.tool_choice.clone().unwrap_or_else(|| "auto".to_string())),
+            Some(
+                args.tool_choice
+                    .clone()
+                    .unwrap_or_else(|| "auto".to_string()),
+            ),
             Some(tools.clone()),
         ),
         _ => (None, None),
@@ -441,16 +441,13 @@ pub struct CreateTransportRequestPreviewArgs {
 pub fn create_transport_request_preview(
     args: CreateTransportRequestPreviewArgs,
 ) -> TransportRequestPayload {
-    let system_prompt =
-        args.system_prompt.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+    let system_prompt = args
+        .system_prompt
+        .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
     let model = args.model.unwrap_or_else(|| DEFAULT_CHAT_MODEL.to_string());
 
     build_transport_request_payload(BuildTransportRequestPayloadArgs {
-        messages: build_transport_messages(
-            &args.history,
-            &system_prompt,
-            &args.context,
-        ),
+        messages: build_transport_messages(&args.history, &system_prompt, &args.context),
         model,
         prompt_cache_key: None,
         reasoning_effort: args.reasoning_effort,
@@ -461,10 +458,12 @@ pub fn create_transport_request_preview(
 }
 
 pub fn estimate_transport_payload_tokens(payload: &TransportRequestPayload) -> u64 {
-    let serialized_payload =
-        serde_json::to_string(payload).expect("payload serializes");
+    let serialized_payload = serde_json::to_string(payload).expect("payload serializes");
 
-    std::cmp::max(1, (serialized_payload.chars().count() as f64 / 4.0).ceil() as u64)
+    std::cmp::max(
+        1,
+        (serialized_payload.chars().count() as f64 / 4.0).ceil() as u64,
+    )
 }
 
 #[cfg(test)]
@@ -506,10 +505,8 @@ mod tests {
 
     #[test]
     fn build_multimodal_user_content_with_images() {
-        let content = build_multimodal_user_content(
-            "see this",
-            &["data:image/png;base64,AAA".to_string()],
-        );
+        let content =
+            build_multimodal_user_content("see this", &["data:image/png;base64,AAA".to_string()]);
 
         assert_eq!(
             content,
@@ -545,16 +542,14 @@ mod tests {
 
     #[test]
     fn normalize_tool_call_always_sets_type_function() {
-        let normalized = normalize_openai_compatible_tool_call(
-            OpenAICompatibleToolCall {
-                function: Some(OpenAICompatibleToolCallFunction {
-                    arguments: Some("{\"a\":1}".to_string()),
-                    name: Some("READ".to_string()),
-                }),
-                id: Some("call_1".to_string()),
-                tool_type: None,
-            },
-        );
+        let normalized = normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
+            function: Some(OpenAICompatibleToolCallFunction {
+                arguments: Some("{\"a\":1}".to_string()),
+                name: Some("READ".to_string()),
+            }),
+            id: Some("call_1".to_string()),
+            tool_type: None,
+        });
 
         assert_eq!(normalized.tool_type.as_deref(), Some("function"));
         assert_eq!(normalized.id.as_deref(), Some("call_1"));
@@ -591,9 +586,9 @@ mod tests {
             prompt_cache_key: Some("key".to_string()),
             reasoning_effort: Some("  high  ".to_string()),
             tools: None,
-        max_tokens: None,
-        tool_choice: None,
-    });
+            max_tokens: None,
+            tool_choice: None,
+        });
 
         let json = serde_json::to_value(&payload).unwrap();
 
@@ -614,9 +609,9 @@ mod tests {
             prompt_cache_key: Some(String::new()),
             reasoning_effort: Some("   ".to_string()),
             tools: None,
-        max_tokens: None,
-        tool_choice: None,
-    });
+            max_tokens: None,
+            tool_choice: None,
+        });
 
         let json = serde_json::to_value(&payload).unwrap();
 
@@ -650,7 +645,11 @@ mod tests {
             model: "m".to_string(),
             prompt_cache_key: None,
             reasoning_effort: None,
-            tools: Some(vec![create_request_tool("READ", "read a file", serde_json::json!({"type": "object"}))]),
+            tools: Some(vec![create_request_tool(
+                "READ",
+                "read a file",
+                serde_json::json!({"type": "object"}),
+            )]),
             max_tokens: Some(6000),
             tool_choice: Some("required".to_string()),
         });
@@ -669,13 +668,12 @@ mod tests {
             prompt_cache_key: None,
             reasoning_effort: None,
             tools: None,
-        max_tokens: None,
-        tool_choice: None,
-    });
+            max_tokens: None,
+            tool_choice: None,
+        });
 
         let serialized = serde_json::to_string(&payload).unwrap();
-        let expected =
-            std::cmp::max(1, (serialized.chars().count() as f64 / 4.0).ceil() as u64);
+        let expected = std::cmp::max(1, (serialized.chars().count() as f64 / 4.0).ceil() as u64);
 
         assert_eq!(estimate_transport_payload_tokens(&payload), expected);
     }
@@ -684,8 +682,9 @@ mod tests {
     fn system_prompt_matches_ts_constant() {
         assert!(DEFAULT_SYSTEM_PROMPT
             .starts_with("You are a coding assistant in a terminal chat editor."));
-        assert!(DEFAULT_SYSTEM_PROMPT
-            .ends_with("If the message needs no workspace access, reply in plain text without tools."));
+        assert!(DEFAULT_SYSTEM_PROMPT.ends_with(
+            "If the message needs no workspace access, reply in plain text without tools."
+        ));
     }
 
     #[test]
@@ -745,7 +744,10 @@ mod tests {
 
         let message = build_context_message(&context);
 
-        assert_eq!(message, "cwd: /repo\nworkspace_scope: cwd\nworking_file: none");
+        assert_eq!(
+            message,
+            "cwd: /repo\nworkspace_scope: cwd\nworking_file: none"
+        );
     }
 }
 
@@ -773,7 +775,10 @@ mod wire_field_names {
         let json = serde_json::to_value(&message).unwrap();
         assert!(json.get("tool_call_id").is_some(), "{json}");
         assert!(json.get("tool_calls").is_some(), "{json}");
-        assert!(json.get("toolCallId").is_none() && json.get("toolCalls").is_none(), "{json}");
+        assert!(
+            json.get("toolCallId").is_none() && json.get("toolCalls").is_none(),
+            "{json}"
+        );
         assert_eq!(json["tool_calls"][0]["type"], "function");
     }
 }

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::cli::run_record::RunRecord;
-use crate::core::types::{HarnessEvent, HarnessEventType, HarnessLeakedJob, HarnessRunUsage, TaskStats, VerificationSummary};
+use crate::core::types::{
+    HarnessEvent, HarnessEventType, HarnessLeakedJob, HarnessRunUsage, TaskStats,
+    VerificationSummary,
+};
 use crate::harness::telemetry::draft_harden_goal;
 
 // The headless run's stdout is a contract for orchestrating agents: with
@@ -77,11 +80,17 @@ pub fn headless_event_line(event: &HarnessEvent, json: bool) -> Option<String> {
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         );
         if let Some(data) = &event.data {
-            line.insert("data".to_string(), serde_json::to_value(data).unwrap_or(Value::Null));
+            line.insert(
+                "data".to_string(),
+                serde_json::to_value(data).unwrap_or(Value::Null),
+            );
         }
         line.insert("detail".to_string(), Value::String(event.detail.clone()));
         line.insert("iteration".to_string(), Value::from(event.iteration));
-        line.insert("kind".to_string(), serde_json::to_value(event.r#type).unwrap_or(Value::Null));
+        line.insert(
+            "kind".to_string(),
+            serde_json::to_value(event.r#type).unwrap_or(Value::Null),
+        );
         line.insert("type".to_string(), Value::String("event".to_string()));
 
         return Some(serde_json::to_string(&Value::Object(line)).unwrap_or_default());
@@ -98,7 +107,10 @@ pub fn headless_event_line(event: &HarnessEvent, json: bool) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_default();
 
-    Some(format!("[{:>3}] {} {}", event.iteration, kind, event.detail))
+    Some(format!(
+        "[{:>3}] {} {}",
+        event.iteration, kind, event.detail
+    ))
 }
 
 // POSIX single-quote escaping: the only character that needs handling inside
@@ -138,10 +150,7 @@ pub fn confidence_basis_line(
 /// why a check can pass inside drip yet fail in their own shell. Only names
 /// actually present in drip's own process env qualify (via `is_present`).
 /// Names are sorted; `None` when no name qualifies.
-pub fn withheld_env_line(
-    scrub_names: &str,
-    is_present: impl Fn(&str) -> bool,
-) -> Option<String> {
+pub fn withheld_env_line(scrub_names: &str, is_present: impl Fn(&str) -> bool) -> Option<String> {
     let mut names: Vec<&str> = scrub_names
         .split(',')
         .map(str::trim)
@@ -228,7 +237,10 @@ pub fn headless_result_payload(args: HeadlessResultArgs<'_>) -> HeadlessResultPa
         last_verification: record.last_verification.clone(),
         pending_operator_messages: record.pending_operator_messages,
         task_stats: record.task_stats,
-        error_message: record.error_message.clone().filter(|message| !message.is_empty()),
+        error_message: record
+            .error_message
+            .clone()
+            .filter(|message| !message.is_empty()),
         continue_command,
         exit_code: if completed {
             0
@@ -305,16 +317,22 @@ mod tests {
         assert_eq!(payload.exit_code, 2);
         assert_eq!(
             payload.continue_command.as_deref(),
-            Some("drip --resume abcdefgh --prompt 'do it' --max-iterations 5 --max-loops 20 --json")
+            Some(
+                "drip --resume abcdefgh --prompt 'do it' --max-iterations 5 --max-loops 20 --json"
+            )
         );
 
         // blocked-on-input carries the run's own continue command (the
         // prompt is the reply) and exits 2 like every incomplete run.
         let mut blocked = record("blocked-on-input", None);
-        blocked.continue_command = Some("drip --resume abcdefgh --prompt \"<the input>\"".to_string());
+        blocked.continue_command =
+            Some("drip --resume abcdefgh --prompt \"<the input>\"".to_string());
         let blocked_payload = payload_for(&blocked);
         assert_eq!(blocked_payload.exit_code, 2);
-        assert_eq!(blocked_payload.continue_command.as_deref(), Some("drip --resume abcdefgh --prompt \"<the input>\""));
+        assert_eq!(
+            blocked_payload.continue_command.as_deref(),
+            Some("drip --resume abcdefgh --prompt \"<the input>\"")
+        );
     }
 
     fn payload_for(record: &RunRecord) -> HeadlessResultPayload {
@@ -336,15 +354,15 @@ mod tests {
 
     #[test]
     fn withheld_env_line_skips_names_not_present() {
-    assert_eq!(
-        withheld_env_line("AWS_SECRET_ACCESS_KEY, OTHER", |_| false),
-        None
-    );
+        assert_eq!(
+            withheld_env_line("AWS_SECRET_ACCESS_KEY, OTHER", |_| false),
+            None
+        );
     }
 
     #[test]
     fn withheld_env_line_sorts_and_joins_present_names() {
-    assert_eq!(
+        assert_eq!(
         withheld_env_line(
             "OTHER_TOKEN,ALPHA_KEY",
             |name| name == "ALPHA_KEY" || name == "OTHER_TOKEN"
@@ -404,12 +422,23 @@ mod tests {
             iteration: 7,
             r#type: HarnessEventType::ModelText,
         };
-        assert_eq!(headless_event_line(&event, false).as_deref(), Some("[  7] model-text hello"));
-        let summary = HarnessEvent { r#type: HarnessEventType::RunSummary, ..event.clone() };
+        assert_eq!(
+            headless_event_line(&event, false).as_deref(),
+            Some("[  7] model-text hello")
+        );
+        let summary = HarnessEvent {
+            r#type: HarnessEventType::RunSummary,
+            ..event.clone()
+        };
         assert_eq!(headless_event_line(&summary, false), None);
         let json = headless_event_line(&summary, true).unwrap();
         assert!(json.starts_with("{\"at\":\""), "{json}");
-        assert!(json.ends_with("\"detail\":\"hello\",\"iteration\":7,\"kind\":\"run-summary\",\"type\":\"event\"}"), "{json}");
+        assert!(
+            json.ends_with(
+                "\"detail\":\"hello\",\"iteration\":7,\"kind\":\"run-summary\",\"type\":\"event\"}"
+            ),
+            "{json}"
+        );
     }
 
     #[test]
@@ -425,10 +454,20 @@ mod tests {
             budget.continue_command.as_deref(),
             Some("drip --resume abcdefgh --prompt 'do it' --max-iterations 5 --json")
         );
-        assert_eq!(budget.continuation.as_ref().unwrap().suggested_max_iterations, Some(5));
+        assert_eq!(
+            budget
+                .continuation
+                .as_ref()
+                .unwrap()
+                .suggested_max_iterations,
+            Some(5)
+        );
 
         let uncapped = payload("aborted", None);
-        assert_eq!(uncapped.continue_command.as_deref(), Some("drip --resume abcdefgh --prompt 'do it' --json"));
+        assert_eq!(
+            uncapped.continue_command.as_deref(),
+            Some("drip --resume abcdefgh --prompt 'do it' --json")
+        );
 
         assert_eq!(payload("error", None).exit_code, 3);
 
@@ -445,7 +484,10 @@ mod tests {
             transcript_path: "/t",
         });
         assert_eq!(awaiting.exit_code, 2);
-        assert_eq!(awaiting.continue_command.as_deref(), Some("drip --resume abcdefgh"));
+        assert_eq!(
+            awaiting.continue_command.as_deref(),
+            Some("drip --resume abcdefgh")
+        );
     }
 
     /// Unreconciled work is complete work with a visible anomaly: exit 0, no
@@ -463,7 +505,9 @@ mod tests {
         });
         assert_eq!(
             confidence_basis_line(&anchored.completion_anchor).as_deref(),
-            Some("confidence: High (basis: external verification — pre-existing project test suite)")
+            Some(
+                "confidence: High (basis: external verification — pre-existing project test suite)"
+            )
         );
 
         let declared_none = crate::core::types::CompletionAnchor {
@@ -501,7 +545,10 @@ mod tests {
             state_path: "/s",
             transcript_path: "/t",
         });
-        assert_eq!(shown.exit_code, 0, "absent confidence must not change the exit code");
+        assert_eq!(
+            shown.exit_code, 0,
+            "absent confidence must not change the exit code"
+        );
         let json = serde_json::to_string(&shown).unwrap();
         assert!(!json.contains("claimedConfidence"), "{json}");
 
@@ -525,7 +572,10 @@ mod tests {
             state_path: "/s",
             transcript_path: "/t",
         });
-        assert_eq!(shown.exit_code, 0, "confidence report must not change the exit code");
+        assert_eq!(
+            shown.exit_code, 0,
+            "confidence report must not change the exit code"
+        );
         let json = serde_json::to_string(&shown).unwrap();
         assert!(json.contains("\"claimedConfidence\":\"medium\""), "{json}");
         assert!(json.contains("\"kind\":\"external\""), "{json}");
@@ -551,10 +601,19 @@ mod tests {
         assert_eq!(unreconciled.exit_code, 0);
         assert!(unreconciled.continue_command.is_none());
         assert!(unreconciled.continuation.is_none());
-        assert_eq!(unreconciled.anomalies.as_ref().map(|anomalies| anomalies.len()), Some(1));
+        assert_eq!(
+            unreconciled
+                .anomalies
+                .as_ref()
+                .map(|anomalies| anomalies.len()),
+            Some(1)
+        );
         let json = serde_json::to_string(&unreconciled).unwrap();
         assert!(json.contains("\"reason\":\"unreconciled\""), "{json}");
-        assert!(json.contains("\"anomalies\":[{\"subject\":\"output sign\""), "{json}");
+        assert!(
+            json.contains("\"anomalies\":[{\"subject\":\"output sign\""),
+            "{json}"
+        );
     }
 
     #[test]

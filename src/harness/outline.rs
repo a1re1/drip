@@ -55,8 +55,13 @@ fn is_symbol_token(token: &str) -> bool {
         return false;
     }
     let has_underscore_inside = token[1..token.len() - 1].contains('_');
-    let camel = token.chars().zip(token.chars().skip(1)).any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase());
-    let all_caps = token.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    let camel = token
+        .chars()
+        .zip(token.chars().skip(1))
+        .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase());
+    let all_caps = token
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
     (has_underscore_inside || camel) && !all_caps
 }
 
@@ -66,7 +71,8 @@ fn is_symbol_token(token: &str) -> bool {
 pub fn extract_goal_symbols(texts: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for text in texts {
-        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c)) {
+        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c))
+        {
             if raw.contains('/') || raw.is_empty() {
                 continue;
             }
@@ -89,7 +95,20 @@ pub fn extract_goal_symbols(texts: &[&str]) -> Vec<String> {
 
 fn git_grep_hits(cwd: &str, symbol: &str) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
-        .args(["grep", "-n", "-w", "-F", "--untracked", "-I", "-e", symbol, "--", ".", ":!*.lock", ":!*.min.*"])
+        .args([
+            "grep",
+            "-n",
+            "-w",
+            "-F",
+            "--untracked",
+            "-I",
+            "-e",
+            symbol,
+            "--",
+            ".",
+            ":!*.lock",
+            ":!*.min.*",
+        ])
         .current_dir(cwd)
         .output()
         .ok()?;
@@ -97,14 +116,24 @@ fn git_grep_hits(cwd: &str, symbol: &str) -> Option<Vec<String>> {
     if !output.status.success() && output.status.code() != Some(1) {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).lines().filter(|hit| !hit_in_dot_directory(hit)).map(str::to_string).collect())
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|hit| !hit_in_dot_directory(hit))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// A grep hit under a dot-directory or dotfile (`.dripdata/sessions/…/state.json`
 /// carries the goal text itself; `.venv`, `.git` worktrees): tooling state,
 /// never the code the goal is about. `--untracked` would otherwise surface it.
 fn hit_in_dot_directory(hit: &str) -> bool {
-    hit.split(':').next().unwrap_or("").split('/').any(|component| component.starts_with('.'))
+    hit.split(':')
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .any(|component| component.starts_with('.'))
 }
 
 /// Plain words the goal quotes in backticks — `title` — that are not
@@ -133,7 +162,9 @@ pub fn extract_quoted_words(texts: &[&str]) -> Vec<String> {
             let plain = word.len() >= 3
                 && word.len() <= 30
                 && word.chars().all(|c| c.is_ascii_alphabetic())
-                && !symbols.iter().any(|symbol| symbol.eq_ignore_ascii_case(word))
+                && !symbols
+                    .iter()
+                    .any(|symbol| symbol.eq_ignore_ascii_case(word))
                 && !out.iter().any(|seen| seen.eq_ignore_ascii_case(word));
             if plain {
                 out.push(word.to_string());
@@ -154,14 +185,33 @@ fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
         "^[[:space:]]*(export[[:space:]]+(default[[:space:]]+)?)?(pub(\\(crate\\))?[[:space:]]+)?(async[[:space:]]+)?(fn|struct|enum|trait|type|impl|def|class|function|const|static|interface|func)[[:space:]]+[A-Za-z_]*{word}"
     );
     let output = std::process::Command::new("git")
-        .args(["grep", "-n", "-i", "-I", "-E", "--untracked", "-e", &pattern, "--", ".", ":!*.lock", ":!*.min.*"])
+        .args([
+            "grep",
+            "-n",
+            "-i",
+            "-I",
+            "-E",
+            "--untracked",
+            "-e",
+            &pattern,
+            "--",
+            ".",
+            ":!*.lock",
+            ":!*.min.*",
+        ])
         .current_dir(cwd)
         .output()
         .ok()?;
     if !output.status.success() && output.status.code() != Some(1) {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).lines().filter(|hit| !hit_in_dot_directory(hit)).map(str::to_string).collect())
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|hit| !hit_in_dot_directory(hit))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Files git knows about (tracked plus untracked-but-not-ignored), sorted,
@@ -169,7 +219,13 @@ fn git_grep_definitions(cwd: &str, word: &str) -> Option<Vec<String>> {
 /// state is not part of the project.
 pub(crate) fn tracked_files(cwd: &str) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
         .current_dir(cwd)
         .output()
         .ok()?;
@@ -220,7 +276,11 @@ pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
         let mut top: BTreeMap<String, (usize, Vec<String>, Vec<&str>)> = BTreeMap::new();
         for file in files {
             match file.split_once('/') {
-                None => top.entry(".".to_string()).or_default().2.push(file.as_str()),
+                None => top
+                    .entry(".".to_string())
+                    .or_default()
+                    .2
+                    .push(file.as_str()),
                 Some((dir, rest)) => {
                     let entry = top.entry(dir.to_string()).or_default();
                     entry.0 += 1;
@@ -235,7 +295,10 @@ pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
                 }
             }
         }
-        lines.push(format!("  {} files; top-level directories with their counts and immediate subdirectories:", files.len()));
+        lines.push(format!(
+            "  {} files; top-level directories with their counts and immediate subdirectories:",
+            files.len()
+        ));
         for (dir, (count, subdirs, names)) in top.iter().take(REPO_TREE_MAX_DIRS) {
             if dir == "." {
                 lines.push(format!("  ./: {}", names.join(" ")));
@@ -243,7 +306,11 @@ pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
             }
             let mut detail = format!("  {dir}/ ({count} files");
             if !subdirs.is_empty() {
-                let shown: Vec<&str> = subdirs.iter().take(REPO_TREE_MAX_SUBDIRS).map(String::as_str).collect();
+                let shown: Vec<&str> = subdirs
+                    .iter()
+                    .take(REPO_TREE_MAX_SUBDIRS)
+                    .map(String::as_str)
+                    .collect();
                 detail.push_str(&format!("; subdirs: {}", shown.join(" ")));
                 if subdirs.len() > REPO_TREE_MAX_SUBDIRS {
                     detail.push_str(&format!(" +{}", subdirs.len() - REPO_TREE_MAX_SUBDIRS));
@@ -260,7 +327,10 @@ pub(crate) fn repo_tree_from_files(files: &[String]) -> String {
             lines.push(detail);
         }
         if top.len() > REPO_TREE_MAX_DIRS {
-            lines.push(format!("  … {} more top-level directories", top.len() - REPO_TREE_MAX_DIRS));
+            lines.push(format!(
+                "  … {} more top-level directories",
+                top.len() - REPO_TREE_MAX_DIRS
+            ));
         }
     }
     let mut total = 0usize;
@@ -287,7 +357,9 @@ pub const NAMED_DIRS_MAX: usize = 2;
 /// opened with a READ of kvstore/store.py — named nowhere in the goal,
 /// but sitting beside the file the goal does name in the package it names.
 pub fn named_directory_files(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
-    let Some(files) = tracked_files(cwd) else { return Vec::new() };
+    let Some(files) = tracked_files(cwd) else {
+        return Vec::new();
+    };
     let mut dirs: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for file in &files {
         let mut end = 0usize;
@@ -301,7 +373,8 @@ pub fn named_directory_files(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<
     }
     let mut named: Vec<String> = Vec::new();
     for text in texts {
-        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c)) {
+        for raw in text.split(|c: char| c.is_whitespace() || "`'\"(),;:<>[]{}=+*!?&|#".contains(c))
+        {
             let word = raw.trim_matches('/').trim_end_matches('.');
             if word.is_empty() || !dirs.contains(word) || named.iter().any(|seen| seen == word) {
                 continue;
@@ -317,15 +390,23 @@ pub fn named_directory_files(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<
     }
     let mut found: Vec<String> = Vec::new();
     for dir in &named {
-        for file in files.iter().filter(|file| file.rsplit_once('/').is_some_and(|(parent, _)| parent == dir)) {
+        for file in files.iter().filter(|file| {
+            file.rsplit_once('/')
+                .is_some_and(|(parent, _)| parent == dir)
+        }) {
             if found.len() >= NAMED_DIR_FILES_MAX {
                 break;
             }
             if skip.iter().any(|s| s == file) || found.contains(file) {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(file)) else { continue };
-            if !text.trim().is_empty() && text.lines().count() <= NAMED_DIR_FILE_MAX_LINES && text.chars().count() <= NAMED_DIR_FILE_MAX_CHARS {
+            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(file)) else {
+                continue;
+            };
+            if !text.trim().is_empty()
+                && text.lines().count() <= NAMED_DIR_FILE_MAX_LINES
+                && text.chars().count() <= NAMED_DIR_FILE_MAX_CHARS
+            {
                 found.push(file.clone());
             }
         }
@@ -345,29 +426,56 @@ pub const SIBLING_TESTS_HEADER: &str = "tests that already cover the files above
 /// big-file runs opened with a READ of exactly these to match the style of
 /// the tests the goal asks them to extend.
 pub fn sibling_test_files(cwd: &str, sources: &[String], skip: &[String]) -> Vec<String> {
-    let Some(files) = tracked_files(cwd) else { return Vec::new() };
+    let Some(files) = tracked_files(cwd) else {
+        return Vec::new();
+    };
     let mut found: Vec<String> = Vec::new();
     for source in sources.iter().filter(|source| !test_like_path(source)) {
         if found.len() >= SIBLING_TESTS_MAX {
             break;
         }
         let name = source.rsplit('/').next().unwrap_or(source);
-        let stem = name.split_once('.').map(|(stem, _)| stem).unwrap_or(name).to_ascii_lowercase();
+        let stem = name
+            .split_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(name)
+            .to_ascii_lowercase();
         if stem.is_empty() {
             continue;
         }
-        let wanted = [format!("test_{stem}"), format!("{stem}_test"), format!("{stem}.test"), format!("{stem}.spec"), format!("{stem}_spec"), format!("test{stem}")];
+        let wanted = [
+            format!("test_{stem}"),
+            format!("{stem}_test"),
+            format!("{stem}.test"),
+            format!("{stem}.spec"),
+            format!("{stem}_spec"),
+            format!("test{stem}"),
+        ];
         for candidate in files.iter().filter(|path| test_like_path(path)) {
-            if skip.iter().any(|s| s == candidate) || found.contains(candidate) || sources.contains(candidate) {
+            if skip.iter().any(|s| s == candidate)
+                || found.contains(candidate)
+                || sources.contains(candidate)
+            {
                 continue;
             }
-            let file = candidate.rsplit('/').next().unwrap_or(candidate).to_ascii_lowercase();
-            let test_stem = file.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file.as_str());
+            let file = candidate
+                .rsplit('/')
+                .next()
+                .unwrap_or(candidate)
+                .to_ascii_lowercase();
+            let test_stem = file
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .unwrap_or(file.as_str());
             if !wanted.iter().any(|w| w == test_stem) {
                 continue;
             }
-            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(candidate)) else { continue };
-            if text.lines().count() <= SIBLING_TEST_MAX_LINES && text.chars().count() <= SIBLING_TEST_MAX_CHARS {
+            let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(candidate)) else {
+                continue;
+            };
+            if text.lines().count() <= SIBLING_TEST_MAX_LINES
+                && text.chars().count() <= SIBLING_TEST_MAX_CHARS
+            {
                 found.push(candidate.clone());
                 if found.len() >= SIBLING_TESTS_MAX {
                     break;
@@ -380,16 +488,41 @@ pub fn sibling_test_files(cwd: &str, sources: &[String], skip: &[String]) -> Vec
 
 pub(crate) fn test_like_path(path: &str) -> bool {
     const TREES: &[&str] = &[
-        "test", "tests", "testing", "fixture", "fixtures", "eval", "evals", "example", "examples", "bench", "benches",
-        "benchmark", "benchmarks", "vendor", "third_party", "node_modules", "dist", "build", "target", "spec", "specs",
-        "__tests__", "snapshots", "__snapshots__", "testdata",
+        "test",
+        "tests",
+        "testing",
+        "fixture",
+        "fixtures",
+        "eval",
+        "evals",
+        "example",
+        "examples",
+        "bench",
+        "benches",
+        "benchmark",
+        "benchmarks",
+        "vendor",
+        "third_party",
+        "node_modules",
+        "dist",
+        "build",
+        "target",
+        "spec",
+        "specs",
+        "__tests__",
+        "snapshots",
+        "__snapshots__",
+        "testdata",
     ];
     let mut segments = path.split('/').peekable();
     while let Some(segment) = segments.next() {
         let last = segments.peek().is_none();
         if last {
             let lower = segment.to_ascii_lowercase();
-            return lower.starts_with("test") || lower.contains("_test") || lower.contains(".test") || lower.contains(".spec");
+            return lower.starts_with("test")
+                || lower.contains("_test")
+                || lower.contains(".test")
+                || lower.contains(".spec");
         }
         if TREES.contains(&segment) {
             return true;
@@ -404,7 +537,11 @@ fn definition_hits_line(word: &str, hits: &[String]) -> String {
     let mut groups: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for hit in hits {
         let mut parts = hit.trim().splitn(3, ':');
-        let (path, num, text) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());
+        let (path, num, text) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or("").trim(),
+        );
         if path.is_empty() || num.is_empty() {
             continue;
         }
@@ -422,7 +559,11 @@ fn definition_hits_line(word: &str, hits: &[String]) -> String {
     let mut rendered: Vec<String> = Vec::new();
     for (index, (path, entries)) in groups.iter().enumerate() {
         if index < DEFINITION_HITS_MAX_FILES {
-            let shown: Vec<String> = entries.iter().take(DEFINITION_HITS_MAX_PER_FILE).map(|(num, sig)| format!("{num} {sig}")).collect();
+            let shown: Vec<String> = entries
+                .iter()
+                .take(DEFINITION_HITS_MAX_PER_FILE)
+                .map(|(num, sig)| format!("{num} {sig}"))
+                .collect();
             let mut part = format!("{path}: {}", shown.join("; "));
             if entries.len() > shown.len() {
                 part.push_str(&format!("; +{} more", entries.len() - shown.len()));
@@ -497,7 +638,11 @@ pub fn symbol_hits_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
                     let hit = hit.trim();
                     // "path:line:text" — keep the locator, tighten the text.
                     let mut parts = hit.splitn(3, ':');
-                    let (path, num, text) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("").trim());
+                    let (path, num, text) = (
+                        parts.next().unwrap_or(""),
+                        parts.next().unwrap_or(""),
+                        parts.next().unwrap_or("").trim(),
+                    );
                     let text: String = text.chars().take(SYMBOL_HIT_LINE_CHARS).collect();
                     format!("{path}:{num} {text}")
                 })
@@ -517,7 +662,10 @@ pub fn symbol_hits_for_texts(cwd: &str, texts: &[&str]) -> Option<String> {
     if lines.is_empty() {
         None
     } else {
-        Some(format!("symbol hits (git grep -nw, first {SYMBOL_HITS_MAX_PER_SYMBOL} per name):\n{}", lines.join("\n")))
+        Some(format!(
+            "symbol hits (git grep -nw, first {SYMBOL_HITS_MAX_PER_SYMBOL} per name):\n{}",
+            lines.join("\n")
+        ))
     }
 }
 
@@ -529,30 +677,81 @@ pub fn is_definition(ext: &str, line: &str) -> bool {
         "rs" => {
             indent <= 4
                 && starts_with_any(&[
-                    "pub fn ", "fn ", "pub async fn ", "async fn ", "pub(crate) fn ", "pub(crate) async fn ",
-                    "pub struct ", "struct ", "pub enum ", "enum ", "pub trait ", "trait ", "impl ", "impl<",
-                    "pub mod ", "mod ", "pub const ", "const ", "pub static ", "static ", "pub type ", "type ",
-                    "macro_rules! ", "pub(crate) struct ", "pub(crate) enum ", "pub(crate) const ",
+                    "pub fn ",
+                    "fn ",
+                    "pub async fn ",
+                    "async fn ",
+                    "pub(crate) fn ",
+                    "pub(crate) async fn ",
+                    "pub struct ",
+                    "struct ",
+                    "pub enum ",
+                    "enum ",
+                    "pub trait ",
+                    "trait ",
+                    "impl ",
+                    "impl<",
+                    "pub mod ",
+                    "mod ",
+                    "pub const ",
+                    "const ",
+                    "pub static ",
+                    "static ",
+                    "pub type ",
+                    "type ",
+                    "macro_rules! ",
+                    "pub(crate) struct ",
+                    "pub(crate) enum ",
+                    "pub(crate) const ",
                 ])
         }
         "py" => indent <= 4 && starts_with_any(&["def ", "async def ", "class "]),
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => {
             indent == 0
                 && starts_with_any(&[
-                    "export function ", "export async function ", "export default function ", "export class ",
-                    "export default class ", "export const ", "export interface ", "export type ", "export enum ",
-                    "function ", "async function ", "class ", "interface ", "type ", "enum ",
+                    "export function ",
+                    "export async function ",
+                    "export default function ",
+                    "export class ",
+                    "export default class ",
+                    "export const ",
+                    "export interface ",
+                    "export type ",
+                    "export enum ",
+                    "function ",
+                    "async function ",
+                    "class ",
+                    "interface ",
+                    "type ",
+                    "enum ",
                 ])
         }
         "go" => indent == 0 && starts_with_any(&["func ", "type "]),
         "rb" => indent <= 2 && starts_with_any(&["def ", "class ", "module "]),
         "java" | "kt" | "swift" | "cs" | "scala" => {
             indent <= 4
-                && (starts_with_any(&["class ", "interface ", "enum ", "struct ", "protocol ", "extension ", "object ", "fun ", "func "])
-                    || (indent == 4
-                        && starts_with_any(&["public ", "private ", "protected ", "static ", "override ", "internal ", "open "])
-                        && body.contains('(')
-                        && !body.trim_end().ends_with(';')))
+                && (starts_with_any(&[
+                    "class ",
+                    "interface ",
+                    "enum ",
+                    "struct ",
+                    "protocol ",
+                    "extension ",
+                    "object ",
+                    "fun ",
+                    "func ",
+                ]) || (indent == 4
+                    && starts_with_any(&[
+                        "public ",
+                        "private ",
+                        "protected ",
+                        "static ",
+                        "override ",
+                        "internal ",
+                        "open ",
+                    ])
+                    && body.contains('(')
+                    && !body.trim_end().ends_with(';')))
         }
         "c" | "h" | "cc" | "cpp" | "hpp" => {
             indent == 0
@@ -588,9 +787,37 @@ fn signature(line: &str) -> String {
 /// keywords (`pub async fn merged_env(` -> `merged_env`, `impl TuiApp {` -> `TuiApp`).
 pub fn short_name(line: &str) -> String {
     const KEYWORDS: &[&str] = &[
-        "pub", "pub(crate)", "async", "fn", "struct", "enum", "trait", "impl", "mod", "const", "static", "type", "def", "class",
-        "function", "export", "default", "func", "interface", "public", "private", "protected", "override", "internal", "open",
-        "fun", "object", "protocol", "extension", "module", "macro_rules!",
+        "pub",
+        "pub(crate)",
+        "async",
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "impl",
+        "mod",
+        "const",
+        "static",
+        "type",
+        "def",
+        "class",
+        "function",
+        "export",
+        "default",
+        "func",
+        "interface",
+        "public",
+        "private",
+        "protected",
+        "override",
+        "internal",
+        "open",
+        "fun",
+        "object",
+        "protocol",
+        "extension",
+        "module",
+        "macro_rules!",
     ];
     let body = line.trim();
     for word in body.split(|c: char| c.is_whitespace()) {
@@ -598,7 +825,10 @@ pub fn short_name(line: &str) -> String {
         if word.is_empty() || KEYWORDS.contains(&word) {
             continue;
         }
-        let name: String = word.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let name: String = word
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return name;
         }
@@ -617,7 +847,9 @@ pub fn enclosing_definition(ext: &str, lines: &[&str], index: usize) -> Option<S
     let target_indent = indent(lines[cursor]);
     loop {
         let line = lines[cursor];
-        if is_definition(ext, line) && (cursor == index || indent(line) < target_indent || target_indent == 0) {
+        if is_definition(ext, line)
+            && (cursor == index || indent(line) < target_indent || target_indent == 0)
+        {
             return Some(short_name(line));
         }
         if cursor == 0 {
@@ -709,12 +941,18 @@ pub fn file_outline(path: &Path, display: &str) -> Option<String> {
         return None;
     }
     let shown = definitions.len().min(OUTLINE_MAX_ENTRIES);
-    let entries: Vec<String> = definitions[..shown].iter().map(|(number, line)| format!("{number} {}", signature(line))).collect();
+    let entries: Vec<String> = definitions[..shown]
+        .iter()
+        .map(|(number, line)| format!("{number} {}", signature(line)))
+        .collect();
     let mut out = format!("{display} ({} lines): {}", lines.len(), entries.join("; "));
     let rest = &definitions[shown..];
     if !rest.is_empty() {
         let compact_shown = rest.len().min(OUTLINE_MAX_COMPACT);
-        let compact: Vec<String> = rest[..compact_shown].iter().map(|(number, line)| format!("{}@{number}", short_name(line))).collect();
+        let compact: Vec<String> = rest[..compact_shown]
+            .iter()
+            .map(|(number, line)| format!("{}@{number}", short_name(line)))
+            .collect();
         out.push_str(&format!("; then (name@line) {}", compact.join(" ")));
         if rest.len() > compact_shown {
             out.push_str(&format!("; +{} more", rest.len() - compact_shown));
@@ -754,14 +992,27 @@ pub fn qualified_type_names(texts: &[&str]) -> Vec<String> {
             if raw.contains('/') {
                 continue;
             }
-            let Some(head) = raw.split("::").next().and_then(|part| part.split('.').next()) else { continue };
-            let qualifies = raw.len() > head.len() && (raw[head.len()..].starts_with('.') || raw[head.len()..].starts_with("::"));
+            let Some(head) = raw
+                .split("::")
+                .next()
+                .and_then(|part| part.split('.').next())
+            else {
+                continue;
+            };
+            let qualifies = raw.len() > head.len()
+                && (raw[head.len()..].starts_with('.') || raw[head.len()..].starts_with("::"));
             let member = &raw[head.len()..];
-            let member_is_name = member.trim_start_matches(|c| c == '.' || c == ':').chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+            let member_is_name = member
+                .trim_start_matches(|c| c == '.' || c == ':')
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
             if !qualifies || !member_is_name || head.len() < 3 || head.len() > 40 {
                 continue;
             }
-            if !head.chars().next().is_some_and(|c| c.is_ascii_uppercase()) || !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if !head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                || !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 continue;
             }
             if !out.iter().any(|seen| seen == head) {
@@ -782,7 +1033,11 @@ pub const DEFINITION_FILES_MAX_WORDS: usize = 8;
 /// exact-name definition is preferred over one that merely contains the word.
 pub fn definition_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
-    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)).chain(extract_quoted_words(texts)) {
+    for word in extract_goal_symbols(texts)
+        .into_iter()
+        .chain(qualified_type_names(texts))
+        .chain(extract_quoted_words(texts))
+    {
         if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
             words.push(word);
         }
@@ -793,16 +1048,26 @@ pub fn definition_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) ->
         if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS {
             break;
         }
-        let Some(hits) = git_grep_definitions(cwd, word) else { break };
+        let Some(hits) = git_grep_definitions(cwd, word) else {
+            break;
+        };
         let mut exact: Vec<String> = Vec::new();
         let mut partial: Vec<String> = Vec::new();
         for hit in &hits {
             let mut parts = hit.splitn(3, ':');
-            let (path, _, text) = (parts.next().unwrap_or(""), parts.next(), parts.next().unwrap_or(""));
+            let (path, _, text) = (
+                parts.next().unwrap_or(""),
+                parts.next(),
+                parts.next().unwrap_or(""),
+            );
             if path.is_empty() || skip.iter().any(|s| s == path) {
                 continue;
             }
-            let bucket = if short_name(text).eq_ignore_ascii_case(word) { &mut exact } else { &mut partial };
+            let bucket = if short_name(text).eq_ignore_ascii_case(word) {
+                &mut exact
+            } else {
+                &mut partial
+            };
             if !bucket.iter().any(|p| p == path) {
                 bucket.push(path.to_string());
             }
@@ -832,7 +1097,11 @@ pub const SYMBOL_HIT_FILES_MAX: usize = 2;
 /// goal's word order.
 pub fn symbol_hit_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
-    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)).chain(extract_quoted_words(texts)) {
+    for word in extract_goal_symbols(texts)
+        .into_iter()
+        .chain(qualified_type_names(texts))
+        .chain(extract_quoted_words(texts))
+    {
         if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
             words.push(word);
         }
@@ -841,14 +1110,23 @@ pub fn symbol_hit_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) ->
     let mut files: Vec<String> = Vec::new();
     let mut rejected: Vec<String> = Vec::new();
     for word in words.iter().take(DEFINITION_FILES_MAX_WORDS) {
-        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS || files.len() >= SYMBOL_HIT_FILES_MAX {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS
+            || files.len() >= SYMBOL_HIT_FILES_MAX
+        {
             break;
         }
-        let Some(hits) = git_grep_hits(cwd, word) else { break };
+        let Some(hits) = git_grep_hits(cwd, word) else {
+            break;
+        };
         let mut paths: Vec<String> = Vec::new();
         for hit in &hits {
             let path = hit.split(':').next().unwrap_or("").to_string();
-            if path.is_empty() || skip.iter().any(|s| *s == path) || files.contains(&path) || rejected.contains(&path) || paths.contains(&path) {
+            if path.is_empty()
+                || skip.iter().any(|s| *s == path)
+                || files.contains(&path)
+                || rejected.contains(&path)
+                || paths.contains(&path)
+            {
                 continue;
             }
             paths.push(path);
@@ -859,7 +1137,10 @@ pub fn symbol_hit_files_for_texts(cwd: &str, texts: &[&str], skip: &[String]) ->
                 break;
             }
             let small = std::fs::read_to_string(Path::new(cwd).join(&path))
-                .map(|text| text.lines().count() <= SYMBOL_HIT_FILE_MAX_LINES && text.chars().count() <= SYMBOL_HIT_FILE_MAX_CHARS)
+                .map(|text| {
+                    text.lines().count() <= SYMBOL_HIT_FILE_MAX_LINES
+                        && text.chars().count() <= SYMBOL_HIT_FILE_MAX_CHARS
+                })
                 .unwrap_or(false);
             if small {
                 files.push(path);
@@ -883,7 +1164,10 @@ pub const DEFINITION_SPANS_HEADER: &str = "definitions the goal names, already r
 
 pub fn definition_spans_for_texts(cwd: &str, texts: &[&str], carried: &[String]) -> Option<String> {
     let mut words: Vec<String> = Vec::new();
-    for word in extract_goal_symbols(texts).into_iter().chain(qualified_type_names(texts)) {
+    for word in extract_goal_symbols(texts)
+        .into_iter()
+        .chain(qualified_type_names(texts))
+    {
         if !words.iter().any(|seen| seen.eq_ignore_ascii_case(&word)) {
             words.push(word);
         }
@@ -893,10 +1177,14 @@ pub fn definition_spans_for_texts(cwd: &str, texts: &[&str], carried: &[String])
     let mut chars = 0usize;
     let mut seen_spans: Vec<(String, usize)> = Vec::new();
     for word in words.iter().take(DEFINITION_FILES_MAX_WORDS) {
-        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS || blocks.len() >= DEFINITION_SPANS_MAX {
+        if started.elapsed().as_millis() > SYMBOL_HITS_TIME_BUDGET_MS
+            || blocks.len() >= DEFINITION_SPANS_MAX
+        {
             break;
         }
-        let Some(hits) = git_grep_definitions(cwd, word) else { break };
+        let Some(hits) = git_grep_definitions(cwd, word) else {
+            break;
+        };
         let exact: Vec<(String, usize)> = hits
             .iter()
             .filter_map(|hit| {
@@ -908,20 +1196,51 @@ pub fn definition_spans_for_texts(cwd: &str, texts: &[&str], carried: &[String])
                 Some((path.to_string(), num.trim().parse::<usize>().ok()?))
             })
             .collect();
-        let [(path, line_number)] = exact.as_slice() else { continue };
-        if carried.iter().any(|c| c == path) || seen_spans.iter().any(|(p, l)| p == path && l == line_number) {
+        let [(path, line_number)] = exact.as_slice() else {
+            continue;
+        };
+        if carried.iter().any(|c| c == path)
+            || seen_spans
+                .iter()
+                .any(|(p, l)| p == path && l == line_number)
+        {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(path)) else { continue };
+        let Ok(text) = std::fs::read_to_string(Path::new(cwd).join(path)) else {
+            continue;
+        };
         let lines: Vec<&str> = text.lines().collect();
         if lines.is_empty() || *line_number == 0 || *line_number > lines.len() {
             continue;
         }
-        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
         let start = line_number - 1;
-        let end = definition_end(ext, &lines, start).min(start + DEFINITION_SPAN_MAX_LINES - 1).max(start);
-        let body: Vec<String> = (start..=end).map(|i| format!("{}\t{}", i + 1, lines[i].chars().take(NAMED_FILE_LINE_CHARS).collect::<String>())).collect();
-        let block = format!("== {path}:{}-{} ({} of {} lines)\n{}", start + 1, end + 1, end - start + 1, lines.len(), body.join("\n"));
+        let end = definition_end(ext, &lines, start)
+            .min(start + DEFINITION_SPAN_MAX_LINES - 1)
+            .max(start);
+        let body: Vec<String> = (start..=end)
+            .map(|i| {
+                format!(
+                    "{}\t{}",
+                    i + 1,
+                    lines[i]
+                        .chars()
+                        .take(NAMED_FILE_LINE_CHARS)
+                        .collect::<String>()
+                )
+            })
+            .collect();
+        let block = format!(
+            "== {path}:{}-{} ({} of {} lines)\n{}",
+            start + 1,
+            end + 1,
+            end - start + 1,
+            lines.len(),
+            body.join("\n")
+        );
         if chars + block.len() > DEFINITION_SPANS_MAX_CHARS {
             break;
         }
@@ -950,7 +1269,11 @@ pub fn named_file_bodies_for_paths(cwd: &str, paths: &[String]) -> (Option<Strin
 
 /// `named_file_bodies_for_paths` under a caller-chosen header (the review
 /// brief carries the files the author edited the same way).
-pub fn file_bodies_for_paths(cwd: &str, paths: &[String], header: &str) -> (Option<String>, Vec<String>) {
+pub fn file_bodies_for_paths(
+    cwd: &str,
+    paths: &[String],
+    header: &str,
+) -> (Option<String>, Vec<String>) {
     let mut blocks: Vec<String> = Vec::new();
     let mut carried: Vec<String> = Vec::new();
     let mut chars = 0usize;
@@ -959,7 +1282,9 @@ pub fn file_bodies_for_paths(cwd: &str, paths: &[String], header: &str) -> (Opti
         if !full.is_file() {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&full) else { continue };
+        let Ok(text) = std::fs::read_to_string(&full) else {
+            continue;
+        };
         let lines: Vec<&str> = text.lines().collect();
         if lines.is_empty() || lines.len() > NAMED_FILE_BODY_MAX_LINES {
             continue;
@@ -969,7 +1294,11 @@ pub fn file_bodies_for_paths(cwd: &str, paths: &[String], header: &str) -> (Opti
             .enumerate()
             .map(|(index, line)| {
                 let shown: String = if line.chars().count() > NAMED_FILE_LINE_CHARS {
-                    format!("{}[line truncated: {} chars total]", line.chars().take(NAMED_FILE_LINE_CHARS).collect::<String>(), line.chars().count())
+                    format!(
+                        "{}[line truncated: {} chars total]",
+                        line.chars().take(NAMED_FILE_LINE_CHARS).collect::<String>(),
+                        line.chars().count()
+                    )
                 } else {
                     (*line).to_string()
                 };
@@ -1062,8 +1391,16 @@ mod tests {
         write(&dir, "src/tiny.rs", "fn a() {}\n");
         let cwd = dir.to_string_lossy().to_string();
         assert!(outlines_for_texts(&cwd, &["fix `src/tiny.rs`"]).is_none());
-        let got = outlines_for_texts(&cwd, &["tidy src/tiny.rs and src/run.rs", "src/run.rs again"]).expect("outline");
-        assert_eq!(got.matches("src/run.rs (").count(), 1, "one outline per file: {got}");
+        let got = outlines_for_texts(
+            &cwd,
+            &["tidy src/tiny.rs and src/run.rs", "src/run.rs again"],
+        )
+        .expect("outline");
+        assert_eq!(
+            got.matches("src/run.rs (").count(),
+            1,
+            "one outline per file: {got}"
+        );
         assert!(outlines_for_texts(&cwd, &["src/missing.rs"]).is_none());
     }
 
@@ -1073,12 +1410,22 @@ mod tests {
         let symbols = extract_goal_symbols(&[goal]);
         assert_eq!(
             symbols,
-            vec!["hedges_fired", "hedges_won", "RoleInferenceTotals", "HarnessRun", "role_inference", "roleInference"],
+            vec![
+                "hedges_fired",
+                "hedges_won",
+                "RoleInferenceTotals",
+                "HarnessRun",
+                "role_inference",
+                "roleInference"
+            ],
             "{symbols:?}"
         );
         assert!(extract_goal_symbols(&["fix the bug in the parser"]).is_empty());
         let many: Vec<String> = (0..20).map(|i| format!("sym_{i}")).collect();
-        assert_eq!(extract_goal_symbols(&[&many.join(" ")]).len(), SYMBOL_HITS_MAX_SYMBOLS);
+        assert_eq!(
+            extract_goal_symbols(&[&many.join(" ")]).len(),
+            SYMBOL_HITS_MAX_SYMBOLS
+        );
     }
 
     #[test]
@@ -1087,9 +1434,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        assert!(symbol_hits_for_texts(&cwd, &["touch role_totals"]).is_none(), "not a repo");
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
-        write(&dir, "src/a.rs", "pub struct RoleTotals {}\nfn use_role_totals(x: RoleTotals) {}\n");
+        assert!(
+            symbol_hits_for_texts(&cwd, &["touch role_totals"]).is_none(),
+            "not a repo"
+        );
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        write(
+            &dir,
+            "src/a.rs",
+            "pub struct RoleTotals {}\nfn use_role_totals(x: RoleTotals) {}\n",
+        );
         write(&dir, "src/b.rs", "// RoleTotalsX is not a whole-word hit\n");
         let hits = symbol_hits_for_texts(&cwd, &["extend RoleTotals and missing_name"]).unwrap();
         assert!(hits.starts_with("symbol hits (git grep -nw"), "{hits}");
@@ -1106,7 +1465,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
         assert!(repo_tree_for_prompt(&cwd).is_none(), "not a repo");
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         write(&dir, "README.md", "# x\n");
         write(&dir, "kvstore/cli.py", "x\n");
         write(&dir, "kvstore/store.py", "x\n");
@@ -1114,12 +1478,21 @@ mod tests {
         write(&dir, ".dripdata/sessions/s/state.json", "{}\n");
         let tree = repo_tree_for_prompt(&cwd).unwrap();
         assert!(tree.starts_with(REPO_TREE_HEADER), "{tree}");
-        assert!(tree.contains("\n  ./: README.md\n  kvstore/: cli.py store.py\n  tests/: test_cli.py"), "{tree}");
+        assert!(
+            tree.contains("\n  ./: README.md\n  kvstore/: cli.py store.py\n  tests/: test_cli.py"),
+            "{tree}"
+        );
         assert!(!tree.contains(".dripdata"), "{tree}");
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut files: Vec<String> = (0..130).map(|i| format!("src/harness/m{i}.rs")).collect();
-        files.extend(["src/lib.rs".to_string(), "src/main.rs".to_string(), "src/tools/a.rs".to_string(), "Cargo.toml".to_string(), "tests/t.rs".to_string()]);
+        files.extend([
+            "src/lib.rs".to_string(),
+            "src/main.rs".to_string(),
+            "src/tools/a.rs".to_string(),
+            "Cargo.toml".to_string(),
+            "tests/t.rs".to_string(),
+        ]);
         files.sort();
         let big = repo_tree_from_files(&files);
         assert!(big.contains("135 files; top-level directories"), "{big}");
@@ -1133,17 +1506,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         write(&dir, "kvstore/__init__.py", "from .store import Store\n");
         write(&dir, "kvstore/cli.py", "x\n");
         write(&dir, "kvstore/store.py", "class Store: pass\n");
-        write(&dir, "kvstore/textutil.py", &"x\n".repeat(NAMED_DIR_FILE_MAX_LINES + 1));
+        write(
+            &dir,
+            "kvstore/textutil.py",
+            &"x\n".repeat(NAMED_DIR_FILE_MAX_LINES + 1),
+        );
         write(&dir, "kvstore/sub/deep.py", "x\n");
         write(&dir, "tests/test_store.py", "import unittest\n");
         write(&dir, "README.md", "# kv\n");
         let texts = ["Add an HTTP API to kvstore. Create kvstore/server.py exposing make_server; add tests in tests/test_server.py"];
         let found = named_directory_files(&cwd, &texts, &["kvstore/cli.py".to_string()]);
-        assert_eq!(found, vec!["kvstore/__init__.py".to_string(), "kvstore/store.py".to_string(), "tests/test_store.py".to_string()], "textutil too long, deep.py not direct, cli.py skipped");
+        assert_eq!(
+            found,
+            vec![
+                "kvstore/__init__.py".to_string(),
+                "kvstore/store.py".to_string(),
+                "tests/test_store.py".to_string()
+            ],
+            "textutil too long, deep.py not direct, cli.py skipped"
+        );
         assert!(named_directory_files(&cwd, &["nothing named here"], &[]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1154,18 +1544,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         write(&dir, "kvstore/cli.py", "x\n");
         write(&dir, "kvstore/store.py", "x\n");
         write(&dir, "kvstore/textutil.py", "x\n");
         write(&dir, "tests/test_cli.py", "import unittest\n");
         write(&dir, "tests/test_store.py", "import unittest\n");
-        write(&dir, "tests/test_textutil.py", &"x\n".repeat(SIBLING_TEST_MAX_LINES + 1));
-        let sources = vec!["kvstore/cli.py".to_string(), "kvstore/textutil.py".to_string(), "kvstore/store.py".to_string()];
+        write(
+            &dir,
+            "tests/test_textutil.py",
+            &"x\n".repeat(SIBLING_TEST_MAX_LINES + 1),
+        );
+        let sources = vec![
+            "kvstore/cli.py".to_string(),
+            "kvstore/textutil.py".to_string(),
+            "kvstore/store.py".to_string(),
+        ];
         let found = sibling_test_files(&cwd, &sources, &["tests/test_store.py".to_string()]);
-        assert_eq!(found, vec!["tests/test_cli.py".to_string()], "textutil's test is too long, store's is skipped");
+        assert_eq!(
+            found,
+            vec!["tests/test_cli.py".to_string()],
+            "textutil's test is too long, store's is skipped"
+        );
         let found = sibling_test_files(&cwd, &sources, &[]);
-        assert_eq!(found, vec!["tests/test_cli.py".to_string(), "tests/test_store.py".to_string()]);
+        assert_eq!(
+            found,
+            vec![
+                "tests/test_cli.py".to_string(),
+                "tests/test_store.py".to_string()
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1173,12 +1586,32 @@ mod tests {
     fn enclosing_definition_names_the_nearest_definition_above() {
         let text = "use std::io;\n\nimpl Run {\n    pub fn new() -> Run {\n        Run { x: 0 }\n    }\n\n    fn helper(&self) {\n        let y = 1;\n    }\n}\n\nfn main() {\n    println!();\n}\n";
         let lines: Vec<&str> = text.split('\n').collect();
-        assert_eq!(enclosing_definition("rs", &lines, 0), None, "before any definition");
-        assert_eq!(enclosing_definition("rs", &lines, 4).as_deref(), Some("new"));
-        assert_eq!(enclosing_definition("rs", &lines, 8).as_deref(), Some("helper"));
-        assert_eq!(enclosing_definition("rs", &lines, 13).as_deref(), Some("main"));
-        assert_eq!(enclosing_definition("rs", &lines, 3).as_deref(), Some("new"), "the definition line itself");
-        let py: Vec<&str> = "class A:\n    def f(self):\n        return 1\n\n\ndef g():\n    pass\n".split('\n').collect();
+        assert_eq!(
+            enclosing_definition("rs", &lines, 0),
+            None,
+            "before any definition"
+        );
+        assert_eq!(
+            enclosing_definition("rs", &lines, 4).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            enclosing_definition("rs", &lines, 8).as_deref(),
+            Some("helper")
+        );
+        assert_eq!(
+            enclosing_definition("rs", &lines, 13).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            enclosing_definition("rs", &lines, 3).as_deref(),
+            Some("new"),
+            "the definition line itself"
+        );
+        let py: Vec<&str> =
+            "class A:\n    def f(self):\n        return 1\n\n\ndef g():\n    pass\n"
+                .split('\n')
+                .collect();
         assert_eq!(enclosing_definition("py", &py, 2).as_deref(), Some("f"));
         assert_eq!(enclosing_definition("py", &py, 6).as_deref(), Some("g"));
     }
@@ -1193,13 +1626,22 @@ mod tests {
         let path = write(&dir, "many.rs", &body);
         let outline = file_outline(&path, "many.rs").expect("outline");
         let last_full = OUTLINE_MAX_ENTRIES - 1;
-        assert!(outline.contains(&format!("pub async fn f{last_full}(&self)")), "{outline}");
-        assert!(outline.contains(&format!("; then (name@line) f{}@", OUTLINE_MAX_ENTRIES)), "{outline}");
+        assert!(
+            outline.contains(&format!("pub async fn f{last_full}(&self)")),
+            "{outline}"
+        );
+        assert!(
+            outline.contains(&format!("; then (name@line) f{}@", OUTLINE_MAX_ENTRIES)),
+            "{outline}"
+        );
         let last_compact = OUTLINE_MAX_ENTRIES + OUTLINE_MAX_COMPACT - 1;
         assert!(outline.contains(&format!(" f{last_compact}@")), "{outline}");
         assert!(outline.ends_with("; +5 more"), "{outline}");
         assert_eq!(short_name("impl TuiApp {"), "TuiApp");
-        assert_eq!(short_name("    pub(crate) fn merged_env(&self) -> BTreeMap<String, String> {"), "merged_env");
+        assert_eq!(
+            short_name("    pub(crate) fn merged_env(&self) -> BTreeMap<String, String> {"),
+            "merged_env"
+        );
         assert_eq!(short_name("export default class Foo extends Bar {"), "Foo");
     }
 
@@ -1210,7 +1652,8 @@ mod tests {
         assert_eq!(definition_end("rs", &lines, 0), 7);
         assert_eq!(definition_end("rs", &lines, 9), 9);
         assert_eq!(definition_end("rs", &lines, 10), 10);
-        let py = "def alpha(x):\n    if x:\n        return 1\n\n    return 2\n\ndef beta():\n    pass\n";
+        let py =
+            "def alpha(x):\n    if x:\n        return 1\n\n    return 2\n\ndef beta():\n    pass\n";
         let lines: Vec<&str> = py.lines().collect();
         assert_eq!(definition_end("py", &lines, 0), 4);
         assert_eq!(definition_end("py", &lines, 6), 7);
@@ -1224,25 +1667,48 @@ mod tests {
 
     #[test]
     fn quoted_words_find_the_definitions_named_after_them() {
-        assert_eq!(extract_quoted_words(&["the predicate whose name contains `title` and calls `RoleTotals`"]), vec!["title".to_string()]);
+        assert_eq!(
+            extract_quoted_words(&[
+                "the predicate whose name contains `title` and calls `RoleTotals`"
+            ]),
+            vec!["title".to_string()]
+        );
         assert!(extract_quoted_words(&["run `cargo test --lib` and `x`"]).is_empty());
         let dir = std::env::temp_dir().join(format!("drip-definition-hits-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = dir.to_string_lossy().into_owned();
-        assert!(definition_hits_for_texts(&cwd, &["`title`"]).is_none(), "not a repo");
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(
+            definition_hits_for_texts(&cwd, &["`title`"]).is_none(),
+            "not a repo"
+        );
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         write(&dir, "src/a.rs", "pub struct TitleRoute {}\n    fn should_request_title(x: u32) -> bool {\n        let title = x;\n        title > 1\n    }\n");
         write(&dir, "src/b.py", "def make_title():\n    return 1\n");
-        let fixture: String = (0..30).map(|i| format!("def pad_title_{i}(x):\n    return x\n")).collect();
+        let fixture: String = (0..30)
+            .map(|i| format!("def pad_title_{i}(x):\n    return x\n"))
+            .collect();
         write(&dir, "evals/fixture/textutil.py", &fixture);
-        let hits = definition_hits_for_texts(&cwd, &["find the predicate whose name contains `title`"]).unwrap();
+        let hits =
+            definition_hits_for_texts(&cwd, &["find the predicate whose name contains `title`"])
+                .unwrap();
         assert!(hits.starts_with("definition hits ("), "{hits}");
         assert!(hits.contains("title: src/a.rs: 1 pub struct TitleRoute; 2 fn should_request_title(x: u32) -> bool | src/b.py: 1 def make_title() | evals/fixture/textutil.py: 1 def pad_title_0(x); 3 def pad_title_1(x); "), "{hits}");
         assert!(hits.contains("; +24 more"), "{hits}");
         assert!(!hits.contains("let title"), "{hits}");
-        assert!(test_like_path("evals/fixture/textutil.py") && test_like_path("src/foo_test.go") && !test_like_path("src/tui/app.rs"));
-        assert!(definition_hits_for_texts(&cwd, &["`nothing`"]).unwrap().contains("nothing: no definition names contain it"));
+        assert!(
+            test_like_path("evals/fixture/textutil.py")
+                && test_like_path("src/foo_test.go")
+                && !test_like_path("src/tui/app.rs")
+        );
+        assert!(definition_hits_for_texts(&cwd, &["`nothing`"])
+            .unwrap()
+            .contains("nothing: no definition names contain it"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1250,18 +1716,33 @@ mod tests {
     fn short_named_files_are_carried_whole_and_long_ones_are_not() {
         let dir = std::env::temp_dir().join(format!("drip-named-bodies-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        write(&dir, "kv/store.py", "class Store:\n    def get(self, k):\n        return self.d[k]\n");
-        let long: String = (0..(NAMED_FILE_BODY_MAX_LINES + 1)).map(|i| format!("x{i} = {i}\n")).collect();
+        write(
+            &dir,
+            "kv/store.py",
+            "class Store:\n    def get(self, k):\n        return self.d[k]\n",
+        );
+        let long: String = (0..(NAMED_FILE_BODY_MAX_LINES + 1))
+            .map(|i| format!("x{i} = {i}\n"))
+            .collect();
         write(&dir, "kv/big.py", &long);
         write(&dir, "kv/empty.py", "");
         let cwd = dir.to_string_lossy().to_string();
-        let paths = named_paths_for_texts(&["fix kv/store.py, kv/big.py, kv/empty.py and kv/missing.py"]);
-        assert_eq!(paths, vec!["kv/store.py", "kv/big.py", "kv/empty.py", "kv/missing.py"]);
+        let paths =
+            named_paths_for_texts(&["fix kv/store.py, kv/big.py, kv/empty.py and kv/missing.py"]);
+        assert_eq!(
+            paths,
+            vec!["kv/store.py", "kv/big.py", "kv/empty.py", "kv/missing.py"]
+        );
         let (section, carried) = named_file_bodies_for_paths(&cwd, &paths);
         let section = section.expect("store.py is carried");
         assert!(section.starts_with(NAMED_FILE_BODIES_HEADER), "{section}");
         assert!(section.contains("== kv/store.py (3 lines)\n1\tclass Store:\n2\t    def get(self, k):\n3\t        return self.d[k]"), "{section}");
-        assert!(!section.contains("big.py") && !section.contains("empty.py") && !section.contains("missing.py"), "{section}");
+        assert!(
+            !section.contains("big.py")
+                && !section.contains("empty.py")
+                && !section.contains("missing.py"),
+            "{section}"
+        );
         assert_eq!(carried, vec!["kv/store.py"]);
         let (none, carried) = named_file_bodies_for_paths(&cwd, &["kv/big.py".to_string()]);
         assert!(none.is_none() && carried.is_empty());
@@ -1275,15 +1756,40 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drip-def-files-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
-        write(&dir, "kv/store.py", "class Store:\n    def set(self, k, v):\n        pass\n");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        write(
+            &dir,
+            "kv/store.py",
+            "class Store:\n    def set(self, k, v):\n        pass\n",
+        );
         write(&dir, "kv/util.py", "def store_setup():\n    pass\n");
-        write(&dir, "tests/test_store.py", "class StoreTest:\n    def test_set(self):\n        pass\n");
+        write(
+            &dir,
+            "tests/test_store.py",
+            "class StoreTest:\n    def test_set(self):\n        pass\n",
+        );
         let cwd = dir.to_string_lossy().to_string();
-        let files = definition_files_for_texts(&cwd, &["Add TTL to Store.set(key) and the `set` subcommand"], &[]);
-        assert_eq!(files, vec!["kv/store.py"], "exact `class Store` and `def set` beat `StoreTest`, `store_setup` and `test_set`");
+        let files = definition_files_for_texts(
+            &cwd,
+            &["Add TTL to Store.set(key) and the `set` subcommand"],
+            &[],
+        );
+        assert_eq!(
+            files,
+            vec!["kv/store.py"],
+            "exact `class Store` and `def set` beat `StoreTest`, `store_setup` and `test_set`"
+        );
         let files = definition_files_for_texts(&cwd, &["Store.set"], &["kv/store.py".to_string()]);
-        assert_eq!(files, vec!["kv/util.py", "tests/test_store.py"], "without an exact hit the containing names count, source trees first");
+        assert_eq!(
+            files,
+            vec!["kv/util.py", "tests/test_store.py"],
+            "without an exact hit the containing names count, source trees first"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1292,7 +1798,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drip-symbol-carry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success());
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
         write(&dir, "kv/cli.py", "import argparse\n\ndef build_parser():\n    p = argparse.ArgumentParser()\n    sub = p.add_subparsers()\n    sub.add_parser(\"set\")\n    return p\n");
         let mut big = String::new();
         for i in 0..300 {
@@ -1303,19 +1814,50 @@ mod tests {
             }
         }
         write(&dir, "kv/textutil.py", &big);
-        write(&dir, "tests/test_cli.py", "def test_set():\n    run(\"set\", \"k\", \"v\")\n");
-        write(&dir, ".dripdata/sessions/s1/state.json", "{\"goal\": \"Add --ttl to the `set` subcommand and fix truncate_middle\"}\n");
+        write(
+            &dir,
+            "tests/test_cli.py",
+            "def test_set():\n    run(\"set\", \"k\", \"v\")\n",
+        );
+        write(
+            &dir,
+            ".dripdata/sessions/s1/state.json",
+            "{\"goal\": \"Add --ttl to the `set` subcommand and fix truncate_middle\"}\n",
+        );
         let cwd = dir.to_string_lossy().to_string();
-        let files = symbol_hit_files_for_texts(&cwd, &["Add --ttl to the `set` subcommand and fix truncate_middle"], &[]);
+        let files = symbol_hit_files_for_texts(
+            &cwd,
+            &["Add --ttl to the `set` subcommand and fix truncate_middle"],
+            &[],
+        );
         assert_eq!(files, vec!["kv/cli.py".to_string(), "tests/test_cli.py".to_string()], "small hit files, source first; textutil.py is over the size cap; the .dripdata state file that quotes the goal is never a hit");
-        let files = symbol_hit_files_for_texts(&cwd, &["the `set` subcommand"], &["kv/cli.py".to_string()]);
-        assert_eq!(files, vec!["tests/test_cli.py".to_string()], "an already carried file is skipped");
-        let spans = definition_spans_for_texts(&cwd, &["fix truncate_middle"], &[]).expect("a lone definition span");
+        let files =
+            symbol_hit_files_for_texts(&cwd, &["the `set` subcommand"], &["kv/cli.py".to_string()]);
+        assert_eq!(
+            files,
+            vec!["tests/test_cli.py".to_string()],
+            "an already carried file is skipped"
+        );
+        let spans = definition_spans_for_texts(&cwd, &["fix truncate_middle"], &[])
+            .expect("a lone definition span");
         assert!(spans.starts_with(DEFINITION_SPANS_HEADER), "{spans}");
         assert!(spans.contains("== kv/textutil.py:151-155 (5 of 304 lines)\n151\tdef truncate_middle(text, width):"), "{spans}");
         assert!(spans.contains("155\t    return text[:half]"), "{spans}");
-        assert!(definition_spans_for_texts(&cwd, &["fix truncate_middle"], &["kv/textutil.py".to_string()]).is_none(), "a carried file's definitions are not repeated");
-        assert!(definition_spans_for_texts(&cwd, &["fix build_parser and the set command"], &["kv/cli.py".to_string()]).is_none());
+        assert!(
+            definition_spans_for_texts(
+                &cwd,
+                &["fix truncate_middle"],
+                &["kv/textutil.py".to_string()]
+            )
+            .is_none(),
+            "a carried file's definitions are not repeated"
+        );
+        assert!(definition_spans_for_texts(
+            &cwd,
+            &["fix build_parser and the set command"],
+            &["kv/cli.py".to_string()]
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1333,8 +1875,13 @@ mod tests {
         assert_eq!(carried.len(), NAMED_FILE_BODIES_MAX_FILES);
         let wide: String = (0..300).map(|_| format!("{}\n", "w".repeat(200))).collect();
         write(&dir, "m/wide.py", &wide);
-        let (section, carried) = named_file_bodies_for_paths(&cwd, &["m/wide.py".to_string(), "m/f0.py".to_string()]);
-        assert_eq!(carried, vec!["m/f0.py"], "the 60K-char file is skipped, the small one after it still carried");
+        let (section, carried) =
+            named_file_bodies_for_paths(&cwd, &["m/wide.py".to_string(), "m/f0.py".to_string()]);
+        assert_eq!(
+            carried,
+            vec!["m/f0.py"],
+            "the 60K-char file is skipped, the small one after it still carried"
+        );
         assert!(section.unwrap().contains("== m/f0.py"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1343,7 +1890,8 @@ mod tests {
     fn long_test_names_count_as_goal_symbols() {
         let name = "indented_append_to_a_brace_file_goes_inside_the_outermost_block";
         assert_eq!(name.len(), 63);
-        let symbols = extract_goal_symbols(&[&format!("Add a test right after `{name}` in src/x.rs.")]);
+        let symbols =
+            extract_goal_symbols(&[&format!("Add a test right after `{name}` in src/x.rs.")]);
         assert_eq!(symbols, vec![name.to_string()]);
         assert!(extract_goal_symbols(&[&format!("`{}`", "a_".repeat(70))]).is_empty());
     }

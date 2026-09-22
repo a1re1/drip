@@ -7,12 +7,14 @@ use crate::cli::session_run::{run_session_goal, SessionGoalArgs};
 use crate::cli::skills::LoadedCliSkill;
 use crate::core::home::DripProject;
 use crate::core::inference::ResolvedInferenceConfig;
-use crate::core::sessions::{create_session, open_session_index, CreateSessionArgs, ProjectPaths, SessionEnvScope};
+use crate::core::sessions::{
+    create_session, open_session_index, CreateSessionArgs, ProjectPaths, SessionEnvScope,
+};
 use crate::harness::model_call::AbortSignal;
 use crate::tools::types::{
     define_sync_tool, ChatToolCompleteRequest, ChatToolCompletionResult, ChatToolDefinition,
-    ChatToolExecuteRequest, ChatToolMode, ChatToolPrepareRequest, ChatToolPreparedInput, ChatToolResult,
-    ChatToolRuntimeServices,
+    ChatToolExecuteRequest, ChatToolMode, ChatToolPrepareRequest, ChatToolPreparedInput,
+    ChatToolResult, ChatToolRuntimeServices,
 };
 
 // Sub-delegation (backlog G3): drip could not safely spawn drip — a BASH-spawned
@@ -42,7 +44,10 @@ fn watch_child_budget(
     wall_seconds: i64,
     done: Arc<std::sync::atomic::AtomicBool>,
     terminate_in_flight: Arc<dyn Fn() + Send + Sync>,
-) -> (std::thread::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
+) -> (
+    std::thread::JoinHandle<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
     use std::sync::atomic::Ordering;
     let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hit = deadline_hit.clone();
@@ -331,7 +336,12 @@ mod tests {
                 tool_route_warning: None,
             },
             parent_session_id: "parent".to_string(),
-            project: crate::core::home::resolve_drip_project(".", &home.path().to_string_lossy(), None).unwrap(),
+            project: crate::core::home::resolve_drip_project(
+                ".",
+                &home.path().to_string_lossy(),
+                None,
+            )
+            .unwrap(),
             redact_secrets: vec![],
             signal: None,
             skills: vec![],
@@ -353,7 +363,10 @@ mod tests {
             transport_state: None,
         };
         let services = crate::tools::async_jobs::create_chat_tool_runtime_services(
-            crate::tools::async_jobs::CreateChatToolRuntimeServicesOptions { cwd: None, jobs_root: None },
+            crate::tools::async_jobs::CreateChatToolRuntimeServicesOptions {
+                cwd: None,
+                jobs_root: None,
+            },
         );
         (tool.prepare)(ChatToolPrepareRequest {
             call_id: "c",
@@ -386,7 +399,8 @@ mod tests {
         // Deadline: a 1s budget fires, marks the deadline, and kills in-flight work.
         let child = AbortSignal::new();
         let done = Arc::new(AtomicBool::new(false));
-        let (watcher, hit) = watch_child_budget(child.clone(), None, 1, done.clone(), terminate.clone());
+        let (watcher, hit) =
+            watch_child_budget(child.clone(), None, 1, done.clone(), terminate.clone());
         watcher.join().unwrap();
         assert!(child.is_aborted() && hit.load(Ordering::SeqCst));
         assert_eq!(kills.load(Ordering::SeqCst), 1);
@@ -394,7 +408,13 @@ mod tests {
         let child = AbortSignal::new();
         let parent = AbortSignal::new();
         let done = Arc::new(AtomicBool::new(false));
-        let (watcher, hit) = watch_child_budget(child.clone(), Some(parent.clone()), 600, done.clone(), terminate.clone());
+        let (watcher, hit) = watch_child_budget(
+            child.clone(),
+            Some(parent.clone()),
+            600,
+            done.clone(),
+            terminate.clone(),
+        );
         parent.abort();
         watcher.join().unwrap();
         assert!(child.is_aborted() && !hit.load(Ordering::SeqCst));
@@ -426,6 +446,9 @@ mod tests {
         assert_eq!(prepared.input["wallSeconds"], 30);
 
         let error = prepare(r#"{"goal":"   "}"#).unwrap_err();
-        assert_eq!(error, "DELEGATE needs a \"goal\" string — the complete subtask description.");
+        assert_eq!(
+            error,
+            "DELEGATE needs a \"goal\" string — the complete subtask description."
+        );
     }
 }

@@ -1,7 +1,9 @@
 use super::types::{ChatToolDefinition, ChatToolMode};
 
 // function mergeToolDefinitions(...toolGroups: ChatToolDefinition[][])
-pub fn merge_tool_definitions(tool_groups: Vec<Vec<ChatToolDefinition>>) -> Vec<ChatToolDefinition> {
+pub fn merge_tool_definitions(
+    tool_groups: Vec<Vec<ChatToolDefinition>>,
+) -> Vec<ChatToolDefinition> {
     let mut merged_tools: Vec<ChatToolDefinition> = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -53,11 +55,12 @@ pub fn filter_runtime_tool_catalog(args: FilterRuntimeToolCatalogArgs) -> Vec<Ch
         return args.tools;
     }
 
-    let allowed_tool_names: std::collections::HashSet<String> = (args.tool_names.unwrap_or_default())
-        .iter()
-        .map(|tool_name| tool_name.trim().to_string())
-        .filter(|tool_name| !tool_name.is_empty())
-        .collect();
+    let allowed_tool_names: std::collections::HashSet<String> =
+        (args.tool_names.unwrap_or_default())
+            .iter()
+            .map(|tool_name| tool_name.trim().to_string())
+            .filter(|tool_name| !tool_name.is_empty())
+            .collect();
 
     args.tools
         .into_iter()
@@ -67,7 +70,9 @@ pub fn filter_runtime_tool_catalog(args: FilterRuntimeToolCatalogArgs) -> Vec<Ch
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters};
+    use super::super::types::{
+        define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters,
+    };
     use super::*;
 
     // The shared base READ definition the tests below reuse: sync, prepare →
@@ -93,7 +98,13 @@ mod tests {
                     ..Default::default()
                 })
             }),
-            complete: Box::new(|_| Ok(super::super::types::ChatToolCompletionResult { blocks: None, tool_content: None, tags: None })),
+            complete: Box::new(|_| {
+                Ok(super::super::types::ChatToolCompletionResult {
+                    blocks: None,
+                    tool_content: None,
+                    tags: None,
+                })
+            }),
         })
     }
 
@@ -133,7 +144,10 @@ mod tests {
     // same names.
     #[test]
     fn includes_framework_async_helper_tools_when_async_tools_are_present() {
-        let framework_tool_definitions = vec![stub_framework_tool("ASYNC_TAIL"), stub_framework_tool("ASYNC_WAIT")];
+        let framework_tool_definitions = vec![
+            stub_framework_tool("ASYNC_TAIL"),
+            stub_framework_tool("ASYNC_WAIT"),
+        ];
         let catalog = resolve_runtime_tool_catalog(vec![async_tool()], framework_tool_definitions);
         let names: Vec<&str> = catalog.iter().map(|tool| tool.name.as_str()).collect();
 

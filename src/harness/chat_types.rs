@@ -224,7 +224,11 @@ pub fn serialize_chat_message_block(block: &ChatMessageBlock) -> String {
         ChatMessageBlock::Text(block) => block.text.clone(),
         ChatMessageBlock::ToolCall(block) => {
             let lines = [
-                Some(format!("tool {} {}", block.tool_name, tool_call_status_string(block.status))),
+                Some(format!(
+                    "tool {} {}",
+                    block.tool_name,
+                    tool_call_status_string(block.status)
+                )),
                 block
                     .input
                     .as_ref()
@@ -240,7 +244,11 @@ pub fn serialize_chat_message_block(block: &ChatMessageBlock) -> String {
         }
         ChatMessageBlock::Completion(block) => {
             let lines = [
-                Some(format!("completion {}", block.path.as_deref().unwrap_or("")).trim().to_string()),
+                Some(
+                    format!("completion {}", block.path.as_deref().unwrap_or(""))
+                        .trim()
+                        .to_string(),
+                ),
                 block.description.clone().filter(|value| !value.is_empty()),
                 Some(block.code.clone()).filter(|value| !value.is_empty()),
             ];
@@ -334,7 +342,10 @@ mod tests {
             })],
             context_files: Some(vec![ChatContextFile {
                 content: "line1".to_string(),
-                line_range: Some(ChatContextFileLineRange { end_line: 4, start_line: 2 }),
+                line_range: Some(ChatContextFileLineRange {
+                    end_line: 4,
+                    start_line: 2,
+                }),
                 mention: "@src/a.ts".to_string(),
                 path: "/abs/src/a.ts".to_string(),
                 relative_path: "src/a.ts".to_string(),

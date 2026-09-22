@@ -43,7 +43,6 @@ pub struct VerifyParsed {
 // Execution helpers (self-contained, mirrors bash-tool pattern)
 // ---------------------------------------------------------------------------
 
-
 /// The OpenAI function definition drip sends for this tool (the
 /// {type: "function", function: {...}} envelope).
 pub fn definition() -> Value {
@@ -185,11 +184,23 @@ fn parse_bun_test(output: &str) -> Option<VerifyVerdict> {
 // vitest: "Tests  N passed | N failed | N skipped"
 fn parse_vitest(output: &str) -> Option<VerifyVerdict> {
     // Vitest can put failures first or omit passing tests entirely.
-    let summary = Regex::new(r"(?im)^\s*Tests\s+([^\n]+)").unwrap()
-        .captures_iter(output).map(|m| m[1].to_string()).collect::<Vec<_>>().join("\n");
-    if summary.is_empty() { return None; }
-    let count = |pattern: &str| Regex::new(pattern).unwrap().captures_iter(&summary)
-        .fold(0_i64, |total, m| total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX)));
+    let summary = Regex::new(r"(?im)^\s*Tests\s+([^\n]+)")
+        .unwrap()
+        .captures_iter(output)
+        .map(|m| m[1].to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if summary.is_empty() {
+        return None;
+    }
+    let count = |pattern: &str| {
+        Regex::new(pattern)
+            .unwrap()
+            .captures_iter(&summary)
+            .fold(0_i64, |total, m| {
+                total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX))
+            })
+    };
     let passed = count(r"(\d+)\s+passed");
     let failed = count(r"(\d+)\s+failed");
     let skipped = count(r"(\d+)\s+skipped");
@@ -225,10 +236,22 @@ fn parse_pytest(output: &str) -> Option<VerifyVerdict> {
         .map(|captures| captures[1].to_string())
         .collect();
     let keyword_re = Regex::new(r"(?i)\d+\s+(passed|failed|errors?|skipped)").unwrap();
-    let summary = all_matches.into_iter().filter(|m| keyword_re.is_match(m)).collect::<Vec<_>>().join("\n");
-    if summary.is_empty() { return None; }
-    let count = |pattern: &str| Regex::new(pattern).unwrap().captures_iter(&summary)
-        .fold(0_i64, |total, m| total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX)));
+    let summary = all_matches
+        .into_iter()
+        .filter(|m| keyword_re.is_match(m))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if summary.is_empty() {
+        return None;
+    }
+    let count = |pattern: &str| {
+        Regex::new(pattern)
+            .unwrap()
+            .captures_iter(&summary)
+            .fold(0_i64, |total, m| {
+                total.saturating_add(m[1].parse::<i64>().unwrap_or(i64::MAX))
+            })
+    };
     let passed = count(r"(\d+)\s+passed");
     let failed = count(r"(\d+)\s+(?:failed|errors?)");
     let skipped = count(r"(\d+)\s+skipped");
@@ -273,7 +296,8 @@ fn parse_unittest(output: &str) -> Option<VerifyVerdict> {
         }
     }
 
-    let failed = counts.get("failures").copied().unwrap_or(0) + counts.get("errors").copied().unwrap_or(0);
+    let failed =
+        counts.get("failures").copied().unwrap_or(0) + counts.get("errors").copied().unwrap_or(0);
     let skipped = counts.get("skipped").copied().unwrap_or(0);
     let passed = (total - failed - skipped).max(0);
     let failure_line_re = Regex::new(r"^(FAIL|ERROR): ").unwrap();
@@ -293,19 +317,25 @@ fn parse_unittest(output: &str) -> Option<VerifyVerdict> {
 
 // cargo test: "test result: ok. N passed; N failed; N ignored"
 fn parse_cargo_test(output: &str) -> Option<VerifyVerdict> {
-    let summary_re = Regex::new(
-        r"(?i)test result:.*?(\d+)\s+passed;\s+(\d+)\s+failed(?:;\s+(\d+)\s+ignored)?",
-    )
-    .unwrap();
+    let summary_re =
+        Regex::new(r"(?i)test result:.*?(\d+)\s+passed;\s+(\d+)\s+failed(?:;\s+(\d+)\s+ignored)?")
+            .unwrap();
     let summaries: Vec<_> = summary_re.captures_iter(output).collect();
-    if summaries.is_empty() { return None; }
+    if summaries.is_empty() {
+        return None;
+    }
     let mut passed = 0_i64;
     let mut failed = 0_i64;
     let mut skipped = 0_i64;
     for summary in summaries {
         passed = passed.saturating_add(summary[1].parse::<i64>().unwrap_or(0));
         failed = failed.saturating_add(summary[2].parse::<i64>().unwrap_or(0));
-        skipped = skipped.saturating_add(summary.get(3).and_then(|m| m.as_str().parse::<i64>().ok()).unwrap_or(0));
+        skipped = skipped.saturating_add(
+            summary
+                .get(3)
+                .and_then(|m| m.as_str().parse::<i64>().ok())
+                .unwrap_or(0),
+        );
     }
 
     // cargo test failure lines: "test foo::bar ... FAILED"
@@ -342,14 +372,20 @@ fn parse_go_test(output: &str) -> Option<VerifyVerdict> {
     // "ok  \tpkg\t(cached)"), not any line that merely starts with ok/FAIL:
     // ad-hoc probe scripts that print "FAIL <reason>" or "ok" were being
     // labelled "go test" in recorded runs.
-    let has_verdict = Regex::new(r"(?m)^(ok|FAIL)\s+\S+\s+(\d+(\.\d+)?s|\(cached\)|\[[^\]]*\])").unwrap().is_match(output);
+    let has_verdict = Regex::new(r"(?m)^(ok|FAIL)\s+\S+\s+(\d+(\.\d+)?s|\(cached\)|\[[^\]]*\])")
+        .unwrap()
+        .is_match(output);
 
     if !has_verdict && fail_lines.is_empty() && pass_lines.is_empty() {
         return None;
     }
 
     let passed = pass_lines.len() as i64;
-    let failed = (fail_lines.len() as i64).max(i64::from(Regex::new(r"(?m)^FAIL\s+\S+\s+(\d|\[)").unwrap().is_match(output)));
+    let failed = (fail_lines.len() as i64).max(i64::from(
+        Regex::new(r"(?m)^FAIL\s+\S+\s+(\d|\[)")
+            .unwrap()
+            .is_match(output),
+    ));
     // go test doesn't report skipped count explicitly
     let skipped = 0;
 
@@ -410,7 +446,11 @@ fn parse_tsc(output: &str) -> Option<VerifyVerdict> {
 // detect by command hint
 fn parse_tsc_clean(command: &str, output: &str) -> Option<VerifyVerdict> {
     if build_evidence_kind(command) != Some(crate::core::types::VerificationEvidenceKind::Typecheck)
-        || !shell_words::split(command).ok()?.iter().any(|word| word == "tsc") {
+        || !shell_words::split(command)
+            .ok()?
+            .iter()
+            .any(|word| word == "tsc")
+    {
         return None;
     }
     if Regex::new(r"error TS\d+").unwrap().is_match(output) {
@@ -445,9 +485,15 @@ fn parse_native_output(command: &str, output: &str) -> VerifyParsed {
         parse_pytest,
     ];
 
-    let mut results: Vec<_> = parsers.into_iter().filter_map(|parser| parser(output)).collect();
+    let mut results: Vec<_> = parsers
+        .into_iter()
+        .filter_map(|parser| parser(output))
+        .collect();
     if !results.is_empty() {
-        let index = results.iter().position(|result| result.failed > 0).unwrap_or(0);
+        let index = results
+            .iter()
+            .position(|result| result.failed > 0)
+            .unwrap_or(0);
         let result = results.remove(index);
         return VerifyParsed {
             runner: result.runner,
@@ -490,18 +536,34 @@ mod evidence_tests {
     #[test]
     fn unknown_empty_and_help_commands_do_not_verify_work() {
         for (command, output) in [
-            ("true", ""), ("python check.py", "file: 42 bytes SHA256 abc"),
-            ("python check.py", "VERIFY unknown: 0 passed, 0 failed (exit 0)"),
-            ("cargo test", "test result: ok. 0 passed; 0 failed; 4 ignored"),
+            ("true", ""),
+            ("python check.py", "file: 42 bytes SHA256 abc"),
+            (
+                "python check.py",
+                "VERIFY unknown: 0 passed, 0 failed (exit 0)",
+            ),
+            (
+                "cargo test",
+                "test result: ok. 0 passed; 0 failed; 4 ignored",
+            ),
             ("python -m unittest", "Ran 4 tests in 0.02s\nOK (skipped=4)"),
-            ("echo tsc", ""), ("tsc --help", ""), ("cargo check --version", ""),
-            ("echo cargo check", ""), ("false; cargo build --help", ""),
-            ("tsc -v", "Version 5"), ("tsc --showConfig", "{}"),
-            ("tsc --init", "created tsconfig.json"), ("tsc --listFilesOnly", "src/a.ts"),
-            ("tsc --build --clean", ""), ("go build -n", "compiler command"),
+            ("echo tsc", ""),
+            ("tsc --help", ""),
+            ("cargo check --version", ""),
+            ("echo cargo check", ""),
+            ("false; cargo build --help", ""),
+            ("tsc -v", "Version 5"),
+            ("tsc --showConfig", "{}"),
+            ("tsc --init", "created tsconfig.json"),
+            ("tsc --listFilesOnly", "src/a.ts"),
+            ("tsc --build --clean", ""),
+            ("go build -n", "compiler command"),
             ("cargo check --unit-graph", "{}"),
         ] {
-            assert!(!verification_evidence(command, output).verifies_work(), "{command}: {output}");
+            assert!(
+                !verification_evidence(command, output).verifies_work(),
+                "{command}: {output}"
+            );
         }
     }
 
@@ -522,10 +584,16 @@ mod evidence_tests {
             r#"{"passed":1,"failed":0}"#,
             "not json",
         ] {
-            assert!(!verification_evidence("python check.py", &format!("DRIP_VERIFY {result}")).verifies_work(), "{result}");
+            assert!(
+                !verification_evidence("python check.py", &format!("DRIP_VERIFY {result}"))
+                    .verifies_work(),
+                "{result}"
+            );
         }
         assert!(parse_verify_output("python check.py", &format!("{pass}\n{pass}")).failed > 0);
-        assert!(parse_verify_output("pytest", &format!("=== 1 failed in 0.1s ===\n{pass}")).failed > 0);
+        assert!(
+            parse_verify_output("pytest", &format!("=== 1 failed in 0.1s ===\n{pass}")).failed > 0
+        );
     }
 
     #[test]
@@ -542,14 +610,24 @@ mod evidence_tests {
         assert_eq!(parse_verify_output("pytest", pytest).failed, 3);
         let mixed = "2 pass\n0 fail\n=== 1 failed in 0.1s ===";
         assert!(parse_verify_output("bun test; pytest", mixed).failed > 0);
-        assert_eq!(parse_verify_output("vitest", "Tests 2 failed | 3 passed (5)").failed, 2);
-        assert_eq!(parse_verify_output("vitest", "Tests 2 failed (2)").failed, 2);
+        assert_eq!(
+            parse_verify_output("vitest", "Tests 2 failed | 3 passed (5)").failed,
+            2
+        );
+        assert_eq!(
+            parse_verify_output("vitest", "Tests 2 failed (2)").failed,
+            2
+        );
         assert!(!verification_evidence("vitest", "Tests 3 skipped (3)").verifies_work());
     }
 
     #[test]
     fn compiler_evidence_is_not_an_assertion_count() {
-        for (command, kind) in [("cargo check", Kind::Typecheck), ("cargo build", Kind::Build), ("npx tsc --noEmit", Kind::Typecheck)] {
+        for (command, kind) in [
+            ("cargo check", Kind::Typecheck),
+            ("cargo build", Kind::Build),
+            ("npx tsc --noEmit", Kind::Typecheck),
+        ] {
             let evidence = verification_evidence(command, "");
             assert_eq!(evidence.kind, kind);
             assert_eq!((evidence.executed, evidence.passed), (0, 0));
@@ -574,8 +652,16 @@ mod evidence_tests {
             assert!(evidence.verifies_work(), "{command}");
         }
         // A real second command hiding after the directory change stays rejected.
-        for command in ["cd x && rm -rf y && cargo build", "cd x; cargo build", "echo cargo build", "false && cargo build"] {
-            assert!(!verification_evidence(command, "").verifies_work(), "{command}");
+        for command in [
+            "cd x && rm -rf y && cargo build",
+            "cd x; cargo build",
+            "echo cargo build",
+            "false && cargo build",
+        ] {
+            assert!(
+                !verification_evidence(command, "").verifies_work(),
+                "{command}"
+            );
         }
     }
 
@@ -596,12 +682,25 @@ mod evidence_tests {
             assert!(evidence.verifies_work(), "{command}");
         }
         // A failing typecheck (tsc diagnostics in output) must NOT verify.
-        assert!(!verification_evidence("bun run typecheck", "src/a.ts(3,1): error TS2304: Cannot find name 'x'.").verifies_work());
+        assert!(!verification_evidence(
+            "bun run typecheck",
+            "src/a.ts(3,1): error TS2304: Cannot find name 'x'."
+        )
+        .verifies_work());
         // build/test scripts and installs are not build evidence: a bundler is
         // not a recognized compiler, test assertions come from output, and an
         // install is not a check at all.
-        for command in ["bun run build", "npm run test", "bun install", "bun run dev", "yarn run lint"] {
-            assert!(!verification_evidence(command, "").verifies_work(), "{command}");
+        for command in [
+            "bun run build",
+            "npm run test",
+            "bun install",
+            "bun run dev",
+            "yarn run lint",
+        ] {
+            assert!(
+                !verification_evidence(command, "").verifies_work(),
+                "{command}"
+            );
         }
     }
 
@@ -609,19 +708,36 @@ mod evidence_tests {
     fn legacy_records_load_but_do_not_render_as_verified() {
         let record: HarnessVerificationRecord = serde_json::from_value(json!({
             "atIteration":1,"command":"true","failed":false,"outputTail":""
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(record.evidence.is_none());
-        assert_eq!(crate::core::state::describe_verification_outcome(record.failed, record.ran_no_tests, record.evidence.as_ref()), "UNVERIFIED");
+        assert_eq!(
+            crate::core::state::describe_verification_outcome(
+                record.failed,
+                record.ran_no_tests,
+                record.evidence.as_ref()
+            ),
+            "UNVERIFIED"
+        );
         let mut record = record;
         record.evidence = Some(verification_evidence("pytest", "=== 3 passed in 0.1s ==="));
         assert!(record.evidence.as_ref().unwrap().verifies_work());
-        assert_eq!(serde_json::from_str::<HarnessVerificationRecord>(&serde_json::to_string(&record).unwrap()).unwrap(), record);
+        assert_eq!(
+            serde_json::from_str::<HarnessVerificationRecord>(
+                &serde_json::to_string(&record).unwrap()
+            )
+            .unwrap(),
+            record
+        );
     }
 
     #[test]
     fn actual_script_failures_dominate_reported_success() {
         let dir = tempfile::tempdir().unwrap();
-        let ctx = super::super::ToolCtx { cwd: dir.path().to_path_buf(), ..Default::default() };
+        let ctx = super::super::ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         for (command, failed) in [
             ("printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'", true),
             ("echo 'DRIP_VERIFY {\"executed\":2,\"passed\":2,\"failed\":0}'", true),
@@ -638,17 +754,29 @@ mod evidence_tests {
         }
         let timeout = execute(&json!({"command":"sleep 2", "timeout":20}), &ctx);
         assert!(timeout.failed);
-        assert!(timeout.text.contains("HUNG: the command did not finish within"), "{}", timeout.text);
+        assert!(
+            timeout
+                .text
+                .contains("HUNG: the command did not finish within"),
+            "{}",
+            timeout.text
+        );
     }
 }
 
 pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
     // Do not interpret the tool's own rendered header as runner counts.
-    let cleaned = output.lines().filter(|line| !line.starts_with("VERIFY ") && !line.starts_with("; evidence:"))
-        .collect::<Vec<_>>().join("\n");
+    let cleaned = output
+        .lines()
+        .filter(|line| !line.starts_with("VERIFY ") && !line.starts_with("; evidence:"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let output = cleaned.as_str();
     let native = parse_native_output(command, output);
-    let records: Vec<_> = output.lines().filter_map(|line| line.strip_prefix(CUSTOM_RESULT_PREFIX)).collect();
+    let records: Vec<_> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix(CUSTOM_RESULT_PREFIX))
+        .collect();
     if records.is_empty() {
         return native;
     }
@@ -662,7 +790,9 @@ pub fn parse_verify_output(command: &str, output: &str) -> VerifyParsed {
         };
     }
     let counts = (|| {
-        if records.len() != 1 { return None; }
+        if records.len() != 1 {
+            return None;
+        }
         let value: Value = serde_json::from_str(records[0]).ok()?;
         let executed = value.get("executed")?.as_i64()?;
         let passed = value.get("passed")?.as_i64()?;
@@ -697,7 +827,12 @@ pub fn marker_is_fabricated(command: &str) -> bool {
     for chain in command.split(|c| c == ';' || c == '\n' || c == '|') {
         let mut real_before = false;
         for segment in chain.split("&&") {
-            let first = segment.trim().trim_start_matches(['(', '{', ' ']).split_whitespace().next().unwrap_or("");
+            let first = segment
+                .trim()
+                .trim_start_matches(['(', '{', ' '])
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
             let is_echo = matches!(first, "echo" | "printf");
             if is_echo && segment.contains(marker) && !real_before {
                 return true;
@@ -730,7 +865,10 @@ fn is_redirection(word: &str) -> bool {
 fn strip_dir_change(command: &str) -> &str {
     let mut command = command.trim();
     for _ in 0..4 {
-        if let Some(inner) = command.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) {
+        if let Some(inner) = command
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             command = inner.trim();
             continue;
         }
@@ -768,7 +906,14 @@ fn package_script_typecheck(args: &[&str]) -> Option<crate::core::types::Verific
     };
     matches!(
         script.trim_start_matches("--"),
-        "typecheck" | "type-check" | "typecheck:all" | "check-types" | "checktypes" | "tsc" | "types" | "compile"
+        "typecheck"
+            | "type-check"
+            | "typecheck:all"
+            | "check-types"
+            | "checktypes"
+            | "tsc"
+            | "types"
+            | "compile"
     )
     .then_some(crate::core::types::VerificationEvidenceKind::Typecheck)
 }
@@ -783,23 +928,51 @@ fn build_evidence_kind(command: &str) -> Option<crate::core::types::Verification
         .into_iter()
         .filter(|word| !is_redirection(word))
         .collect();
-    if words.iter().any(|word| word.contains([';', '|', '&', '\n', '`']) || word.contains("$(")
-        || matches!(word.as_str(), "--help" | "-h" | "--version" | "-V" | "--list" | "--dry-run")) {
+    if words.iter().any(|word| {
+        word.contains([';', '|', '&', '\n', '`'])
+            || word.contains("$(")
+            || matches!(
+                word.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--list" | "--dry-run"
+            )
+    }) {
         return None;
     }
     let args: Vec<_> = words.iter().map(String::as_str).collect();
-    let has_option = |options: &[&str]| args.iter().any(|arg| options.iter().any(|option| option.eq_ignore_ascii_case(arg.split('=').next().unwrap_or(arg))));
+    let has_option = |options: &[&str]| {
+        args.iter().any(|arg| {
+            options
+                .iter()
+                .any(|option| option.eq_ignore_ascii_case(arg.split('=').next().unwrap_or(arg)))
+        })
+    };
     match args.as_slice() {
         ["cargo", "check", ..] if !has_option(&["--unit-graph"]) => Some(Typecheck),
         ["cargo", "build", ..] if !has_option(&["--unit-graph"]) => Some(Build),
         ["tsc", ..] | ["npx" | "bunx", "tsc", ..]
-            if !has_option(&["-v", "--version", "-h", "--help", "--init", "--showConfig", "--listFilesOnly", "--clean", "--dry"]) => Some(Typecheck),
+            if !has_option(&[
+                "-v",
+                "--version",
+                "-h",
+                "--help",
+                "--init",
+                "--showConfig",
+                "--listFilesOnly",
+                "--clean",
+                "--dry",
+            ]) =>
+        {
+            Some(Typecheck)
+        }
         ["go", "build", ..] if !has_option(&["-n"]) => Some(Build),
         _ => package_script_typecheck(&args),
     }
 }
 
-pub fn verification_evidence(command: &str, output: &str) -> crate::core::types::VerificationEvidence {
+pub fn verification_evidence(
+    command: &str,
+    output: &str,
+) -> crate::core::types::VerificationEvidence {
     use crate::core::types::{VerificationEvidence, VerificationEvidenceKind as Kind};
     let parsed = parse_verify_output(command, output);
     let kind = match parsed.runner.as_str() {
@@ -809,8 +982,16 @@ pub fn verification_evidence(command: &str, output: &str) -> crate::core::types:
         _ => Kind::Tests,
     };
     let assertions = matches!(kind, Kind::Tests | Kind::Custom);
-    let executed = if assertions { parsed.passed.checked_add(parsed.failed).unwrap_or(0) } else { 0 };
-    let kind = if assertions && executed == 0 { Kind::Unverified } else { kind };
+    let executed = if assertions {
+        parsed.passed.checked_add(parsed.failed).unwrap_or(0)
+    } else {
+        0
+    };
+    let kind = if assertions && executed == 0 {
+        Kind::Unverified
+    } else {
+        kind
+    };
     VerificationEvidence {
         kind, executed, passed: if assertions { parsed.passed } else { 0 }, failed: parsed.failed,
         skipped: Some(parsed.skipped),
@@ -842,19 +1023,22 @@ pub struct VerifyToolPrepared {
 }
 
 /// Run a shell command and parse its output into a structured test verdict. Detects bun test, vitest, pytest, python unittest, cargo test, go test, and tsc output formats.
-pub fn prepare(args: &serde_json::Value, ctx: &super::ToolCtx) -> anyhow::Result<VerifyToolPrepared> {
+pub fn prepare(
+    args: &serde_json::Value,
+    ctx: &super::ToolCtx,
+) -> anyhow::Result<VerifyToolPrepared> {
     let args = super::tool_arguments(args)?;
 
     let raw_command = args.get("command").and_then(|v| v.as_str());
     if raw_command.map_or(true, |s| s.trim().is_empty()) {
-        return Err(anyhow::anyhow!("Missing required string argument \"command\"."));
+        return Err(anyhow::anyhow!(
+            "Missing required string argument \"command\"."
+        ));
     }
     let command = strip_trailing_tail_pipe(raw_command.unwrap().trim());
 
-    let policy_verdict = crate::tools::command_policy::evaluate_command_policy(
-        &command,
-        &ctx.cwd.to_string_lossy(),
-    );
+    let policy_verdict =
+        crate::tools::command_policy::evaluate_command_policy(&command, &ctx.cwd.to_string_lossy());
 
     if policy_verdict.verdict() == "block"
         && !crate::tools::command_policy::allow_destructive_enabled()
@@ -867,15 +1051,12 @@ pub fn prepare(args: &serde_json::Value, ctx: &super::ToolCtx) -> anyhow::Result
                 (String::new(), String::new())
             }
         };
-        return Err(anyhow::anyhow!(crate::tools::command_policy::format_policy_refusal(
-            &command,
-            &rule,
-            &why
-        )));
+        return Err(anyhow::anyhow!(
+            crate::tools::command_policy::format_policy_refusal(&command, &rule, &why)
+        ));
     }
 
-    let raw_timeout =
-        crate::tools::helpers::get_optional_number_argument(&args, "timeout")?;
+    let raw_timeout = crate::tools::helpers::get_optional_number_argument(&args, "timeout")?;
     let timeout_ms = match raw_timeout {
         None => DEFAULT_TIMEOUT_MS,
         Some(raw) => {
@@ -915,7 +1096,9 @@ pub fn runner_failure_excerpt(output: &str) -> Option<String> {
     let start = lines.iter().position(|line| start_re.is_match(line))?;
     let mut end = (start + MAX_LINES).min(lines.len());
     // Stop at the runner summary: the result already shows the tail.
-    if let Some(offset) = lines[start..end].iter().position(|line| line.starts_with("test result:") || (line.starts_with("=====") && line.contains(" in "))) {
+    if let Some(offset) = lines[start..end].iter().position(|line| {
+        line.starts_with("test result:") || (line.starts_with("=====") && line.contains(" in "))
+    }) {
         end = (start + offset).max(start + 1);
     }
     let excerpt = lines[start..end].join("\n");
@@ -923,14 +1106,21 @@ pub fn runner_failure_excerpt(output: &str) -> Option<String> {
 }
 
 pub fn execute_prepared(prepared: &VerifyToolPrepared) -> anyhow::Result<VerifyVerdict> {
-    use crate::tools::child_process::{build_combined_output, run_captured_process, CapturedProcessArgs};
+    use crate::tools::child_process::{
+        build_combined_output, run_captured_process, CapturedProcessArgs,
+    };
     let input = &prepared.input;
 
     let captured = run_captured_process(&CapturedProcessArgs {
         command: "bash",
         cwd: Some(input.cwd.as_str()),
         env: None,
-        process_args: &["-o".to_string(), "pipefail".to_string(), "-lc".to_string(), input.command.clone()],
+        process_args: &[
+            "-o".to_string(),
+            "pipefail".to_string(),
+            "-lc".to_string(),
+            input.command.clone(),
+        ],
         timeout_ms: Some(input.timeout_ms),
         stdin_payload: None,
     })
@@ -972,7 +1162,9 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
             .unwrap_or_else(|| "null".to_string())
     );
     let mut body_lines: Vec<String> = vec![verdict_line.clone()];
-    body_lines.push(crate::core::state::describe_verification_evidence(Some(&evidence)));
+    body_lines.push(crate::core::state::describe_verification_evidence(Some(
+        &evidence,
+    )));
     if verdict.timed_out {
         // The forensics come first: a long result is truncated from the
         // middle, and the thread summary is the part worth keeping.
@@ -996,7 +1188,11 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
 
     if !verdict.output.is_empty() {
         body_lines.push(String::new());
-        body_lines.push(if verdict.timed_out { compact_hang_output(&verdict.output) } else { verdict.output.clone() });
+        body_lines.push(if verdict.timed_out {
+            compact_hang_output(&verdict.output)
+        } else {
+            verdict.output.clone()
+        });
     }
 
     let tool_content = body_lines.join("\n");
@@ -1016,7 +1212,9 @@ pub fn complete(prepared: &VerifyToolPrepared, verdict: &VerifyVerdict) -> super
 /// prepare() produces — or None when the arguments do not parse (the execute
 /// path reports that error).
 pub fn display_input(args: &serde_json::Value, ctx: &super::ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOutcome {
@@ -1034,8 +1232,7 @@ pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOut
     // The tool call itself must read failed when the verification failed —
     // this status is what the harness records as lastVerification.failed,
     // so a text-only verdict would let a failing run register as a pass.
-    let failed =
-        verdict.timed_out || verdict.failed > 0 || (verdict.exit_code.unwrap_or(1)) != 0;
+    let failed = verdict.timed_out || verdict.failed > 0 || (verdict.exit_code.unwrap_or(1)) != 0;
     if failed {
         super::ToolOutcome {
             text: completion.tool_content,
@@ -1045,7 +1242,6 @@ pub fn execute(args: &serde_json::Value, ctx: &super::ToolCtx) -> super::ToolOut
         super::ToolOutcome::success(completion.tool_content)
     }
 }
-
 
 /// What the captured output says about where a hung command was when the
 /// timeout's SIGABRT reached it: the last test unittest/pytest had started
@@ -1066,7 +1262,8 @@ pub fn hang_forensics(output: &str) -> Option<String> {
         }
         let idx = line.find(" ...")?;
         let rest = line[idx + 4..].trim();
-        (rest.is_empty() || rest.starts_with("Fatal Python error")).then(|| line[..idx].trim().to_string())
+        (rest.is_empty() || rest.starts_with("Fatal Python error"))
+            .then(|| line[..idx].trim().to_string())
     });
     if let Some(test) = last_started {
         lines.push(format!("last test started, never finished: {test}"));
@@ -1076,9 +1273,13 @@ pub fn hang_forensics(output: &str) -> Option<String> {
         let joining_in_cleanup = threads.iter().any(|(label, frames)| {
             label.starts_with("current")
                 && frames.iter().any(|(func, _, _)| func == "join")
-                && frames.iter().any(|(func, _, _)| func == "doCleanups" || func == "_callCleanup" || func == "tearDown")
+                && frames.iter().any(|(func, _, _)| {
+                    func == "doCleanups" || func == "_callCleanup" || func == "tearDown"
+                })
         });
-        let serving = threads.iter().any(|(_, frames)| frames.iter().any(|(func, _, _)| func == "serve_forever"));
+        let serving = threads
+            .iter()
+            .any(|(_, frames)| frames.iter().any(|(func, _, _)| func == "serve_forever"));
         // The diagnosis leads the thread lines: a truncated result keeps
         // its head, and the diagnosis is the line that saves the probes.
         if joining_in_cleanup && serving {
@@ -1086,7 +1287,11 @@ pub fn hang_forensics(output: &str) -> Option<String> {
         }
         lines.push("threads at the kill (fault handler, innermost frame first):".to_string());
         for (label, frames) in &threads {
-            let shown: Vec<String> = frames.iter().take(6).map(|(func, file, line)| format!("{func} ({file}:{line})")).collect();
+            let shown: Vec<String> = frames
+                .iter()
+                .take(6)
+                .map(|(func, file, line)| format!("{func} ({file}:{line})"))
+                .collect();
             lines.push(format!("  {label}: {}", shown.join(" ← ")));
         }
     }
@@ -1116,7 +1321,10 @@ pub fn compact_hang_output(output: &str) -> String {
             continue;
         }
         if in_c_stack {
-            if trimmed.is_empty() || body.starts_with("Binary file") || body.starts_with("<truncated") {
+            if trimmed.is_empty()
+                || body.starts_with("Binary file")
+                || body.starts_with("<truncated")
+            {
                 continue;
             }
             in_c_stack = false;
@@ -1151,15 +1359,27 @@ fn fault_handler_threads(output: &str) -> Vec<(String, Vec<(String, String, Stri
     for line in output.lines() {
         let trimmed = line.trim_end();
         if trimmed.starts_with("Current thread ") || trimmed.starts_with("Thread ") {
-            let label = if trimmed.starts_with("Current") { "current thread (the one that hung)" } else { "another thread" };
+            let label = if trimmed.starts_with("Current") {
+                "current thread (the one that hung)"
+            } else {
+                "another thread"
+            };
             threads.push((label.to_string(), Vec::new()));
             continue;
         }
-        let Some((_, frames)) = threads.last_mut() else { continue };
+        let Some((_, frames)) = threads.last_mut() else {
+            continue;
+        };
         let frame = trimmed.trim_start();
-        let Some(rest) = frame.strip_prefix("File \"") else { continue };
-        let Some((path, tail)) = rest.split_once("\", line ") else { continue };
-        let Some((line_no, func)) = tail.split_once(" in ") else { continue };
+        let Some(rest) = frame.strip_prefix("File \"") else {
+            continue;
+        };
+        let Some((path, tail)) = rest.split_once("\", line ") else {
+            continue;
+        };
+        let Some((line_no, func)) = tail.split_once(" in ") else {
+            continue;
+        };
         let file = path.rsplit('/').next().unwrap_or(path).to_string();
         frames.push((func.trim().to_string(), file, line_no.trim().to_string()));
     }
@@ -1188,14 +1408,29 @@ mod tests {
         let text = super::hang_forensics(output).expect("forensics");
         assert!(text.contains("last test started, never finished: test_existing_key (tests.test_server.TestKeys.test_existing_key)"), "{text}");
         assert!(text.contains("current thread (the one that hung): _wait_for_tstate_lock (threading.py:1149) ← join (threading.py:1119) ← _callCleanup (case.py:646) ← doCleanups (case.py:665) ← setUp (test_server.py:31)"), "{text}");
-        assert!(text.contains("another thread: serve_forever (socketserver.py:235)"), "{text}");
+        assert!(
+            text.contains("another thread: serve_forever (socketserver.py:235)"),
+            "{text}"
+        );
         assert!(text.contains("cleanups run LIFO"), "{text}");
-        assert!(text.find("diagnosis:").unwrap() < text.find("threads at the kill").unwrap(), "{text}");
+        assert!(
+            text.find("diagnosis:").unwrap() < text.find("threads at the kill").unwrap(),
+            "{text}"
+        );
         assert!(super::hang_forensics("ran 3 tests\nOK\n").is_none());
-        let aborted = super::hang_forensics("test_a (m.T.test_a) ... ok\ntest_b (m.T.test_b) ... Fatal Python error: Aborted\n").unwrap();
-        assert!(aborted.starts_with("last test started, never finished: test_b (m.T.test_b)"), "{aborted}");
+        let aborted = super::hang_forensics(
+            "test_a (m.T.test_a) ... ok\ntest_b (m.T.test_b) ... Fatal Python error: Aborted\n",
+        )
+        .unwrap();
+        assert!(
+            aborted.starts_with("last test started, never finished: test_b (m.T.test_b)"),
+            "{aborted}"
+        );
         let plain = super::hang_forensics("test_a (m.T.test_a) ... \n").unwrap();
-        assert!(plain.starts_with("last test started, never finished: test_a"), "{plain}");
+        assert!(
+            plain.starts_with("last test started, never finished: test_a"),
+            "{plain}"
+        );
         assert!(!plain.contains("LIFO"));
     }
 
@@ -1221,11 +1456,29 @@ mod tests {
             "  <truncated rest of calls>\n",
         );
         let compact = super::compact_hang_output(output);
-        assert!(compact.starts_with("test_a (m.T.test_a) ... Fatal Python error: Aborted"), "{compact}");
-        assert!(compact.contains("line 1024 in run\n  … outer frames dropped\n\nCurrent thread 0x2"), "{compact}");
-        assert!(compact.contains("line 706 in doCleanups\n  … outer frames dropped"), "{compact}");
-        assert!(!compact.contains("_bootstrap") && !compact.contains("Binary file") && !compact.contains("C stack") && !compact.contains("truncated rest"), "{compact}");
-        assert_eq!(super::compact_hang_output("ran 3 tests\nOK"), "ran 3 tests\nOK");
+        assert!(
+            compact.starts_with("test_a (m.T.test_a) ... Fatal Python error: Aborted"),
+            "{compact}"
+        );
+        assert!(
+            compact.contains("line 1024 in run\n  … outer frames dropped\n\nCurrent thread 0x2"),
+            "{compact}"
+        );
+        assert!(
+            compact.contains("line 706 in doCleanups\n  … outer frames dropped"),
+            "{compact}"
+        );
+        assert!(
+            !compact.contains("_bootstrap")
+                && !compact.contains("Binary file")
+                && !compact.contains("C stack")
+                && !compact.contains("truncated rest"),
+            "{compact}"
+        );
+        assert_eq!(
+            super::compact_hang_output("ran 3 tests\nOK"),
+            "ran 3 tests\nOK"
+        );
     }
 
     use super::parse_verify_output;
@@ -1326,7 +1579,10 @@ mod tests {
         assert_eq!(result.skipped, 1);
         assert_eq!(
             result.first_failures,
-            vec!["ERROR: test_boom (t.T.test_boom)".to_string(), "FAIL: test_add (t.T.test_add)".to_string()]
+            vec![
+                "ERROR: test_boom (t.T.test_boom)".to_string(),
+                "FAIL: test_add (t.T.test_add)".to_string()
+            ]
         );
     }
 
@@ -1358,9 +1614,9 @@ mod tests {
         assert_eq!(result.runner, "pytest");
         assert_eq!(result.passed, 2);
         assert_eq!(result.failed, 2);
-        assert!(result
-            .first_failures
-            .contains(&"FAILED test_math.py::test_subtract - AssertionError: assert 3 == 5".to_string()));
+        assert!(result.first_failures.contains(
+            &"FAILED test_math.py::test_subtract - AssertionError: assert 3 == 5".to_string()
+        ));
         assert!(result
             .first_failures
             .contains(&"FAILED test_math.py::test_divide - ZeroDivisionError".to_string()));
@@ -1368,7 +1624,8 @@ mod tests {
 
     #[test]
     fn parses_pytest_output_with_skipped() {
-        let output = "=================== 3 passed, 1 skipped, 1 warning in 0.8s ====================";
+        let output =
+            "=================== 3 passed, 1 skipped, 1 warning in 0.8s ====================";
 
         let result = parse_verify_output("pytest", output);
         assert_eq!(result.runner, "pytest");
@@ -1410,20 +1667,37 @@ mod tests {
         let output = "running 1 test\ntest a::b ... FAILED\n\nfailures:\n\n---- a::b stdout ----\nthread 'a::b' panicked at src/x.rs:9:5:\nassertion `left == right` failed\n  left: 1\n right: 2\n\nfailures:\n    a::b\n\ntest result: FAILED. 0 passed; 1 failed\n";
         use super::runner_failure_excerpt;
         let excerpt = runner_failure_excerpt(output).expect("excerpt");
-        assert!(excerpt.starts_with("thread 'a::b' panicked at"), "{excerpt}");
-        assert!(excerpt.contains(" right: 2") && !excerpt.contains("test result:"), "{excerpt}");
+        assert!(
+            excerpt.starts_with("thread 'a::b' panicked at"),
+            "{excerpt}"
+        );
+        assert!(
+            excerpt.contains(" right: 2") && !excerpt.contains("test result:"),
+            "{excerpt}"
+        );
         assert!(runner_failure_excerpt("running 3 tests\ntest result: ok. 3 passed\n").is_none());
         let py = "FAILED tests/test_a.py::test_b - AssertionError: 1 != 2\n1 failed in 0.1s\n";
-        assert!(runner_failure_excerpt(py).unwrap().starts_with("FAILED tests/test_a.py"));
+        assert!(runner_failure_excerpt(py)
+            .unwrap()
+            .starts_with("FAILED tests/test_a.py"));
     }
 
     #[test]
     fn trailing_tail_and_head_pipes_are_dropped_from_verify_commands() {
         use super::strip_trailing_tail_pipe as strip;
-        assert_eq!(strip("python3 -m unittest discover -s tests -q 2>&1 | tail -5"), "python3 -m unittest discover -s tests -q 2>&1");
-        assert_eq!(strip("cargo test --release -q --lib 2>&1 | tail -n 20"), "cargo test --release -q --lib 2>&1");
+        assert_eq!(
+            strip("python3 -m unittest discover -s tests -q 2>&1 | tail -5"),
+            "python3 -m unittest discover -s tests -q 2>&1"
+        );
+        assert_eq!(
+            strip("cargo test --release -q --lib 2>&1 | tail -n 20"),
+            "cargo test --release -q --lib 2>&1"
+        );
         assert_eq!(strip("pytest -q | head -40"), "pytest -q");
-        assert_eq!(strip("cargo test -q | grep -c ok"), "cargo test -q | grep -c ok");
+        assert_eq!(
+            strip("cargo test -q | grep -c ok"),
+            "cargo test -q | grep -c ok"
+        );
         assert_eq!(strip("tail -f log"), "tail -f log");
     }
 
@@ -1431,7 +1705,9 @@ mod tests {
     fn probe_output_that_merely_says_ok_or_fail_is_not_go_test() {
         use super::parse_go_test;
         assert!(parse_go_test("ok\n").is_none());
-        assert!(parse_go_test("FAIL legacy get('k'): got 1, fixture behavior {'value': 1}\n").is_none());
+        assert!(
+            parse_go_test("FAIL legacy get('k'): got 1, fixture behavior {'value': 1}\n").is_none()
+        );
         assert!(parse_go_test("ok  \texample.com/math\t0.002s\n").is_some());
         assert!(parse_go_test("ok  \texample.com/math\t(cached)\n").is_some());
         let parsed = parse_verify_output("python3 -c 'print(1)'", "FAIL something\nok\n");
@@ -1458,8 +1734,12 @@ mod tests {
         assert_eq!(result.runner, "go test");
         assert_eq!(result.passed, 1);
         assert_eq!(result.failed, 2);
-        assert!(result.first_failures.contains(&"--- FAIL: TestSub (0.00s)".to_string()));
-        assert!(result.first_failures.contains(&"--- FAIL: TestDiv (0.00s)".to_string()));
+        assert!(result
+            .first_failures
+            .contains(&"--- FAIL: TestSub (0.00s)".to_string()));
+        assert!(result
+            .first_failures
+            .contains(&"--- FAIL: TestDiv (0.00s)".to_string()));
     }
 
     #[test]

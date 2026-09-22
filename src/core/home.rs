@@ -202,11 +202,15 @@ pub fn open_drip_home(root: &str) -> DripHome {
         config_path: join(root, "config.json").to_string_lossy().into_owned(),
         env_vars_path: join(root, "env.vars").to_string_lossy().into_owned(),
         marketplaces_dir: join(root, "marketplaces").to_string_lossy().into_owned(),
-        marketplaces_path: join(root, "marketplaces.json").to_string_lossy().into_owned(),
+        marketplaces_path: join(root, "marketplaces.json")
+            .to_string_lossy()
+            .into_owned(),
         home_root: root.to_string(),
         projects_dir: join(root, "projects").to_string_lossy().into_owned(),
         skills_dir: join(root, "skills").to_string_lossy().into_owned(),
-        skill_requirements_db_path: join(root, "skill-requirements.sqlite").to_string_lossy().into_owned(),
+        skill_requirements_db_path: join(root, "skill-requirements.sqlite")
+            .to_string_lossy()
+            .into_owned(),
         root: root.to_string(),
     };
 
@@ -429,7 +433,9 @@ pub fn resolve_drip_project(
         None => {
             return Ok(DripProject {
                 home_root: home_root.to_string(),
-                index_db_path: join(&data_dir, "index.sqlite").to_string_lossy().into_owned(),
+                index_db_path: join(&data_dir, "index.sqlite")
+                    .to_string_lossy()
+                    .into_owned(),
                 legacy_index_db_path: None,
                 legacy_sessions_dir: None,
                 memory_dir: join(&data_dir, "memory").to_string_lossy().into_owned(),
@@ -461,7 +467,9 @@ pub fn resolve_drip_project(
 
     Ok(DripProject {
         home_root: home_root.to_string(),
-        index_db_path: join(&project_home, "index.sqlite").to_string_lossy().into_owned(),
+        index_db_path: join(&project_home, "index.sqlite")
+            .to_string_lossy()
+            .into_owned(),
         // Legacy locations are advertised only when they actually exist, so every
         // dual-read path can treat "absent" as "nothing to merge" without probing.
         legacy_index_db_path: if exists(&legacy_index_db_path) {
@@ -481,7 +489,9 @@ pub fn resolve_drip_project(
         repo_root: Some(repo_root),
         repo_slug,
         root: data_dir.to_string_lossy().into_owned(),
-        sessions_dir: join(&project_home, "sessions").to_string_lossy().into_owned(),
+        sessions_dir: join(&project_home, "sessions")
+            .to_string_lossy()
+            .into_owned(),
         slug,
         worktree_root: Some(worktree_root),
     })
@@ -544,7 +554,10 @@ mod tests {
 
     #[test]
     fn slugs_a_cwd_into_a_single_flat_directory_name() {
-        assert_eq!(project_slug("/Users/tyler/src/my-app"), "-Users-tyler-src-my-app");
+        assert_eq!(
+            project_slug("/Users/tyler/src/my-app"),
+            "-Users-tyler-src-my-app"
+        );
         assert_eq!(
             project_slug("/Users/tyler/src/weird name (v2)"),
             "-Users-tyler-src-weird-name-v2-"
@@ -573,7 +586,10 @@ mod tests {
         // Machine-local per-project data lives beside memory under the global home,
         // keyed by the project root's slug — one place a viewer can be pointed at.
         assert_eq!(project.sessions_dir, s(&join(&project_home, "sessions")));
-        assert_eq!(project.index_db_path, s(&join(&project_home, "index.sqlite")));
+        assert_eq!(
+            project.index_db_path,
+            s(&join(&project_home, "index.sqlite"))
+        );
         assert_eq!(project.memory_dir, s(&join(&project_home, "memory")));
         assert_eq!(project.slug, project_slug(&s(&cwd)));
         assert_eq!(project.project_root.as_deref(), Some(s(&cwd).as_str()));
@@ -599,12 +615,22 @@ mod tests {
         // A user-customized ignore file survives byte-identical.
         fs::write(join(&ensured.root, ".gitignore"), "custom/\n").unwrap();
         ensure_drip_project(&ensured);
-        assert_eq!(fs::read_to_string(join(&ensured.root, ".gitignore")).unwrap(), "custom/\n");
+        assert_eq!(
+            fs::read_to_string(join(&ensured.root, ".gitignore")).unwrap(),
+            "custom/\n"
+        );
 
         // A byte-exact older default is upgraded to the current one.
-        fs::write(join(&ensured.root, ".gitignore"), PREVIOUS_PROJECT_GITIGNORES[1]).unwrap();
+        fs::write(
+            join(&ensured.root, ".gitignore"),
+            PREVIOUS_PROJECT_GITIGNORES[1],
+        )
+        .unwrap();
         ensure_drip_project(&ensured);
-        assert_eq!(fs::read_to_string(join(&ensured.root, ".gitignore")).unwrap(), PROJECT_GITIGNORE);
+        assert_eq!(
+            fs::read_to_string(join(&ensured.root, ".gitignore")).unwrap(),
+            PROJECT_GITIGNORE
+        );
     }
 
     #[test]
@@ -614,15 +640,24 @@ mod tests {
         let nested = join(&root, "repo/src/deep");
 
         // No markers anywhere: the cwd itself is the project root.
-        assert_eq!(resolve_drip_project_root(&s(&nested), &home_root), s(&nested));
+        assert_eq!(
+            resolve_drip_project_root(&s(&nested), &home_root),
+            s(&nested)
+        );
 
         // The nearest ancestor with a .git wins over the cwd…
         fs::create_dir_all(join(&root, "repo/.git")).unwrap();
-        assert_eq!(resolve_drip_project_root(&s(&nested), &home_root), s(&join(&root, "repo")));
+        assert_eq!(
+            resolve_drip_project_root(&s(&nested), &home_root),
+            s(&join(&root, "repo"))
+        );
 
         // …but the nearest ancestor already holding a .drip wins over that.
         fs::create_dir_all(join(&root, "repo/src/.drip")).unwrap();
-        assert_eq!(resolve_drip_project_root(&s(&nested), &home_root), s(&join(&root, "repo/src")));
+        assert_eq!(
+            resolve_drip_project_root(&s(&nested), &home_root),
+            s(&join(&root, "repo/src"))
+        );
     }
 
     #[test]
@@ -645,19 +680,34 @@ mod tests {
             fs::create_dir_all(join(checkout, "src")).unwrap();
             fs::write(
                 join(checkout, ".git"),
-                format!("gitdir: {}\n", s(&join(&main, &format!(".git/worktrees/{name}")))),
+                format!(
+                    "gitdir: {}\n",
+                    s(&join(&main, &format!(".git/worktrees/{name}")))
+                ),
             )
             .unwrap();
         }
 
-        assert_eq!(resolve_git_repo_root(&s(&main)).as_deref(), Some(s(&main).as_str()));
-        assert_eq!(resolve_git_repo_root(&s(&linked)).as_deref(), Some(s(&main).as_str()));
-        assert_eq!(resolve_git_repo_root(&s(&elsewhere)).as_deref(), Some(s(&main).as_str()));
+        assert_eq!(
+            resolve_git_repo_root(&s(&main)).as_deref(),
+            Some(s(&main).as_str())
+        );
+        assert_eq!(
+            resolve_git_repo_root(&s(&linked)).as_deref(),
+            Some(s(&main).as_str())
+        );
+        assert_eq!(
+            resolve_git_repo_root(&s(&elsewhere)).as_deref(),
+            Some(s(&main).as_str())
+        );
         assert_eq!(resolve_git_repo_root(&s(&root)), None);
         let mut expected = vec![s(&linked), s(&elsewhere)];
         expected.sort();
         assert_eq!(list_linked_worktree_roots(&s(&main)), expected);
-        assert_eq!(list_linked_worktree_roots(&s(&linked)), Vec::<String>::new());
+        assert_eq!(
+            list_linked_worktree_roots(&s(&linked)),
+            Vec::<String>::new()
+        );
 
         // Whether or not the main checkout holds a .drip, every checkout keeps
         // its own session home (from a subdirectory too) while memory is shared
@@ -676,7 +726,10 @@ mod tests {
                 let project = resolve_drip_project(&s(&cwd), &home_root, None).unwrap();
 
                 assert_eq!(project.slug, project_slug(&s(&worktree)));
-                assert_eq!(project.worktree_root.as_deref(), Some(s(&worktree).as_str()));
+                assert_eq!(
+                    project.worktree_root.as_deref(),
+                    Some(s(&worktree).as_str())
+                );
                 assert_eq!(
                     project.sessions_dir,
                     s(&join(
@@ -727,10 +780,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("global drip home"));
-        assert!(resolve_drip_project(&s(&root), &home_root, Some(&home_root))
-            .unwrap_err()
-            .to_string()
-            .contains("global drip home"));
+        assert!(
+            resolve_drip_project(&s(&root), &home_root, Some(&home_root))
+                .unwrap_err()
+                .to_string()
+                .contains("global drip home")
+        );
     }
 
     #[test]
@@ -743,7 +798,10 @@ mod tests {
 
         assert_eq!(project.root, override_dir);
         assert_eq!(project.sessions_dir, s(&join(&override_dir, "sessions")));
-        assert_eq!(project.index_db_path, s(&join(&override_dir, "index.sqlite")));
+        assert_eq!(
+            project.index_db_path,
+            s(&join(&override_dir, "index.sqlite"))
+        );
         assert_eq!(project.memory_dir, s(&join(&override_dir, "memory")));
         assert_eq!(project.slug, project_slug(&override_dir));
         assert_eq!(project.repo_slug, project_slug(&override_dir));

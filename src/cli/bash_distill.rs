@@ -703,7 +703,11 @@ mod tests {
         assert!(truncated);
         let marker_at = text.find("[... ").expect("marker");
         let head_len = marker_at;
-        let tail_len = text.len() - text[marker_at..].find("...]\n").map(|i| marker_at + i + 5).unwrap();
+        let tail_len = text.len()
+            - text[marker_at..]
+                .find("...]\n")
+                .map(|i| marker_at + i + 5)
+                .unwrap();
         assert!(tail_len > head_len, "tail {tail_len} <= head {head_len}");
     }
 
@@ -723,23 +727,36 @@ mod tests {
         let (text, truncated) = truncate_for_distillation(&blob, 1000);
         assert!(truncated);
         assert!(text.starts_with("0000|0001|"), "{}", &text[..40]);
-        assert!(text.trim_end().ends_with("3998|3999|"), "{}", &text[text.len() - 40..]);
+        assert!(
+            text.trim_end().ends_with("3998|3999|"),
+            "{}",
+            &text[text.len() - 40..]
+        );
         let marker_at = text.find("[... ").expect("marker");
-        let tail_len = text.len() - text[marker_at..].find("...]\n").map(|i| marker_at + i + 5).unwrap();
+        let tail_len = text.len()
+            - text[marker_at..]
+                .find("...]\n")
+                .map(|i| marker_at + i + 5)
+                .unwrap();
         assert!(tail_len > marker_at, "tail {tail_len} <= head {marker_at}");
         assert!(text.len() < 1200, "len {}", text.len());
     }
 
     #[test]
     fn blank_model_replies_are_rejected_so_the_caller_fails_open() {
-        let parse = |body: &str| serde_json::from_str::<OpenAICompatibleResponse>(body).expect("response");
+        let parse =
+            |body: &str| serde_json::from_str::<OpenAICompatibleResponse>(body).expect("response");
         let empty_string = parse(r#"{"choices":[{"message":{"role":"assistant","content":""}}]}"#);
         assert_eq!(extract_reply_text(&empty_string), None);
-        let no_text_parts = parse(r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"image"}]}}]}"#);
+        let no_text_parts =
+            parse(r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"image"}]}}]}"#);
         assert_eq!(extract_reply_text(&no_text_parts), None);
-        let whitespace = parse(r#"{"choices":[{"message":{"role":"assistant","content":"  \n"}}]}"#);
+        let whitespace =
+            parse(r#"{"choices":[{"message":{"role":"assistant","content":"  \n"}}]}"#);
         assert_eq!(extract_reply_text(&whitespace), None);
-        let real = parse(r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"PASS"}]}}]}"#);
+        let real = parse(
+            r#"{"choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"PASS"}]}}]}"#,
+        );
         assert_eq!(extract_reply_text(&real).as_deref(), Some("PASS"));
     }
 

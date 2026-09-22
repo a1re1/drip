@@ -11,32 +11,39 @@
 // drives the child on a private runtime. WAL mode serializes the writers.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::path::Path;
 
 use similar::TextDiff;
 
 use serde::Serialize;
 
 use crate::cli::review_report::{
-    build_skipped_synthesis_report, build_synthesis_prompt, build_unit_review_prompt, confidence_from_counts,
-    format_file_report, looks_like_file_report, looks_like_synthesis_report, parse_file_report, pick_report_body,
-    chunk_oversized_units, plan_retry_units, plan_review_units, review_child_budget, unit_part_label, should_skip_synthesis, split_unit_report,
-    unit_review_task_title, with_computed_confidence, DiffFile, FileReport, ReportBodySources, ReviewSynthesisMode,
-    ReviewUnit, ReviewUnitKind, RetryRun, SkippedSynthesisArgs, SkippedSynthesisFile, SynthesisPromptArgs,
-    SynthesisSkipFile, UnitPromptFile, UnitReviewPromptArgs, REVIEW_TOOL_NAMES,
-    SKIPPED_FILE_NAMES, SKIPPED_FILE_SUFFIXES, SYNTHESIS_TASK_TITLE,
+    build_skipped_synthesis_report, build_synthesis_prompt, build_unit_review_prompt,
+    chunk_oversized_units, confidence_from_counts, format_file_report, looks_like_file_report,
+    looks_like_synthesis_report, parse_file_report, pick_report_body, plan_retry_units,
+    plan_review_units, review_child_budget, should_skip_synthesis, split_unit_report,
+    unit_part_label, unit_review_task_title, with_computed_confidence, DiffFile, FileReport,
+    ReportBodySources, RetryRun, ReviewSynthesisMode, ReviewUnit, ReviewUnitKind,
+    SkippedSynthesisArgs, SkippedSynthesisFile, SynthesisPromptArgs, SynthesisSkipFile,
+    UnitPromptFile, UnitReviewPromptArgs, REVIEW_TOOL_NAMES, SKIPPED_FILE_NAMES,
+    SKIPPED_FILE_SUFFIXES, SYNTHESIS_TASK_TITLE,
 };
 use crate::cli::roles::PRESET_FAST_PROFILE_ID;
-use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
+use crate::cli::session_run::{
+    run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
+};
 use crate::cli::skills::LoadedCliSkill;
 use crate::core::home::DripProject;
 use crate::core::inference::ResolvedInferenceConfig;
 use crate::core::sessions::{create_session, open_session_index, CreateSessionArgs, ProjectPaths};
-use crate::core::types::{serialize_js_number, HarnessEvent, HarnessEventType, HarnessRunReason, HarnessTask, HarnessTaskStatus};
+use crate::core::types::{
+    serialize_js_number, HarnessEvent, HarnessEventType, HarnessRunReason, HarnessTask,
+    HarnessTaskStatus,
+};
 use crate::harness::model_call::AbortSignal;
 use crate::tools::types::ChatToolDefinition;
 
@@ -70,8 +77,11 @@ pub type ReadFileAtHeadFn = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sy
 /// Test seam: the commit the worktree is on (default `git rev-parse HEAD`).
 pub type ReadHeadFn = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 /// Test seam: the child-session runner (defaults to run_session_goal on a private runtime).
-pub type RunGoalFn =
-    Arc<dyn for<'a> Fn(SessionGoalArgs<'a>) -> Result<SessionGoalOutcome, SessionGoalError> + Send + Sync>;
+pub type RunGoalFn = Arc<
+    dyn for<'a> Fn(SessionGoalArgs<'a>) -> Result<SessionGoalOutcome, SessionGoalError>
+        + Send
+        + Sync,
+>;
 pub type ProgressFn = Arc<dyn Fn(ReviewProgressEvent) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -139,12 +149,29 @@ pub struct ReviewCounts {
 
 #[derive(Debug, Clone)]
 pub enum ReviewProgressEvent {
-    Planned { units: Vec<ReviewUnit>, file_count: usize },
-    UnitDone { unit: ReviewUnit, errored: bool, elapsed_ms: u64, counts: ReviewCounts, retry: bool },
-    UnitRetry { unit: ReviewUnit, reason: String },
+    Planned {
+        units: Vec<ReviewUnit>,
+        file_count: usize,
+    },
+    UnitDone {
+        unit: ReviewUnit,
+        errored: bool,
+        elapsed_ms: u64,
+        counts: ReviewCounts,
+        retry: bool,
+    },
+    UnitRetry {
+        unit: ReviewUnit,
+        reason: String,
+    },
     SynthesisStart,
-    SynthesisSkipped { mode: ReviewSynthesisMode },
-    SynthesisDone { elapsed_ms: u64, errored: bool },
+    SynthesisSkipped {
+        mode: ReviewSynthesisMode,
+    },
+    SynthesisDone {
+        elapsed_ms: u64,
+        errored: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
@@ -261,7 +288,11 @@ fn git_stdout(args: &[&str], cwd: &str) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        return Err(format!("Command failed: git {}\n{}", args.join(" "), stderr));
+        return Err(format!(
+            "Command failed: git {}\n{}",
+            args.join(" "),
+            stderr
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -270,7 +301,12 @@ fn git_stdout(args: &[&str], cwd: &str) -> Result<String, String> {
 fn default_list_changed_files(base_ref: &str, cwd: &str) -> Result<Vec<String>, String> {
     let stdout = git_stdout(&["diff", "--name-only", &format!("{base_ref}...HEAD")], cwd)?;
 
-    Ok(stdout.split('\n').map(str::trim).filter(|line| !line.is_empty()).map(String::from).collect())
+    Ok(stdout
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn default_read_head(cwd: &str) -> Result<String, String> {
@@ -296,7 +332,11 @@ pub fn assert_head_unchanged(start_head: &str, current_head: &str) -> Result<(),
 // and an uncommitted edit must not leak into what the reviewer is told is the
 // change. None (not an error) for anything git cannot show as text.
 fn default_read_file_at_head(path: &str, cwd: &str) -> Option<String> {
-    let output = Command::new("git").args(["show", &format!("HEAD:{path}")]).current_dir(cwd).output().ok()?;
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{path}")])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
 
     if !output.status.success() || output.stdout.contains(&0u8) {
         return None;
@@ -319,7 +359,16 @@ fn head_has_path(path: &str, cwd: &str) -> bool {
 }
 
 fn ref_exists(reference: &str, cwd: &str) -> bool {
-    git_stdout(&["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")], cwd).is_ok()
+    git_stdout(
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+        cwd,
+    )
+    .is_ok()
 }
 
 // The default base is the remote-tracking ref of origin's HEAD branch
@@ -328,10 +377,21 @@ fn ref_exists(reference: &str, cwd: &str) -> bool {
 // fallback when the remote-tracking ref does not exist.
 pub fn resolve_default_base_ref(cwd: &str) -> String {
     if let Ok(stdout) = git_stdout(&["remote", "show", "origin"], cwd) {
-        if let Some(head_branch) = stdout.split('\n').map(str::trim).find(|line| line.starts_with("HEAD branch:")) {
-            let branch = head_branch.replacen("HEAD branch:", "", 1).trim().to_string();
+        if let Some(head_branch) = stdout
+            .split('\n')
+            .map(str::trim)
+            .find(|line| line.starts_with("HEAD branch:"))
+        {
+            let branch = head_branch
+                .replacen("HEAD branch:", "", 1)
+                .trim()
+                .to_string();
 
-            return if ref_exists(&format!("origin/{branch}"), cwd) { format!("origin/{branch}") } else { branch };
+            return if ref_exists(&format!("origin/{branch}"), cwd) {
+                format!("origin/{branch}")
+            } else {
+                branch
+            };
         }
     }
 
@@ -367,7 +427,11 @@ fn collect_child_events(
             usage.prompt_tokens += data.and_then(|data| data.prompt_tokens).unwrap_or(0);
         }
         HarnessEventType::RateLimited => {
-            usage.lock().unwrap().retry_wait_seconds += event.data.as_ref().and_then(|data| data.wait_seconds).unwrap_or(0.0);
+            usage.lock().unwrap().retry_wait_seconds += event
+                .data
+                .as_ref()
+                .and_then(|data| data.wait_seconds)
+                .unwrap_or(0.0);
         }
         _ => {}
     })
@@ -407,7 +471,12 @@ where
         }
     });
 
-    results.into_inner().unwrap().into_iter().map(|result| result.expect("pool lane filled every slot")).collect()
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|result| result.expect("pool lane filled every slot"))
+        .collect()
 }
 
 // A child signal that fires after `ms` or when
@@ -451,7 +520,11 @@ impl Timebox {
             });
         }
 
-        Self { signal, timed_out, released }
+        Self {
+            signal,
+            timed_out,
+            released,
+        }
     }
 
     fn timed_out(&self) -> bool {
@@ -523,7 +596,9 @@ fn build_journal_file_diffs(cwd: &str) -> Result<(Vec<JournalFileDiff>, usize), 
     let mut base_by_path: HashMap<String, String> = HashMap::new();
     let mut line_count = 0usize;
     for line in raw.lines() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         line_count += 1;
         let entry: crate::tools::patch_journal::PatchJournalEntry = serde_json::from_str(line)
             .map_err(|error| format!("parse patch journal line {line_count}: {error}"))?;
@@ -545,9 +620,15 @@ fn build_journal_file_diffs(cwd: &str) -> Result<(Vec<JournalFileDiff>, usize), 
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(format!("read reviewed file {path}: {error}")),
         };
-        if base == current { continue; }
+        if base == current {
+            continue;
+        }
         let diff = journal_unified_diff(&path, &base, &current);
-        files.push(JournalFileDiff { path, current, diff });
+        files.push(JournalFileDiff {
+            path,
+            current,
+            diff,
+        });
     }
     Ok((files, line_count))
 }
@@ -556,9 +637,23 @@ fn build_journal_file_diffs(cwd: &str) -> Result<(Vec<JournalFileDiff>, usize), 
 fn journal_diff_stat(files: &[JournalFileDiff]) -> String {
     let mut lines = Vec::new();
     for file in files {
-        let added = file.diff.lines().filter(|line| line.starts_with('+') && !line.starts_with("+++")).count();
-        let removed = file.diff.lines().filter(|line| line.starts_with('-') && !line.starts_with("---")).count();
-        lines.push(format!(" {} | {} +{} -{}", file.path, added + removed, added, removed));
+        let added = file
+            .diff
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .count();
+        let removed = file
+            .diff
+            .lines()
+            .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+            .count();
+        lines.push(format!(
+            " {} | {} +{} -{}",
+            file.path,
+            added + removed,
+            added,
+            removed
+        ));
     }
     lines.join("\n")
 }
@@ -604,11 +699,13 @@ fn seconds_label(ms: u64) -> String {
 }
 
 fn sum_counts(files: &[FileReviewResult]) -> ReviewCounts {
-    files.iter().fold(ReviewCounts::default(), |acc, file| ReviewCounts {
-        p0: acc.p0 + file.p0,
-        p1: acc.p1 + file.p1,
-        p2: acc.p2 + file.p2,
-    })
+    files
+        .iter()
+        .fold(ReviewCounts::default(), |acc, file| ReviewCounts {
+            p0: acc.p0 + file.p0,
+            p1: acc.p1 + file.p1,
+            p2: acc.p2 + file.p2,
+        })
 }
 
 fn outcome_files(files: &[FileReviewResult]) -> Vec<ReviewOutcomeFile> {
@@ -627,18 +724,30 @@ fn outcome_files(files: &[FileReviewResult]) -> Vec<ReviewOutcomeFile> {
         .collect()
 }
 
-fn report_from_outcome(outcome: &SessionGoalOutcome, model_texts: &[String], looks_like_report: fn(&str) -> bool) -> String {
+fn report_from_outcome(
+    outcome: &SessionGoalOutcome,
+    model_texts: &[String],
+    looks_like_report: fn(&str) -> bool,
+) -> String {
     let model_texts: Vec<&str> = model_texts.iter().map(String::as_str).collect();
     let task_summaries = completed_task_summaries(&outcome.result.state.tasks);
     let task_summaries: Vec<&str> = task_summaries.iter().map(String::as_str).collect();
-    let summary = outcome
-        .record
-        .summary
-        .as_deref()
-        .or_else(|| outcome.result.state.run_summary.as_ref().map(|summary| summary.text.as_str()));
+    let summary = outcome.record.summary.as_deref().or_else(|| {
+        outcome
+            .result
+            .state
+            .run_summary
+            .as_ref()
+            .map(|summary| summary.text.as_str())
+    });
 
     pick_report_body(ReportBodySources {
-        direct_response: outcome.result.state.direct_response.as_ref().map(|response| response.text.as_str()),
+        direct_response: outcome
+            .result
+            .state
+            .direct_response
+            .as_ref()
+            .map(|response| response.text.as_str()),
         looks_like_report,
         model_texts: &model_texts,
         summary,
@@ -692,7 +801,10 @@ impl ReviewContext<'_> {
     // Read-only review: an allowlist (REVIEW_TOOL_NAMES), not a denylist — a
     // new workspace tool must opt in to reach a reviewer.
     fn review_tools(&self) -> Vec<ChatToolDefinition> {
-        (self.args.tools)().into_iter().filter(|tool| REVIEW_TOOL_NAMES.contains(&tool.name.as_str())).collect()
+        (self.args.tools)()
+            .into_iter()
+            .filter(|tool| REVIEW_TOOL_NAMES.contains(&tool.name.as_str()))
+            .collect()
     }
 
     fn run_child(
@@ -713,7 +825,15 @@ impl ReviewContext<'_> {
         // shelled out to `drip --review`; a standalone review stays flat. The
         // children run concurrently on pool threads, so they never export their
         // own id into the process environment the way DELEGATE does.
-        let child_session = create_session(&index, CreateSessionArgs { cwd: args.cwd.clone(), parent_id: None, project: &project_paths, now: "" });
+        let child_session = create_session(
+            &index,
+            CreateSessionArgs {
+                cwd: args.cwd.clone(),
+                parent_id: None,
+                project: &project_paths,
+                now: "",
+            },
+        );
         let timebox = Timebox::new(wall_clock_ms, args.signal.as_ref());
         let usage = Arc::new(Mutex::new(ReviewUsage::default()));
         let model_texts = Arc::new(Mutex::new(Vec::new()));
@@ -793,11 +913,21 @@ impl ReviewContext<'_> {
             .iter()
             .map(|path| UnitPromptFile {
                 path,
-                diff: unit.part.as_ref().map(|part| part.diff.as_str()).or_else(|| self.diffs.get(path).map(String::as_str)).unwrap_or(""),
+                diff: unit
+                    .part
+                    .as_ref()
+                    .map(|part| part.diff.as_str())
+                    .or_else(|| self.diffs.get(path).map(String::as_str))
+                    .unwrap_or(""),
                 content: self.contents.get(path).map(String::as_str),
             })
             .collect();
-        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: &args.base_ref, context: &args.context, files: &files, unit: &unit });
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs {
+            base_ref: &args.base_ref,
+            context: &args.context,
+            files: &files,
+            unit: &unit,
+        });
         let result = self.run_child(
             prompt,
             args.file_inference.clone(),
@@ -818,8 +948,11 @@ impl ReviewContext<'_> {
                 // file. The caller retries those paths once.
                 let sections = split_unit_report(&report, &unit.paths);
                 let single = unit.paths.len() == 1;
-                let missing: Vec<String> =
-                    sections.iter().filter(|(_, section)| !single && section.is_none()).map(|(path, _)| path.clone()).collect();
+                let missing: Vec<String> = sections
+                    .iter()
+                    .filter(|(_, section)| !single && section.is_none())
+                    .map(|(path, _)| path.clone())
+                    .collect();
                 let files: Vec<FileReviewResult> = sections
                     .into_iter()
                     .map(|(path, section)| {
@@ -857,7 +990,16 @@ impl ReviewContext<'_> {
                     unit: unit.clone(),
                 });
 
-                UnitRun { elapsed_ms: elapsed_ms(started_at), errored: false, files, missing, retry_of, session_id, unit, usage }
+                UnitRun {
+                    elapsed_ms: elapsed_ms(started_at),
+                    errored: false,
+                    files,
+                    missing,
+                    retry_of,
+                    session_id,
+                    unit,
+                    usage,
+                }
             }
             Err(error) => {
                 // One failing child must not abort the run — record and continue.
@@ -874,7 +1016,11 @@ impl ReviewContext<'_> {
                 UnitRun {
                     elapsed_ms: elapsed_ms(started_at),
                     errored: true,
-                    files: unit.paths.iter().map(|path| errored_file(path, &description)).collect(),
+                    files: unit
+                        .paths
+                        .iter()
+                        .map(|path| errored_file(path, &description))
+                        .collect(),
                     missing: Vec::new(),
                     retry_of,
                     session_id: None,
@@ -887,16 +1033,28 @@ impl ReviewContext<'_> {
 }
 
 fn is_skipped_path(path: &str) -> bool {
-    if SKIPPED_FILE_NAMES.contains(&path) || SKIPPED_FILE_SUFFIXES.iter().any(|suffix| path.ends_with(suffix)) {
+    if SKIPPED_FILE_NAMES.contains(&path)
+        || SKIPPED_FILE_SUFFIXES
+            .iter()
+            .any(|suffix| path.ends_with(suffix))
+    {
         return true;
     }
 
     // /(^|\/)[^/]*\.lock$/
-    path.rsplit('/').next().is_some_and(|basename| basename.ends_with(".lock"))
+    path.rsplit('/')
+        .next()
+        .is_some_and(|basename| basename.ends_with(".lock"))
 }
 
 fn assemble_report(head: String, file_reports: &[String]) -> String {
-    [head, String::new(), "## Per-file reports".to_string(), file_reports.join("\n\n")].join("\n")
+    [
+        head,
+        String::new(),
+        "## Per-file reports".to_string(),
+        file_reports.join("\n\n"),
+    ]
+    .join("\n")
 }
 
 pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, String> {
@@ -926,10 +1084,15 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
     let list_changed_files: ListChangedFilesFn = if journal_mode {
         let journal_files = journal_files.clone();
         Arc::new(move |_: &str, _: &str| {
-            Ok(journal_files.iter().map(|file| file.path.clone()).collect::<Vec<String>>())
+            Ok(journal_files
+                .iter()
+                .map(|file| file.path.clone())
+                .collect::<Vec<String>>())
         })
     } else {
-        args.list_changed_files.clone().unwrap_or_else(|| Arc::new(default_list_changed_files))
+        args.list_changed_files
+            .clone()
+            .unwrap_or_else(|| Arc::new(default_list_changed_files))
     };
     let read_diff: ReadDiffFn = if journal_mode {
         let journal_files = journal_files.clone();
@@ -941,23 +1104,35 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
                 .ok_or_else(|| format!("no patch-journal diff for {path}"))
         })
     } else {
-        args.read_diff.clone().unwrap_or_else(|| Arc::new(default_read_diff))
+        args.read_diff
+            .clone()
+            .unwrap_or_else(|| Arc::new(default_read_diff))
     };
     let read_file_at_head: ReadFileAtHeadFn = if journal_mode {
         // Journal analog of `git show HEAD:{path}` — the file AFTER the change
         // (HEAD contains the change in git mode), i.e. the disk content now.
         let journal_files = journal_files.clone();
         Arc::new(move |path: &str, _: &str| {
-            journal_files.iter().find(|file| file.path == path).map(|file| file.current.clone())
+            journal_files
+                .iter()
+                .find(|file| file.path == path)
+                .map(|file| file.current.clone())
         })
     } else {
-        args.read_file_at_head.clone().unwrap_or_else(|| Arc::new(default_read_file_at_head))
+        args.read_file_at_head
+            .clone()
+            .unwrap_or_else(|| Arc::new(default_read_file_at_head))
     };
-    let run_goal: RunGoalFn = args.run_goal.clone().unwrap_or_else(|| Arc::new(default_run_goal));
+    let run_goal: RunGoalFn = args
+        .run_goal
+        .clone()
+        .unwrap_or_else(|| Arc::new(default_run_goal));
     let read_head: ReadHeadFn = if journal_mode {
         Arc::new(|_: &str| Ok(String::new()))
     } else {
-        args.read_head.clone().unwrap_or_else(|| Arc::new(default_read_head))
+        args.read_head
+            .clone()
+            .unwrap_or_else(|| Arc::new(default_read_head))
     };
     let head_at_start = read_head(&args.cwd)?;
 
@@ -977,7 +1152,11 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
             exit_code: 0,
             files: Vec::new(),
             report: format!("No reviewable changed files against {base_ref}."),
-            timing: ReviewTiming { synthesis_ms: 0, total_ms: 0, units_ms: 0 },
+            timing: ReviewTiming {
+                synthesis_ms: 0,
+                total_ms: 0,
+                units_ms: 0,
+            },
             units: Vec::new(),
             usage: ReviewUsage::default(),
         });
@@ -989,19 +1168,32 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
     // one errored file, not a dead review. Bounded like the reviewer pool: two
     // git subprocesses per path, and a wide diff must not fork hundreds at once.
     enum Loaded {
-        Ok { path: String, diff: String, content: Option<String> },
+        Ok {
+            path: String,
+            diff: String,
+            content: Option<String>,
+        },
         Unreadable(FileReviewResult),
     }
 
-    let loaded = run_pool(reviewable_paths.clone(), 8, |path: String| match read_diff(&base_ref, &path, &args.cwd) {
+    let loaded = run_pool(reviewable_paths.clone(), 8, |path: String| match read_diff(
+        &base_ref, &path, &args.cwd,
+    ) {
         Ok(diff) => {
             // Every readable file is kept: the prompt inlines small ones whole
             // and big ones as excerpts around their hunks (see MAX_INLINE_FILE_LINES).
             let content = read_file_at_head(&path, &args.cwd);
 
-            Loaded::Ok { path, diff, content }
+            Loaded::Ok {
+                path,
+                diff,
+                content,
+            }
         }
-        Err(error) => Loaded::Unreadable(errored_file(&path, &format!("errored: could not read the diff ({error})"))),
+        Err(error) => Loaded::Unreadable(errored_file(
+            &path,
+            &format!("errored: could not read the diff ({error})"),
+        )),
     });
     let mut diffs: HashMap<String, String> = HashMap::new();
     let mut contents: HashMap<String, String> = HashMap::new();
@@ -1009,7 +1201,11 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     for entry in loaded {
         match entry {
-            Loaded::Ok { path, diff, content } => {
+            Loaded::Ok {
+                path,
+                diff,
+                content,
+            } => {
                 diffs.insert(path.clone(), diff);
 
                 if let Some(content) = content {
@@ -1022,18 +1218,31 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     let diff_files: Vec<DiffFile<'_>> = reviewable_paths
         .iter()
-        .filter_map(|path| diffs.get(path).map(|diff| DiffFile { path: path.as_str(), diff_lines: count_diff_lines(diff) }))
+        .filter_map(|path| {
+            diffs.get(path).map(|diff| DiffFile {
+                path: path.as_str(),
+                diff_lines: count_diff_lines(diff),
+            })
+        })
         .collect();
-    let units = chunk_oversized_units(plan_review_units(&diff_files), |path| diffs.get(path).cloned().unwrap_or_default());
+    let units = chunk_oversized_units(plan_review_units(&diff_files), |path| {
+        diffs.get(path).cloned().unwrap_or_default()
+    });
     let context = ReviewContext {
         args: &args,
         contents,
         diffs,
         run_goal,
-        unit_wall_clock_ms: args.wall_clock_ms.and_then(|clock| clock.unit).unwrap_or(UNIT_WALL_CLOCK_MS),
+        unit_wall_clock_ms: args
+            .wall_clock_ms
+            .and_then(|clock| clock.unit)
+            .unwrap_or(UNIT_WALL_CLOCK_MS),
     };
 
-    context.progress(ReviewProgressEvent::Planned { file_count: reviewable_paths.len(), units: units.clone() });
+    context.progress(ReviewProgressEvent::Planned {
+        file_count: reviewable_paths.len(),
+        units: units.clone(),
+    });
 
     let command_started_at = Instant::now();
     let mut first_pass = run_pool(units, concurrency, |unit| context.review_unit(unit, None));
@@ -1044,26 +1253,46 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
     let retry_units = if args.signal.as_ref().is_some_and(AbortSignal::is_aborted) {
         Vec::new()
     } else {
-        let runs: Vec<RetryRun<'_>> =
-            first_pass.iter().map(|run| RetryRun { errored: run.errored, missing: &run.missing, unit: &run.unit }).collect();
-        let diff_lines_of = |path: &str| context.diffs.get(path).map(|diff| count_diff_lines(diff)).unwrap_or(1);
+        let runs: Vec<RetryRun<'_>> = first_pass
+            .iter()
+            .map(|run| RetryRun {
+                errored: run.errored,
+                missing: &run.missing,
+                unit: &run.unit,
+            })
+            .collect();
+        let diff_lines_of = |path: &str| {
+            context
+                .diffs
+                .get(path)
+                .map(|diff| count_diff_lines(diff))
+                .unwrap_or(1)
+        };
         let retries = plan_retry_units(&runs, &diff_lines_of);
 
         for retry in &retries {
-            context.progress(ReviewProgressEvent::UnitRetry { reason: retry.reason.clone(), unit: retry.unit.clone() });
+            context.progress(ReviewProgressEvent::UnitRetry {
+                reason: retry.reason.clone(),
+                unit: retry.unit.clone(),
+            });
         }
 
         retries
     };
     let retries = run_pool(
-        retry_units.iter().map(|entry| (entry.unit.clone(), entry.retry_of.clone())).collect(),
+        retry_units
+            .iter()
+            .map(|entry| (entry.unit.clone(), entry.retry_of.clone()))
+            .collect(),
         concurrency,
         |(unit, retry_of)| context.review_unit(unit, Some(retry_of)),
     );
     let mut retry_records: Vec<UnitRun> = Vec::new();
 
     for (mut retry, entry) in retries.into_iter().zip(retry_units.iter()) {
-        let Some(original) = first_pass.get_mut(entry.original_index) else { continue };
+        let Some(original) = first_pass.get_mut(entry.original_index) else {
+            continue;
+        };
 
         // A successful retry replaces the original's rows for the paths it
         // covered; a failed retry leaves the original's (already errored or
@@ -1117,15 +1346,32 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     // Back to diff order: units are planned docs-first and grouped, but the
     // per-file reports (and files[]) should read in the order the diff lists.
-    let order: HashMap<&str, usize> = reviewable_paths.iter().enumerate().map(|(i, path)| (path.as_str(), i)).collect();
+    let order: HashMap<&str, usize> = reviewable_paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| (path.as_str(), i))
+        .collect();
 
     file_results.sort_by_key(|file| order.get(file.path.as_str()).copied().unwrap_or(0));
 
-    let file_reports: Vec<String> = file_results.iter().map(|file| format_file_report(&file.path, &file.report, file.part.as_deref())).collect();
+    let file_reports: Vec<String> = file_results
+        .iter()
+        .map(|file| format_file_report(&file.path, &file.report, file.part.as_deref()))
+        .collect();
     let counts = sum_counts(&file_results);
     let confidence = confidence_from_counts(counts.p0, counts.p1);
-    let counts_report = FileReport { rating: None, rating_derived: false, p0: counts.p0, p1: counts.p1, p2: counts.p2 };
-    let exit_code = if counts.p0 == 0 && counts.p1 == 0 { 0 } else { 4 };
+    let counts_report = FileReport {
+        rating: None,
+        rating_derived: false,
+        p0: counts.p0,
+        p1: counts.p1,
+        p2: counts.p2,
+    };
+    let exit_code = if counts.p0 == 0 && counts.p1 == 0 {
+        0
+    } else {
+        4
+    };
     let synth_started_at = Instant::now();
     let synthesis_mode = args.synthesis.unwrap_or(ReviewSynthesisMode::Auto);
     let skip_files: Vec<SynthesisSkipFile<'_>> = file_results
@@ -1141,7 +1387,9 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
         .collect();
 
     if should_skip_synthesis(synthesis_mode, &skip_files) {
-        context.progress(ReviewProgressEvent::SynthesisSkipped { mode: synthesis_mode });
+        context.progress(ReviewProgressEvent::SynthesisSkipped {
+            mode: synthesis_mode,
+        });
 
         let skipped_files: Vec<SkippedSynthesisFile<'_>> = file_results
             .iter()
@@ -1166,8 +1414,15 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
             counts,
             exit_code,
             files: outcome_files(&file_results),
-            report: assemble_report(with_computed_confidence(&skipped, confidence, &counts_report), &file_reports),
-            timing: ReviewTiming { synthesis_ms: 0, total_ms: elapsed_ms(command_started_at), units_ms },
+            report: assemble_report(
+                with_computed_confidence(&skipped, confidence, &counts_report),
+                &file_reports,
+            ),
+            timing: ReviewTiming {
+                synthesis_ms: 0,
+                total_ms: elapsed_ms(command_started_at),
+                units_ms,
+            },
             units: unit_results,
             usage: total_usage,
         });
@@ -1175,18 +1430,27 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 
     context.progress(ReviewProgressEvent::SynthesisStart);
 
-    let synthesis_wall_clock_ms = args.wall_clock_ms.and_then(|clock| clock.synthesis).unwrap_or(SYNTHESIS_WALL_CLOCK_MS);
+    let synthesis_wall_clock_ms = args
+        .wall_clock_ms
+        .and_then(|clock| clock.synthesis)
+        .unwrap_or(SYNTHESIS_WALL_CLOCK_MS);
     let synthesize = || -> Result<(String, ReviewUsage), String> {
         let diff_stat = if journal_mode {
-        journal_diff_stat(&journal_files)
-    } else {
-        git_stdout(&["diff", "--stat", &format!("{base_ref}...HEAD")], &args.cwd)?
-    };
+            journal_diff_stat(&journal_files)
+        } else {
+            git_stdout(
+                &["diff", "--stat", &format!("{base_ref}...HEAD")],
+                &args.cwd,
+            )?
+        };
         let log = if journal_mode {
-        journal_change_note(journal_lines, journal_count)
-    } else {
-        git_stdout(&["log", "--oneline", &format!("{base_ref}...HEAD")], &args.cwd)?
-    };
+            journal_change_note(journal_lines, journal_count)
+        } else {
+            git_stdout(
+                &["log", "--oneline", &format!("{base_ref}...HEAD")],
+                &args.cwd,
+            )?
+        };
         let synth_prompt = build_synthesis_prompt(SynthesisPromptArgs {
             base_ref: &base_ref,
             context: &args.context,
@@ -1213,13 +1477,22 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
     let report = match synthesize() {
         Ok((synth_report, synth_usage)) => {
             total_usage.add(&synth_usage);
-            context.progress(ReviewProgressEvent::SynthesisDone { elapsed_ms: elapsed_ms(synth_started_at), errored: false });
+            context.progress(ReviewProgressEvent::SynthesisDone {
+                elapsed_ms: elapsed_ms(synth_started_at),
+                errored: false,
+            });
 
-            assemble_report(with_computed_confidence(&synth_report, confidence, &counts_report), &file_reports)
+            assemble_report(
+                with_computed_confidence(&synth_report, confidence, &counts_report),
+                &file_reports,
+            )
         }
         Err(error) => {
             // The synthesis child failing must not lose the per-file findings.
-            context.progress(ReviewProgressEvent::SynthesisDone { elapsed_ms: elapsed_ms(synth_started_at), errored: true });
+            context.progress(ReviewProgressEvent::SynthesisDone {
+                elapsed_ms: elapsed_ms(synth_started_at),
+                errored: true,
+            });
 
             let mut lines = vec![format!("(synthesis pass failed: {error})"), String::new()];
 
@@ -1243,7 +1516,11 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
         exit_code,
         files: outcome_files(&file_results),
         report,
-        timing: ReviewTiming { synthesis_ms: elapsed_ms(synth_started_at), total_ms: elapsed_ms(command_started_at), units_ms },
+        timing: ReviewTiming {
+            synthesis_ms: elapsed_ms(synth_started_at),
+            total_ms: elapsed_ms(command_started_at),
+            units_ms,
+        },
         units: unit_results,
         usage: total_usage,
     })
@@ -1253,7 +1530,8 @@ pub fn run_review_command(args: ReviewCommandArgs) -> Result<ReviewOutcome, Stri
 mod tests {
     use super::*;
     use crate::core::config::{
-        default_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID, ACTIVE_TOOL_PROFILE_SETTING_ID, MODEL_PROFILES_SETTING_ID,
+        default_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID,
+        ACTIVE_TOOL_PROFILE_SETTING_ID, MODEL_PROFILES_SETTING_ID,
     };
     use crate::core::inference::resolve_inference_config;
 
@@ -1262,7 +1540,10 @@ mod tests {
         let mut settings = default_setting_values();
 
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles.to_string());
-        settings.insert(ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         settings.insert(ACTIVE_TOOL_PROFILE_SETTING_ID.to_string(), String::new());
 
         let mut env = HashMap::new();
@@ -1349,9 +1630,17 @@ mod tests {
 
     #[test]
     fn usage_serializes_with_ts_keys_and_integral_seconds() {
-        let usage = ReviewUsage { calls: 2, completion_tokens: 30, prompt_tokens: 400, retry_wait_seconds: 0.0 };
+        let usage = ReviewUsage {
+            calls: 2,
+            completion_tokens: 30,
+            prompt_tokens: 400,
+            retry_wait_seconds: 0.0,
+        };
 
-        assert_eq!(serde_json::to_string(&usage).unwrap(), r#"{"calls":2,"completionTokens":30,"promptTokens":400,"retryWaitSeconds":0}"#);
+        assert_eq!(
+            serde_json::to_string(&usage).unwrap(),
+            r#"{"calls":2,"completionTokens":30,"promptTokens":400,"retryWaitSeconds":0}"#
+        );
     }
 
     #[test]
@@ -1361,9 +1650,22 @@ mod tests {
             confidence: 5,
             counts: ReviewCounts::default(),
             exit_code: 0,
-            files: vec![ReviewOutcomeFile { errored: false, p0: 0, p1: 0, p2: 1, part: None, path: "a.rs".into(), rating: Some("⚠️".into()), session_id: Some("s1".into()) }],
+            files: vec![ReviewOutcomeFile {
+                errored: false,
+                p0: 0,
+                p1: 0,
+                p2: 1,
+                part: None,
+                path: "a.rs".into(),
+                rating: Some("⚠️".into()),
+                session_id: Some("s1".into()),
+            }],
             report: "r".into(),
-            timing: ReviewTiming { synthesis_ms: 1, total_ms: 3, units_ms: 2 },
+            timing: ReviewTiming {
+                synthesis_ms: 1,
+                total_ms: 3,
+                units_ms: 2,
+            },
             units: vec![ReviewUnitResult {
                 elapsed_ms: 2,
                 errored: false,
@@ -1388,7 +1690,10 @@ mod tests {
     fn head_guard_passes_on_a_quiet_worktree_and_aborts_after_a_checkout() {
         assert!(assert_head_unchanged("abc123", "abc123").is_ok());
         let err = assert_head_unchanged("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb").unwrap_err();
-        assert!(err.contains("HEAD moved from aaaaaaaaaaaa to bbbbbbbbbbbb"), "{err}");
+        assert!(
+            err.contains("HEAD moved from aaaaaaaaaaaa to bbbbbbbbbbbb"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1420,7 +1725,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.exit_code, 0);
-        assert_eq!(outcome.report, "No reviewable changed files against origin/main.");
+        assert_eq!(
+            outcome.report,
+            "No reviewable changed files against origin/main."
+        );
         assert!(outcome.units.is_empty());
     }
 
@@ -1465,7 +1773,10 @@ mod tests {
         let outcome = run_review_command(no_git_args(dir.path(), false)).unwrap();
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(outcome.base, JOURNAL_BASE_LABEL);
-        assert_eq!(outcome.report, format!("No reviewable changed files against {JOURNAL_BASE_LABEL}."));
+        assert_eq!(
+            outcome.report,
+            format!("No reviewable changed files against {JOURNAL_BASE_LABEL}.")
+        );
         assert!(outcome.units.is_empty());
     }
 
@@ -1474,8 +1785,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir()
-            .join(format!("drip-review-{}-{nanos}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("drip-review-{}-{nanos}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1536,7 +1847,14 @@ mod tests {
         // not "even older"); current comes from disk.
         assert_eq!(files[0].current, "first line\nsecond line\n");
         let diff = &files[0].diff;
-        assert!(diff.starts_with(&format!("--- {}\n+++ {}\n", abs("alpha.txt"), abs("alpha.txt"))), "{diff}");
+        assert!(
+            diff.starts_with(&format!(
+                "--- {}\n+++ {}\n",
+                abs("alpha.txt"),
+                abs("alpha.txt")
+            )),
+            "{diff}"
+        );
         assert!(diff.contains("@@"));
         assert!(diff.contains("-CHANGED"));
         assert!(diff.contains("+second line"));
@@ -1581,7 +1899,11 @@ mod tests {
         let journal_path = dir.join("patches.jsonl");
         std::fs::write(&journal_path, journal_line("a", None, false)).unwrap();
         assert_eq!(journal_line_count(&journal_path), 1);
-        std::fs::write(&journal_path, journal_line("a", None, false) + "\n" + &journal_line("b", None, false)).unwrap();
+        std::fs::write(
+            &journal_path,
+            journal_line("a", None, false) + "\n" + &journal_line("b", None, false),
+        )
+        .unwrap();
         let growth = journal_growth_error(&journal_path, 1);
         assert!(growth.contains("changed during review"), "{growth}");
         assert!(growth.contains("1 -> 2"), "{growth}");
@@ -1601,5 +1923,4 @@ mod tests {
         assert_eq!(lines, 0);
         std::fs::remove_dir_all(&dir).ok();
     }
-
 }

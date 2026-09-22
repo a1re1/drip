@@ -88,7 +88,8 @@ pub fn strip_html(html: &str) -> String {
 
 /// Regex::replace_all with a literal replacement (no `$group` expansion).
 fn replace_all(text: &str, re: &regex::Regex, replacement: &str) -> String {
-    re.replace_all(text, regex::NoExpand(replacement)).into_owned()
+    re.replace_all(text, regex::NoExpand(replacement))
+        .into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -246,11 +247,15 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<FetchToolPrepared> {
             let parsed = match raw_max.as_f64() {
                 Some(f) => f,
                 None => {
-                    return Err(anyhow::anyhow!("Argument \"maxBytes\" must be a positive number."));
+                    return Err(anyhow::anyhow!(
+                        "Argument \"maxBytes\" must be a positive number."
+                    ));
                 }
             };
             if !parsed.is_finite() || parsed <= 0.0 {
-                return Err(anyhow::anyhow!("Argument \"maxBytes\" must be a positive number."));
+                return Err(anyhow::anyhow!(
+                    "Argument \"maxBytes\" must be a positive number."
+                ));
             }
             max_bytes = (parsed.round() as i64).min(MAX_MAX_BYTES);
         }
@@ -262,10 +267,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<FetchToolPrepared> {
     };
 
     Ok(FetchToolPrepared {
-        input: FetchToolInput {
-            max_bytes,
-            url,
-        },
+        input: FetchToolInput { max_bytes, url },
         display_input,
     })
 }
@@ -295,7 +297,12 @@ pub fn execute_prepared(prepared: &FetchToolPrepared) -> Result<FetchToolExecuti
         .unwrap_or("application/octet-stream")
         .to_string();
     // Normalize: strip parameters for classification
-    let base_content_type = raw_content_type.split(';').next().unwrap_or("").trim().to_string();
+    let base_content_type = raw_content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     // Refuse binary content types
     if is_binary_content_type(&base_content_type) {
@@ -315,7 +322,10 @@ pub fn execute_prepared(prepared: &FetchToolPrepared) -> Result<FetchToolExecuti
         },
         capped_max,
     );
-    let header_line = format!("FETCH {status} {raw_content_type} {final_url} ({} chars)", body.chars().count());
+    let header_line = format!(
+        "FETCH {status} {raw_content_type} {final_url} ({} chars)",
+        body.chars().count()
+    );
 
     Ok(FetchToolExecution {
         data: FetchToolResult {
@@ -357,7 +367,9 @@ pub fn complete(prepared: &FetchToolPrepared, result: &FetchToolResult) -> super
 /// display string — or None when the arguments do not parse (the execute path
 /// reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
@@ -439,10 +451,7 @@ mod tests {
         let error = prepare(&json!({ "url": "https://example.com/" }), &stage_ctx(false))
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("network access is disabled"),
-            "{error}"
-        );
+        assert!(error.contains("network access is disabled"), "{error}");
     }
 
     // The refusal must name the env var and the CLI flag that enables network.

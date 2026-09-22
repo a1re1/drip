@@ -116,7 +116,10 @@ impl RequestProgress {
         }
     }
     pub fn first_token_seen(&self) -> bool {
-        self.first_token.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.first_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
     /// Milliseconds from the request start to the first token, once seen.
     pub fn first_token_ms(&self) -> Option<i64> {
@@ -125,7 +128,10 @@ impl RequestProgress {
         Some(first.duration_since(started).as_millis() as i64)
     }
     pub fn since_last_byte(&self) -> Option<Duration> {
-        self.last_byte.lock().unwrap_or_else(|e| e.into_inner()).map(|at| at.elapsed())
+        self.last_byte
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(|at| at.elapsed())
     }
 }
 
@@ -134,7 +140,10 @@ pub fn with_stream_fields(request_body: &Value) -> String {
     let mut body = request_body.clone();
     if let Some(object) = body.as_object_mut() {
         object.insert("stream".to_string(), Value::Bool(true));
-        object.insert("stream_options".to_string(), serde_json::json!({ "include_usage": true }));
+        object.insert(
+            "stream_options".to_string(),
+            serde_json::json!({ "include_usage": true }),
+        );
     }
     body.to_string()
 }
@@ -150,13 +159,19 @@ fn is_event_stream(headers: &reqwest::header::HeaderMap) -> bool {
 /// call, or reasoning) or an error — not for a role-only first delta, a
 /// keepalive comment, or `[DONE]`.
 pub fn sse_line_carries_a_token(line: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(line) else { return false };
-    let Some(data) = text.trim().strip_prefix("data:") else { return false };
+    let Ok(text) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let Some(data) = text.trim().strip_prefix("data:") else {
+        return false;
+    };
     let data = data.trim();
     if data == "[DONE]" || data.is_empty() {
         return false;
     }
-    let Ok(value) = serde_json::from_str::<Value>(data) else { return false };
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return false;
+    };
     if value.get("error").is_some_and(|error| !error.is_null()) {
         return true;
     }
@@ -172,14 +187,20 @@ pub fn sse_line_carries_a_token(line: &[u8]) -> bool {
                     Some(Value::Null) | None => false,
                     Some(_) => true,
                 };
-                non_empty("content") || non_empty("tool_calls") || non_empty("reasoning") || non_empty("reasoning_content")
+                non_empty("content")
+                    || non_empty("tool_calls")
+                    || non_empty("reasoning")
+                    || non_empty("reasoning_content")
             })
         })
 }
 
 /// Reads a streamed (SSE) response to its end, marking progress as bytes
 /// arrive and the first token as soon as a data line carries one.
-async fn read_event_stream(mut response: reqwest::Response, progress: &RequestProgress) -> Result<Vec<u8>, reqwest::Error> {
+async fn read_event_stream(
+    mut response: reqwest::Response,
+    progress: &RequestProgress,
+) -> Result<Vec<u8>, reqwest::Error> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut scanned = 0usize;
     while let Some(chunk) = response.chunk().await? {
@@ -215,12 +236,16 @@ pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
     let mut usage: Option<Value> = None;
     let mut tool_calls: Vec<(u64, serde_json::Map<String, Value>)> = Vec::new();
     for line in text.lines() {
-        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
         if data == "[DONE]" {
             break;
         }
-        let Ok(value) = serde_json::from_str::<Value>(data) else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             return serde_json::to_vec(&serde_json::json!({ "error": error })).unwrap_or_default();
         }
@@ -233,17 +258,33 @@ pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
         if let Some(chunk_usage) = value.get("usage").filter(|v| v.is_object()) {
             usage = Some(chunk_usage.clone());
         }
-        for choice in value.get("choices").and_then(Value::as_array).into_iter().flatten() {
+        for choice in value
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(reason) = choice.get("finish_reason").filter(|v| !v.is_null()) {
                 finish_reason = Some(reason.clone());
             }
-            let Some(delta) = choice.get("delta") else { continue };
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
             if let Some(Value::String(piece)) = delta.get("content") {
                 content_seen = true;
                 content.push_str(piece);
             }
-            for (position, call) in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten().enumerate() {
-                let index = call.get("index").and_then(Value::as_u64).unwrap_or(position as u64);
+            for (position, call) in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let index = call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(position as u64);
                 let entry = match tool_calls.iter_mut().find(|(i, _)| *i == index) {
                     Some((_, entry)) => entry,
                     None => {
@@ -260,13 +301,19 @@ pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
                     entry.insert("type".to_string(), Value::String(kind.clone()));
                 }
                 if let Some(function) = call.get("function") {
-                    let existing = entry.entry("function").or_insert_with(|| serde_json::json!({ "name": "", "arguments": "" }));
-                    if let (Some(Value::String(name)), Some(slot)) = (function.get("name"), existing.get_mut("name")) {
+                    let existing = entry
+                        .entry("function")
+                        .or_insert_with(|| serde_json::json!({ "name": "", "arguments": "" }));
+                    if let (Some(Value::String(name)), Some(slot)) =
+                        (function.get("name"), existing.get_mut("name"))
+                    {
                         if !name.is_empty() && slot.as_str().unwrap_or("").is_empty() {
                             *slot = Value::String(name.clone());
                         }
                     }
-                    if let (Some(Value::String(fragment)), Some(Value::String(arguments))) = (function.get("arguments"), existing.get_mut("arguments")) {
+                    if let (Some(Value::String(fragment)), Some(Value::String(arguments))) =
+                        (function.get("arguments"), existing.get_mut("arguments"))
+                    {
                         arguments.push_str(fragment);
                     }
                 }
@@ -276,7 +323,14 @@ pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
     tool_calls.sort_by_key(|(index, _)| *index);
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), Value::String("assistant".to_string()));
-    message.insert("content".to_string(), if content_seen { Value::String(content) } else { Value::Null });
+    message.insert(
+        "content".to_string(),
+        if content_seen {
+            Value::String(content)
+        } else {
+            Value::Null
+        },
+    );
     if !tool_calls.is_empty() {
         message.insert(
             "tool_calls".to_string(),
@@ -284,7 +338,9 @@ pub fn assemble_streamed_response(sse: &[u8]) -> Vec<u8> {
                 tool_calls
                     .into_iter()
                     .map(|(_, mut entry)| {
-                        entry.entry("type").or_insert_with(|| Value::String("function".to_string()));
+                        entry
+                            .entry("type")
+                            .or_insert_with(|| Value::String("function".to_string()));
                         Value::Object(entry)
                     })
                     .collect(),
@@ -341,7 +397,9 @@ pub fn save_latency_store(path: &std::path::Path, samples: &LatencySamples) {
         .iter()
         .map(|(model, recent)| (model.as_str(), recent.iter().copied().collect()))
         .collect();
-    let Ok(text) = serde_json::to_string(&raw) else { return };
+    let Ok(text) = serde_json::to_string(&raw) else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -365,7 +423,10 @@ pub fn first_token_hedge_ms(samples: &[u64], wall_delay_ms: u64) -> u64 {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
-    median.saturating_mul(HEDGE_MULTIPLIER).max(FIRST_TOKEN_HEDGE_MS).min(wall_delay_ms)
+    median
+        .saturating_mul(HEDGE_MULTIPLIER)
+        .max(FIRST_TOKEN_HEDGE_MS)
+        .min(wall_delay_ms)
 }
 
 pub fn hedge_delay_ms(samples: &[u64], floor_ms: u64, timeout_ms: u64) -> Option<u64> {
@@ -375,7 +436,12 @@ pub fn hedge_delay_ms(samples: &[u64], floor_ms: u64, timeout_ms: u64) -> Option
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
-    Some(median.saturating_mul(HEDGE_MULTIPLIER).max(floor_ms).min(timeout_ms / 2))
+    Some(
+        median
+            .saturating_mul(HEDGE_MULTIPLIER)
+            .max(floor_ms)
+            .min(timeout_ms / 2),
+    )
 }
 
 /// The first-attempt bound for a model with `samples` recent successful
@@ -449,27 +515,59 @@ pub struct OpenAICompatibleResponseError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenAICompatibleResponseUsage {
     /// Anthropic native: tokens written to the prompt cache this call (billed at the cache-write premium).
-    #[serde(default, rename = "cache_creation_input_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "cache_creation_input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_creation_input_tokens: Option<i64>,
     /// Anthropic native: tokens served from the prompt cache (billed at ~10% of the input rate).
-    #[serde(default, rename = "cache_read_input_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "cache_read_input_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache_read_input_tokens: Option<i64>,
-    #[serde(default, rename = "completion_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "completion_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub completion_tokens: Option<i64>,
-    #[serde(default, rename = "completion_tokens_details", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "completion_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub completion_tokens_details: Option<OpenAICompatibleResponseCompletionTokensDetails>,
-    #[serde(default, rename = "prompt_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "prompt_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prompt_tokens: Option<i64>,
     /// OpenAI-compatible providers with automatic caching (OpenAI, Cerebras, xAI, Gemini) report cache hits here.
-    #[serde(default, rename = "prompt_tokens_details", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "prompt_tokens_details",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub prompt_tokens_details: Option<OpenAICompatibleResponsePromptTokensDetails>,
-    #[serde(default, rename = "total_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "total_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub total_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenAICompatibleResponsePromptTokensDetails {
-    #[serde(default, rename = "cached_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "cached_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cached_tokens: Option<i64>,
 }
 
@@ -478,18 +576,30 @@ pub struct OpenAICompatibleResponsePromptTokensDetails {
 /// 8,000 tokens that ends in one small GREP call is thinking, not code.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenAICompatibleResponseCompletionTokensDetails {
-    #[serde(default, rename = "reasoning_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "reasoning_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reasoning_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenAICompatibleResponseMessage {
     /// Native Anthropic responses only: raw content blocks for verbatim replay (thinking blocks must survive tool round-trips).
-    #[serde(default, rename = "anthropicContent", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "anthropicContent",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub anthropic_content: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
-    #[serde(default, rename = "tool_calls", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "tool_calls",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tool_calls: Option<Vec<OpenAICompatibleToolCall>>,
 }
 
@@ -519,21 +629,21 @@ impl From<crate::harness::anthropic::AnthropicTranslatedResponse> for OpenAIComp
                     .into_iter()
                     .map(|choice| OpenAICompatibleResponseChoice {
                         finish_reason: choice.finish_reason,
-                        message: choice.message.map(|message| OpenAICompatibleResponseMessage {
-                            anthropic_content: message.anthropic_content,
-                            content: message.content,
-                            tool_calls: message.tool_calls,
-                        }),
+                        message: choice
+                            .message
+                            .map(|message| OpenAICompatibleResponseMessage {
+                                anthropic_content: message.anthropic_content,
+                                content: message.content,
+                                tool_calls: message.tool_calls,
+                            }),
                     })
                     .collect()
             }),
-            error: translated
-                .error
-                .map(|error| OpenAICompatibleResponseError {
-                    code: error.code,
-                    message: error.message,
-                    error_type: error.error_type,
-                }),
+            error: translated.error.map(|error| OpenAICompatibleResponseError {
+                code: error.code,
+                message: error.message,
+                error_type: error.error_type,
+            }),
             usage: translated.usage.map(|usage| OpenAICompatibleResponseUsage {
                 completion_tokens_details: None,
                 cache_creation_input_tokens: Some(usage.cache_creation_input_tokens as i64),
@@ -557,7 +667,8 @@ pub struct ModelRoute {
     pub provider: Option<String>,
     pub reasoning_effort: Option<String>,
     /// Re-mints this route's headers before each request when the credential is dynamic (a "cmd:" token).
-    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
+    pub refresh_headers:
+        Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     pub url: String,
 }
 
@@ -565,12 +676,24 @@ impl std::fmt::Debug for ModelRoute {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ModelRoute")
-            .field("fallback_route", &self.fallback_route.as_ref().map(|route| route.model.clone()))
-            .field("headers", &self.headers.as_ref().map(|headers| headers.len()))
+            .field(
+                "fallback_route",
+                &self
+                    .fallback_route
+                    .as_ref()
+                    .map(|route| route.model.clone()),
+            )
+            .field(
+                "headers",
+                &self.headers.as_ref().map(|headers| headers.len()),
+            )
             .field("model", &self.model)
             .field("provider", &self.provider)
             .field("reasoning_effort", &self.reasoning_effort)
-            .field("refresh_headers", &self.refresh_headers.as_ref().map(|_| "<fn>"))
+            .field(
+                "refresh_headers",
+                &self.refresh_headers.as_ref().map(|_| "<fn>"),
+            )
             .field("url", &self.url)
             .finish()
     }
@@ -620,13 +743,18 @@ pub fn is_non_retryable_quota_error(error: Option<&OpenAICompatibleResponseError
 fn config_error_regex() -> &'static regex::Regex {
     static REGEX: OnceLock<regex::Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        regex::Regex::new(r"(?i)failed to parse url|invalid url|invalid header|unsupported protocol").unwrap()
+        regex::Regex::new(
+            r"(?i)failed to parse url|invalid url|invalid header|unsupported protocol",
+        )
+        .unwrap()
     })
 }
 
 fn quota_message_regex() -> &'static regex::Regex {
     static REGEX: OnceLock<regex::Regex> = OnceLock::new();
-    REGEX.get_or_init(|| regex::Regex::new(r"(?i)insufficient[_ ]quota|credit balance|billing").unwrap())
+    REGEX.get_or_init(|| {
+        regex::Regex::new(r"(?i)insufficient[_ ]quota|credit balance|billing").unwrap()
+    })
 }
 
 fn network_error_regex() -> &'static regex::Regex {
@@ -653,9 +781,16 @@ impl ModelCaller {
     /// (possibly defaulted) deps value, and once a provider has rejected the
     /// default this run every defaulted call omits the field.
     fn effective_reasoning_effort(&self, route: Option<&ModelRoute>) -> (Option<String>, bool) {
-        let disabled = self.reasoning_default_disabled.load(std::sync::atomic::Ordering::Relaxed);
+        let disabled = self
+            .reasoning_default_disabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         match route {
-            Some(route) => match route.reasoning_effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()) {
+            Some(route) => match route
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+            {
                 Some(effort) => (Some(effort.to_string()), false),
                 None if disabled => (None, true),
                 None => (Some(BASE_MODEL_DEFAULT_REASONING_EFFORT.to_string()), true),
@@ -664,7 +799,10 @@ impl ModelCaller {
                 if self.deps.reasoning_effort_defaulted && disabled {
                     (None, true)
                 } else {
-                    (self.deps.reasoning_effort.clone(), self.deps.reasoning_effort_defaulted)
+                    (
+                        self.deps.reasoning_effort.clone(),
+                        self.deps.reasoning_effort_defaulted,
+                    )
                 }
             }
         }
@@ -736,8 +874,7 @@ impl AbortSignal {
     }
 
     pub fn abort(&self) {
-        self.0
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn is_aborted(&self) -> bool {
@@ -806,7 +943,8 @@ pub struct ModelCallerDeps {
     /// Provider of the base model route; "claude" switches to the native Anthropic API (prompt caching).
     pub provider: Option<String>,
     /// Re-mints the base route's headers before each request when the credential is dynamic (a "cmd:" token).
-    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
+    pub refresh_headers:
+        Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     /// Stable key sent to providers that support prompt-cache routing hints (OpenAI: prompt_cache_key body field; xAI: x-grok-conv-id header).
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -841,10 +979,12 @@ pub struct ModelCaller {
     latency_store: Option<std::path::PathBuf>,
     sleep: SleepFn,
     /// Recent successful latencies per model, for the stall-aware first-attempt bound.
-    latency_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
+    latency_samples:
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
     /// Recent first-token times per model from streamed replies (this run
     /// only), the basis of the streaming hedge point.
-    first_token_samples: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
+    first_token_samples:
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u64>>>,
     /// Codex lane for tool-bearing calls (the run's main conversation).
     codex_tool_lane: tokio::sync::Mutex<Option<CodexBridge>>,
     /// Codex lane for include_tools=false calls (run summaries), so they never
@@ -871,7 +1011,10 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
     };
     let hedge_floor_ms = deps.hedge_floor_ms.unwrap_or(HEDGE_FLOOR_MS);
     let latency_store = deps.latency_store.clone();
-    let seeded = latency_store.as_deref().map(load_latency_store).unwrap_or_default();
+    let seeded = latency_store
+        .as_deref()
+        .map(load_latency_store)
+        .unwrap_or_default();
     if let Some(path) = latency_store.as_deref().filter(|_| !seeded.is_empty()) {
         (deps.emit)(HarnessEvent {
             data: None,
@@ -904,8 +1047,8 @@ pub fn create_model_caller(deps: ModelCallerDeps) -> ModelCaller {
         first_token_samples: std::sync::Mutex::new(std::collections::HashMap::new()),
         codex_tool_lane: tokio::sync::Mutex::new(None),
         codex_summary_lane: tokio::sync::Mutex::new(None),
-            reasoning_default_disabled: std::sync::atomic::AtomicBool::new(false),
-            streaming_disabled: std::sync::atomic::AtomicBool::new(false),
+        reasoning_default_disabled: std::sync::atomic::AtomicBool::new(false),
+        streaming_disabled: std::sync::atomic::AtomicBool::new(false),
     }
 }
 
@@ -992,9 +1135,7 @@ async fn bounded_codex_wait<T>(
     };
 
     result.map_err(|_| {
-        ModelCallError::Message(format!(
-            "codex bridge wait timed out after {timeout_ms}ms"
-        ))
+        ModelCallError::Message(format!("codex bridge wait timed out after {timeout_ms}ms"))
     })
 }
 
@@ -1029,22 +1170,37 @@ impl ModelCaller {
         if attempt > 1 {
             return self.request_timeout_ms;
         }
-        let samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let samples = self
+            .latency_samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match samples.get(model) {
-            Some(recent) => stall_timeout_ms(&recent.iter().copied().collect::<Vec<_>>(), self.request_timeout_ms),
+            Some(recent) => stall_timeout_ms(
+                &recent.iter().copied().collect::<Vec<_>>(),
+                self.request_timeout_ms,
+            ),
             None => self.request_timeout_ms,
         }
     }
 
     /// The hedge point for this call's first attempt, if the model has enough history.
     fn first_token_delay_for(&self, model: &str, wall_delay_ms: u64) -> u64 {
-        let samples = self.first_token_samples.lock().unwrap_or_else(|e| e.into_inner());
-        let recent: Vec<u64> = samples.get(model).map(|r| r.iter().copied().collect()).unwrap_or_default();
+        let samples = self
+            .first_token_samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let recent: Vec<u64> = samples
+            .get(model)
+            .map(|r| r.iter().copied().collect())
+            .unwrap_or_default();
         first_token_hedge_ms(&recent, wall_delay_ms)
     }
 
     fn record_first_token(&self, model: &str, first_token_ms: i64) {
-        let mut samples = self.first_token_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let mut samples = self
+            .first_token_samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let recent = samples.entry(model.to_string()).or_default();
         recent.push_back(first_token_ms.max(0) as u64);
         while recent.len() > STALL_LATENCY_SAMPLES {
@@ -1056,8 +1212,14 @@ impl ModelCaller {
         if attempt > 1 {
             return None;
         }
-        let samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
-        let recent: Vec<u64> = samples.get(model).map(|r| r.iter().copied().collect()).unwrap_or_default();
+        let samples = self
+            .latency_samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let recent: Vec<u64> = samples
+            .get(model)
+            .map(|r| r.iter().copied().collect())
+            .unwrap_or_default();
         hedge_delay_ms(&recent, self.hedge_floor_ms, timeout_ms)
     }
 
@@ -1095,11 +1257,20 @@ impl ModelCaller {
                 }
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 if primary_progress.first_token_seen() {
-                    if let Some(quiet) = primary_progress.since_last_byte().filter(|quiet| quiet.as_millis() as u64 >= STREAM_STALL_HEDGE_MS) {
-                        break format!("has streamed nothing for {:.1}s after its first token", quiet.as_secs_f64());
+                    if let Some(quiet) = primary_progress
+                        .since_last_byte()
+                        .filter(|quiet| quiet.as_millis() as u64 >= STREAM_STALL_HEDGE_MS)
+                    {
+                        break format!(
+                            "has streamed nothing for {:.1}s after its first token",
+                            quiet.as_secs_f64()
+                        );
                     }
                 } else if elapsed_ms >= first_token_delay {
-                    break format!("has sent no first token after {:.1}s", elapsed_ms as f64 / 1000.0);
+                    break format!(
+                        "has sent no first token after {:.1}s",
+                        elapsed_ms as f64 / 1000.0
+                    );
                 }
             }
         } else {
@@ -1109,7 +1280,11 @@ impl ModelCaller {
                 outcome = &mut primary => return (outcome, false, None),
                 () = &mut delay => {}
             }
-            format!("has not answered after {:.1}s ({}× its typical latency)", delay_ms as f64 / 1000.0, HEDGE_MULTIPLIER)
+            format!(
+                "has not answered after {:.1}s ({}× its typical latency)",
+                delay_ms as f64 / 1000.0,
+                HEDGE_MULTIPLIER
+            )
         };
         self.emit(
             HarnessEventType::HarnessOp,
@@ -1126,15 +1301,25 @@ impl ModelCaller {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.emit(
             HarnessEventType::HarnessOp,
-            format!("hedge resolved: the {winner} {} after {elapsed_ms}ms", outcome.describe()),
+            format!(
+                "hedge resolved: the {winner} {} after {elapsed_ms}ms",
+                outcome.describe()
+            ),
             None,
         );
-        let first_token_ms = if hedge_won { hedge_progress.first_token_ms() } else { primary_progress.first_token_ms() };
+        let first_token_ms = if hedge_won {
+            hedge_progress.first_token_ms()
+        } else {
+            primary_progress.first_token_ms()
+        };
         (outcome, hedge_won, first_token_ms)
     }
 
     fn record_latency(&self, model: &str, latency_ms: i64) {
-        let mut samples = self.latency_samples.lock().unwrap_or_else(|e| e.into_inner());
+        let mut samples = self
+            .latency_samples
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let recent = samples.entry(model.to_string()).or_default();
         recent.push_back(latency_ms.max(0) as u64);
         while recent.len() > STALL_LATENCY_SAMPLES {
@@ -1165,7 +1350,10 @@ impl ModelCaller {
         // the run's tool-calling model; text-only calls (run summaries) use the
         // general model.
         let primary_route = if include_tools {
-            call_options.route.clone().or_else(|| self.deps.tool_route.clone())
+            call_options
+                .route
+                .clone()
+                .or_else(|| self.deps.tool_route.clone())
         } else {
             None
         };
@@ -1240,7 +1428,10 @@ impl ModelCaller {
                     failures.push(message.clone());
 
                     let Some(next) = next_route else {
-                        if route.is_some() && !base_fallback_used && is_codex_spawn_failure(&message) {
+                        if route.is_some()
+                            && !base_fallback_used
+                            && is_codex_spawn_failure(&message)
+                        {
                             self.emit(
                                 HarnessEventType::RunWarning,
                                 format!(
@@ -1322,7 +1513,11 @@ impl ModelCaller {
     fn codex_bridge_config(&self, model: &str) -> BridgeConfig {
         BridgeConfig {
             cwd: self.deps.cwd.as_deref().map(std::path::PathBuf::from),
-            executable: self.deps.codex_executable.clone().unwrap_or_else(|| "codex".to_string()),
+            executable: self
+                .deps
+                .codex_executable
+                .clone()
+                .unwrap_or_else(|| "codex".to_string()),
             model: Some(model.to_string()),
             request_timeout_ms: self.request_timeout_ms,
             ..BridgeConfig::default()
@@ -1353,14 +1548,15 @@ impl ModelCaller {
             &self.codex_summary_lane
         };
         let deadline = tokio::time::Instant::now() + Duration::from_millis(self.request_timeout_ms);
-        let remaining_ms = || deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() as u64;
+        let remaining_ms = || {
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64
+        };
         // Summary calls carry no tools; tool calls get the call's filtered
         // dynamic tool set.
-        let tools_for_lane: &[OpenAICompatibleRequestTool] = if include_tools {
-            request_tools
-        } else {
-            &[]
-        };
+        let tools_for_lane: &[OpenAICompatibleRequestTool] =
+            if include_tools { request_tools } else { &[] };
 
         if self
             .deps
@@ -1376,12 +1572,8 @@ impl ModelCaller {
         // turn at a time. The lock wait and the spawn are both bounded by the
         // request deadline and the abort signal — an uninterruptible wait here
         // would wedge the caller past a stop or a stalled handshake.
-        let mut lane_guard = bounded_codex_wait(
-            lane.lock(),
-            remaining_ms(),
-            self.deps.signal.as_ref(),
-        )
-        .await?;
+        let mut lane_guard =
+            bounded_codex_wait(lane.lock(), remaining_ms(), self.deps.signal.as_ref()).await?;
 
         let reuse = lane_guard
             .as_ref()
@@ -1406,9 +1598,7 @@ impl ModelCaller {
             *lane_guard = Some(bridge);
         }
 
-        let bridge = lane_guard
-            .as_mut()
-            .expect("codex bridge is spawned above");
+        let bridge = lane_guard.as_mut().expect("codex bridge is spawned above");
         let outcome = bounded_codex_wait(
             bridge.call(
                 messages,
@@ -1418,7 +1608,9 @@ impl ModelCaller {
             ),
             remaining_ms(),
             self.deps.signal.as_ref(),
-        ).await.and_then(|outcome| outcome);
+        )
+        .await
+        .and_then(|outcome| outcome);
 
         match outcome {
             Ok(response) => {
@@ -1458,7 +1650,6 @@ impl ModelCaller {
             }
         }
     }
-
 
     #[allow(clippy::too_many_arguments)]
     async fn attempt_route(
@@ -1502,7 +1693,8 @@ impl ModelCaller {
         // HTTP credentials are resolved only after local-provider dispatch.
         let route_headers: Option<Vec<(String, String)>> = match route {
             Some(route) => {
-                let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+                let mut headers =
+                    vec![("content-type".to_string(), "application/json".to_string())];
                 let route_headers = match &route.refresh_headers {
                     Some(refresh_headers) => refresh_headers().map_err(ModelCallError::Message)?,
                     None => route.headers.clone().unwrap_or_default(),
@@ -1527,40 +1719,46 @@ impl ModelCaller {
             .unwrap_or_else(|| self.deps.model.clone());
         let (reasoning_effort, effort_defaulted) = self.effective_reasoning_effort(route);
         let request_body = if anthropic_native {
-            serde_json::to_value(build_anthropic_request_payload(BuildAnthropicRequestPayloadArgs {
-                // One-shot calls (run summaries) never re-read their prefix, so a
-                // cache write would be a pure premium.
-                cache: Some(include_tools),
-                max_tokens: call_options.max_tokens,
-                messages: messages.to_vec(),
-                model: model.clone(),
-                tools: if include_tools {
-                    Some(request_tools.to_vec())
-                } else {
-                    None
+            serde_json::to_value(build_anthropic_request_payload(
+                BuildAnthropicRequestPayloadArgs {
+                    // One-shot calls (run summaries) never re-read their prefix, so a
+                    // cache write would be a pure premium.
+                    cache: Some(include_tools),
+                    max_tokens: call_options.max_tokens,
+                    messages: messages.to_vec(),
+                    model: model.clone(),
+                    tools: if include_tools {
+                        Some(request_tools.to_vec())
+                    } else {
+                        None
+                    },
                 },
-            }))
+            ))
             .map_err(|error| {
-                ModelCallError::Message(format!("failed to serialize the Anthropic request payload: {error}"))
+                ModelCallError::Message(format!(
+                    "failed to serialize the Anthropic request payload: {error}"
+                ))
             })?
         } else {
-            serde_json::to_value(build_transport_request_payload(BuildTransportRequestPayloadArgs {
-                messages: messages.to_vec(),
-                model: model.clone(),
-                prompt_cache_key: if provider.as_deref() == Some("openai") {
-                    self.deps.prompt_cache_key.clone()
-                } else {
-                    None
+            serde_json::to_value(build_transport_request_payload(
+                BuildTransportRequestPayloadArgs {
+                    messages: messages.to_vec(),
+                    model: model.clone(),
+                    prompt_cache_key: if provider.as_deref() == Some("openai") {
+                        self.deps.prompt_cache_key.clone()
+                    } else {
+                        None
+                    },
+                    reasoning_effort,
+                    tools: if include_tools {
+                        Some(request_tools.to_vec())
+                    } else {
+                        None
+                    },
+                    max_tokens: call_options.max_tokens,
+                    tool_choice: call_options.tool_choice.clone(),
                 },
-                reasoning_effort,
-                tools: if include_tools {
-                    Some(request_tools.to_vec())
-                } else {
-                    None
-                },
-                max_tokens: call_options.max_tokens,
-                tool_choice: call_options.tool_choice.clone(),
-            }))
+            ))
             .map_err(|error| {
                 ModelCallError::Message(format!("failed to serialize the request payload: {error}"))
             })?
@@ -1668,8 +1866,15 @@ impl ModelCaller {
             // OpenAI-compatible providers get a streaming request: the
             // hedge then watches the first token instead of the clock, and
             // the chunks are folded back into one response body below.
-            let streaming = !anthropic_native && !self.streaming_disabled.load(std::sync::atomic::Ordering::Relaxed);
-            let wire_body = if streaming { with_stream_fields(&request_body) } else { body.clone() };
+            let streaming = !anthropic_native
+                && !self
+                    .streaming_disabled
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let wire_body = if streaming {
+                with_stream_fields(&request_body)
+            } else {
+                body.clone()
+            };
             let build_request = || {
                 let client = self.http_client.clone();
                 let url = url.clone();
@@ -1680,11 +1885,18 @@ impl ModelCaller {
 
                 (
                     async move {
-                        let response = client.post(&url).headers(header_map).body(body).send().await?;
+                        let response = client
+                            .post(&url)
+                            .headers(header_map)
+                            .body(body)
+                            .send()
+                            .await?;
                         let status = response.status().as_u16();
                         let headers = response.headers().clone();
                         let body = if streaming && is_event_stream(&headers) {
-                            read_event_stream(response, &tracker).await.map(|sse| assemble_streamed_response(&sse))
+                            read_event_stream(response, &tracker)
+                                .await
+                                .map(|sse| assemble_streamed_response(&sse))
                         } else {
                             response.bytes().await.map(|bytes| bytes.to_vec())
                         };
@@ -1694,21 +1906,31 @@ impl ModelCaller {
                     progress,
                 )
             };
-            let (outcome, call_hedged, call_hedge_won, call_first_token_ms) =
-                match self.hedge_delay_for(&model, attempt, attempt_timeout_ms) {
-                    Some(delay_ms) => {
-                        let first_token_delay = streaming.then(|| self.first_token_delay_for(&model, delay_ms));
-                        let (outcome, hedge_won, first_token_ms) = self
-                            .run_hedged_request(&build_request, delay_ms, attempt_timeout_ms, &model, first_token_delay)
+            let (outcome, call_hedged, call_hedge_won, call_first_token_ms) = match self
+                .hedge_delay_for(&model, attempt, attempt_timeout_ms)
+            {
+                Some(delay_ms) => {
+                    let first_token_delay =
+                        streaming.then(|| self.first_token_delay_for(&model, delay_ms));
+                    let (outcome, hedge_won, first_token_ms) = self
+                        .run_hedged_request(
+                            &build_request,
+                            delay_ms,
+                            attempt_timeout_ms,
+                            &model,
+                            first_token_delay,
+                        )
+                        .await;
+                    (outcome, true, hedge_won, first_token_ms)
+                }
+                None => {
+                    let (future, progress) = build_request();
+                    let outcome =
+                        run_bounded_request(future, attempt_timeout_ms, self.deps.signal.as_ref())
                             .await;
-                        (outcome, true, hedge_won, first_token_ms)
-                    }
-                    None => {
-                        let (future, progress) = build_request();
-                        let outcome = run_bounded_request(future, attempt_timeout_ms, self.deps.signal.as_ref()).await;
-                        (outcome, false, false, progress.first_token_ms())
-                    }
-                };
+                    (outcome, false, false, progress.first_token_ms())
+                }
+            };
 
             match outcome {
                 RequestOutcome::Stopped => {
@@ -1731,7 +1953,8 @@ impl ModelCaller {
                         return Err(ModelCallError::Message(message));
                     }
 
-                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at).await?;
+                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at)
+                        .await?;
                     attempt += 1;
                     continue;
                 }
@@ -1747,7 +1970,8 @@ impl ModelCaller {
                     } else {
                         request_timeout_message(attempt_timeout_ms)
                     };
-                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at).await?;
+                    wait_out_unreachable(self, attempt, max_attempts, &message, call_started_at)
+                        .await?;
                     attempt += 1;
                     continue;
                 }
@@ -1829,7 +2053,8 @@ impl ModelCaller {
                             }),
                         );
                         (self.deps.on_retry_wait)(wait_seconds);
-                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone()).await;
+                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone())
+                            .await;
 
                         if self
                             .deps
@@ -1873,7 +2098,8 @@ impl ModelCaller {
                             }),
                         );
                         (self.deps.on_retry_wait)(wait_seconds);
-                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone()).await;
+                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone())
+                            .await;
 
                         if self
                             .deps
@@ -1882,7 +2108,8 @@ impl ModelCaller {
                             .is_some_and(|signal| signal.is_aborted())
                         {
                             return Err(ModelCallError::Message(
-                                "The run was stopped while waiting out an endpoint outage.".to_string(),
+                                "The run was stopped while waiting out an endpoint outage."
+                                    .to_string(),
                             ));
                         }
 
@@ -1899,7 +2126,9 @@ impl ModelCaller {
 
                         // Context-window overflows are recoverable by folding the loop's
                         // transcript; everything else stays fatal to the call.
-                        if (status == 400 || status == 413) && context_overflow_regex().is_match(&message) {
+                        if (status == 400 || status == 413)
+                            && context_overflow_regex().is_match(&message)
+                        {
                             return Err(ContextOverflowError(message).into());
                         }
 
@@ -1908,7 +2137,9 @@ impl ModelCaller {
                         if status == 400
                             && streaming
                             && streaming_rejection_regex().is_match(&message)
-                            && !self.streaming_disabled.swap(true, std::sync::atomic::Ordering::Relaxed)
+                            && !self
+                                .streaming_disabled
+                                .swap(true, std::sync::atomic::Ordering::Relaxed)
                         {
                             self.emit(
                                 HarnessEventType::RunWarning,
@@ -1924,7 +2155,9 @@ impl ModelCaller {
                         if status == 400
                             && effort_defaulted
                             && reasoning_rejection_regex().is_match(&message)
-                            && !self.reasoning_default_disabled.swap(true, std::sync::atomic::Ordering::Relaxed)
+                            && !self
+                                .reasoning_default_disabled
+                                .swap(true, std::sync::atomic::Ordering::Relaxed)
                         {
                             self.emit(
                                 HarnessEventType::RunWarning,
@@ -1939,7 +2172,9 @@ impl ModelCaller {
                         return Err(ModelCallError::Message(message));
                     }
 
-                    if let Some(message) = data.error.as_ref().and_then(|error| error.message.clone()) {
+                    if let Some(message) =
+                        data.error.as_ref().and_then(|error| error.message.clone())
+                    {
                         return Err(ModelCallError::Message(message));
                     }
 
@@ -1971,7 +2206,8 @@ impl ModelCaller {
                             }),
                         );
                         (self.deps.on_retry_wait)(wait_seconds);
-                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone()).await;
+                        (self.sleep)((wait_seconds * 1000.0) as u64, self.deps.signal.clone())
+                            .await;
 
                         if self
                             .deps
@@ -1980,7 +2216,8 @@ impl ModelCaller {
                             .is_some_and(|signal| signal.is_aborted())
                         {
                             return Err(ModelCallError::Message(
-                                "The run was stopped while waiting out an endpoint outage.".to_string(),
+                                "The run was stopped while waiting out an endpoint outage."
+                                    .to_string(),
                             ));
                         }
 
@@ -2031,13 +2268,30 @@ mod tests {
             refresh_headers: None,
             url: "http://127.0.0.1:1/v1/chat/completions".to_string(),
         };
-        assert_eq!(caller.effective_reasoning_effort(None), (Some("low".to_string()), true));
-        assert_eq!(caller.effective_reasoning_effort(Some(&route(None))), (Some("low".to_string()), true));
-        assert_eq!(caller.effective_reasoning_effort(Some(&route(Some("high")))), (Some("high".to_string()), false));
-        caller.reasoning_default_disabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            caller.effective_reasoning_effort(None),
+            (Some("low".to_string()), true)
+        );
+        assert_eq!(
+            caller.effective_reasoning_effort(Some(&route(None))),
+            (Some("low".to_string()), true)
+        );
+        assert_eq!(
+            caller.effective_reasoning_effort(Some(&route(Some("high")))),
+            (Some("high".to_string()), false)
+        );
+        caller
+            .reasoning_default_disabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(caller.effective_reasoning_effort(None), (None, true));
-        assert_eq!(caller.effective_reasoning_effort(Some(&route(None))), (None, true));
-        assert_eq!(caller.effective_reasoning_effort(Some(&route(Some("high")))), (Some("high".to_string()), false));
+        assert_eq!(
+            caller.effective_reasoning_effort(Some(&route(None))),
+            (None, true)
+        );
+        assert_eq!(
+            caller.effective_reasoning_effort(Some(&route(Some("high")))),
+            (Some("high".to_string()), false)
+        );
     }
 
     #[test]
@@ -2046,8 +2300,14 @@ mod tests {
             r#"{"prompt_tokens":10,"completion_tokens":9000,"completion_tokens_details":{"reasoning_tokens":8700},"total_tokens":9010}"#,
         )
         .unwrap();
-        assert_eq!(usage.completion_tokens_details.and_then(|d| d.reasoning_tokens), Some(8700));
-        let plain: OpenAICompatibleResponseUsage = serde_json::from_str(r#"{"prompt_tokens":1,"completion_tokens":1}"#).unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens),
+            Some(8700)
+        );
+        let plain: OpenAICompatibleResponseUsage =
+            serde_json::from_str(r#"{"prompt_tokens":1,"completion_tokens":1}"#).unwrap();
         assert!(plain.completion_tokens_details.is_none());
         assert!(reasoning_rejection_regex().is_match("Unsupported parameter: reasoning_effort"));
         assert!(reasoning_rejection_regex().is_match("unknown field `reasoning_effort`"));
@@ -2102,12 +2362,18 @@ mod tests {
         assert!(is_network_fetch_error(&MessageError(
             "Unable to connect. Is the computer able to access the url?".to_string()
         )));
-        assert!(is_network_fetch_error(&MessageError("Connection refused (os error 61)".to_string())));
-        assert!(is_network_fetch_error(&MessageError("fetch failed: connection reset".to_string())));
+        assert!(is_network_fetch_error(&MessageError(
+            "Connection refused (os error 61)".to_string()
+        )));
+        assert!(is_network_fetch_error(&MessageError(
+            "fetch failed: connection reset".to_string()
+        )));
         assert!(!is_network_fetch_error(&MessageError(
             "failed to parse url: relative URL without a base".to_string()
         )));
-        assert!(!is_network_fetch_error(&MessageError("invalid header value".to_string())));
+        assert!(!is_network_fetch_error(&MessageError(
+            "invalid header value".to_string()
+        )));
     }
 
     #[test]
@@ -2126,37 +2392,80 @@ mod tests {
             request_timeout_message(DEFAULT_REQUEST_TIMEOUT_MS),
             "request timed out after 240s with no response"
         );
-        assert_eq!(request_timeout_message(1500), "request timed out after 2s with no response");
+        assert_eq!(
+            request_timeout_message(1500),
+            "request timed out after 2s with no response"
+        );
     }
 
     #[test]
     fn stall_timeout_needs_samples_and_clamps_to_the_floor_and_base() {
-        assert_eq!(stall_timeout_ms(&[8_000, 9_000], 240_000), 240_000, "too few samples: full bound");
+        assert_eq!(
+            stall_timeout_ms(&[8_000, 9_000], 240_000),
+            240_000,
+            "too few samples: full bound"
+        );
         assert_eq!(
             stall_timeout_ms(&[8_000, 9_000, 7_000], 240_000),
             8_000 * STALL_TIMEOUT_MULTIPLIER,
             "median × multiplier"
         );
-        assert_eq!(stall_timeout_ms(&[1_000, 1_000, 1_000], 240_000), STALL_TIMEOUT_FLOOR_MS, "floor");
-        assert_eq!(stall_timeout_ms(&[60_000, 70_000, 80_000], 240_000), 240_000, "never above the base");
-        assert_eq!(stall_timeout_ms(&[1_000, 1_000, 1_000], 30_000), 30_000, "base below the floor wins");
+        assert_eq!(
+            stall_timeout_ms(&[1_000, 1_000, 1_000], 240_000),
+            STALL_TIMEOUT_FLOOR_MS,
+            "floor"
+        );
+        assert_eq!(
+            stall_timeout_ms(&[60_000, 70_000, 80_000], 240_000),
+            240_000,
+            "never above the base"
+        );
+        assert_eq!(
+            stall_timeout_ms(&[1_000, 1_000, 1_000], 30_000),
+            30_000,
+            "base below the floor wins"
+        );
     }
 
     #[test]
     fn first_attempt_uses_the_stall_bound_only_after_recorded_latencies() {
-        let caller = create_model_caller(test_deps("http://127.0.0.1:9/v1/chat/completions".to_string()));
-        assert_eq!(caller.attempt_timeout_ms("m", 1), DEFAULT_REQUEST_TIMEOUT_MS);
+        let caller = create_model_caller(test_deps(
+            "http://127.0.0.1:9/v1/chat/completions".to_string(),
+        ));
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 1),
+            DEFAULT_REQUEST_TIMEOUT_MS
+        );
         caller.record_latency("m", 6_000);
         caller.record_latency("m", 7_000);
-        assert_eq!(caller.attempt_timeout_ms("m", 1), DEFAULT_REQUEST_TIMEOUT_MS, "two samples are not enough");
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 1),
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            "two samples are not enough"
+        );
         caller.record_latency("m", 8_000);
-        assert_eq!(caller.attempt_timeout_ms("m", 1), 7_000 * STALL_TIMEOUT_MULTIPLIER);
-        assert_eq!(caller.attempt_timeout_ms("m", 2), DEFAULT_REQUEST_TIMEOUT_MS, "retries get the full bound");
-        assert_eq!(caller.attempt_timeout_ms("other", 1), DEFAULT_REQUEST_TIMEOUT_MS, "per model");
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 1),
+            7_000 * STALL_TIMEOUT_MULTIPLIER
+        );
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 2),
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            "retries get the full bound"
+        );
+        assert_eq!(
+            caller.attempt_timeout_ms("other", 1),
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            "per model"
+        );
         for _ in 0..STALL_LATENCY_SAMPLES {
             caller.record_latency("m", 20_000);
         }
-        assert_eq!(caller.attempt_timeout_ms("m", 1), 20_000 * STALL_TIMEOUT_MULTIPLIER, "window forgets old samples");
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 1),
+            20_000 * STALL_TIMEOUT_MULTIPLIER,
+            "window forgets old samples"
+        );
     }
 
     #[test]
@@ -2228,13 +2537,18 @@ mod tests {
             requests
         });
 
-        (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
+        (
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            handle,
+        )
     }
 
     /// A mock that answers one connection with a server-sent event stream
     /// (`content-type: text/event-stream`), each line written as its own
     /// chunk, so the streaming reader sees the reply arrive piecewise.
-    fn spawn_sse_mock_server(lines: Vec<&'static str>) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+    fn spawn_sse_mock_server(
+        lines: Vec<&'static str>,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
@@ -2249,7 +2563,10 @@ mod tests {
                     let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
                     let content_length = head
                         .lines()
-                        .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
                         .unwrap_or(0);
                     if data.len() >= pos + 4 + content_length {
                         break pos + 4;
@@ -2269,7 +2586,10 @@ mod tests {
             }
             data[body_start..].to_vec()
         });
-        (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
+        (
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            handle,
+        )
     }
 
     #[test]
@@ -2285,46 +2605,94 @@ mod tests {
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n",
             "data: [DONE]\n\n",
         );
-        let body: Value = serde_json::from_slice(&assemble_streamed_response(sse.as_bytes())).unwrap();
+        let body: Value =
+            serde_json::from_slice(&assemble_streamed_response(sse.as_bytes())).unwrap();
         assert_eq!(body["id"], "r1");
         assert_eq!(body["model"], "m");
         assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(body["choices"][0]["message"]["content"], "Hello");
-        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["id"], "call_1");
-        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "READ");
-        assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"path\":1}");
+        assert_eq!(
+            body["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_1"
+        );
+        assert_eq!(
+            body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "READ"
+        );
+        assert_eq!(
+            body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":1}"
+        );
         assert_eq!(body["usage"]["completion_tokens"], 7);
         let parsed: OpenAICompatibleResponse = serde_json::from_value(body).unwrap();
         assert_eq!(parsed.usage.unwrap().total_tokens, Some(12));
 
         let error = "data: {\"error\":{\"message\":\"overloaded\",\"code\":503}}\n\n";
-        let body: Value = serde_json::from_slice(&assemble_streamed_response(error.as_bytes())).unwrap();
+        let body: Value =
+            serde_json::from_slice(&assemble_streamed_response(error.as_bytes())).unwrap();
         assert_eq!(body["error"]["message"], "overloaded");
 
-        let empty: Value = serde_json::from_slice(&assemble_streamed_response(b"data: [DONE]\n\n")).unwrap();
+        let empty: Value =
+            serde_json::from_slice(&assemble_streamed_response(b"data: [DONE]\n\n")).unwrap();
         assert!(empty["choices"][0]["message"]["content"].is_null());
     }
 
     #[test]
     fn the_first_token_hedge_point_rises_with_the_median_first_token() {
-        assert_eq!(first_token_hedge_ms(&[], 8_000), 4_000, "the floor before any history");
-        assert_eq!(first_token_hedge_ms(&[900, 1_100], 8_000), 4_000, "the floor with too little history");
-        assert_eq!(first_token_hedge_ms(&[900, 1_100, 1_000], 8_000), 4_000, "a quick provider stays at the floor");
-        assert_eq!(first_token_hedge_ms(&[5_000, 6_000, 7_000], 20_000), 12_000, "a queued window doubles its median");
-        assert_eq!(first_token_hedge_ms(&[5_000, 6_000, 7_000], 8_000), 8_000, "never past the wall-clock point");
-        assert_eq!(first_token_hedge_ms(&[], 3_000), 3_000, "a wall-clock point under the floor wins");
+        assert_eq!(
+            first_token_hedge_ms(&[], 8_000),
+            4_000,
+            "the floor before any history"
+        );
+        assert_eq!(
+            first_token_hedge_ms(&[900, 1_100], 8_000),
+            4_000,
+            "the floor with too little history"
+        );
+        assert_eq!(
+            first_token_hedge_ms(&[900, 1_100, 1_000], 8_000),
+            4_000,
+            "a quick provider stays at the floor"
+        );
+        assert_eq!(
+            first_token_hedge_ms(&[5_000, 6_000, 7_000], 20_000),
+            12_000,
+            "a queued window doubles its median"
+        );
+        assert_eq!(
+            first_token_hedge_ms(&[5_000, 6_000, 7_000], 8_000),
+            8_000,
+            "never past the wall-clock point"
+        );
+        assert_eq!(
+            first_token_hedge_ms(&[], 3_000),
+            3_000,
+            "a wall-clock point under the floor wins"
+        );
     }
 
     #[test]
     fn a_first_token_is_a_delta_with_output_not_a_role_or_keepalive() {
         assert!(!sse_line_carries_a_token(b": keepalive"));
         assert!(!sse_line_carries_a_token(b"data: [DONE]"));
-        assert!(!sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"role":"assistant","content":""}}]}"#));
-        assert!(!sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"content":null}}]}"#));
-        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"content":"H"}}]}"#));
-        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"reasoning":"thinking"}}]}"#));
-        assert!(sse_line_carries_a_token(br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#));
-        assert!(sse_line_carries_a_token(br#"data: {"error":{"message":"nope"}}"#));
+        assert!(!sse_line_carries_a_token(
+            br#"data: {"choices":[{"delta":{"role":"assistant","content":""}}]}"#
+        ));
+        assert!(!sse_line_carries_a_token(
+            br#"data: {"choices":[{"delta":{"content":null}}]}"#
+        ));
+        assert!(sse_line_carries_a_token(
+            br#"data: {"choices":[{"delta":{"content":"H"}}]}"#
+        ));
+        assert!(sse_line_carries_a_token(
+            br#"data: {"choices":[{"delta":{"reasoning":"thinking"}}]}"#
+        ));
+        assert!(sse_line_carries_a_token(
+            br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#
+        ));
+        assert!(sse_line_carries_a_token(
+            br#"data: {"error":{"message":"nope"}}"#
+        ));
     }
 
     #[test]
@@ -2345,20 +2713,38 @@ mod tests {
             r#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
             "data: [DONE]",
         ]);
-        let records: Arc<std::sync::Mutex<Vec<ModelCallRecord>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let records: Arc<std::sync::Mutex<Vec<ModelCallRecord>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = records.clone();
         let mut deps = test_deps(url);
         deps.on_usage = Arc::new(move |_, record| sink.lock().unwrap().push(record));
         let caller = create_model_caller(deps);
-        let response = caller.call_model(vec![user_message("hello")], None).await.unwrap();
-        assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("streamed")));
+        let response = caller
+            .call_model(vec![user_message("hello")], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.choices.unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .content,
+            Some(serde_json::json!("streamed"))
+        );
         assert_eq!(response.usage.unwrap().total_tokens, Some(2));
         let request: Value = serde_json::from_slice(&server.join().unwrap()).unwrap();
-        assert_eq!(request["stream"], true, "the wire request should ask for a stream: {request}");
+        assert_eq!(
+            request["stream"], true,
+            "the wire request should ask for a stream: {request}"
+        );
         assert_eq!(request["stream_options"]["include_usage"], true);
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 1);
-        assert!(records[0].first_token_ms.is_some(), "the first-token time should be recorded: {:?}", records[0]);
+        assert!(
+            records[0].first_token_ms.is_some(),
+            "the first-token time should be recorded: {:?}",
+            records[0]
+        );
     }
 
     fn test_deps(url: String) -> ModelCallerDeps {
@@ -2391,14 +2777,19 @@ mod tests {
 
     /// A mock that answers each connection on its own thread after the
     /// matching delay, so a slow first request does not block the second.
-    fn spawn_delayed_mock_server(delays_ms: Vec<u64>, response_body: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    fn spawn_delayed_mock_server(
+        delays_ms: Vec<u64>,
+        response_body: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let served_in_thread = served.clone();
         std::thread::spawn(move || {
             for delay_ms in delays_ms {
-                let Ok((mut stream, _)) = listener.accept() else { return };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
                 let served = served_in_thread.clone();
                 std::thread::spawn(move || {
                     let mut data: Vec<u8> = Vec::new();
@@ -2409,11 +2800,15 @@ mod tests {
                             return;
                         }
                         data.extend_from_slice(&chunk[..read]);
-                        if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
                             let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
                             let content_length = head
                                 .lines()
-                                .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                                .find_map(|line| {
+                                    line.strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
                                 .unwrap_or(0);
                             if data.len() >= pos + 4 + content_length {
                                 break;
@@ -2432,7 +2827,10 @@ mod tests {
                 });
             }
         });
-        (format!("http://127.0.0.1:{port}/v1/chat/completions"), served)
+        (
+            format!("http://127.0.0.1:{port}/v1/chat/completions"),
+            served,
+        )
     }
 
     #[tokio::test]
@@ -2441,7 +2839,8 @@ mod tests {
             vec![3_000, 0],
             r#"{"choices":[{"message":{"content":"hedged"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
         );
-        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = events.clone();
         let mut deps = test_deps(url);
         deps.hedge_floor_ms = Some(200);
@@ -2451,15 +2850,49 @@ mod tests {
             caller.record_latency("test-model", 20);
         }
         let started = Instant::now();
-        let response = caller.call_model(vec![user_message("hello")], None).await.unwrap();
-        assert!(started.elapsed() < Duration::from_millis(2_500), "the hedge should answer long before the 3s primary: {:?}", started.elapsed());
-        assert_eq!(response.choices.unwrap()[0].message.as_ref().unwrap().content, Some(serde_json::json!("hedged")));
+        let response = caller
+            .call_model(vec![user_message("hello")], None)
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(2_500),
+            "the hedge should answer long before the 3s primary: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            response.choices.unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .content,
+            Some(serde_json::json!("hedged"))
+        );
         let events = events.lock().unwrap();
-        assert!(events.iter().any(|detail| detail.starts_with("hedged model request: test-model has sent no first token after 0.")), "{events:?}");
-        let resolved = events.iter().find(|detail| detail.starts_with("hedge resolved: ")).expect("a hedge resolution event should be emitted");
-        assert!(resolved.starts_with("hedge resolved: the second request completed after "), "{resolved}");
-        let elapsed_ms: u64 = resolved.rsplit_once("after ").unwrap().1.trim_end_matches("ms").trim().parse().unwrap();
-        assert!((200..2_500).contains(&elapsed_ms), "elapsed should cover the hedge delay but not the 3s primary: {resolved}");
+        assert!(
+            events.iter().any(|detail| detail
+                .starts_with("hedged model request: test-model has sent no first token after 0.")),
+            "{events:?}"
+        );
+        let resolved = events
+            .iter()
+            .find(|detail| detail.starts_with("hedge resolved: "))
+            .expect("a hedge resolution event should be emitted");
+        assert!(
+            resolved.starts_with("hedge resolved: the second request completed after "),
+            "{resolved}"
+        );
+        let elapsed_ms: u64 = resolved
+            .rsplit_once("after ")
+            .unwrap()
+            .1
+            .trim_end_matches("ms")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            (200..2_500).contains(&elapsed_ms),
+            "elapsed should cover the hedge delay but not the 3s primary: {resolved}"
+        );
     }
 
     #[tokio::test]
@@ -2468,47 +2901,104 @@ mod tests {
             vec![0, 0],
             r#"{"choices":[{"message":{"content":"fast"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
         );
-        let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = events.clone();
         let mut deps = test_deps(url);
         deps.hedge_floor_ms = Some(200);
         deps.emit = Arc::new(move |event| sink.lock().unwrap().push(event.detail));
         let caller = create_model_caller(deps);
-        assert_eq!(caller.hedge_delay_for("test-model", 1, 240_000), None, "no history, no hedge");
+        assert_eq!(
+            caller.hedge_delay_for("test-model", 1, 240_000),
+            None,
+            "no history, no hedge"
+        );
         for _ in 0..STALL_TIMEOUT_MIN_SAMPLES {
             caller.record_latency("test-model", 20);
         }
         assert_eq!(caller.hedge_delay_for("test-model", 1, 240_000), Some(200));
-        assert_eq!(caller.hedge_delay_for("test-model", 2, 240_000), None, "retries are never hedged");
-        caller.call_model(vec![user_message("hello")], None).await.unwrap();
+        assert_eq!(
+            caller.hedge_delay_for("test-model", 2, 240_000),
+            None,
+            "retries are never hedged"
+        );
+        caller
+            .call_model(vec![user_message("hello")], None)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1, "a prompt answer sends one request");
-        assert!(events.lock().unwrap().is_empty(), "{:?}", events.lock().unwrap());
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a prompt answer sends one request"
+        );
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "{:?}",
+            events.lock().unwrap()
+        );
     }
 
     #[test]
     fn hedge_delay_clamps_and_respects_the_off_switch() {
-        assert_eq!(hedge_delay_ms(&[2_000, 2_000], 8_000, 240_000), None, "too few samples");
-        assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 8_000, 240_000), Some(8_000), "floor");
-        assert_eq!(hedge_delay_ms(&[5_000, 4_000, 6_000], 8_000, 240_000), Some(10_000), "2× median");
-        assert_eq!(hedge_delay_ms(&[50_000, 50_000, 50_000], 8_000, 100_000), Some(50_000), "half the timeout");
-        assert_eq!(hedge_delay_ms(&[2_000, 2_000, 2_000], 0, 240_000), None, "floor 0 disables");
+        assert_eq!(
+            hedge_delay_ms(&[2_000, 2_000], 8_000, 240_000),
+            None,
+            "too few samples"
+        );
+        assert_eq!(
+            hedge_delay_ms(&[2_000, 2_000, 2_000], 8_000, 240_000),
+            Some(8_000),
+            "floor"
+        );
+        assert_eq!(
+            hedge_delay_ms(&[5_000, 4_000, 6_000], 8_000, 240_000),
+            Some(10_000),
+            "2× median"
+        );
+        assert_eq!(
+            hedge_delay_ms(&[50_000, 50_000, 50_000], 8_000, 100_000),
+            Some(50_000),
+            "half the timeout"
+        );
+        assert_eq!(
+            hedge_delay_ms(&[2_000, 2_000, 2_000], 0, 240_000),
+            None,
+            "floor 0 disables"
+        );
     }
 
     #[test]
     fn latency_store_round_trips_and_caps_samples() {
         let dir = std::env::temp_dir().join(format!("drip-latency-{}", std::process::id()));
         let path = dir.join("nested").join(LATENCY_STORE_FILE);
-        assert!(load_latency_store(&path).is_empty(), "missing file reads as empty");
+        assert!(
+            load_latency_store(&path).is_empty(),
+            "missing file reads as empty"
+        );
         let mut samples = LatencySamples::new();
-        samples.insert("m".to_string(), (1..=(STALL_LATENCY_SAMPLES as u64 + 3)).collect());
+        samples.insert(
+            "m".to_string(),
+            (1..=(STALL_LATENCY_SAMPLES as u64 + 3)).collect(),
+        );
         save_latency_store(&path, &samples);
         let loaded = load_latency_store(&path);
         let recent: Vec<u64> = loaded["m"].iter().copied().collect();
-        assert_eq!(recent.len(), STALL_LATENCY_SAMPLES, "capped to the recent window");
-        assert_eq!(recent.last().copied(), Some(STALL_LATENCY_SAMPLES as u64 + 3), "keeps the newest samples");
+        assert_eq!(
+            recent.len(),
+            STALL_LATENCY_SAMPLES,
+            "capped to the recent window"
+        );
+        assert_eq!(
+            recent.last().copied(),
+            Some(STALL_LATENCY_SAMPLES as u64 + 3),
+            "keeps the newest samples"
+        );
         std::fs::write(&path, "not json").unwrap();
-        assert!(load_latency_store(&path).is_empty(), "corrupt file reads as empty");
+        assert!(
+            load_latency_store(&path).is_empty(),
+            "corrupt file reads as empty"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2522,17 +3012,31 @@ mod tests {
         let mut deps = test_deps("http://127.0.0.1:9".to_string());
         deps.latency_store = Some(path.clone());
         let caller = create_model_caller(deps);
-        assert_eq!(caller.hedge_delay_for("m", 1, 240_000), Some(8_000), "hedges before any call in this run");
-        assert_eq!(caller.attempt_timeout_ms("m", 1), STALL_TIMEOUT_FLOOR_MS, "stall bound from the seeded samples");
+        assert_eq!(
+            caller.hedge_delay_for("m", 1, 240_000),
+            Some(8_000),
+            "hedges before any call in this run"
+        );
+        assert_eq!(
+            caller.attempt_timeout_ms("m", 1),
+            STALL_TIMEOUT_FLOOR_MS,
+            "stall bound from the seeded samples"
+        );
         caller.record_latency("m", 3_000);
         let persisted: Vec<u64> = load_latency_store(&path)["m"].iter().copied().collect();
-        assert_eq!(persisted, vec![2_000, 2_000, 2_000, 3_000], "new samples are written back");
+        assert_eq!(
+            persisted,
+            vec![2_000, 2_000, 2_000, 3_000],
+            "new samples are written back"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn user_message(text: &str) -> TransportRequestMessage {
         TransportRequestMessage {
-            content: Some(crate::harness::transport::TransportContent::Text(text.to_string())),
+            content: Some(crate::harness::transport::TransportContent::Text(
+                text.to_string(),
+            )),
             name: None,
             role: crate::harness::chat_types::ChatRoleTag::User,
             tool_call_id: None,
@@ -2576,7 +3080,10 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(body["model"], "test-model");
-        assert_eq!(body["stream"], true, "OpenAI-compatible requests ask for a stream");
+        assert_eq!(
+            body["stream"], true,
+            "OpenAI-compatible requests ask for a stream"
+        );
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
@@ -2606,16 +3113,33 @@ mod tests {
             url: String::new(),
         };
         let response = caller
-            .call_model(vec![user_message("plan")], Some(ModelCallOptions { route: Some(route), ..Default::default() }))
+            .call_model(
+                vec![user_message("plan")],
+                Some(ModelCallOptions {
+                    route: Some(route),
+                    ..Default::default()
+                }),
+            )
             .await
             .unwrap();
         assert_eq!(
-            response.choices.as_ref().unwrap()[0].message.as_ref().unwrap().content.as_ref().unwrap(),
+            response.choices.as_ref().unwrap()[0]
+                .message
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap(),
             &serde_json::json!("base hi")
         );
         let _ = server.join();
         let events = events.lock().unwrap();
-        assert!(events.iter().any(|detail| detail.contains("falling back to the run's base model test-model")), "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|detail| detail.contains("falling back to the run's base model test-model")),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]
@@ -2634,7 +3158,10 @@ mod tests {
         ];
 
         let caller = create_model_caller(deps);
-        let response = caller.call_model(vec![user_message("hello")], None).await.unwrap();
+        let response = caller
+            .call_model(vec![user_message("hello")], None)
+            .await
+            .unwrap();
 
         assert_eq!(
             response.choices.as_ref().unwrap()[0]
@@ -2680,7 +3207,10 @@ mod tests {
         deps.sleep_impl = Some(Arc::new(|_, _| Box::pin(async {})));
 
         let caller = create_model_caller(deps);
-        let error = caller.call_model(vec![user_message("hello")], None).await.unwrap_err();
+        let error = caller
+            .call_model(vec![user_message("hello")], None)
+            .await
+            .unwrap_err();
 
         assert_eq!(
             error.message(),

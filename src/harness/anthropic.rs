@@ -16,8 +16,9 @@
 //     translated usage so the run ledger can price the run honestly.
 use crate::harness::chat_types::ChatRoleTag;
 use crate::harness::transport::{
-    OpenAICompatibleRequestTool, OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction,
-    TransportContent, TransportContentPart, TransportRequestMessage, transport_content_to_text,
+    transport_content_to_text, OpenAICompatibleRequestTool, OpenAICompatibleToolCall,
+    OpenAICompatibleToolCallFunction, TransportContent, TransportContentPart,
+    TransportRequestMessage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -223,7 +224,10 @@ pub fn build_anthropic_headers(headers: &[(String, String)]) -> Vec<(String, Str
     }
 
     if !has_header(&result, "anthropic-version") {
-        result.push(("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()));
+        result.push((
+            "anthropic-version".to_string(),
+            ANTHROPIC_VERSION.to_string(),
+        ));
     }
 
     result
@@ -252,8 +256,7 @@ fn image_block_from_url(url: &str) -> AnthropicContentBlock {
         static DATA_URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
         DATA_URL.get_or_init(|| {
-            regex::Regex::new(r"(?s)^data:([^;,]+);base64,(.*)$")
-                .expect("valid data URL regex")
+            regex::Regex::new(r"(?s)^data:([^;,]+);base64,(.*)$").expect("valid data URL regex")
         })
     }
 
@@ -344,7 +347,10 @@ fn append_blocks(
         }
     }
 
-    messages.push(AnthropicMessage { content: blocks, role });
+    messages.push(AnthropicMessage {
+        content: blocks,
+        role,
+    });
 }
 
 pub struct BuildAnthropicRequestPayloadArgs {
@@ -382,11 +388,13 @@ pub fn build_anthropic_request_payload(
                 append_blocks(
                     &mut messages,
                     AnthropicRole::User,
-                    vec![AnthropicContentBlock::ToolResult(AnthropicToolResultBlock {
-                        content: (!text.is_empty()).then_some(text),
-                        tool_use_id: message.tool_call_id.clone().unwrap_or_default(),
-                        block_type: "tool_result".to_string(),
-                    })],
+                    vec![AnthropicContentBlock::ToolResult(
+                        AnthropicToolResultBlock {
+                            content: (!text.is_empty()).then_some(text),
+                            tool_use_id: message.tool_call_id.clone().unwrap_or_default(),
+                            block_type: "tool_result".to_string(),
+                        },
+                    )],
                 );
             }
             ChatRoleTag::Assistant => {
@@ -413,7 +421,8 @@ pub fn build_anthropic_request_payload(
                     blocks.push(text_block(text));
                 }
 
-                for (index, tool_call) in message.tool_calls.unwrap_or_default().iter().enumerate() {
+                for (index, tool_call) in message.tool_calls.unwrap_or_default().iter().enumerate()
+                {
                     blocks.push(AnthropicContentBlock::ToolUse(AnthropicToolUseBlock {
                         id: tool_call
                             .id
@@ -464,11 +473,9 @@ pub fn build_anthropic_request_payload(
         messages,
         model: args.model,
         system: (!system_blocks.is_empty()).then_some(system_blocks),
-        tool_choice: tools
-            .as_ref()
-            .map(|_| AnthropicToolChoice {
-                choice_type: "auto".to_string(),
-            }),
+        tool_choice: tools.as_ref().map(|_| AnthropicToolChoice {
+            choice_type: "auto".to_string(),
+        }),
         tools: tools.map(|tools| {
             tools
                 .into_iter()
@@ -650,15 +657,16 @@ pub fn translate_anthropic_response(data: &Value) -> AnthropicTranslatedResponse
             }),
         }]),
         error: None,
-        usage: data.get("usage").filter(|usage| usage.is_object()).map(|_| {
-            AnthropicTranslatedUsage {
+        usage: data
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .map(|_| AnthropicTranslatedUsage {
                 cache_creation_input_tokens: cache_creation_tokens,
                 cache_read_input_tokens: cache_read_tokens,
                 completion_tokens: completion_tokens,
                 prompt_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
-            }
-        }),
+            }),
     }
 }
 
@@ -669,12 +677,12 @@ mod tests {
     // translation. The route resolver and the reqwest-backed caller are
     // not covered in this module.
     use super::*;
-    use crate::harness::transport::{
-        OpenAICompatibleFunctionDefinition, OpenAICompatibleRequestTool,
-        OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction, TransportContent,
-        TransportContentPart, TransportImageUrl, TransportRequestMessage,
-    };
     use crate::harness::chat_types::ChatRoleTag;
+    use crate::harness::transport::{
+        OpenAICompatibleFunctionDefinition, OpenAICompatibleRequestTool, OpenAICompatibleToolCall,
+        OpenAICompatibleToolCallFunction, TransportContent, TransportContentPart,
+        TransportImageUrl, TransportRequestMessage,
+    };
     use serde_json::json;
 
     fn sample_tools() -> Vec<OpenAICompatibleRequestTool> {
@@ -733,7 +741,10 @@ mod tests {
     #[test]
     fn converts_the_shared_bearer_credential_to_x_api_key_and_stamps_the_api_version() {
         let headers = build_anthropic_headers(&[
-            ("Authorization".to_string(), "Bearer sk-ant-test123".to_string()),
+            (
+                "Authorization".to_string(),
+                "Bearer sk-ant-test123".to_string(),
+            ),
             ("content-type".to_string(), "application/json".to_string()),
         ]);
 
@@ -745,7 +756,10 @@ mod tests {
             vec![
                 ("content-type".to_string(), "application/json".to_string()),
                 ("x-api-key".to_string(), "sk-ant-test123".to_string()),
-                ("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
+                (
+                    "anthropic-version".to_string(),
+                    ANTHROPIC_VERSION.to_string()
+                ),
             ]
         );
     }
@@ -777,10 +791,8 @@ mod tests {
 
     #[test]
     fn passes_a_non_bearer_authorization_header_through_untouched() {
-        let headers = build_anthropic_headers(&[(
-            "Authorization".to_string(),
-            "Basic abc".to_string(),
-        )]);
+        let headers =
+            build_anthropic_headers(&[("Authorization".to_string(), "Basic abc".to_string())]);
 
         assert_eq!(
             headers
@@ -819,7 +831,10 @@ mod tests {
             tools: Some(sample_tools()),
         });
 
-        assert_eq!(payload.cache_control, Some(AnthropicCacheControl::ephemeral()));
+        assert_eq!(
+            payload.cache_control,
+            Some(AnthropicCacheControl::ephemeral())
+        );
         assert_eq!(payload.max_tokens, DEFAULT_ANTHROPIC_MAX_TOKENS);
         assert_eq!(
             payload.system,
@@ -849,7 +864,9 @@ mod tests {
         );
         assert_eq!(
             payload.tool_choice,
-            Some(AnthropicToolChoice { choice_type: "auto".to_string() })
+            Some(AnthropicToolChoice {
+                choice_type: "auto".to_string()
+            })
         );
         assert_eq!(
             payload.tools,
@@ -1002,7 +1019,14 @@ mod tests {
         });
 
         let roles: Vec<AnthropicRole> = payload.messages.iter().map(|m| m.role).collect();
-        assert_eq!(roles, vec![AnthropicRole::User, AnthropicRole::Assistant, AnthropicRole::User]);
+        assert_eq!(
+            roles,
+            vec![
+                AnthropicRole::User,
+                AnthropicRole::Assistant,
+                AnthropicRole::User
+            ]
+        );
         assert_eq!(
             payload.messages[2].content,
             vec![
@@ -1059,17 +1083,27 @@ mod tests {
         });
 
         // messages[1] carries the native blocks as an assistant message.
-        assert_eq!(payload.messages[1], AnthropicMessage {
-            content: native_blocks.iter().cloned().map(AnthropicContentBlock::Raw).collect(),
-            role: AnthropicRole::Assistant,
-        });
-        assert_eq!(payload.messages[2].content, vec![
-            AnthropicContentBlock::ToolResult(AnthropicToolResultBlock {
-                content: Some("file contents".to_string()),
-                tool_use_id: "toolu_01".to_string(),
-                block_type: "tool_result".to_string(),
-            }),
-        ]);
+        assert_eq!(
+            payload.messages[1],
+            AnthropicMessage {
+                content: native_blocks
+                    .iter()
+                    .cloned()
+                    .map(AnthropicContentBlock::Raw)
+                    .collect(),
+                role: AnthropicRole::Assistant,
+            }
+        );
+        assert_eq!(
+            payload.messages[2].content,
+            vec![AnthropicContentBlock::ToolResult(
+                AnthropicToolResultBlock {
+                    content: Some("file contents".to_string()),
+                    tool_use_id: "toolu_01".to_string(),
+                    block_type: "tool_result".to_string(),
+                }
+            ),]
+        );
     }
 
     #[test]
@@ -1079,7 +1113,9 @@ mod tests {
             max_tokens: None,
             messages: vec![TransportRequestMessage {
                 content: Some(TransportContent::Parts(vec![
-                    TransportContentPart::Text { text: "look at this".to_string() },
+                    TransportContentPart::Text {
+                        text: "look at this".to_string(),
+                    },
                     TransportContentPart::ImageUrl {
                         image_url: TransportImageUrl {
                             url: "data:image/png;base64,AAAA".to_string(),
@@ -1191,10 +1227,7 @@ mod tests {
         }));
 
         assert_eq!(
-            translated
-                .choices
-                .as_ref()
-                .expect("choices")[0]
+            translated.choices.as_ref().expect("choices")[0]
                 .message
                 .as_ref()
                 .expect("message")

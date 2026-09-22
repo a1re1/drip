@@ -38,7 +38,9 @@ pub const CHILD_ENV_DEFAULTS: [(&str, &str); 1] = [("PYTHONFAULTHANDLER", "1")];
 pub fn build_child_process_env(overrides: Option<&BTreeMap<String, String>>) -> ChildProcessEnv {
     let mut child_env: ChildProcessEnv = std::env::vars().collect();
     for (key, value) in CHILD_ENV_DEFAULTS {
-        child_env.entry(key.to_string()).or_insert_with(|| value.to_string());
+        child_env
+            .entry(key.to_string())
+            .or_insert_with(|| value.to_string());
     }
     if let Some(overrides) = overrides {
         for (key, value) in overrides {
@@ -152,10 +154,7 @@ mod tests {
         std::env::set_var("DRIP_SCRUB_ENV", "DRIP_TEST_SECRET");
 
         let mut overrides = BTreeMap::new();
-        overrides.insert(
-            "DRIP_TEST_SECRET".to_string(),
-            "explicit-value".to_string(),
-        );
+        overrides.insert("DRIP_TEST_SECRET".to_string(), "explicit-value".to_string());
 
         let child_env = build_child_process_env(Some(&overrides));
 
@@ -171,10 +170,20 @@ mod tests {
 
         std::env::remove_var("DRIP_SCRUB_ENV");
         std::env::remove_var("PYTHONFAULTHANDLER");
-        assert_eq!(build_child_process_env(None).get("PYTHONFAULTHANDLER").map(String::as_str), Some("1"));
+        assert_eq!(
+            build_child_process_env(None)
+                .get("PYTHONFAULTHANDLER")
+                .map(String::as_str),
+            Some("1")
+        );
 
         std::env::set_var("PYTHONFAULTHANDLER", "0");
-        assert_eq!(build_child_process_env(None).get("PYTHONFAULTHANDLER").map(String::as_str), Some("0"));
+        assert_eq!(
+            build_child_process_env(None)
+                .get("PYTHONFAULTHANDLER")
+                .map(String::as_str),
+            Some("0")
+        );
         std::env::remove_var("PYTHONFAULTHANDLER");
     }
 
@@ -207,9 +216,6 @@ mod tests {
         );
 
         std::env::remove_var("DRIP_SCRUB_ENV");
-        assert_eq!(
-            build_env_unset_arguments(),
-            vec!["-u", "DRIP_SCRUB_ENV"]
-        );
+        assert_eq!(build_env_unset_arguments(), vec!["-u", "DRIP_SCRUB_ENV"]);
     }
 }

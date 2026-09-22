@@ -317,7 +317,9 @@ pub fn complete(prepared: &ReadToolPrepared, result: &ReadToolResult) -> ToolCom
 /// The transcript's display string for this call — or None when the
 /// arguments do not parse (the execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors
@@ -586,8 +588,11 @@ mod tests {
         let (_temp, cwd) = create_temp_dir("read-tool-binary-");
         let file_path = cwd.join("image.bin");
         // Write a buffer containing NUL bytes — unmistakably binary
-        std::fs::write(&file_path, [0x89, 0x50, 0x4e, 0x47, 0x00, 0x00, 0x00, 0x00, 0x41, 0x42])
-            .unwrap();
+        std::fs::write(
+            &file_path,
+            [0x89, 0x50, 0x4e, 0x47, 0x00, 0x00, 0x00, 0x00, 0x41, 0x42],
+        )
+        .unwrap();
 
         // Without force
         let ctx = stage_context(&cwd);
@@ -615,7 +620,10 @@ mod tests {
         let result = execute_prepared(&prepared).unwrap();
 
         // The text should contain the truncation suffix mentioning 10000 chars
-        assert!(result.data.text.contains("[line truncated: 10000 chars total]"));
+        assert!(result
+            .data
+            .text
+            .contains("[line truncated: 10000 chars total]"));
         // The actual content before suffix should be clamped to 2000 chars
         // Format: "1\t<2000 x-chars>[line truncated: 10000 chars total]"
         let line_content = result.data.text.strip_prefix("1\t").unwrap();

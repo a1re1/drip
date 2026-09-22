@@ -156,7 +156,12 @@ fn format_async_job_output(tool_name: &str, job: &ChatAsyncToolJob) -> String {
 }
 
 // Builds the failed tool-call block reported back to the model.
-fn build_failure_result(call_id: &str, error: &str, raw_input: &str, tool_name: &str) -> ExecutedToolCall {
+fn build_failure_result(
+    call_id: &str,
+    error: &str,
+    raw_input: &str,
+    tool_name: &str,
+) -> ExecutedToolCall {
     let output = if error.is_empty() {
         // Default branch: unreachable when stages always hand back a
         // message, kept as a stable fallback string.
@@ -215,13 +220,22 @@ fn add_tool_tags(tool_name: &str, blocks: &[ChatMessageBlock]) -> Vec<ChatMessag
             let mut block = block.clone();
             match &mut block {
                 ChatMessageBlock::Text(inner) => {
-                    inner.tags = merge_tags(&[Some(vec![ChatTag::Text(tool_tag.clone())]), inner.tags.clone()]);
+                    inner.tags = merge_tags(&[
+                        Some(vec![ChatTag::Text(tool_tag.clone())]),
+                        inner.tags.clone(),
+                    ]);
                 }
                 ChatMessageBlock::ToolCall(inner) => {
-                    inner.tags = merge_tags(&[Some(vec![ChatTag::Text(tool_tag.clone())]), inner.tags.clone()]);
+                    inner.tags = merge_tags(&[
+                        Some(vec![ChatTag::Text(tool_tag.clone())]),
+                        inner.tags.clone(),
+                    ]);
                 }
                 ChatMessageBlock::Completion(inner) => {
-                    inner.tags = merge_tags(&[Some(vec![ChatTag::Text(tool_tag.clone())]), inner.tags.clone()]);
+                    inner.tags = merge_tags(&[
+                        Some(vec![ChatTag::Text(tool_tag.clone())]),
+                        inner.tags.clone(),
+                    ]);
                 }
             }
             block
@@ -323,30 +337,32 @@ pub fn execute_tool_call(args: ToolExecutionContext<'_>) -> ExecutedToolCall {
             completion.tags.clone(),
             &prepared.display_input,
             &output_text,
-            result
-                .status
-                .or(result
-                    .async_job
-                    .as_ref()
-                    .map(|job| async_job_status_to_tool_call_status(job))),
+            result.status.or(result
+                .async_job
+                .as_ref()
+                .map(|job| async_job_status_to_tool_call_status(job))),
             merge_tags(&[prepared.tags.clone(), result.tags.clone()]),
             &tool.name,
         );
 
         let completion_blocks = completion.blocks.clone().unwrap_or_default();
         let completion_blocks = add_tool_tags(&tool.name, &completion_blocks);
-        let fallback_tool_content = [
-            output_text.clone(),
-            serialize_blocks(&completion_blocks),
-        ]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        let fallback_tool_content = [output_text.clone(), serialize_blocks(&completion_blocks)]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         Ok(ExecutedToolCall {
-            blocks: [vec![ChatMessageBlock::ToolCall(tool_call_block)], completion_blocks].concat(),
-            tool_content: completion.tool_content.clone().unwrap_or(fallback_tool_content),
+            blocks: [
+                vec![ChatMessageBlock::ToolCall(tool_call_block)],
+                completion_blocks,
+            ]
+            .concat(),
+            tool_content: completion
+                .tool_content
+                .clone()
+                .unwrap_or(fallback_tool_content),
         })
     })();
 

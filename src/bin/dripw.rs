@@ -55,7 +55,9 @@ fn main() {
         std::process::exit(0);
     }
 
-    let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".to_string());
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
     let home_root = resolve_drip_home_root();
     // resolve_drip_project only, never open_drip_home/ensure_drip_project — a
     // watcher must not create the home tree, the project .drip, or anything else.

@@ -36,7 +36,12 @@ pub struct RowCell {
 
 impl RowCell {
     fn plain(text: impl Into<String>, color: fn(&str) -> String) -> Self {
-        Self { text: text.into(), color: Some(color), selected: false, rich: false }
+        Self {
+            text: text.into(),
+            color: Some(color),
+            selected: false,
+            rich: false,
+        }
     }
 }
 
@@ -68,7 +73,10 @@ fn cut(text: &str, max: usize) -> String {
     if chars.len() <= max {
         text.to_string()
     } else {
-        format!("{}…", chars[..max.saturating_sub(1)].iter().collect::<String>())
+        format!(
+            "{}…",
+            chars[..max.saturating_sub(1)].iter().collect::<String>()
+        )
     }
 }
 
@@ -83,7 +91,11 @@ fn prefix(entry: &TranscriptEventEntry) -> String {
 
 pub fn fmt_ms(ms: Option<i64>) -> Option<String> {
     let ms = ms?;
-    Some(if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", ms as f64 / 1000.0) })
+    Some(if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    })
 }
 
 pub fn fmt_tokens(n: i64) -> String {
@@ -108,7 +120,9 @@ fn str_arg<'a>(args: &'a Args, key: &str) -> Option<&'a str> {
 fn num_arg(args: &Args, key: &str) -> Option<f64> {
     match args.get(key) {
         Some(Value::Number(n)) => n.as_f64().filter(|v| v.is_finite()),
-        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
+        Some(Value::String(s)) if !s.trim().is_empty() => {
+            s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+        }
         _ => None,
     }
 }
@@ -143,11 +157,21 @@ fn fmt_arg_value(value: &Value) -> String {
     match value {
         Value::String(s) => {
             let flat = collapse(s);
-            cut(&if flat.chars().any(char::is_whitespace) { format!("\"{flat}\"") } else { flat }, MAX_ARG_VALUE_CHARS)
+            cut(
+                &if flat.chars().any(char::is_whitespace) {
+                    format!("\"{flat}\"")
+                } else {
+                    flat
+                },
+                MAX_ARG_VALUE_CHARS,
+            )
         }
         Value::Null => cut("null", MAX_ARG_VALUE_CHARS),
         Value::Bool(b) => cut(&b.to_string(), MAX_ARG_VALUE_CHARS),
-        Value::Number(n) => cut(&n.as_f64().map(js_num).unwrap_or_else(|| n.to_string()), MAX_ARG_VALUE_CHARS),
+        Value::Number(n) => cut(
+            &n.as_f64().map(js_num).unwrap_or_else(|| n.to_string()),
+            MAX_ARG_VALUE_CHARS,
+        ),
         other => cut(&collapse(&other.to_string()), MAX_ARG_VALUE_CHARS),
     }
 }
@@ -180,50 +204,77 @@ fn patch_targets(args: &Args) -> (Vec<String>, bool) {
 /// `key=value` pairs with long values cut.
 pub fn summarize_tool_call(tool_name: &str, raw_args: &str) -> String {
     let Some(args) = parse_args(raw_args) else {
-        return format!("{tool_name} {}", collapse(raw_args)).trim().to_string();
+        return format!("{tool_name} {}", collapse(raw_args))
+            .trim()
+            .to_string();
     };
 
-    let known = match tool_name {
-        "READ" => str_arg(&args, "path").filter(|p| !p.is_empty()).map(|path| {
-            let offset = num_arg(&args, "offset");
-            let limit = num_arg(&args, "limit");
-            let span = if offset.is_some() || limit.is_some() {
+    let known =
+        match tool_name {
+            "READ" => str_arg(&args, "path")
+                .filter(|p| !p.is_empty())
+                .map(|path| {
+                    let offset = num_arg(&args, "offset");
+                    let limit = num_arg(&args, "limit");
+                    let span = if offset.is_some() || limit.is_some() {
+                        format!(
+                            ":{}{}",
+                            offset.map(js_num).unwrap_or_else(|| "1".to_string()),
+                            limit.map(|l| format!("+{}", js_num(l))).unwrap_or_default()
+                        )
+                    } else {
+                        String::new()
+                    };
+                    format!("READ {path}{span}")
+                }),
+            "GREP" => str_arg(&args, "pattern").map(|pattern| {
+                let path = str_arg(&args, "path").filter(|p| !p.is_empty());
                 format!(
-                    ":{}{}",
-                    offset.map(js_num).unwrap_or_else(|| "1".to_string()),
-                    limit.map(|l| format!("+{}", js_num(l))).unwrap_or_default()
+                    "GREP /{}/{}",
+                    collapse(pattern),
+                    path.map(|p| format!(" in {p}")).unwrap_or_default()
                 )
-            } else {
-                String::new()
-            };
-            format!("READ {path}{span}")
-        }),
-        "GREP" => str_arg(&args, "pattern").map(|pattern| {
-            let path = str_arg(&args, "path").filter(|p| !p.is_empty());
-            format!("GREP /{}/{}", collapse(pattern), path.map(|p| format!(" in {p}")).unwrap_or_default())
-        }),
-        "BASH" | "VERIFY" | "CHECK" => str_arg(&args, "command").map(|command| format!("{tool_name} {}", collapse(command))),
-        "PATCH" | "WRITE" => {
-            let (paths, write) = patch_targets(&args);
-            (!paths.is_empty()).then(|| format!("{tool_name} {}{}", paths.join(", "), if write { " (write)" } else { "" }))
-        }
-        "REFERENCE" => match str_arg(&args, "action").as_deref() {
-            Some("show") => Some(match (str_arg(&args, "path"), args.get("chunk").and_then(|value| value.as_i64())) {
-                (Some(path), _) => format!("REFERENCE show {path}"),
-                (None, Some(chunk)) => format!("REFERENCE show chunk {chunk}"),
-                (None, None) => "REFERENCE show".to_string(),
             }),
-            _ => str_arg(&args, "query").map(|query| format!("REFERENCE search {}", collapse(query))),
-        },
-        "DIR" => str_arg(&args, "path").filter(|p| !p.is_empty()).map(|path| format!("DIR {path}")),
-        _ => None,
-    };
+            "BASH" | "VERIFY" | "CHECK" => str_arg(&args, "command")
+                .map(|command| format!("{tool_name} {}", collapse(command))),
+            "PATCH" | "WRITE" => {
+                let (paths, write) = patch_targets(&args);
+                (!paths.is_empty()).then(|| {
+                    format!(
+                        "{tool_name} {}{}",
+                        paths.join(", "),
+                        if write { " (write)" } else { "" }
+                    )
+                })
+            }
+            "REFERENCE" => match str_arg(&args, "action").as_deref() {
+                Some("show") => Some(
+                    match (
+                        str_arg(&args, "path"),
+                        args.get("chunk").and_then(|value| value.as_i64()),
+                    ) {
+                        (Some(path), _) => format!("REFERENCE show {path}"),
+                        (None, Some(chunk)) => format!("REFERENCE show chunk {chunk}"),
+                        (None, None) => "REFERENCE show".to_string(),
+                    },
+                ),
+                _ => str_arg(&args, "query")
+                    .map(|query| format!("REFERENCE search {}", collapse(query))),
+            },
+            "DIR" => str_arg(&args, "path")
+                .filter(|p| !p.is_empty())
+                .map(|path| format!("DIR {path}")),
+            _ => None,
+        };
 
     if let Some(text) = known {
         return text;
     }
 
-    let pairs: Vec<String> = args.iter().map(|(key, value)| format!("{key}={}", fmt_arg_value(value))).collect();
+    let pairs: Vec<String> = args
+        .iter()
+        .map(|(key, value)| format!("{key}={}", fmt_arg_value(value)))
+        .collect();
     if pairs.is_empty() {
         tool_name.to_string()
     } else {
@@ -232,19 +283,35 @@ pub fn summarize_tool_call(tool_name: &str, raw_args: &str) -> String {
 }
 
 fn tool_name_of(entry: &TranscriptEventEntry) -> String {
-    if let Some(name) = entry.data.as_ref().and_then(|d| d.tool_name.as_deref()).map(str::trim) {
+    if let Some(name) = entry
+        .data
+        .as_ref()
+        .and_then(|d| d.tool_name.as_deref())
+        .map(str::trim)
+    {
         if !name.is_empty() {
             return name.to_string();
         }
     }
-    entry.detail.split(|ch: char| ch.is_whitespace() || ch == ':').next().unwrap_or("").to_string()
+    entry
+        .detail
+        .split(|ch: char| ch.is_whitespace() || ch == ':')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn tool_call_row(entry: &TranscriptEventEntry) -> RowCell {
     let tool = tool_name_of(entry);
     // detail is `<TOOL> <json args>`; strip the name once so the JSON stands alone.
-    let raw_args = entry.detail.strip_prefix(&format!("{tool} ")).unwrap_or(&entry.detail);
-    RowCell::plain(format!("{}{}", prefix(entry), summarize_tool_call(&tool, raw_args)), event_color(entry.kind))
+    let raw_args = entry
+        .detail
+        .strip_prefix(&format!("{tool} "))
+        .unwrap_or(&entry.detail);
+    RowCell::plain(
+        format!("{}{}", prefix(entry), summarize_tool_call(&tool, raw_args)),
+        event_color(entry.kind),
+    )
 }
 
 // ── Tool results ─────────────────────────────────────────────────────────────
@@ -252,7 +319,12 @@ fn tool_call_row(entry: &TranscriptEventEntry) -> RowCell {
 /// Split a result detail into the tool's own first line and its body.
 fn split_result(entry: &TranscriptEventEntry, tool: &str) -> (String, String) {
     let mut text: &str = &entry.detail;
-    for lead in [format!("{tool} (failed): "), format!("{tool}: "), format!("{tool} (failed):"), format!("{tool}:")] {
+    for lead in [
+        format!("{tool} (failed): "),
+        format!("{tool}: "),
+        format!("{tool} (failed):"),
+        format!("{tool}:"),
+    ] {
         if let Some(rest) = text.strip_prefix(lead.as_str()) {
             text = rest;
             break;
@@ -296,7 +368,11 @@ fn bash_exit_re() -> &'static Regex {
 /// on failure) followed by up to `max_body_lines` dim body lines and a
 /// `… +N lines` marker. Failed results show their whole message as the body
 /// — the error text is the useful part.
-pub fn tool_result_rows(entry: &TranscriptEventEntry, inner_w: usize, max_body_lines: usize) -> Vec<RowCell> {
+pub fn tool_result_rows(
+    entry: &TranscriptEventEntry,
+    inner_w: usize,
+    max_body_lines: usize,
+) -> Vec<RowCell> {
     let tool = tool_name_of(entry);
     let failed = entry.data.as_ref().and_then(|d| d.failed) == Some(true);
     let (first, body) = split_result(entry, &tool);
@@ -309,7 +385,15 @@ pub fn tool_result_rows(entry: &TranscriptEventEntry, inner_w: usize, max_body_l
         // `Bash command output from <cwd> — exit code N` says the same as `exit N`.
         if let Some(bash) = bash_exit_re().captures(&summary) {
             let cwd = &bash[1];
-            parts.push(format!("exit {}{}", &bash[2], if cwd == "." { String::new() } else { format!(" in {cwd}") }));
+            parts.push(format!(
+                "exit {}{}",
+                &bash[2],
+                if cwd == "." {
+                    String::new()
+                } else {
+                    format!(" in {cwd}")
+                }
+            ));
         } else if !summary.is_empty() {
             parts.push(summary);
         }
@@ -322,7 +406,11 @@ pub fn tool_result_rows(entry: &TranscriptEventEntry, inner_w: usize, max_body_l
     }
     let mut rows = vec![RowCell::plain(
         format!("{}{}", prefix(entry), parts.join(" · ")),
-        if failed { c::red } else { event_color(entry.kind) },
+        if failed {
+            c::red
+        } else {
+            event_color(entry.kind)
+        },
     )];
 
     // On failure the message may be a single long line: wrap it so it reads.
@@ -339,7 +427,10 @@ pub fn tool_result_rows(entry: &TranscriptEventEntry, inner_w: usize, max_body_l
         rows.push(RowCell::plain(format!("{BODY_INDENT}{line}"), c::dim));
     }
     if lines.len() > shown.len() {
-        rows.push(RowCell::plain(format!("{BODY_INDENT}… +{} lines", lines.len() - shown.len()), c::dim));
+        rows.push(RowCell::plain(
+            format!("{BODY_INDENT}… +{} lines", lines.len() - shown.len()),
+            c::dim,
+        ));
     }
     rows
 }
@@ -358,7 +449,11 @@ pub fn markdown_rows(source: &str, inner_w: usize, max_lines: Option<usize>) -> 
     for line in wrap_ansi(&rendered, inner_w.max(1)) {
         let blank = strip_ansi(&line).trim().is_empty();
         // Collapse runs of blank lines; the pane is a log, not a page.
-        if blank && lines.last().is_none_or(|last| strip_ansi(last).trim().is_empty()) {
+        if blank
+            && lines
+                .last()
+                .is_none_or(|last| strip_ansi(last).trim().is_empty())
+        {
             continue;
         }
         lines.push(if blank { String::new() } else { line });
@@ -377,12 +472,20 @@ pub fn markdown_rows(source: &str, inner_w: usize, max_lines: Option<usize>) -> 
             if text.is_empty() {
                 RowCell::plain("", c::dim)
             } else {
-                RowCell { text: text.clone(), color: None, selected: false, rich: true }
+                RowCell {
+                    text: text.clone(),
+                    color: None,
+                    selected: false,
+                    rich: true,
+                }
             }
         })
         .collect();
     if kept.len() < lines.len() {
-        rows.push(RowCell::plain(format!("… +{} lines", lines.len() - kept.len()), c::dim));
+        rows.push(RowCell::plain(
+            format!("… +{} lines", lines.len() - kept.len()),
+            c::dim,
+        ));
     }
     rows
 }
@@ -392,15 +495,25 @@ pub fn markdown_rows(source: &str, inner_w: usize, max_lines: Option<usize>) -> 
 fn inference_row(entry: &TranscriptEventEntry) -> RowCell {
     let color = event_color(entry.kind);
     if let Some(d) = &entry.data {
-        if let (Some(model), Some(prompt), Some(completion)) = (d.model.as_deref().filter(|m| !m.is_empty()), d.prompt_tokens, d.completion_tokens) {
-            let mut parts = vec![model.to_string(), format!("{}→{} tok", fmt_tokens(prompt), fmt_tokens(completion))];
+        if let (Some(model), Some(prompt), Some(completion)) = (
+            d.model.as_deref().filter(|m| !m.is_empty()),
+            d.prompt_tokens,
+            d.completion_tokens,
+        ) {
+            let mut parts = vec![
+                model.to_string(),
+                format!("{}→{} tok", fmt_tokens(prompt), fmt_tokens(completion)),
+            ];
             if let Some(latency) = fmt_ms(d.latency_ms) {
                 parts.push(latency);
             }
             return RowCell::plain(format!("{}{}", prefix(entry), parts.join(" · ")), color);
         }
     }
-    RowCell::plain(format!("{}{}", prefix(entry), collapse(&entry.detail)), color)
+    RowCell::plain(
+        format!("{}{}", prefix(entry), collapse(&entry.detail)),
+        color,
+    )
 }
 
 fn context_event_re() -> &'static Regex {
@@ -423,16 +536,31 @@ fn event_rows(entry: &TranscriptEventEntry, inner_w: usize) -> Vec<RowCell> {
             rows.extend(markdown_rows(&entry.detail, inner_w, None));
             rows
         }
-        HarnessEventType::IterationStart => vec![RowCell::plain(format!("── {} ──", collapse(&entry.detail)), color)],
+        HarnessEventType::IterationStart => vec![RowCell::plain(
+            format!("── {} ──", collapse(&entry.detail)),
+            color,
+        )],
         HarnessEventType::Inference => vec![inference_row(entry)],
-        HarnessEventType::LoopStart | HarnessEventType::HarnessOp | HarnessEventType::TaskFinished | HarnessEventType::ContextWithheld => {
-            vec![RowCell::plain(format!("{}{}", prefix(entry), collapse(&entry.detail)), color)]
+        HarnessEventType::LoopStart
+        | HarnessEventType::HarnessOp
+        | HarnessEventType::TaskFinished
+        | HarnessEventType::ContextWithheld => {
+            vec![RowCell::plain(
+                format!("{}{}", prefix(entry), collapse(&entry.detail)),
+                color,
+            )]
         }
-        HarnessEventType::ContextExpired | HarnessEventType::ContextPromoted | HarnessEventType::ContextRefreshed => {
+        HarnessEventType::ContextExpired
+        | HarnessEventType::ContextPromoted
+        | HarnessEventType::ContextRefreshed => {
             // `<TOOL> <json input>[ (ttl …)]` — the same shape as a call, so the
             // same summary; anything else (fold notices) prints as-is.
             let text = match context_event_re().captures(&entry.detail) {
-                Some(m) => format!("{}{}", summarize_tool_call(&m[1], &m[2]), m.get(3).map(|s| s.as_str()).unwrap_or("")),
+                Some(m) => format!(
+                    "{}{}",
+                    summarize_tool_call(&m[1], &m[2]),
+                    m.get(3).map(|s| s.as_str()).unwrap_or("")
+                ),
                 None => collapse(&entry.detail),
             };
             vec![RowCell::plain(format!("{}{}", prefix(entry), text), color)]
@@ -440,7 +568,12 @@ fn event_rows(entry: &TranscriptEventEntry, inner_w: usize) -> Vec<RowCell> {
         _ => {
             // Warnings, stalls, waits, context events, run-complete: keep every word.
             let mut rows = Vec::new();
-            push_wrapped(&mut rows, &format!("{}{}", prefix(entry), entry.detail), inner_w, color);
+            push_wrapped(
+                &mut rows,
+                &format!("{}{}", prefix(entry), entry.detail),
+                inner_w,
+                color,
+            );
             rows
         }
     }
@@ -448,11 +581,19 @@ fn event_rows(entry: &TranscriptEventEntry, inner_w: usize) -> Vec<RowCell> {
 
 // Kinds whose rows end with a blank separator so the next block stands apart.
 fn is_block_kind(kind: HarnessEventType) -> bool {
-    matches!(kind, HarnessEventType::ModelText | HarnessEventType::RunSummary | HarnessEventType::OperatorMessage)
+    matches!(
+        kind,
+        HarnessEventType::ModelText
+            | HarnessEventType::RunSummary
+            | HarnessEventType::OperatorMessage
+    )
 }
 
 fn run_reason_name(reason: &crate::core::types::HarnessRunReason) -> String {
-    serde_json::to_value(reason).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -462,7 +603,9 @@ pub fn flatten_transcript(entries: &[TranscriptEntry], inner_w: usize) -> Vec<Ro
     // The newest route entry is already pinned by model_header_rows; drop it from
     // the scrolling body so it is not printed twice. Older route entries stay —
     // they are where the model changed mid-session.
-    let newest_model = entries.iter().rposition(|entry| matches!(entry, TranscriptEntry::Model(_)));
+    let newest_model = entries
+        .iter()
+        .rposition(|entry| matches!(entry, TranscriptEntry::Model(_)));
     let mut rows: Vec<RowCell> = Vec::new();
 
     for (i, entry) in entries.iter().enumerate() {
@@ -474,7 +617,10 @@ pub fn flatten_transcript(entries: &[TranscriptEntry], inner_w: usize) -> Vec<Ro
                 push_blank(&mut rows);
             }
             TranscriptEntry::RunEnd(end) => {
-                rows.push(RowCell::plain(format!("── run end ({}) ──", run_reason_name(&end.reason)), c::dim));
+                rows.push(RowCell::plain(
+                    format!("── run end ({}) ──", run_reason_name(&end.reason)),
+                    c::dim,
+                ));
             }
             TranscriptEntry::Model(model) => {
                 if Some(i) == newest_model {
@@ -486,7 +632,11 @@ pub fn flatten_transcript(entries: &[TranscriptEntry], inner_w: usize) -> Vec<Ro
             }
             TranscriptEntry::Skill(skill) => {
                 rows.push(RowCell::plain(
-                    format!("skill {} {}", skill.name, if skill.enabled { "enabled" } else { "disabled" }),
+                    format!(
+                        "skill {} {}",
+                        skill.name,
+                        if skill.enabled { "enabled" } else { "disabled" }
+                    ),
                     c::dim,
                 ));
             }
@@ -513,8 +663,19 @@ mod tests {
     use crate::cli::transcript::{TranscriptGoalEntry, TranscriptRunEndEntry};
     use crate::core::types::{HarnessEventData, HarnessRunReason};
 
-    fn event(kind: HarnessEventType, detail: &str, data: Option<HarnessEventData>) -> TranscriptEventEntry {
-        TranscriptEventEntry { at: "t".into(), data, detail: detail.into(), goal_id: "g".into(), iteration: 2, kind }
+    fn event(
+        kind: HarnessEventType,
+        detail: &str,
+        data: Option<HarnessEventData>,
+    ) -> TranscriptEventEntry {
+        TranscriptEventEntry {
+            at: "t".into(),
+            data,
+            detail: detail.into(),
+            goal_id: "g".into(),
+            iteration: 2,
+            kind,
+        }
     }
 
     #[test]
@@ -528,19 +689,42 @@ mod tests {
 
     #[test]
     fn summarizes_known_tools_and_falls_back_for_others() {
-        assert_eq!(summarize_tool_call("READ", r#"{"path":"a.rs","offset":10,"limit":5}"#), "READ a.rs:10+5");
-        assert_eq!(summarize_tool_call("GREP", r#"{"pattern":"fn  main","path":"src"}"#), "GREP /fn main/ in src");
-        assert_eq!(summarize_tool_call("PATCH", r#"{"files":[{"path":"a","content":"x"},{"path":"b","find":"1","replace":"2"}]}"#), "PATCH a, b (write)");
+        assert_eq!(
+            summarize_tool_call("READ", r#"{"path":"a.rs","offset":10,"limit":5}"#),
+            "READ a.rs:10+5"
+        );
+        assert_eq!(
+            summarize_tool_call("GREP", r#"{"pattern":"fn  main","path":"src"}"#),
+            "GREP /fn main/ in src"
+        );
+        assert_eq!(
+            summarize_tool_call(
+                "PATCH",
+                r#"{"files":[{"path":"a","content":"x"},{"path":"b","find":"1","replace":"2"}]}"#
+            ),
+            "PATCH a, b (write)"
+        );
         assert_eq!(summarize_tool_call("BASH", "{not json"), "BASH {not json");
-        assert_eq!(summarize_tool_call("FETCH", r#"{"url":"http://x","maxBytes":10}"#), "FETCH url=http://x maxBytes=10");
+        assert_eq!(
+            summarize_tool_call("FETCH", r#"{"url":"http://x","maxBytes":10}"#),
+            "FETCH url=http://x maxBytes=10"
+        );
     }
 
     #[test]
     fn tool_result_rows_summarize_bash_and_preview_body() {
         let _guard = crate::watch::ansi::color_test_lock();
         crate::watch::ansi::set_color_enabled(false);
-        let data = HarnessEventData { duration_ms: Some(12), tool_name: Some("BASH".into()), ..Default::default() };
-        let entry = event(HarnessEventType::ToolResult, "BASH: Bash command output from . — exit code 0.\n\nl1\nl2\nl3\nl4\nl5\nl6", Some(data));
+        let data = HarnessEventData {
+            duration_ms: Some(12),
+            tool_name: Some("BASH".into()),
+            ..Default::default()
+        };
+        let entry = event(
+            HarnessEventType::ToolResult,
+            "BASH: Bash command output from . — exit code 0.\n\nl1\nl2\nl3\nl4\nl5\nl6",
+            Some(data),
+        );
         let rows = tool_result_rows(&entry, 80, RESULT_PREVIEW_LINES);
         assert_eq!(rows[0].text, "[  2] result BASH · exit 0 · 12ms");
         assert_eq!(rows[1].text, "    l1");
@@ -563,12 +747,35 @@ mod tests {
     fn flatten_orders_blocks_and_drops_newest_model_entry() {
         let _guard = crate::watch::ansi::color_test_lock();
         crate::watch::ansi::set_color_enabled(false);
-        let goal = TranscriptEntry::Goal(TranscriptGoalEntry { at: "t".into(), goal_id: "g".into(), images: vec![], mentions: vec![], text: "do it".into() });
-        let call = TranscriptEntry::Event(event(HarnessEventType::ToolCall, r#"READ {"path":"a.rs"}"#, None));
-        let end = TranscriptEntry::RunEnd(TranscriptRunEndEntry { at: "t".into(), goal_id: "g".into(), iterations: 3, reason: HarnessRunReason::Completed });
+        let goal = TranscriptEntry::Goal(TranscriptGoalEntry {
+            at: "t".into(),
+            goal_id: "g".into(),
+            images: vec![],
+            mentions: vec![],
+            text: "do it".into(),
+        });
+        let call = TranscriptEntry::Event(event(
+            HarnessEventType::ToolCall,
+            r#"READ {"path":"a.rs"}"#,
+            None,
+        ));
+        let end = TranscriptEntry::RunEnd(TranscriptRunEndEntry {
+            at: "t".into(),
+            goal_id: "g".into(),
+            iterations: 3,
+            reason: HarnessRunReason::Completed,
+        });
         let model = TranscriptEntry::Model(crate::cli::transcript::TranscriptModelEntry {
-            at: "t".into(), goal_id: "g".into(), model: "m".into(), profile_id: "p".into(), provider: "openai".into(),
-            reasoning_effort: None, roles: None, tool_model: None, tool_profile_id: None, tool_reasoning_effort: None,
+            at: "t".into(),
+            goal_id: "g".into(),
+            model: "m".into(),
+            profile_id: "p".into(),
+            provider: "openai".into(),
+            reasoning_effort: None,
+            roles: None,
+            tool_model: None,
+            tool_profile_id: None,
+            tool_reasoning_effort: None,
         });
         let rows = flatten_transcript(&[model, goal, call, end], 60);
         let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();

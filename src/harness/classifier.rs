@@ -42,7 +42,11 @@ pub fn classifier_profile_id(settings: &IndexMap<String, String>) -> Option<Stri
     let raw = settings
         .get(CLASSIFIER_PROFILE_SETTING_ID)
         .cloned()
-        .or_else(|| baseline_setting_values().get(CLASSIFIER_PROFILE_SETTING_ID).cloned())
+        .or_else(|| {
+            baseline_setting_values()
+                .get(CLASSIFIER_PROFILE_SETTING_ID)
+                .cloned()
+        })
         .unwrap_or_default();
     let trimmed = raw.trim();
 
@@ -209,7 +213,8 @@ pub async fn ask(
     // here would race the outer one and make the error text nondeterministic.
     // One shared client: a loop can fan out one request per authored skill,
     // and each fresh client would otherwise carry its own connection pool.
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
@@ -224,7 +229,12 @@ pub async fn ask(
     }
 
     let response = match tokio::time::timeout(bound, request.send()).await {
-        Err(_) => return Err(format!("classifier: request timed out after {}ms", route.timeout_ms)),
+        Err(_) => {
+            return Err(format!(
+                "classifier: request timed out after {}ms",
+                route.timeout_ms
+            ))
+        }
         Ok(Err(error)) => return Err(format!("classifier: request failed: {error}")),
         Ok(Ok(response)) => response,
     };
@@ -232,11 +242,19 @@ pub async fn ask(
 
     if !status.is_success() {
         // Status only: a body can echo credentials back.
-        return Err(format!("classifier: endpoint returned HTTP {}", status.as_u16()));
+        return Err(format!(
+            "classifier: endpoint returned HTTP {}",
+            status.as_u16()
+        ));
     }
 
     let text = match tokio::time::timeout(bound, response.text()).await {
-        Err(_) => return Err(format!("classifier: response timed out after {}ms", route.timeout_ms)),
+        Err(_) => {
+            return Err(format!(
+                "classifier: response timed out after {}ms",
+                route.timeout_ms
+            ))
+        }
         Ok(Err(error)) => return Err(format!("classifier: response could not be read: {error}")),
         Ok(Ok(text)) => text,
     };
@@ -255,9 +273,11 @@ pub async fn ask(
 pub fn answer_value(answer: &DecisionAnswer) -> f64 {
     match answer {
         DecisionAnswer::Noul { noul } => *noul,
-        DecisionAnswer::Choice { choice, probabilities, .. } => {
-            probabilities.get(choice).copied().unwrap_or(0.0)
-        }
+        DecisionAnswer::Choice {
+            choice,
+            probabilities,
+            ..
+        } => probabilities.get(choice).copied().unwrap_or(0.0),
         DecisionAnswer::Score { score, legend, .. } => {
             let levels = legend.len() as f64;
 
@@ -403,7 +423,9 @@ impl<'a> FormulaParser<'a> {
     }
 
     fn primary(&mut self) -> Result<f64, String> {
-        let current = self.peek().ok_or_else(|| "formula ended early".to_string())?;
+        let current = self
+            .peek()
+            .ok_or_else(|| "formula ended early".to_string())?;
 
         if current == '(' {
             self.pos += 1;
@@ -531,7 +553,11 @@ fn call_function(name: &str, args: &[f64]) -> Result<f64, String> {
         "abs" if args.len() == 1 => Ok(args[0].abs()),
         "clamp" if args.len() == 3 => {
             let (value, low, high) = (args[0], args[1], args[2]);
-            let (low, high) = if low <= high { (low, high) } else { (high, low) };
+            let (low, high) = if low <= high {
+                (low, high)
+            } else {
+                (high, low)
+            };
             Ok(value.max(low).min(high))
         }
         "max" | "min" | "abs" | "clamp" => Err(format!(
@@ -588,7 +614,9 @@ pub fn load_skill_classifiers(skill_md_path: &str) -> Option<Result<SkillClassif
         return None;
     }
 
-    let path = std::path::Path::new(skill_md_path).parent()?.join("classifiers.json");
+    let path = std::path::Path::new(skill_md_path)
+        .parent()?
+        .join("classifiers.json");
 
     if !path.exists() {
         return None;
@@ -680,13 +708,13 @@ pub async fn select_skills(
     let mut authored: Vec<(String, RelevanceSpec)> = Vec::new();
 
     for (index, candidate) in candidates.iter().enumerate() {
-        match candidate.classifiers.as_ref().and_then(|entry| entry.relevance.as_ref()) {
+        match candidate
+            .classifiers
+            .as_ref()
+            .and_then(|entry| entry.relevance.as_ref())
+        {
             Some(spec) => authored.push((candidate.name.clone(), spec.clone())),
-            None => unauthored.push((
-                index,
-                candidate.name.clone(),
-                candidate.description.clone(),
-            )),
+            None => unauthored.push((index, candidate.name.clone(), candidate.description.clone())),
         }
     }
 
@@ -739,11 +767,18 @@ pub async fn select_skills(
 
     for outcome in outcomes {
         match outcome {
-            SelectionOutcome::Unauthored { selected, warnings: extra } => {
+            SelectionOutcome::Unauthored {
+                selected,
+                warnings: extra,
+            } => {
                 unauthored_selected.extend(selected);
                 warnings.extend(extra);
             }
-            SelectionOutcome::Authored { name, score, warnings: extra } => {
+            SelectionOutcome::Authored {
+                name,
+                score,
+                warnings: extra,
+            } => {
                 if let Some(score) = score {
                     authored_selected.push((name, score));
                 }
@@ -799,7 +834,9 @@ async fn select_unauthored_batch(
         Err(error) => {
             return SelectionOutcome::Unauthored {
                 selected: Vec::new(),
-                warnings: vec![format!("classifier: skill relevance request failed: {error}")],
+                warnings: vec![format!(
+                    "classifier: skill relevance request failed: {error}"
+                )],
             }
         }
     };
@@ -821,7 +858,10 @@ async fn select_unauthored_batch(
     by_score_descending(&mut scored);
     scored.truncate(UNAUTHORED_SELECTION_CAP);
 
-    SelectionOutcome::Unauthored { selected: scored, warnings: Vec::new() }
+    SelectionOutcome::Unauthored {
+        selected: scored,
+        warnings: Vec::new(),
+    }
 }
 
 async fn select_authored_skill(
@@ -875,12 +915,24 @@ async fn select_authored_skill(
         }
     };
 
-    let score = if raw.is_finite() { raw.clamp(0.0, 1.0) } else { 0.0 };
+    let score = if raw.is_finite() {
+        raw.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     if score >= threshold {
-        SelectionOutcome::Authored { name, score: Some(score), warnings: Vec::new() }
+        SelectionOutcome::Authored {
+            name,
+            score: Some(score),
+            warnings: Vec::new(),
+        }
     } else {
-        SelectionOutcome::Authored { name, score: None, warnings: Vec::new() }
+        SelectionOutcome::Authored {
+            name,
+            score: None,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -888,7 +940,10 @@ async fn select_authored_skill(
 /// answer value, and `id.member` reads that option's (or level's) probability.
 fn answer_var(response: &DecisionsResponse, var: &str) -> Option<f64> {
     match var.split_once('.') {
-        Some((id, member)) => response.answers.get(id).and_then(|answer| answer_member(answer, member)),
+        Some((id, member)) => response
+            .answers
+            .get(id)
+            .and_then(|answer| answer_member(answer, member)),
         None => response.answers.get(var).map(answer_value),
     }
 }
@@ -932,9 +987,7 @@ mod tests {
 
     /// HTTP/1.1 mock over a std TcpListener: accepts one connection per canned
     /// response (in order) and returns the request bodies it received.
-    fn spawn_mock(
-        responses: Vec<&'static str>,
-    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    fn spawn_mock(responses: Vec<&'static str>) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
@@ -985,19 +1038,34 @@ mod tests {
     fn classifier_settings_default_off_and_timeout_defaults() {
         let settings = default_setting_values();
         assert_eq!(classifier_profile_id(&settings), None);
-        assert_eq!(classifier_timeout_ms(&settings), DEFAULT_CLASSIFIER_TIMEOUT_MS);
+        assert_eq!(
+            classifier_timeout_ms(&settings),
+            DEFAULT_CLASSIFIER_TIMEOUT_MS
+        );
 
         let mut settings = settings;
         settings.insert(CLASSIFIER_PROFILE_SETTING_ID.to_string(), "  ".to_string());
         assert_eq!(classifier_profile_id(&settings), None);
-        settings.insert(CLASSIFIER_PROFILE_SETTING_ID.to_string(), " jev ".to_string());
+        settings.insert(
+            CLASSIFIER_PROFILE_SETTING_ID.to_string(),
+            " jev ".to_string(),
+        );
         assert_eq!(classifier_profile_id(&settings).as_deref(), Some("jev"));
 
         for value in ["nope", "0", "-5"] {
-            settings.insert(CLASSIFIER_TIMEOUT_MS_SETTING_ID.to_string(), value.to_string());
-            assert_eq!(classifier_timeout_ms(&settings), DEFAULT_CLASSIFIER_TIMEOUT_MS);
+            settings.insert(
+                CLASSIFIER_TIMEOUT_MS_SETTING_ID.to_string(),
+                value.to_string(),
+            );
+            assert_eq!(
+                classifier_timeout_ms(&settings),
+                DEFAULT_CLASSIFIER_TIMEOUT_MS
+            );
         }
-        settings.insert(CLASSIFIER_TIMEOUT_MS_SETTING_ID.to_string(), "1234".to_string());
+        settings.insert(
+            CLASSIFIER_TIMEOUT_MS_SETTING_ID.to_string(),
+            "1234".to_string(),
+        );
         assert_eq!(classifier_timeout_ms(&settings), 1234);
     }
 
@@ -1014,7 +1082,10 @@ mod tests {
             .unwrap();
         assert_eq!(route.url, "https://openrouter.ai/api/alpha/decisions");
         assert_eq!(route.model, "~typesafe/jev-latest");
-        assert!(route.headers.iter().any(|(key, value)| key == "Authorization" && value == "Bearer test-key"));
+        assert!(route
+            .headers
+            .iter()
+            .any(|(key, value)| key == "Authorization" && value == "Bearer test-key"));
 
         let typesafe = settings_with_profile("typesafe", None);
         let route = resolve_classifier_route(&typesafe, Some(&env), override_profile)
@@ -1025,9 +1096,15 @@ mod tests {
         // The override wins over the setting; an unset override falls back to it.
         let mut settings = settings_with_profile("typesafe", None);
         settings.insert(CLASSIFIER_PROFILE_SETTING_ID.to_string(), String::new());
-        assert!(resolve_classifier_route(&settings, Some(&env), None).unwrap().is_none());
-        assert!(resolve_classifier_route(&settings, Some(&env), Some("  ")).unwrap().is_none());
-        assert!(resolve_classifier_route(&settings, Some(&env), Some("jev")).unwrap().is_some());
+        assert!(resolve_classifier_route(&settings, Some(&env), None)
+            .unwrap()
+            .is_none());
+        assert!(resolve_classifier_route(&settings, Some(&env), Some("  "))
+            .unwrap()
+            .is_none());
+        assert!(resolve_classifier_route(&settings, Some(&env), Some("jev"))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1054,9 +1131,14 @@ mod tests {
         let (base, server) = spawn_mock(vec![body]);
         let route = hand_route(&base, 10_000);
         let mut questions = Map::new();
-        questions.insert("a".to_string(), serde_json::json!({"type": "noul", "instructions": "?"}));
+        questions.insert(
+            "a".to_string(),
+            serde_json::json!({"type": "noul", "instructions": "?"}),
+        );
 
-        let response = ask(&route, serde_json::json!({"goal": "x"}), questions).await.unwrap();
+        let response = ask(&route, serde_json::json!({"goal": "x"}), questions)
+            .await
+            .unwrap();
 
         assert_eq!(response.model, "jev-1.13.0");
         assert_eq!(response.answers.len(), 3);
@@ -1074,7 +1156,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let route = hand_route(&format!("http://{addr}"), 150);
 
-        let error = ask(&route, serde_json::json!({}), Map::new()).await.unwrap_err();
+        let error = ask(&route, serde_json::json!({}), Map::new())
+            .await
+            .unwrap_err();
 
         assert!(error.contains("timed out"), "{error}");
     }
@@ -1084,7 +1168,9 @@ mod tests {
         let (base, server) = spawn_mock(vec!["not json at all"]);
         let route = hand_route(&base, 10_000);
 
-        let error = ask(&route, serde_json::json!({}), Map::new()).await.unwrap_err();
+        let error = ask(&route, serde_json::json!({}), Map::new())
+            .await
+            .unwrap_err();
 
         assert!(error.contains("not valid decisions JSON"), "{error}");
         server.join().unwrap();
@@ -1151,10 +1237,15 @@ mod tests {
         assert_eq!(eval_formula("1 + 2 * 3", &vars).unwrap(), 7.0);
         assert_eq!(eval_formula("(1 + 2) * 3", &vars).unwrap(), 9.0);
         assert_eq!(eval_formula("-2 + 10", &vars).unwrap(), 8.0);
-        assert_eq!(eval_formula("max(1, 2, 3) - min(4, 5)", &vars).unwrap(), -1.0);
+        assert_eq!(
+            eval_formula("max(1, 2, 3) - min(4, 5)", &vars).unwrap(),
+            -1.0
+        );
         assert_eq!(eval_formula("clamp(5, 0, 1)", &vars).unwrap(), 1.0);
         assert_eq!(eval_formula("abs(0 - 3)", &vars).unwrap(), 3.0);
-        assert!((eval_formula("0.5 * is_migration + 0.3 * risk", &vars).unwrap() - 0.65).abs() < 1e-9);
+        assert!(
+            (eval_formula("0.5 * is_migration + 0.3 * risk", &vars).unwrap() - 0.65).abs() < 1e-9
+        );
         assert!(
             (eval_formula(
                 "0.5 * is_migration + 0.3 * risk + 0.2 * max(phase.implement, phase.review)",
@@ -1171,7 +1262,10 @@ mod tests {
     fn formula_handles_member_access() {
         assert_eq!(eval_formula("phase.implement", &vars).unwrap(), 0.9);
         assert_eq!(eval_formula("risk.0", &vars).unwrap(), 0.25);
-        assert_eq!(eval_formula("phase.implement + risk.0", &vars).unwrap(), 1.15);
+        assert_eq!(
+            eval_formula("phase.implement + risk.0", &vars).unwrap(),
+            1.15
+        );
     }
 
     #[test]
@@ -1242,7 +1336,10 @@ mod tests {
             .iter()
             .map(|(id, value)| format!("\"{id}\":{{\"type\":\"noul\",\"noul\":{value}}}"))
             .collect();
-        format!("{{\"model\":\"jev\",\"answers\":{{{}}}}}", answers.join(","))
+        format!(
+            "{{\"model\":\"jev\",\"answers\":{{{}}}}}",
+            answers.join(",")
+        )
     }
 
     // The response body must outlive the request, so it is leaked into a
@@ -1294,14 +1391,21 @@ mod tests {
         let selection = select_skills(&route, serde_json::json!({"goal": "g"}), &candidates).await;
 
         assert!(selection.warnings.is_empty(), "{:?}", selection.warnings);
-        let names: Vec<&str> = selection.selected.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&str> = selection
+            .selected
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(names, vec!["f", "a", "e", "c"]);
         // ONE batched request for every unauthored candidate.
         let bodies = server.join().unwrap();
         assert_eq!(bodies.len(), 1);
         let sent: Value = serde_json::from_str(&bodies[0]).unwrap();
         assert_eq!(sent["questions"].as_object().unwrap().len(), 6);
-        assert_eq!(sent["questions"]["skill_0"]["type"], serde_json::json!("noul"));
+        assert_eq!(
+            sent["questions"]["skill_0"]["type"],
+            serde_json::json!("noul")
+        );
         assert_eq!(
             sent["questions"]["skill_0"]["instructions"]["question"],
             serde_json::json!("Would following the skill `skill` help complete the current task described in the state?")
@@ -1329,7 +1433,10 @@ mod tests {
 
         assert!(selection.warnings.is_empty(), "{:?}", selection.warnings);
         assert_eq!(selection.selected.len(), 5);
-        assert!(selection.selected.iter().all(|(_, score)| (*score - 0.8).abs() < 1e-12));
+        assert!(selection
+            .selected
+            .iter()
+            .all(|(_, score)| (*score - 0.8).abs() < 1e-12));
         let bodies = server.join().unwrap();
         assert_eq!(bodies.len(), 5);
         // The authored questions go verbatim, not the batch noul shape.
@@ -1371,11 +1478,23 @@ mod tests {
 
         let selection = select_skills(&route, serde_json::json!({}), &candidates).await;
 
-        let names: Vec<&str> = selection.selected.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<&str> = selection
+            .selected
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
         assert_eq!(names, vec!["plain", "batch"]);
         assert_eq!(selection.warnings.len(), 1);
-        assert!(selection.warnings[0].contains("broken"), "{:?}", selection.warnings);
-        assert!(selection.warnings[0].contains("unknown variable"), "{:?}", selection.warnings);
+        assert!(
+            selection.warnings[0].contains("broken"),
+            "{:?}",
+            selection.warnings
+        );
+        assert!(
+            selection.warnings[0].contains("unknown variable"),
+            "{:?}",
+            selection.warnings
+        );
         server.join().unwrap();
     }
 
@@ -1384,10 +1503,13 @@ mod tests {
         let body = "{}";
         let (base, server) = spawn_mock(vec![leak(body.to_string()); 2]);
         let route = hand_route(&base, 10_000);
-        let candidates = vec![unauthored("a"), authored(
-            "b",
-            serde_json::json!({ "questions": { "q": { "type": "noul", "instructions": "?" } } }),
-        )];
+        let candidates = vec![
+            unauthored("a"),
+            authored(
+                "b",
+                serde_json::json!({ "questions": { "q": { "type": "noul", "instructions": "?" } } }),
+            ),
+        ];
 
         let selection = select_skills(&route, serde_json::json!({}), &candidates).await;
 
@@ -1406,7 +1528,8 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 4096];
             let _ = std::io::Read::read(&mut stream, &mut buf);
-            let response = "HTTP/1.1 422 Unprocessable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            let response =
+                "HTTP/1.1 422 Unprocessable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
             std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
         });
         let route = hand_route(&format!("http://127.0.0.1:{port}"), 10_000);
@@ -1416,7 +1539,11 @@ mod tests {
 
         assert!(selection.selected.is_empty());
         assert_eq!(selection.warnings.len(), 1);
-        assert!(selection.warnings[0].contains("422"), "{:?}", selection.warnings);
+        assert!(
+            selection.warnings[0].contains("422"),
+            "{:?}",
+            selection.warnings
+        );
         server.join().unwrap();
     }
 

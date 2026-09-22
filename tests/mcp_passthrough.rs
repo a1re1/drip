@@ -29,7 +29,8 @@ fn fake_drip(body: &str) -> FakeDrip {
     let path = dir.path().join("drip");
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake drip script");
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fake drip");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake drip");
     FakeDrip { _dir: dir, path }
 }
 
@@ -104,14 +105,17 @@ fn parse_lines(stdout: &str) -> Vec<Value> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|error| panic!("stdout line not valid JSON-RPC: {error:?}\nline: {line}"))
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("stdout line not valid JSON-RPC: {error:?}\nline: {line}")
+            })
         })
         .collect()
 }
 
 fn error_code(reply: &Value) -> i64 {
-    reply["error"]["code"].as_i64().unwrap_or_else(|| panic!("no error code in {reply}"))
+    reply["error"]["code"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("no error code in {reply}"))
 }
 
 fn content_texts(result: &Value) -> Vec<&str> {
@@ -128,7 +132,9 @@ fn request(id: &str, method: &str) -> String {
 }
 
 fn tools_call(id: i64, arguments: &str) -> String {
-    format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"drip","arguments":{arguments}}}}}"#)
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"drip","arguments":{arguments}}}}}"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -144,18 +150,31 @@ fn initialize_then_tools_list_has_one_drip_tool_with_required_args() {
     assert!(outcome.status.success(), "server must exit 0 on EOF");
 
     let replies = parse_lines(&outcome.stdout);
-    assert_eq!(replies.len(), 2, "exactly two replies, got: {}", outcome.stdout);
+    assert_eq!(
+        replies.len(),
+        2,
+        "exactly two replies, got: {}",
+        outcome.stdout
+    );
 
     let initialize = &replies[0];
     assert_eq!(initialize["id"], 1);
     assert_eq!(initialize["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(initialize["result"]["capabilities"]["tools"], serde_json::json!({}));
+    assert_eq!(
+        initialize["result"]["capabilities"]["tools"],
+        serde_json::json!({})
+    );
     assert_eq!(initialize["result"]["serverInfo"]["name"], "drip-mcp");
 
-    let tools = replies[1]["result"]["tools"].as_array().expect("tools array");
+    let tools = replies[1]["result"]["tools"]
+        .as_array()
+        .expect("tools array");
     assert_eq!(tools.len(), 1, "exactly one tool");
     assert_eq!(tools[0]["name"], "drip");
-    assert!(tools[0]["description"].as_str().expect("description").contains("--detach"));
+    assert!(tools[0]["description"]
+        .as_str()
+        .expect("description")
+        .contains("--detach"));
     let schema = &tools[0]["inputSchema"];
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["required"], serde_json::json!(["args"]));
@@ -171,7 +190,8 @@ fn initialize_then_tools_list_has_one_drip_tool_with_required_args() {
 #[test]
 fn tools_call_passes_argv_verbatim() {
     let fake = fake_drip_echo_argv();
-    let arguments = r#"{"args":["goal with spaces","","quotes 'and \"double\"'","$HOME `id` ; | &","--json"]}"#;
+    let arguments =
+        r#"{"args":["goal with spaces","","quotes 'and \"double\"'","$HOME `id` ; | &","--json"]}"#;
     let outcome = run_server(
         &[tools_call(7, arguments)],
         &[("DRIP_MCP_BIN", fake.path.to_str().expect("fake path"))],
@@ -197,7 +217,9 @@ fn tools_call_passes_argv_verbatim() {
             "--json",
         ]
     );
-    assert!(content_texts(result).iter().any(|text| *text == "exit code: 0"));
+    assert!(content_texts(result)
+        .iter()
+        .any(|text| *text == "exit code: 0"));
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +236,10 @@ fn tools_call_nonzero_exit_is_tool_error() {
             ("FAKE_EXIT", "3"),
         ],
     );
-    assert!(outcome.status.success(), "tool-level failure is not a server failure");
+    assert!(
+        outcome.status.success(),
+        "tool-level failure is not a server failure"
+    );
 
     let replies = parse_lines(&outcome.stdout);
     assert_eq!(replies.len(), 1);
@@ -274,7 +299,9 @@ fn tools_call_timeout_kills_child_and_reports_quickly() {
     assert_eq!(result["isError"], true);
     let texts = content_texts(result);
     assert!(
-        texts.iter().any(|text| text.contains("timed out") && text.contains("1s")),
+        texts
+            .iter()
+            .any(|text| text.contains("timed out") && text.contains("1s")),
         "timeout explanation missing in {texts:?}"
     );
 }
@@ -347,7 +374,10 @@ fn tools_call_nonexistent_executable_is_tool_error() {
         &[tools_call(12, r#"{"args":["goal"]}"#)],
         &[("DRIP_MCP_BIN", "/nonexistent/drip-mcp-fake-path")],
     );
-    assert!(outcome.status.success(), "spawn failure must not kill the server");
+    assert!(
+        outcome.status.success(),
+        "spawn failure must not kill the server"
+    );
     let replies = parse_lines(&outcome.stdout);
     assert_eq!(replies.len(), 1);
     let result = &replies[0]["result"];
@@ -413,10 +443,16 @@ fn every_request_gets_exactly_one_reply_matched_by_id() {
     assert_eq!(replies.len(), 4, "one reply per request");
     // Protocol replies are written inline in arrival order; tool replies may
     // interleave with them but must still be present and matched by id.
-    let ids: Vec<String> = replies.iter().map(|reply| reply["id"].to_string()).collect();
+    let ids: Vec<String> = replies
+        .iter()
+        .map(|reply| reply["id"].to_string())
+        .collect();
     assert!(ids.iter().position(|id| id == "\"a\"") < ids.iter().position(|id| id == "\"b\""));
     for id in [1, 2] {
-        let reply = replies.iter().find(|reply| reply["id"] == id).unwrap_or_else(|| panic!("no reply for id {id}"));
+        let reply = replies
+            .iter()
+            .find(|reply| reply["id"] == id)
+            .unwrap_or_else(|| panic!("no reply for id {id}"));
         assert_eq!(reply["result"]["content"][0]["text"], "seq\n");
     }
 }
@@ -436,7 +472,10 @@ fn slow_tool_call_does_not_block_a_later_call() {
     );
     let elapsed = started.elapsed();
     assert!(outcome.status.success());
-    assert!(elapsed >= Duration::from_secs(2), "server must wait for the in-flight slow call; took {elapsed:?}");
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "server must wait for the in-flight slow call; took {elapsed:?}"
+    );
     let replies = parse_lines(&outcome.stdout);
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[0]["id"], 2, "fast call replies first: {replies:?}");
@@ -457,7 +496,10 @@ fn run_args(args: &[&str]) -> (std::process::ExitStatus, String) {
         .stderr(Stdio::null())
         .output()
         .expect("run drip-mcp with args");
-    (output.status, String::from_utf8_lossy(&output.stdout).into_owned())
+    (
+        output.status,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
 }
 
 #[test]
@@ -465,7 +507,10 @@ fn help_prints_usage_and_exits_zero() {
     for flag in ["--help", "-h"] {
         let (status, stdout) = run_args(&[flag]);
         assert!(status.success(), "{flag} must exit 0");
-        assert!(stdout.contains("drip-mcp"), "{flag} output should name the binary");
+        assert!(
+            stdout.contains("drip-mcp"),
+            "{flag} output should name the binary"
+        );
     }
 }
 
@@ -473,6 +518,8 @@ fn help_prints_usage_and_exits_zero() {
 fn version_prints_name_and_pkg_version() {
     let (status, stdout) = run_args(&["--version"]);
     assert!(status.success());
-    assert_eq!(stdout.trim(), format!("drip-mcp {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        stdout.trim(),
+        format!("drip-mcp {}", env!("CARGO_PKG_VERSION"))
+    );
 }
-

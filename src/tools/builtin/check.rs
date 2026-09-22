@@ -132,7 +132,10 @@ pub fn execute_prepared(prepared: &CheckToolPrepared) -> Result<CheckToolExecuti
         &prepared.input.workspace_root,
     );
 
-    let lead_line = format!("CHECK: {} error(s) in {}", result.total_errors, result.scope);
+    let lead_line = format!(
+        "CHECK: {} error(s) in {}",
+        result.total_errors, result.scope
+    );
 
     Ok(CheckToolExecution {
         data: result,
@@ -292,7 +295,9 @@ fn checked_compiler_output(success: bool, combined: String) -> Result<String> {
     // launcher failed without producing diagnostics the parser understands.
     if !success && parse_diagnostics_output(&combined).is_empty() {
         let tail: String = combined.chars().take(2000).collect();
-        return Err(anyhow::anyhow!("tsc exited unsuccessfully without recognized diagnostics: {tail}"));
+        return Err(anyhow::anyhow!(
+            "tsc exited unsuccessfully without recognized diagnostics: {tail}"
+        ));
     }
     Ok(combined)
 }
@@ -306,7 +311,11 @@ mod compiler_status_tests {
         assert!(checked_compiler_output(false, "launcher could not execute tsc".into()).is_err());
         assert!(checked_compiler_output(false, String::new()).is_err());
         assert!(checked_compiler_output(true, String::new()).is_ok());
-        let output = checked_compiler_output(false, "src/a.ts(1,2): error TS2322: incompatible type".into()).unwrap();
+        let output = checked_compiler_output(
+            false,
+            "src/a.ts(1,2): error TS2322: incompatible type".into(),
+        )
+        .unwrap();
         assert_eq!(parse_diagnostics_output(&output).len(), 1);
     }
 }
@@ -374,7 +383,10 @@ fn display_file_path(file: &str, workspace_root: &str) -> String {
 
 /// The complete stage.
 pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolCompletion {
-    let lead_line = format!("CHECK: {} error(s) in {}", result.total_errors, result.scope);
+    let lead_line = format!(
+        "CHECK: {} error(s) in {}",
+        result.total_errors, result.scope
+    );
     let mut lines: Vec<String> = vec![lead_line.clone()];
 
     if !result.diagnostics.is_empty() {
@@ -411,7 +423,9 @@ pub fn complete(prepared: &CheckToolPrepared, result: &CheckToolResult) -> ToolC
 /// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors

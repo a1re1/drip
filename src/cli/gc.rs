@@ -133,7 +133,8 @@ pub fn collect_gc_plan(
 
     // Every registry: the project's own index plus the legacy pre-move index
     // when it still exists on disk.
-    let mut registries: Vec<(&rusqlite::Connection, &str)> = vec![(&index.conn, &project.sessions_dir)];
+    let mut registries: Vec<(&rusqlite::Connection, &str)> =
+        vec![(&index.conn, &project.sessions_dir)];
 
     // The legacy pre-move registry gets its own handle on its own db file.
     let legacy_index = match (
@@ -156,13 +157,16 @@ pub fn collect_gc_plan(
     let mut rows: Vec<(String, String, String)> = Vec::new();
 
     for (conn, sessions_dir) in &registries {
-        let mut stmt = match conn.prepare("SELECT id, updated_at FROM sessions WHERE status != 'active'") {
-            Ok(stmt) => stmt,
-            Err(_) => continue,
-        };
+        let mut stmt =
+            match conn.prepare("SELECT id, updated_at FROM sessions WHERE status != 'active'") {
+                Ok(stmt) => stmt,
+                Err(_) => continue,
+            };
 
         let fetched = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .expect("collect_gc_plan query");
 
         for row in fetched.flatten() {
@@ -176,36 +180,38 @@ pub fn collect_gc_plan(
     let mut sessions: Vec<GcSessionEntry> = Vec::new();
 
     for (id, updated_at, sessions_dir) in rows {
+        // Age gate — sessions updated recently are skipped.
+        let Ok(updated) = DateTime::parse_from_rfc3339(&updated_at) else {
+            continue;
+        };
 
-            // Age gate — sessions updated recently are skipped.
-            let Ok(updated) = DateTime::parse_from_rfc3339(&updated_at) else {
-                continue;
-            };
-
-            if updated.timestamp_millis() >= cutoff {
-                continue;
-            }
-
-            let dir = PathBuf::from(sessions_dir).join(&id);
-
-            // Liveness gate — a live lease means the session is running;
-            // never touch it.
-            let lease_path = dir.join("lease.json");
-            if check_lease(Path::new(&lease_path), now).alive() {
-                continue;
-            }
-            let bytes = dir_bytes(dir.to_str().unwrap_or(""));
-
-            sessions.push(GcSessionEntry {
-                bytes,
-                dir: dir.to_string_lossy().into_owned(),
-                id,
-            });
+        if updated.timestamp_millis() >= cutoff {
+            continue;
         }
+
+        let dir = PathBuf::from(sessions_dir).join(&id);
+
+        // Liveness gate — a live lease means the session is running;
+        // never touch it.
+        let lease_path = dir.join("lease.json");
+        if check_lease(Path::new(&lease_path), now).alive() {
+            continue;
+        }
+        let bytes = dir_bytes(dir.to_str().unwrap_or(""));
+
+        sessions.push(GcSessionEntry {
+            bytes,
+            dir: dir.to_string_lossy().into_owned(),
+            id,
+        });
+    }
 
     let total_bytes = sessions.iter().map(|s| s.bytes).sum();
 
-    GcPlan { sessions, total_bytes }
+    GcPlan {
+        sessions,
+        total_bytes,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +317,10 @@ pub fn sweep_async_job_logs(
     let mut deleted_files: u64 = 0;
 
     if !dir.exists() {
-        return SweepResult { deleted_bytes, deleted_files };
+        return SweepResult {
+            deleted_bytes,
+            deleted_files,
+        };
     }
 
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -343,7 +352,10 @@ pub fn sweep_async_job_logs(
         }
     }
 
-    SweepResult { deleted_bytes, deleted_files }
+    SweepResult {
+        deleted_bytes,
+        deleted_files,
+    }
 }
 
 // ---------------------------------------------------------------------------

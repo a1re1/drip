@@ -31,9 +31,7 @@ pub mod config;
 // the description carries an `[mcp:<server>]` prefix so the model can tell
 // which server a call will hit, and the parameters are the server's
 // inputSchema normalized into the tool layer's shape.
-pub fn mcp_tool_definitions(
-    clients: &[Arc<Mutex<McpClient>>],
-) -> Vec<ChatToolDefinition> {
+pub fn mcp_tool_definitions(clients: &[Arc<Mutex<McpClient>>]) -> Vec<ChatToolDefinition> {
     let mut definitions = Vec::new();
     for client in clients {
         // Snapshot under the lock, then release it: the std mutex is not
@@ -63,7 +61,11 @@ pub fn mcp_server_of(tool_name: &str) -> Option<&str> {
 
 // Wraps one advertised tool as a sync ChatToolDefinition. The closures own
 // an `Arc` clone of the client so `execute` can reach the live connection.
-fn mcp_tool_definition(client: &Arc<Mutex<McpClient>>, server: &str, tool: &McpToolInfo) -> ChatToolDefinition {
+fn mcp_tool_definition(
+    client: &Arc<Mutex<McpClient>>,
+    server: &str,
+    tool: &McpToolInfo,
+) -> ChatToolDefinition {
     let (name, description, parameters) = mcp_tool_metadata(server, tool);
     let server_tool_name = tool.name.clone();
     let execute_client = Arc::clone(client);
@@ -76,18 +78,23 @@ fn mcp_tool_definition(client: &Arc<Mutex<McpClient>>, server: &str, tool: &McpT
         // workspace, so they stay out of the stall accounting.
         mutates_workspace: false,
         mode: ChatToolMode::Sync,
-        prepare: Box::new(move |request: crate::tools::types::ChatToolPrepareRequest<'_>| {
-            // The raw input is the tool's JSON arguments object.
-            let arguments = parse_tool_arguments(request.raw_input).map_err(|error| error.to_string())?;
-            Ok(ChatToolPreparedInput {
-                display_input: request.raw_input.to_string(),
-                input: Value::Object(arguments),
-                tags: None,
-            })
-        }),
+        prepare: Box::new(
+            move |request: crate::tools::types::ChatToolPrepareRequest<'_>| {
+                // The raw input is the tool's JSON arguments object.
+                let arguments =
+                    parse_tool_arguments(request.raw_input).map_err(|error| error.to_string())?;
+                Ok(ChatToolPreparedInput {
+                    display_input: request.raw_input.to_string(),
+                    input: Value::Object(arguments),
+                    tags: None,
+                })
+            },
+        ),
         execute: Box::new(move |request: ChatToolExecuteRequest<'_>| {
             let arguments = request.prepared.input;
-            let mut client = execute_client.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut client = execute_client
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             match client.call(&server_tool_name, arguments) {
                 // A transport failure (dead server, timeout) throws, exactly
                 // like a builtin failure thrown through outcome_to_result.
@@ -117,13 +124,15 @@ fn mcp_tool_definition(client: &Arc<Mutex<McpClient>>, server: &str, tool: &McpT
                 }
             }
         }),
-        complete: Box::new(|request: crate::tools::types::ChatToolCompleteRequest<'_>| {
-            Ok(ChatToolCompletionResult {
-                blocks: None,
-                tool_content: request.result.output_text.clone(),
-                tags: None,
-            })
-        }),
+        complete: Box::new(
+            |request: crate::tools::types::ChatToolCompleteRequest<'_>| {
+                Ok(ChatToolCompletionResult {
+                    blocks: None,
+                    tool_content: request.result.output_text.clone(),
+                    tags: None,
+                })
+            },
+        ),
     })
 }
 
@@ -158,19 +167,22 @@ fn parameters_from_schema(schema: &Value) -> ChatToolParameters {
         }
     }
 
-    let required = object.get("required").and_then(Value::as_array).and_then(|entries| {
-        let names: Vec<String> = entries
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect();
-        // Keep the list only when every entry was a string.
-        if !names.is_empty() && names.len() == entries.len() {
-            Some(names)
-        } else {
-            None
-        }
-    });
+    let required = object
+        .get("required")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            let names: Vec<String> = entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            // Keep the list only when every entry was a string.
+            if !names.is_empty() && names.len() == entries.len() {
+                Some(names)
+            } else {
+                None
+            }
+        });
 
     ChatToolParameters {
         additional_properties: None,

@@ -62,21 +62,26 @@ pub fn find_journal_root(start_dir: &Path) -> PathBuf {
 }
 
 pub fn patch_journal_path(workspace_root: &Path) -> PathBuf {
-    find_journal_root(workspace_root).join(".drip").join("patches.jsonl")
+    find_journal_root(workspace_root)
+        .join(".drip")
+        .join("patches.jsonl")
 }
 
-pub fn append_patch_journal(
-    workspace_root: &Path,
-    entry: &AppendPatchJournalEntry,
-) {
+pub fn append_patch_journal(workspace_root: &Path, entry: &AppendPatchJournalEntry) {
     let journal_path = patch_journal_path(workspace_root);
-    let elided =
-        entry.pre_image.as_deref().map_or(false, |pre| pre.chars().count() > MAX_PRE_IMAGE_CHARS);
+    let elided = entry
+        .pre_image
+        .as_deref()
+        .map_or(false, |pre| pre.chars().count() > MAX_PRE_IMAGE_CHARS);
     let record = PatchJournalEntry {
         at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         path: entry.path.clone(),
         post_sha256: sha256(&entry.post_content),
-        pre_image: if elided { None } else { entry.pre_image.clone() },
+        pre_image: if elided {
+            None
+        } else {
+            entry.pre_image.clone()
+        },
         pre_image_elided: if elided { Some(true) } else { None },
     };
 
@@ -91,9 +96,15 @@ pub fn append_patch_journal(
     if let Some(parent) = journal_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&journal_path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&journal_path)
+    {
         use std::io::Write;
-        let _ = file.write_all(line.as_bytes()).and_then(|_| file.write_all(b"\n"));
+        let _ = file
+            .write_all(line.as_bytes())
+            .and_then(|_| file.write_all(b"\n"));
     }
 }
 
@@ -122,10 +133,11 @@ pub fn undo_last_patches(workspace_root: &Path, count: usize) -> Vec<UndoOutcome
         return vec![UndoOutcome::Empty];
     }
 
-    let mut lines: Vec<String> = crate::lib_fs::read_jsonl_records::<PatchJournalEntry>(&journal_path)
-        .into_iter()
-        .map(|record| record.raw)
-        .collect();
+    let mut lines: Vec<String> =
+        crate::lib_fs::read_jsonl_records::<PatchJournalEntry>(&journal_path)
+            .into_iter()
+            .map(|record| record.raw)
+            .collect();
     let mut outcomes: Vec<UndoOutcome> = Vec::new();
     let mut remaining = count;
 
@@ -152,7 +164,10 @@ pub fn undo_last_patches(workspace_root: &Path, count: usize) -> Vec<UndoOutcome
 
         let current_content = std::fs::read_to_string(&entry.path).ok();
 
-        if current_content.as_deref().map_or(true, |current| sha256(current) != entry.post_sha256) {
+        if current_content
+            .as_deref()
+            .map_or(true, |current| sha256(current) != entry.post_sha256)
+        {
             // The file moved on since this patch — undoing would destroy newer work.
             outcomes.push(UndoOutcome::Refused {
                 path: entry.path.clone(),
@@ -166,14 +181,18 @@ pub fn undo_last_patches(workspace_root: &Path, count: usize) -> Vec<UndoOutcome
 
         if entry.pre_image.is_none() {
             let _ = std::fs::remove_file(&entry.path);
-            outcomes.push(UndoOutcome::Deleted { path: entry.path.clone() });
+            outcomes.push(UndoOutcome::Deleted {
+                path: entry.path.clone(),
+            });
         } else {
             let _ = crate::lib_fs::write_file_atomic(
                 Path::new(&entry.path),
                 entry.pre_image.as_deref().unwrap_or_default(),
                 false,
             );
-            outcomes.push(UndoOutcome::Undone { path: entry.path.clone() });
+            outcomes.push(UndoOutcome::Undone {
+                path: entry.path.clone(),
+            });
         }
 
         lines.pop();
@@ -279,8 +298,12 @@ mod tests {
         assert_eq!(
             outcomes,
             vec![
-                UndoOutcome::Deleted { path: created.to_string_lossy().into_owned() },
-                UndoOutcome::Undone { path: edited.to_string_lossy().into_owned() },
+                UndoOutcome::Deleted {
+                    path: created.to_string_lossy().into_owned()
+                },
+                UndoOutcome::Undone {
+                    path: edited.to_string_lossy().into_owned()
+                },
             ]
         );
         assert!(!created.exists());

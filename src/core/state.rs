@@ -17,14 +17,11 @@ use chrono::{SecondsFormat, Utc};
 use indexmap::IndexMap;
 use serde_json::Value;
 
+use crate::core::types::{push_recovery_event, HarnessRecoveryAction, HarnessRecoveryEvent};
 use crate::core::types::{
-	ClaimedConfidence,
-	HarnessGoalRecord,
-HarnessMemoryNote, HarnessObservation, HarnessState,
-HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats,
-	VerificationSummary,
+    ClaimedConfidence, HarnessGoalRecord, HarnessMemoryNote, HarnessObservation, HarnessState,
+    HarnessTask, HarnessTaskStatus, HarnessTelemetryConfig, TaskStats, VerificationSummary,
 };
-use crate::core::types::{HarnessRecoveryAction, HarnessRecoveryEvent, push_recovery_event};
 #[cfg(test)]
 use crate::core::types::{MAX_RECOVERY_EVENTS, MAX_RECOVERY_TEXT_CHARS};
 use crate::lib_fs::write_file_atomic;
@@ -33,392 +30,447 @@ use crate::lib_fs::write_file_atomic;
 /// inserted just after the current task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HarnessTaskPlacement {
-	End,
-	Next,
+    End,
+    Next,
 }
 
 pub type HarnessTaskPlacementAlias = HarnessTaskPlacement;
 
 pub fn create_harness_state(goal: &str) -> HarnessState {
-	HarnessState {
-		created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-		direct_response: None,
-		goal: goal.to_string(),
-		history: Vec::new(),
-		inbox_cursor: None,
-		operator_messages: None,
-		last_verification: None,
-		mutations_since_verification: None,
-		workspace_edits: None,
-		verifications: None,
-		verification_streak: None,
-		expectations: Vec::new(),
-		anomalies: Vec::new(),
-		completion_anchor: None,
-		edited_paths: Vec::new(),
-		pending_questions: None,
-		iteration: 0,
-		last_activation: None,
-		r#loop: 0,
-		memory: Vec::new(),
-		observations: Vec::new(),
-		promoted_context: Vec::new(),
-		run_summary: None,
-		tasks: Vec::new(),
-		telemetry: IndexMap::new(),
-		review_opt_out: None,
-		opt_out_warning_emitted: None,
-		version: 1,
-	}
+    HarnessState {
+        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        direct_response: None,
+        goal: goal.to_string(),
+        history: Vec::new(),
+        inbox_cursor: None,
+        operator_messages: None,
+        last_verification: None,
+        mutations_since_verification: None,
+        workspace_edits: None,
+        verifications: None,
+        verification_streak: None,
+        expectations: Vec::new(),
+        anomalies: Vec::new(),
+        completion_anchor: None,
+        edited_paths: Vec::new(),
+        pending_questions: None,
+        iteration: 0,
+        last_activation: None,
+        r#loop: 0,
+        memory: Vec::new(),
+        observations: Vec::new(),
+        promoted_context: Vec::new(),
+        run_summary: None,
+        tasks: Vec::new(),
+        telemetry: IndexMap::new(),
+        review_opt_out: None,
+        opt_out_warning_emitted: None,
+        version: 1,
+    }
 }
 
 pub fn start_follow_up_goal(state: &mut HarnessState, goal: &str) {
-	if !state.tasks.is_empty() {
-		state.history.push(HarnessGoalRecord {
-			archived_at_iteration: state.iteration,
-			goal: state.goal.clone(),
-			summary: state.run_summary.as_ref().map(|note| note.text.clone()),
-			tasks: std::mem::take(&mut state.tasks),
-		});
-	}
+    if !state.tasks.is_empty() {
+        state.history.push(HarnessGoalRecord {
+            archived_at_iteration: state.iteration,
+            goal: state.goal.clone(),
+            summary: state.run_summary.as_ref().map(|note| note.text.clone()),
+            tasks: std::mem::take(&mut state.tasks),
+        });
+    }
 
-	state.goal = goal.to_string();
-	state.tasks = Vec::new();
-	state.last_activation = None;
-	state.run_summary = None;
-	state.direct_response = None;
-	// A new goal must not inherit the previous goal's test outcome as "current"
-	// — nor its verification timeline, failure streak, or staleness counter
-	// (debt audit B4: the v0.30 fields missed this list and leaked).
-	state.last_verification = None;
-	state.verifications = None;
-	state.verification_streak
- = None;
-	state.mutations_since_verification
- = None;
-	// Same for anchoring state: a new goal starts with no pre-registered
-	// expectations, no terminal anomalies, and no completion anchor.
-	state.expectations = Vec::new();
-	state.anomalies = Vec::new();
-	state.completion_anchor = None;
-	// Steering consumed during the previous goal was steering FOR that goal;
-	// a new goal's text is the operator's latest word.
-	state.operator_messages = None;
-	// Draft/opt-out state is steering-shaped: a new goal starts clean and the
-	// current invocation's flags/goal reapply it (full-rigor hardening resume).
-	state.review_opt_out = None;
-	state.opt_out_warning_emitted = None;
-	// An unanswered survey asked FOR the previous goal must not re-block the
-	// new one (same leak class as the debt-audit list above).
-	state.pending_questions = None;
+    state.goal = goal.to_string();
+    state.tasks = Vec::new();
+    state.last_activation = None;
+    state.run_summary = None;
+    state.direct_response = None;
+    // A new goal must not inherit the previous goal's test outcome as "current"
+    // — nor its verification timeline, failure streak, or staleness counter
+    // (debt audit B4: the v0.30 fields missed this list and leaked).
+    state.last_verification = None;
+    state.verifications = None;
+    state.verification_streak = None;
+    state.mutations_since_verification = None;
+    // Same for anchoring state: a new goal starts with no pre-registered
+    // expectations, no terminal anomalies, and no completion anchor.
+    state.expectations = Vec::new();
+    state.anomalies = Vec::new();
+    state.completion_anchor = None;
+    // Steering consumed during the previous goal was steering FOR that goal;
+    // a new goal's text is the operator's latest word.
+    state.operator_messages = None;
+    // Draft/opt-out state is steering-shaped: a new goal starts clean and the
+    // current invocation's flags/goal reapply it (full-rigor hardening resume).
+    state.review_opt_out = None;
+    state.opt_out_warning_emitted = None;
+    // An unanswered survey asked FOR the previous goal must not re-block the
+    // new one (same leak class as the debt-audit list above).
+    state.pending_questions = None;
 }
 
 pub fn has_unfinished_tasks(state: &HarnessState) -> bool {
-	state.tasks.iter().any(|task| task.status != HarnessTaskStatus::Completed && task.status != HarnessTaskStatus::Dropped)
+    state.tasks.iter().any(|task| {
+        task.status != HarnessTaskStatus::Completed && task.status != HarnessTaskStatus::Dropped
+    })
 }
 
 fn next_sequence_id(prefix: &str, existing_ids: &[String]) -> String {
-	let needle = format!("{}-", prefix);
-	let mut highest_sequence: i64 = 0;
+    let needle = format!("{}-", prefix);
+    let mut highest_sequence: i64 = 0;
 
-	for existing_id in existing_ids {
-		if let Some(rest) = existing_id.strip_prefix(needle.as_str()) {
-			// Matches ids of the form `{prefix}-<digits>`.
-			if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
-				if let Ok(sequence) = rest.parse::<i64>() {
-					highest_sequence = highest_sequence.max(sequence);
-				}
-			}
-		}
-	}
+    for existing_id in existing_ids {
+        if let Some(rest) = existing_id.strip_prefix(needle.as_str()) {
+            // Matches ids of the form `{prefix}-<digits>`.
+            if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                if let Ok(sequence) = rest.parse::<i64>() {
+                    highest_sequence = highest_sequence.max(sequence);
+                }
+            }
+        }
+    }
 
-	format!("{}-{}", prefix, highest_sequence + 1)
+    format!("{}-{}", prefix, highest_sequence + 1)
 }
 
 pub struct HarnessTaskInput {
-	/// Ids of tasks that must finish (complete/drop) before this one runs.
-	pub depends_on: Option<Vec<String>>,
-	/// Task this one reviews (verify-gate bookkeeping).
-	pub review_of: Option<String>,
-	/// Role whose loop should work this task.
-	pub role: Option<String>,
-	pub title: String,
+    /// Ids of tasks that must finish (complete/drop) before this one runs.
+    pub depends_on: Option<Vec<String>>,
+    /// Task this one reviews (verify-gate bookkeeping).
+    pub review_of: Option<String>,
+    /// Role whose loop should work this task.
+    pub role: Option<String>,
+    pub title: String,
 }
 
 impl From<&str> for HarnessTaskInput {
-	fn from(title: &str) -> Self {
-		HarnessTaskInput { depends_on: None, review_of: None, role: None, title: title.to_string() }
-	}
+    fn from(title: &str) -> Self {
+        HarnessTaskInput {
+            depends_on: None,
+            review_of: None,
+            role: None,
+            title: title.to_string(),
+        }
+    }
 }
 
 impl From<String> for HarnessTaskInput {
-	fn from(title: String) -> Self {
-		HarnessTaskInput { depends_on: None, review_of: None, role: None, title }
-	}
+    fn from(title: String) -> Self {
+        HarnessTaskInput {
+            depends_on: None,
+            review_of: None,
+            role: None,
+            title,
+        }
+    }
 }
 
 pub fn add_tasks(
-	state: &mut HarnessState,
-	entries: Vec<HarnessTaskInput>,
-	placement: HarnessTaskPlacement,
+    state: &mut HarnessState,
+    entries: Vec<HarnessTaskInput>,
+    placement: HarnessTaskPlacement,
 ) -> Vec<HarnessTask> {
-	// Deterministic duplicate guard: a replacement task whose title matches an
-	// existing task (case-insensitive, whitespace-normalized) is refused —
-	// silently re-adding identical work would mint a clean task id and reset
-	// retry accounting and recovery history. Callers must finish, unblock or
-	// drop the original instead; genuinely new unblocking work is unaffected.
-	let normalize = |title: &str| -> String {
-		title.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-	};
-	let existing_titles: std::collections::HashSet<String> =
-		state.tasks.iter().map(|task| normalize(&task.title)).collect();
-	let entries: Vec<HarnessTaskInput> = entries
-		.into_iter()
-		.filter(|entry| !existing_titles.contains(&normalize(&entry.title)))
-		.collect();
-	let mut added_tasks: Vec<HarnessTask> = Vec::new();
+    // Deterministic duplicate guard: a replacement task whose title matches an
+    // existing task (case-insensitive, whitespace-normalized) is refused —
+    // silently re-adding identical work would mint a clean task id and reset
+    // retry accounting and recovery history. Callers must finish, unblock or
+    // drop the original instead; genuinely new unblocking work is unaffected.
+    let normalize = |title: &str| -> String {
+        title
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let existing_titles: std::collections::HashSet<String> = state
+        .tasks
+        .iter()
+        .map(|task| normalize(&task.title))
+        .collect();
+    let entries: Vec<HarnessTaskInput> = entries
+        .into_iter()
+        .filter(|entry| !existing_titles.contains(&normalize(&entry.title)))
+        .collect();
+    let mut added_tasks: Vec<HarnessTask> = Vec::new();
 
-	for entry in entries {
-		let trimmed_title = entry.title.trim();
+    for entry in entries {
+        let trimmed_title = entry.title.trim();
 
-		if trimmed_title.is_empty() {
-			continue;
-		}
+        if trimmed_title.is_empty() {
+            continue;
+        }
 
-		let depends_on = entry
-			.depends_on
-			.filter(|ids| !ids.is_empty())
-			.map(|ids| ids.clone());
-		let depends_on_ref = depends_on.as_deref();
+        let depends_on = entry
+            .depends_on
+            .filter(|ids| !ids.is_empty())
+            .map(|ids| ids.clone());
+        let depends_on_ref = depends_on.as_deref();
 
-		let existing_ids: Vec<String> = state
-			.tasks
-			.iter()
-			.chain(added_tasks.iter())
-			.map(|task| task.id.clone())
-			.collect();
+        let existing_ids: Vec<String> = state
+            .tasks
+            .iter()
+            .chain(added_tasks.iter())
+            .map(|task| task.id.clone())
+            .collect();
 
-		added_tasks.push(HarnessTask {
-			activations: Some(0),
-			created_at_iteration: state.iteration,
-			depends_on: depends_on_ref.map(|ids| ids.to_vec()),
-			footprint: None,
-			dropped_exhausted: None,
-			finished_at_iteration: None,
-			id: next_sequence_id("task", &existing_ids),
-			notes: Vec::new(),
-			reopen_count: None,
-			review_of: entry.review_of.clone(),
-			reviews: None,
-			review_round: None,
-			awaiting_review_by: None,
-			role: entry.role.clone(),
-			loops_run: None,
-			stall_count: 0,
-			status: HarnessTaskStatus::Pending,
-			summary: None,
-			title: trimmed_title.to_string(),
-			verify_nudged: None,
-			edit_nudged: None,
-			confidence: None,
-			blocked_on: None,
-			recovery_history: None,
-		});
-	}
+        added_tasks.push(HarnessTask {
+            activations: Some(0),
+            created_at_iteration: state.iteration,
+            depends_on: depends_on_ref.map(|ids| ids.to_vec()),
+            footprint: None,
+            dropped_exhausted: None,
+            finished_at_iteration: None,
+            id: next_sequence_id("task", &existing_ids),
+            notes: Vec::new(),
+            reopen_count: None,
+            review_of: entry.review_of.clone(),
+            reviews: None,
+            review_round: None,
+            awaiting_review_by: None,
+            role: entry.role.clone(),
+            loops_run: None,
+            stall_count: 0,
+            status: HarnessTaskStatus::Pending,
+            summary: None,
+            title: trimmed_title.to_string(),
+            verify_nudged: None,
+            edit_nudged: None,
+            confidence: None,
+            blocked_on: None,
+            recovery_history: None,
+        });
+    }
 
-	if placement == HarnessTaskPlacement::Next {
-		// Newly discovered prerequisite work slots in right after the current task,
-		// ahead of the rest of the pending queue.
-		let current_index = state.tasks.iter().position(|task| task.status == HarnessTaskStatus::InProgress);
-		let first_pending_index = state.tasks.iter().position(|task| task.status == HarnessTaskStatus::Pending);
-		let insert_index = match (current_index, first_pending_index) {
-			(Some(index), _) => index + 1,
-			(None, Some(index)) => index,
-			(None, None) => state.tasks.len(),
-		};
+    if placement == HarnessTaskPlacement::Next {
+        // Newly discovered prerequisite work slots in right after the current task,
+        // ahead of the rest of the pending queue.
+        let current_index = state
+            .tasks
+            .iter()
+            .position(|task| task.status == HarnessTaskStatus::InProgress);
+        let first_pending_index = state
+            .tasks
+            .iter()
+            .position(|task| task.status == HarnessTaskStatus::Pending);
+        let insert_index = match (current_index, first_pending_index) {
+            (Some(index), _) => index + 1,
+            (None, Some(index)) => index,
+            (None, None) => state.tasks.len(),
+        };
 
-		let mut tail = state.tasks.split_off(insert_index);
-		state.tasks.extend(added_tasks.iter().cloned());
-		state.tasks.append(&mut tail);
-	} else {
-		state.tasks.extend(added_tasks.iter().cloned());
-	}
+        let mut tail = state.tasks.split_off(insert_index);
+        state.tasks.extend(added_tasks.iter().cloned());
+        state.tasks.append(&mut tail);
+    } else {
+        state.tasks.extend(added_tasks.iter().cloned());
+    }
 
-	added_tasks
+    added_tasks
 }
 
 pub fn get_task_by_id<'a>(state: &'a HarnessState, task_id: &str) -> Option<&'a HarnessTask> {
-	state.tasks.iter().find(|task| task.id == task_id)
+    state.tasks.iter().find(|task| task.id == task_id)
 }
 
-pub fn get_task_by_id_mut<'a>(state: &'a mut HarnessState, task_id: &str) -> Option<&'a mut HarnessTask> {
-	state.tasks.iter_mut().find(|task| task.id == task_id)
+pub fn get_task_by_id_mut<'a>(
+    state: &'a mut HarnessState,
+    task_id: &str,
+) -> Option<&'a mut HarnessTask> {
+    state.tasks.iter_mut().find(|task| task.id == task_id)
 }
 
 // A dependency is met once the task it names is terminal (completed or
 // dropped) — or never existed, so a mistyped id cannot deadlock the plan.
 fn has_unmet_dependencies_in(tasks: &[HarnessTask], task: &HarnessTask) -> bool {
-	(task.depends_on.as_deref().unwrap_or(&[])).iter().any(|dependency_id| {
-		tasks
-			.iter()
-			.find(|candidate| &candidate.id == dependency_id)
-			.map_or(false, |dependency| {
-				dependency.status != HarnessTaskStatus::Completed && dependency.status != HarnessTaskStatus::Dropped
-			})
-	})
+    (task.depends_on.as_deref().unwrap_or(&[]))
+        .iter()
+        .any(|dependency_id| {
+            tasks
+                .iter()
+                .find(|candidate| &candidate.id == dependency_id)
+                .map_or(false, |dependency| {
+                    dependency.status != HarnessTaskStatus::Completed
+                        && dependency.status != HarnessTaskStatus::Dropped
+                })
+        })
 }
 
 pub fn has_unmet_dependencies(state: &HarnessState, task: &HarnessTask) -> bool {
-	has_unmet_dependencies_in(&state.tasks, task)
+    has_unmet_dependencies_in(&state.tasks, task)
 }
 
 pub fn get_current_task(state: &HarnessState) -> Option<&HarnessTask> {
-	state
-		.tasks
-		.iter()
-		.find(|task| task.status == HarnessTaskStatus::InProgress)
-		.or_else(|| {
-			state
-				.tasks
-				.iter()
-				.find(|task| task.status == HarnessTaskStatus::Pending && !has_unmet_dependencies_in(&state.tasks, task))
-		})
+    state
+        .tasks
+        .iter()
+        .find(|task| task.status == HarnessTaskStatus::InProgress)
+        .or_else(|| {
+            state.tasks.iter().find(|task| {
+                task.status == HarnessTaskStatus::Pending
+                    && !has_unmet_dependencies_in(&state.tasks, task)
+            })
+        })
 }
 
-pub fn get_current_task_mut
-(state: &mut HarnessState) -> Option<&mut HarnessTask> {
-	if state.tasks.iter().any(|task| task.status == HarnessTaskStatus::InProgress) {
-		return state
-			.tasks
-			.iter_mut()
-			.find(|task| task.status == HarnessTaskStatus::InProgress);
-	}
+pub fn get_current_task_mut(state: &mut HarnessState) -> Option<&mut HarnessTask> {
+    if state
+        .tasks
+        .iter()
+        .any(|task| task.status == HarnessTaskStatus::InProgress)
+    {
+        return state
+            .tasks
+            .iter_mut()
+            .find(|task| task.status == HarnessTaskStatus::InProgress);
+    }
 
-	let ready_ids: Vec<String> = state
-		.tasks
-		.iter()
-		.filter(|task| task.status == HarnessTaskStatus::Pending && !has_unmet_dependencies_in(&state.tasks, task))
-		.map(|task| task.id.clone())
-		.collect();
+    let ready_ids: Vec<String> = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.status == HarnessTaskStatus::Pending
+                && !has_unmet_dependencies_in(&state.tasks, task)
+        })
+        .map(|task| task.id.clone())
+        .collect();
 
-	state
-		.tasks
-		.iter_mut()
-		.find(|task| task.status == HarnessTaskStatus::Pending && ready_ids.contains(&task.id))
+    state
+        .tasks
+        .iter_mut()
+        .find(|task| task.status == HarnessTaskStatus::Pending && ready_ids.contains(&task.id))
 }
 
 pub struct HarnessFinishArgs<'a> {
-	pub status: HarnessTaskStatus,
-	pub summary: &'a str,
-	pub task_id: Option<&'a str>,
-	pub confidence: Option<ClaimedConfidence>,
+    pub status: HarnessTaskStatus,
+    pub summary: &'a str,
+    pub task_id: Option<&'a str>,
+    pub confidence: Option<ClaimedConfidence>,
 }
 
-pub fn finish_task<'a>(state: &'a mut HarnessState, args: HarnessFinishArgs<'_>) -> Option<&'a mut HarnessTask> {
-	let iteration = state.iteration;
-	let task = match args.task_id {
-		Some(task_id) => get_task_by_id_mut(state, task_id),
-		None => get_current_task_mut(state),
-	};
+pub fn finish_task<'a>(
+    state: &'a mut HarnessState,
+    args: HarnessFinishArgs<'_>,
+) -> Option<&'a mut HarnessTask> {
+    let iteration = state.iteration;
+    let task = match args.task_id {
+        Some(task_id) => get_task_by_id_mut(state, task_id),
+        None => get_current_task_mut(state),
+    };
 
-	let task = task?;
+    let task = task?;
 
-	task.finished_at_iteration = Some(iteration);
-	task.status = args.status;
-	// A blocker belongs to one specific block: any finish (including a harness
-	// auto-block) clears it, and finish_task(blockedOn) sets it afresh after.
-	task.blocked_on = None;
-	let trimmed = args.summary.trim();
-	task.summary = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
-	if args.confidence.is_some() {
-		task.confidence = args.confidence;
-	}
+    task.finished_at_iteration = Some(iteration);
+    task.status = args.status;
+    // A blocker belongs to one specific block: any finish (including a harness
+    // auto-block) clears it, and finish_task(blockedOn) sets it afresh after.
+    task.blocked_on = None;
+    let trimmed = args.summary.trim();
+    task.summary = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    if args.confidence.is_some() {
+        task.confidence = args.confidence;
+    }
 
-	// Recovery history: a blocked finish is a recovery point the replanner
-	// should see; completed finishes are outcomes, not recovery points. The
-	// blocker label (if the caller attaches one afterwards) stays readable on
-	// the task itself, so the event only carries the failure summary.
-	if args.status == HarnessTaskStatus::Blocked {
-		let event = HarnessRecoveryEvent {
-			action: HarnessRecoveryAction::Blocked,
-			blocked_on: None,
-			at_iteration: iteration,
-			task_title: Some(task.title.clone()),
-			detail: task.summary.clone(),
-			evidence: None,
-		};
-		push_recovery_event(task, event);
-	}
+    // Recovery history: a blocked finish is a recovery point the replanner
+    // should see; completed finishes are outcomes, not recovery points. The
+    // blocker label (if the caller attaches one afterwards) stays readable on
+    // the task itself, so the event only carries the failure summary.
+    if args.status == HarnessTaskStatus::Blocked {
+        let event = HarnessRecoveryEvent {
+            action: HarnessRecoveryAction::Blocked,
+            blocked_on: None,
+            at_iteration: iteration,
+            task_title: Some(task.title.clone()),
+            detail: task.summary.clone(),
+            evidence: None,
+        };
+        push_recovery_event(task, event);
+    }
 
-	Some(task)
+    Some(task)
 }
 
-pub fn drop_task<'a>(state: &'a mut HarnessState, task_id: &str, reason: &str) -> Option<&'a mut HarnessTask> {
-	let iteration = state.iteration;
-	{
-		let task = get_task_by_id(state, task_id)?;
+pub fn drop_task<'a>(
+    state: &'a mut HarnessState,
+    task_id: &str,
+    reason: &str,
+) -> Option<&'a mut HarnessTask> {
+    let iteration = state.iteration;
+    {
+        let task = get_task_by_id(state, task_id)?;
 
-		if task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Dropped {
-			return None;
-		}
-	}
+        if task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Dropped
+        {
+            return None;
+        }
+    }
 
-	let task = get_task_by_id_mut(state, task_id)?;
-	task.finished_at_iteration = Some(iteration);
-	task.status = HarnessTaskStatus::Dropped;
-	let trimmed = reason.trim();
-	task.summary = Some(if trimmed.is_empty() { "Dropped without a reason.".to_string() } else { trimmed.to_string() });
+    let task = get_task_by_id_mut(state, task_id)?;
+    task.finished_at_iteration = Some(iteration);
+    task.status = HarnessTaskStatus::Dropped;
+    let trimmed = reason.trim();
+    task.summary = Some(if trimmed.is_empty() {
+        "Dropped without a reason.".to_string()
+    } else {
+        trimmed.to_string()
+    });
 
-	// Dropped tasks keep their history: a replanner must see why earlier
-	// attempts (including this drop) failed before re-attempting the work.
-	let event = HarnessRecoveryEvent {
-		action: HarnessRecoveryAction::Dropped,
-		blocked_on: None,
-		at_iteration: iteration,
-		task_title: Some(task.title.clone()),
-		detail: task.summary.clone(),
-		evidence: None,
-	};
-	push_recovery_event(task, event);
+    // Dropped tasks keep their history: a replanner must see why earlier
+    // attempts (including this drop) failed before re-attempting the work.
+    let event = HarnessRecoveryEvent {
+        action: HarnessRecoveryAction::Dropped,
+        blocked_on: None,
+        at_iteration: iteration,
+        task_title: Some(task.title.clone()),
+        detail: task.summary.clone(),
+        evidence: None,
+    };
+    push_recovery_event(task, event);
 
-	Some(task)
+    Some(task)
 }
 
-pub fn revise_task<'a>(state: &'a mut HarnessState, task_id: &str, title: &str) -> Option<&'a mut HarnessTask> {
-	let trimmed_title = title.trim();
+pub fn revise_task<'a>(
+    state: &'a mut HarnessState,
+    task_id: &str,
+    title: &str,
+) -> Option<&'a mut HarnessTask> {
+    let trimmed_title = title.trim();
 
-	{
-		let task = get_task_by_id(state, task_id)?;
+    {
+        let task = get_task_by_id(state, task_id)?;
 
-		if task.status == HarnessTaskStatus::Completed
-			|| task
-				.status == HarnessTaskStatus::Dropped
-			|| trimmed_title.is_empty()
-		{
-			return None;
-		}
-	}
+        if task.status == HarnessTaskStatus::Completed
+            || task.status == HarnessTaskStatus::Dropped
+            || trimmed_title.is_empty()
+        {
+            return None;
+        }
+    }
 
-	let task = get_task_by_id_mut(state, task_id)?;
+    let task = get_task_by_id_mut(state, task_id)?;
 
-	if trimmed_title != task.title {
-		task.notes.push(format!("Retitled from \"{}\".", task.title));
-		task.title = trimmed_title.to_string();
-	}
+    if trimmed_title != task.title {
+        task.notes
+            .push(format!("Retitled from \"{}\".", task.title));
+        task.title = trimmed_title.to_string();
+    }
 
-	Some(task)
+    Some(task)
 }
 
 // Sends a reviewed task back to the queue after its reviewer rejected the
 // work: pending again with a fresh stall budget, carrying the reviewer's
 // findings as a note, and one review round closer to being blocked for good.
 pub fn reopen_task_for_rework(task: &mut HarnessTask, note: &str) {
-	task.review_round = Some(task.review_round.unwrap_or(0) + 1);
-	task.status = HarnessTaskStatus::Pending;
-	task.stall_count = 0;
-	task.finished_at_iteration = None;
-	task.summary = None;
-	append_task_note(task, note);
+    task.review_round = Some(task.review_round.unwrap_or(0) + 1);
+    task.status = HarnessTaskStatus::Pending;
+    task.stall_count = 0;
+    task.finished_at_iteration = None;
+    task.summary = None;
+    append_task_note(task, note);
 }
 
 // Does the current recovery episode still have its one allowed fresh automatic
@@ -427,126 +479,128 @@ pub fn reopen_task_for_rework(task: &mut HarnessTask, note: &str) {
 // reply (an independently observed change) starts a fresh episode after that.
 // No recorded history means the task never went through a recovery episode.
 fn has_unspent_reopen(task: &HarnessTask) -> bool {
-	let Some(history) = task.recovery_history.as_ref() else {
-		return true;
-	};
+    let Some(history) = task.recovery_history.as_ref() else {
+        return true;
+    };
 
-	for event in history.iter().rev() {
-		match event.action {
-			HarnessRecoveryAction::Reopened => return false,
-			HarnessRecoveryAction::OperatorReply => return true,
-			HarnessRecoveryAction::Blocked | HarnessRecoveryAction::Dropped | HarnessRecoveryAction::Exhausted => continue,
-		}
-	}
+    for event in history.iter().rev() {
+        match event.action {
+            HarnessRecoveryAction::Reopened => return false,
+            HarnessRecoveryAction::OperatorReply => return true,
+            HarnessRecoveryAction::Blocked
+            | HarnessRecoveryAction::Dropped
+            | HarnessRecoveryAction::Exhausted => continue,
+        }
+    }
 
-	true
+    true
 }
 
 pub fn reopen_blocked_tasks(
-	state: &mut HarnessState,
-	note: &str,
-	max_reopens: Option<i64>,
+    state: &mut HarnessState,
+    note: &str,
+    max_reopens: Option<i64>,
 ) -> Vec<HarnessTask> {
-	let mut reopened: Vec<HarnessTask> = Vec::new();
+    let mut reopened: Vec<HarnessTask> = Vec::new();
 
-	for task in state.tasks.iter_mut() {
-		if task.status != HarnessTaskStatus::Blocked {
-			continue;
-		}
+    for task in state.tasks.iter_mut() {
+        if task.status != HarnessTaskStatus::Blocked {
+            continue;
+        }
 
-		// A task blocked on operator input cannot be unblocked by trying again:
-		// it waits for the operator (run_loops ends the run blocked-on-input
-		// once nothing else is workable), not for a retry.
-		if task.blocked_on.is_some() {
-			continue;
-		}
+        // A task blocked on operator input cannot be unblocked by trying again:
+        // it waits for the operator (run_loops ends the run blocked-on-input
+        // once nothing else is workable), not for a retry.
+        if task.blocked_on.is_some() {
+            continue;
+        }
 
-		// A task that has already burned its reopen budget stays blocked: reopening
-		// it again would replay the same stall loop instead of forcing an escalation.
-		if let Some(max_reopens) = max_reopens {
-			if task.reopen_count.unwrap_or(0) >= max_reopens {
-				continue;
-			}
-		}
+        // A task that has already burned its reopen budget stays blocked: reopening
+        // it again would replay the same stall loop instead of forcing an escalation.
+        if let Some(max_reopens) = max_reopens {
+            if task.reopen_count.unwrap_or(0) >= max_reopens {
+                continue;
+            }
+        }
 
-		// At most one fresh automatic reopen per recovery episode: once that
-		// reopen has run and the task came back blocked unchanged, further
-		// automatic retries would replay the identical stall loop. The task stays
-		// blocked so the evidence-aware planner must name changed evidence (or an
-		// operator reply must arrive) before work resumes.
-		if !has_unspent_reopen(task) {
-			continue;
-		}
+        // At most one fresh automatic reopen per recovery episode: once that
+        // reopen has run and the task came back blocked unchanged, further
+        // automatic retries would replay the identical stall loop. The task stays
+        // blocked so the evidence-aware planner must name changed evidence (or an
+        // operator reply must arrive) before work resumes.
+        if !has_unspent_reopen(task) {
+            continue;
+        }
 
-		task.reopen_count = Some(task.reopen_count.unwrap_or(0) + 1);
-		task.status = HarnessTaskStatus::Pending;
-		task.stall_count = 0;
-		task.finished_at_iteration = None;
-		append_task_note(task, note);
-		let event = HarnessRecoveryEvent {
-			action: HarnessRecoveryAction::Reopened,
-			blocked_on: None,
-			at_iteration: state.iteration,
-			task_title: Some(task.title.clone()),
-			detail: Some(note.to_string()),
-			evidence: None,
-		};
-		push_recovery_event(task, event);
-		reopened.push(task.clone());
-	}
+        task.reopen_count = Some(task.reopen_count.unwrap_or(0) + 1);
+        task.status = HarnessTaskStatus::Pending;
+        task.stall_count = 0;
+        task.finished_at_iteration = None;
+        append_task_note(task, note);
+        let event = HarnessRecoveryEvent {
+            action: HarnessRecoveryAction::Reopened,
+            blocked_on: None,
+            at_iteration: state.iteration,
+            task_title: Some(task.title.clone()),
+            detail: Some(note.to_string()),
+            evidence: None,
+        };
+        push_recovery_event(task, event);
+        reopened.push(task.clone());
+    }
 
-	reopened
+    reopened
 }
 
 // Escalation when every blocked task has exhausted its reopen budget: drop them
 // with an honest summary so the run ends (or replans from scratch) instead of
 // spinning through identical stall cycles forever.
 pub fn drop_exhausted_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask> {
-	let mut dropped: Vec<HarnessTask> = Vec::new();
+    let mut dropped: Vec<HarnessTask> = Vec::new();
 
-	for task in state.tasks.iter_mut() {
-		if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_some() {
-			continue;
-		}
+    for task in state.tasks.iter_mut() {
+        if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_some() {
+            continue;
+        }
 
-		// Never drop a task whose current episode's fresh reopen has not been
-		// attempted yet: that would discard required work before its one allowed
-		// automatic retry had a chance to run.
-		if has_unspent_reopen(task) {
-			continue;
-		}
+        // Never drop a task whose current episode's fresh reopen has not been
+        // attempted yet: that would discard required work before its one allowed
+        // automatic retry had a chance to run.
+        if has_unspent_reopen(task) {
+            continue;
+        }
 
-		task.dropped_exhausted = Some(true);
-		task.finished_at_iteration = Some(state.iteration);
-		task.status = HarnessTaskStatus::Dropped;
-		task.summary = Some(format!(
+        task.dropped_exhausted = Some(true);
+        task.finished_at_iteration = Some(state.iteration);
+        task.status = HarnessTaskStatus::Dropped;
+        task.summary = Some(format!(
 			"Dropped after {} reopen cycle(s) without recorded progress — this task needs a different approach or user input.",
 			task.reopen_count.unwrap_or(0)
 		));
-		let event = HarnessRecoveryEvent {
-			action: HarnessRecoveryAction::Exhausted,
-			blocked_on: None,
-			at_iteration: state.iteration,
-			task_title: Some(task.title.clone()),
-			detail: task.summary.clone(),
-			evidence: None,
-		};
-		push_recovery_event(task, event);
-		dropped.push(task.clone());
-	}
+        let event = HarnessRecoveryEvent {
+            action: HarnessRecoveryAction::Exhausted,
+            blocked_on: None,
+            at_iteration: state.iteration,
+            task_title: Some(task.title.clone()),
+            detail: task.summary.clone(),
+            evidence: None,
+        };
+        push_recovery_event(task, event);
+        dropped.push(task.clone());
+    }
 
-	dropped
+    dropped
 }
 
 /// Tasks blocked on input only the operator can supply (finish_task with
 /// blockedOn). While one exists and nothing else is workable, the run has
 /// nothing left to do on its own.
 pub fn operator_blocked_tasks(state: &HarnessState) -> Vec<&HarnessTask> {
-	state
-		.tasks
-		.iter()
-		.filter(|task| task.status == HarnessTaskStatus::Blocked && task.blocked_on.is_some())
-		.collect()
+    state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Blocked && task.blocked_on.is_some())
+        .collect()
 }
 
 /// A resumed run's operator prompt is the input an operator-blocked task was
@@ -556,394 +610,428 @@ pub fn operator_blocked_tasks(state: &HarnessState) -> Vec<&HarnessTask> {
 /// with no message at all) stay blocked — resuming with the same goal and no
 /// reply ends the run blocked-on-input again rather than replaying the block.
 pub fn reopen_operator_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask> {
-	let Some(reply) = state
-		.operator_messages
-		.as_ref()
-		.and_then(|messages| messages.last())
-		.cloned()
-	else {
-		return Vec::new();
-	};
-	let mut reopened: Vec<HarnessTask> = Vec::new();
+    let Some(reply) = state
+        .operator_messages
+        .as_ref()
+        .and_then(|messages| messages.last())
+        .cloned()
+    else {
+        return Vec::new();
+    };
+    let mut reopened: Vec<HarnessTask> = Vec::new();
 
-	for task in state.tasks.iter_mut() {
-		if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_none() {
-			continue;
-		}
-		if task.finished_at_iteration.unwrap_or(0) > reply.received_at_iteration {
-			continue;
-		}
+    for task in state.tasks.iter_mut() {
+        if task.status != HarnessTaskStatus::Blocked || task.blocked_on.is_none() {
+            continue;
+        }
+        if task.finished_at_iteration.unwrap_or(0) > reply.received_at_iteration {
+            continue;
+        }
 
-		task.blocked_on = None;
-		task.status = HarnessTaskStatus::Pending;
-		task.stall_count = 0;
-		task.finished_at_iteration = None;
-		append_task_note(task, &format!("Operator input received: {}", reply.text));
-		// The operator reply is an independently observed change: recording it
-		// closes the exhausted episode and starts a fresh one, and gives the
-		// planner evidence that this task recovered through operator input.
-		push_recovery_event(
-			task,
-			HarnessRecoveryEvent {
-				action: HarnessRecoveryAction::OperatorReply,
-				blocked_on: None,
-				at_iteration: state.iteration,
-				task_title: Some(task.title.clone()),
-				detail: Some(reply.text.clone()),
-				evidence: None,
-			},
-		);
-		reopened.push(task.clone());
-	}
+        task.blocked_on = None;
+        task.status = HarnessTaskStatus::Pending;
+        task.stall_count = 0;
+        task.finished_at_iteration = None;
+        append_task_note(task, &format!("Operator input received: {}", reply.text));
+        // The operator reply is an independently observed change: recording it
+        // closes the exhausted episode and starts a fresh one, and gives the
+        // planner evidence that this task recovered through operator input.
+        push_recovery_event(
+            task,
+            HarnessRecoveryEvent {
+                action: HarnessRecoveryAction::OperatorReply,
+                blocked_on: None,
+                at_iteration: state.iteration,
+                task_title: Some(task.title.clone()),
+                detail: Some(reply.text.clone()),
+                evidence: None,
+            },
+        );
+        reopened.push(task.clone());
+    }
 
-	reopened
+    reopened
 }
 
 pub fn append_task_note(task: &mut HarnessTask, note: &str) {
-	let trimmed_note = note.trim();
+    let trimmed_note = note.trim();
 
-	if !trimmed_note.is_empty() {
-		task.notes.push(trimmed_note.to_string());
-	}
+    if !trimmed_note.is_empty() {
+        task.notes.push(trimmed_note.to_string());
+    }
 }
 
 pub fn add_memory_note(state: &mut HarnessState, text: &str) -> Option<HarnessMemoryNote> {
-	let trimmed_text = text.trim();
+    let trimmed_text = text.trim();
 
-	if trimmed_text.is_empty() {
-		return None;
-	}
+    if trimmed_text.is_empty() {
+        return None;
+    }
 
-	let existing_ids: Vec<String> = state.memory.iter().map(|note| note.id.clone()).collect();
-	let note = HarnessMemoryNote {
-		created_at_iteration: state.iteration,
-		id: next_sequence_id("note", &existing_ids),
-		text: trimmed_text.to_string(),
-	};
+    let existing_ids: Vec<String> = state.memory.iter().map(|note| note.id.clone()).collect();
+    let note = HarnessMemoryNote {
+        created_at_iteration: state.iteration,
+        id: next_sequence_id("note", &existing_ids),
+        text: trimmed_text.to_string(),
+    };
 
-	state.memory.push(note.clone());
+    state.memory.push(note.clone());
 
-	Some(note)
+    Some(note)
 }
 
 // Saves (or refreshes) a middle-term observation. Re-observing text that is
 // already stored refreshes its ttl instead of duplicating the entry, so the
 // model can keep a finding alive across activations while it still matters.
 pub struct AddObservationArgs {
-	pub text: String,
-	pub ttl: Option<i64>,
+    pub text: String,
+    pub ttl: Option<i64>,
 }
 
 pub fn add_observation(
-	state: &mut HarnessState,
-	args: AddObservationArgs,
-	config: &HarnessTelemetryConfig,
+    state: &mut HarnessState,
+    args: AddObservationArgs,
+    config: &HarnessTelemetryConfig,
 ) -> Option<(HarnessObservation, bool)> {
-	let trimmed_text = args.text.trim();
+    let trimmed_text = args.text.trim();
 
-	if trimmed_text.is_empty() {
-		return None;
-	}
+    if trimmed_text.is_empty() {
+        return None;
+    }
 
-	let requested_ttl = args.ttl.unwrap_or(config.observation_base_ttl);
-	let ttl = config.max_observation_ttl.min(1.max(requested_ttl));
-	if let Some(existing) = state.observations.iter_mut().find(|observation| observation.text == trimmed_text) {
-		existing.ttl = existing.ttl.max(ttl);
+    let requested_ttl = args.ttl.unwrap_or(config.observation_base_ttl);
+    let ttl = config.max_observation_ttl.min(1.max(requested_ttl));
+    if let Some(existing) = state
+        .observations
+        .iter_mut()
+        .find(|observation| observation.text == trimmed_text)
+    {
+        existing.ttl = existing.ttl.max(ttl);
 
-		return Some((existing.clone(), true));
-	}
+        return Some((existing.clone(), true));
+    }
 
-	let observation = HarnessObservation {
-		created_at_iteration: state.iteration,
-		id: {
-			let existing_ids: Vec<String> = state.observations.iter().map(|entry| entry.id.clone()).collect();
-			next_sequence_id("obs", &existing_ids)
-		},
-		text: trimmed_text.to_string(),
-		ttl,
-	};
+    let observation = HarnessObservation {
+        created_at_iteration: state.iteration,
+        id: {
+            let existing_ids: Vec<String> = state
+                .observations
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            next_sequence_id("obs", &existing_ids)
+        },
+        text: trimmed_text.to_string(),
+        ttl,
+    };
 
-	state.observations.push(observation.clone());
-	let new_index = state.observations.len() - 1;
+    state.observations.push(observation.clone());
+    let new_index = state.observations.len() - 1;
 
-	// The observation store is bounded: when full, the entry closest to expiry
-	// makes room for the new one.
-	if state.observations.len() as i64 > config.max_observations {
-		let mut evictable: Option<usize> = None;
-		for (index, entry) in state.observations.iter().enumerate() {
-			if index == new_index {
-				continue;
-			}
-			match evictable {
-				None => evictable = Some(index),
-				Some(best) => {
-					if entry.ttl < state.observations[best].ttl {
-						evictable = Some(index);
-					}
-				}
-			}
-		}
+    // The observation store is bounded: when full, the entry closest to expiry
+    // makes room for the new one.
+    if state.observations.len() as i64 > config.max_observations {
+        let mut evictable: Option<usize> = None;
+        for (index, entry) in state.observations.iter().enumerate() {
+            if index == new_index {
+                continue;
+            }
+            match evictable {
+                None => evictable = Some(index),
+                Some(best) => {
+                    if entry.ttl < state.observations[best].ttl {
+                        evictable = Some(index);
+                    }
+                }
+            }
+        }
 
-		if let Some(index) = evictable {
-			state.observations.remove(index);
-		}
-	}
+        if let Some(index) = evictable {
+            state.observations.remove(index);
+        }
+    }
 
-	Some((observation, false))
+    Some((observation, false))
 }
 
 // Called once per task loop: observations decay toward expiry unless re-observed.
-pub fn decay_observations(state: &mut HarnessState, fresh_after_iteration: Option<i64>) -> Vec<HarnessObservation> {
-	let fresh_after = fresh_after_iteration.unwrap_or(state.iteration - 1);
-	let mut expired: Vec<HarnessObservation> = Vec::new();
-	let ids: Vec<String> = state.observations.iter().map(|observation| observation.id.clone()).collect();
+pub fn decay_observations(
+    state: &mut HarnessState,
+    fresh_after_iteration: Option<i64>,
+) -> Vec<HarnessObservation> {
+    let fresh_after = fresh_after_iteration.unwrap_or(state.iteration - 1);
+    let mut expired: Vec<HarnessObservation> = Vec::new();
+    let ids: Vec<String> = state
+        .observations
+        .iter()
+        .map(|observation| observation.id.clone())
+        .collect();
 
-	for id in ids {
-		let Some(index) = state.observations.iter().position(|observation| observation.id == id) else {
-			continue;
-		};
-		let observation = &mut state.observations[index];
+    for id in ids {
+        let Some(index) = state
+            .observations
+            .iter()
+            .position(|observation| observation.id == id)
+        else {
+            continue;
+        };
+        let observation = &mut state.observations[index];
 
-		// An observation saved during the loop that is ending keeps its full ttl:
-		// decay starts with the first loop that actually had a chance to read it.
-		if observation.created_at_iteration > fresh_after {
-			continue;
-		}
+        // An observation saved during the loop that is ending keeps its full ttl:
+        // decay starts with the first loop that actually had a chance to read it.
+        if observation.created_at_iteration > fresh_after {
+            continue;
+        }
 
-		observation.ttl -= 1;
+        observation.ttl -= 1;
 
-		if observation.ttl <= 0 {
-			let expired_observation = state.observations.remove(index);
-			expired.push(expired_observation);
-		}
-	}
+        if observation.ttl <= 0 {
+            let expired_observation = state.observations.remove(index);
+            expired.push(expired_observation);
+        }
+    }
 
-	expired
+    expired
 }
 
-pub fn 
-remove_memory_note(state: &mut HarnessState, note_id: &str) -> bool {
-	let Some(note_index) = state.memory.iter().position(|note| note.id == note_id) else {
-		return false;
-	};
+pub fn remove_memory_note(state: &mut HarnessState, note_id: &str) -> bool {
+    let Some(note_index) = state.memory.iter().position(|note| note.id == note_id) else {
+        return false;
+    };
 
-	state.memory.remove(note_index);
+    state.memory.remove(note_index);
 
-	true
+    true
 }
 
 pub fn is_goal_complete(state: &HarnessState) -> bool {
-	// Dropped tasks do not block completion, but a goal where everything was
-	// dropped and nothing completed is not "done" — it was abandoned.
-	!state.tasks.is_empty()
-		&& state
-			.tasks
-			.iter()
-			.all(|task| task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Dropped)
-		&& state.tasks.iter().any(|task| task.status == HarnessTaskStatus::Completed)
+    // Dropped tasks do not block completion, but a goal where everything was
+    // dropped and nothing completed is not "done" — it was abandoned.
+    !state.tasks.is_empty()
+        && state.tasks.iter().all(|task| {
+            task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Dropped
+        })
+        && state
+            .tasks
+            .iter()
+            .any(|task| task.status == HarnessTaskStatus::Completed)
 }
 
 fn is_object(value: Option<&Value>) -> bool {
-	value.map_or(false, |value| value.is_object())
+    value.map_or(false, |value| value.is_object())
 }
 
 fn is_string_field(value: Option<&Value>) -> bool {
-	value.map_or(false, Value::is_string)
+    value.map_or(false, Value::is_string)
 }
 
 fn is_finite_number(value: Option<&Value>) -> bool {
-	value.map_or(false
-, |value| value.as_f64().map_or(false, |number| number.is_finite()))
+    value.map_or(false, |value| {
+        value.as_f64().map_or(false, |number| number.is_finite())
+    })
 }
 
-fn is_array_field(value: Option<&
-Value>) 
--> bool {
-	value.map_or(false, Value::is_array)
+fn is_array_field(value: Option<&Value>) -> bool {
+    value.map_or(false, Value::is_array)
 }
 
 fn every_is_string(value: Option<&Value>) -> bool {
-	value.map_or(false, |value| {
-		value.as_array().map_or(false, |items| items.iter().all(|item| item.is_string()))
-	})
+    value.map_or(false, |value| {
+        value
+            .as_array()
+            .map_or(false, |items| items.iter().all(|item| item.is_string()))
+    })
 }
 
 fn is_harness_task_shape(value: &Value) -> bool {
-	is_object(Some(value))
-		&& is_string_field(value.get("id"))
-		&& is_string_field(value.get("title"))
-		&& is_string_field(value.get("status"))
-		&& is_array_field(value.get("notes"))
+    is_object(Some(value))
+        && is_string_field(value.get("id"))
+        && is_string_field(value.get("title"))
+        && is_string_field(value.get("status"))
+        && is_array_field(value.get("notes"))
 }
 
 fn is_goal_record_shape(value: &Value) -> bool {
-	is_object(Some(value))
-		&& is_string_field(value.get("goal"))
-		&& is_array_field(value.get("tasks"))
-		&& value
-			.get("tasks")
-			.map_or(false, |tasks| tasks.as_array().map_or(false, |tasks| tasks.iter().all(is_harness_task_shape)))
+    is_object(Some(value))
+        && is_string_field(value.get("goal"))
+        && is_array_field(value.get("tasks"))
+        && value.get("tasks").map_or(false, |tasks| {
+            tasks
+                .as_array()
+                .map_or(false, |tasks| tasks.iter().all(is_harness_task_shape))
+        })
 }
 
 fn is_memory_note_shape(value: &Value) -> bool {
-	is_object(Some(value)) && is_string_field(value.get("id")) && is_string_field(value.get("text"))
+    is_object(Some(value)) && is_string_field(value.get("id")) && is_string_field(value.get("text"))
 }
 
 fn is_promoted_entry_shape(value: &Value) -> bool {
-	is_object(Some(value))
-		&& is_string_field(value.get("key"))
-		&& is_string_field(value.get("toolName"))
-		&& is_string_field(value.get("output"))
-		&& value.get("ttl").map_or(false, Value::is_number)
+    is_object(Some(value))
+        && is_string_field(value.get("key"))
+        && is_string_field(value.get("toolName"))
+        && is_string_field(value.get("output"))
+        && value.get("ttl").map_or(false, Value::is_number)
 }
 
-fn 
-is_activation_digest_shape(value: 
-&Value)
- -> bool {
-	is_object(Some(value))
-		&& value.get("iteration").map_or(false, Value::is_number)
-		&& is_string_field(value.get("outcome"))
-		&& is_array_field(value.get("actions"))
-		&& every_is_string(value.get("actions"))
+fn is_activation_digest_shape(value: &Value) -> bool {
+    is_object(Some(value))
+        && value.get("iteration").map_or(false, Value::is_number)
+        && is_string_field(value.get("outcome"))
+        && is_array_field(value.get("actions"))
+        && every_is_string(value.get("actions"))
 }
 
-fn 
-is_run_summary_shape(value: &Value) -> bool {
-	is_object(Some(value)) && is_string_field(value.get("text")) && is_string_field(value.get("reason"))
+fn is_run_summary_shape(value: &Value) -> bool {
+    is_object(Some(value))
+        && is_string_field(value.get("text"))
+        && is_string_field(value.get("reason"))
 }
 
-fn
- is_operator_message_shape(value: &Value) -> bool {
-	is_object(Some(value))
-		&& is_string_field(value.get("id"))
-		&& is_string_field(value.get("text"))
-		&& value.get("receivedAtIteration").map_or(false, Value::is_number)
+fn is_operator_message_shape(value: &Value) -> bool {
+    is_object(Some(value))
+        && is_string_field(value.get("id"))
+        && is_string_field(value.get("text"))
+        && value
+            .get("receivedAtIteration")
+            .map_or(false, Value::is_number)
 }
 
-fn
- is_direct_response_shape(value: &Value) -> bool {
-	is_object(Some(value)) && is_string_field(value.get("text")) && value.get("createdAtIteration").map_or(false, Value::is_number)
+fn is_direct_response_shape(value: &Value) -> bool {
+    is_object(Some(value))
+        && is_string_field(value.get("text"))
+        && value
+            .get("createdAtIteration")
+            .map_or(false, Value::is_number)
 }
 
 fn is_last_verification_shape(value: Option<&Value>) -> bool {
-	match value {
-		None => true,
-		Some(value) if value.is_null() => true,
-		Some(value) => {
-			is_object(Some(value))
-				&& is_string_field(value.get("command"))
-				&& value.get("failed").map_or(false, Value
-::is_boolean)
-		}
-	}
+    match value {
+        None => true,
+        Some(value) if value.is_null() => true,
+        Some(value) => {
+            is_object(Some(value))
+                && is_string_field(value.get("command"))
+                && value.get("failed").map_or(false, Value::is_boolean)
+        }
+    }
 }
 
 pub fn is_harness_state(value: &Value) -> bool {
-	is_object(Some(value))
-		&& value.get("version").and_then(Value::as_f64) == Some(1.0)
-		&& is_string_field(value.get("goal"))
-		&& is_finite_number(value.get("iteration"))
-		&& match value.get("loop") {
-			None | Some(Value::Null) => true,
-			Some(_) => is_finite_number(value.get("loop")),
-		}
-		&& is_array_field(value
-.get("tasks"))
-		&& value
-			.get("tasks")
-			.map_or(false, |tasks| tasks.as_array().map_or(false, |tasks| tasks.iter().all(is_harness_task_shape)))
-		&& match value.get("history") {
-			None => true,
-			Some(Value::Null) => true,
-			Some(_) => {
-				is_array_field(value.get("history"))
-					&& value.get("history").map_or(false, |history| {
-						history.as_array().map_or(false, |records| records.iter().all(is_goal_record_shape))
-					})
-			}
-		}
-		&& match value.get("lastActivation") {
-			None | Some(Value::Null) => true,
-			Some(digest) => is_activation_digest_shape(digest),
-		}
-		&& match value.get("runSummary") {
-			None | Some(Value::Null) => true,
-			Some(summary) => is_run_summary_shape(summary),
-		}
-		&& match value.get("directResponse") {
-			None | Some(Value::Null) => true,
-			Some(response) => is_direct_response_shape(response),
-		}
-		&& match value.get("inboxCursor") {
-			None | Some(Value::Null) => true,
-			Some(_) => is_finite_number(value.get("inboxCursor")),
-		}
-		&& match value.get
-("operatorMessages") {
-			None | Some(Value::Null) => true,
-			Some(_) => {
-				is_array_field(value.get("operatorMessages"))
-					&& value.get("operatorMessages").map_or(false, |messages| {
-						messages
-							.as_array()
-							.map_or(false, |messages| messages.iter().all(is_operator_message_shape))
-					})
-			}
-		}
-		&& is_last_verification_shape(value.get("lastVerification"))
-		&& is_array_field(value.get("memory"))
-		&& value.get("memory").map_or(false
-, |memory| {
-			memory.as_array().map_or(false, |notes| notes.iter().all(is_memory_note_shape))
-		})
-		&& 
-is_array_field(value.get("promotedContext"))
-		&& value.get("promotedContext").map_or(false, |promoted| {
-			promoted
-				.as_array()
-				.map_or(false, |entries| entries.iter().all(is_promoted_entry_shape))
-		})
-		&& is_object(value.get("telemetry"))
+    is_object(Some(value))
+        && value.get("version").and_then(Value::as_f64) == Some(1.0)
+        && is_string_field(value.get("goal"))
+        && is_finite_number(value.get("iteration"))
+        && match value.get("loop") {
+            None | Some(Value::Null) => true,
+            Some(_) => is_finite_number(value.get("loop")),
+        }
+        && is_array_field(value.get("tasks"))
+        && value.get("tasks").map_or(false, |tasks| {
+            tasks
+                .as_array()
+                .map_or(false, |tasks| tasks.iter().all(is_harness_task_shape))
+        })
+        && match value.get("history") {
+            None => true,
+            Some(Value::Null) => true,
+            Some(_) => {
+                is_array_field(value.get("history"))
+                    && value.get("history").map_or(false, |history| {
+                        history
+                            .as_array()
+                            .map_or(false, |records| records.iter().all(is_goal_record_shape))
+                    })
+            }
+        }
+        && match value.get("lastActivation") {
+            None | Some(Value::Null) => true,
+            Some(digest) => is_activation_digest_shape(digest),
+        }
+        && match value.get("runSummary") {
+            None | Some(Value::Null) => true,
+            Some(summary) => is_run_summary_shape(summary),
+        }
+        && match value.get("directResponse") {
+            None | Some(Value::Null) => true,
+            Some(response) => is_direct_response_shape(response),
+        }
+        && match value.get("inboxCursor") {
+            None | Some(Value::Null) => true,
+            Some(_) => is_finite_number(value.get("inboxCursor")),
+        }
+        && match value.get("operatorMessages") {
+            None | Some(Value::Null) => true,
+            Some(_) => {
+                is_array_field(value.get("operatorMessages"))
+                    && value.get("operatorMessages").map_or(false, |messages| {
+                        messages.as_array().map_or(false, |messages| {
+                            messages.iter().all(is_operator_message_shape)
+                        })
+                    })
+            }
+        }
+        && is_last_verification_shape(value.get("lastVerification"))
+        && is_array_field(value.get("memory"))
+        && value.get("memory").map_or(false, |memory| {
+            memory
+                .as_array()
+                .map_or(false, |notes| notes.iter().all(is_memory_note_shape))
+        })
+        && is_array_field(value.get("promotedContext"))
+        && value.get("promotedContext").map_or(false, |promoted| {
+            promoted
+                .as_array()
+                .map_or(false, |entries| entries.iter().all(is_promoted_entry_shape))
+        })
+        && is_object(value.get("telemetry"))
 }
 
 pub fn load_harness_state(state_path: &Path) -> anyhow::Result<Option<HarnessState>> {
-	if !state_path.exists() {
-		return Ok(None);
-	}
+    if !state_path.exists() {
+        return Ok(None);
+    }
 
-	let raw = std::fs::read_to_string(state_path)?;
-	let mut parsed_value: Value = serde_json::from_str(&raw)?;
+    let raw = std::fs::read_to_string(state_path)?;
+    let mut parsed_value: Value = serde_json::from_str(&raw)?;
 
-	if 
-!is_harness_state(&parsed_value) {
-		bail!("The file at {} is not a valid harness state file.", state_path.display());
-	}
+    if !is_harness_state(&parsed_value) {
+        bail!(
+            "The file at {} is not a valid harness state file.",
+            state_path.display()
+        );
+    }
 
-	// State files written before goal history existed load with an empty history.
-	if parsed_value.get("history").map_or(true, Value::is_null) {
-		parsed_value["history"] = serde_json::json!([]);
-	}
-	// State files written before middle-term observations existed load with none.
-	if parsed_value.get("observations").map_or(true, Value::is_null) {
-		parsed_value["observations"] = serde_json::json!([]);
-	}
-	// State files written before task loops existed used one loop per activation,
-	// so the iteration counter is the correct continuation point for the loop clock.
-	if parsed_value.get("loop").map_or(true, Value::is_null) {
-		let iteration = parsed_value.get("iteration").cloned().unwrap_or(Value::Null);
-		parsed_value["loop"] = iteration;
-	}
+    // State files written before goal history existed load with an empty history.
+    if parsed_value.get("history").map_or(true, Value::is_null) {
+        parsed_value["history"] = serde_json::json!([]);
+    }
+    // State files written before middle-term observations existed load with none.
+    if parsed_value
+        .get("observations")
+        .map_or(true, Value::is_null)
+    {
+        parsed_value["observations"] = serde_json::json!([]);
+    }
+    // State files written before task loops existed used one loop per activation,
+    // so the iteration counter is the correct continuation point for the loop clock.
+    if parsed_value.get("loop").map_or(true, Value::is_null) {
+        let iteration = parsed_value
+            .get("iteration")
+            .cloned()
+            .unwrap_or(Value::Null);
+        parsed_value["loop"] = iteration;
+    }
 
-	let state = serde_json::from_value(parsed_value)?;
+    let state = serde_json::from_value(parsed_value)?;
 
-	Ok(Some(state))
+    Ok(Some(state))
 }
 
 pub fn save_harness_state(state_path: &Path, state: &HarnessState) -> std::io::Result<()> {
-	let serialized = serde_json::to_string_pretty(state).expect("harness state serializes");
-	// Pretty-printed JSON (two-space indent) plus a trailing newline.
-	write_file_atomic(state_path, &format!("{}\n", serialized), true)
+    let serialized = serde_json::to_string_pretty(state).expect("harness state serializes");
+    // Pretty-printed JSON (two-space indent) plus a trailing newline.
+    write_file_atomic(state_path, &format!("{}\n", serialized), true)
 }
 
 // The single derivation for the result contract's verification and task-stat
@@ -951,146 +1039,175 @@ pub fn save_harness_state(state_path: &Path, state: &HarnessState) -> std::io::R
 /// One-line rendering of structured evidence for prompts/results. Returns the
 /// explicit unverified label for legacy records without evidence, and a compact descriptor
 /// otherwise. Counts are reported assertions, not proof of correctness.
-pub fn describe_verification_evidence(evidence: Option<&crate::core::types::VerificationEvidence>) -> String {
-	use crate::core::types::VerificationEvidenceKind;
-	let Some(evidence) = evidence else {
-		return "; evidence: unavailable (legacy record; unverified)".into();
-	};
-	let kind_word = match evidence.kind {
-		VerificationEvidenceKind::Tests => "tests",
-		VerificationEvidenceKind::Custom => "custom-check",
-		VerificationEvidenceKind::Build => "build",
-		VerificationEvidenceKind::Typecheck => "typecheck",
-		VerificationEvidenceKind::Unverified => "unverified",
-	};
-	let counts = match evidence.kind {
-		VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => format!("{} (no assertions)", kind_word),
-		_ => format!("{}: {} executed, {} passed, {} failed", kind_word, evidence.executed, evidence.passed, evidence.failed),
-	};
-	let detail = evidence
-		.detail
-		.as_deref()
-		.map(|detail| format!(" — {}", detail))
-		.unwrap_or_default();
-	let anchor_text = describe_verification_anchor(evidence.anchor.as_ref());
-	format!("; evidence: {}{}; anchor: {}", counts, detail, anchor_text)
+pub fn describe_verification_evidence(
+    evidence: Option<&crate::core::types::VerificationEvidence>,
+) -> String {
+    use crate::core::types::VerificationEvidenceKind;
+    let Some(evidence) = evidence else {
+        return "; evidence: unavailable (legacy record; unverified)".into();
+    };
+    let kind_word = match evidence.kind {
+        VerificationEvidenceKind::Tests => "tests",
+        VerificationEvidenceKind::Custom => "custom-check",
+        VerificationEvidenceKind::Build => "build",
+        VerificationEvidenceKind::Typecheck => "typecheck",
+        VerificationEvidenceKind::Unverified => "unverified",
+    };
+    let counts = match evidence.kind {
+        VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => {
+            format!("{} (no assertions)", kind_word)
+        }
+        _ => format!(
+            "{}: {} executed, {} passed, {} failed",
+            kind_word, evidence.executed, evidence.passed, evidence.failed
+        ),
+    };
+    let detail = evidence
+        .detail
+        .as_deref()
+        .map(|detail| format!(" — {}", detail))
+        .unwrap_or_default();
+    let anchor_text = describe_verification_anchor(evidence.anchor.as_ref());
+    format!("; evidence: {}{}; anchor: {}", counts, detail, anchor_text)
 }
 
 /// The anchor label a VERIFY result and the harness both print, so the model
 /// reads back exactly the anchor the record carries.
-pub fn describe_verification_anchor(anchor: Option<&crate::core::types::VerificationAnchor>) -> String {
-	match anchor {
-		None => "undeclared".to_string(),
-		Some(anchor) => match anchor.kind {
-			crate::core::types::VerificationAnchorKind::External => match anchor.source.as_deref() {
-				Some(source) if !source.is_empty() => format!("external ({})", source),
-				_ => "external".to_string(),
-			},
-			crate::core::types::VerificationAnchorKind::SelfAuthored => {
-				match anchor.downgraded_reason.as_deref() {
-					Some(reason) if !reason.is_empty() => {
-						format!("self-authored (downgraded: {})", reason)
-					}
-					_ => "self-authored".to_string(),
-				}
-			}
-			crate::core::types::VerificationAnchorKind::Undeclared => "undeclared".to_string(),
-		},
-	}
+pub fn describe_verification_anchor(
+    anchor: Option<&crate::core::types::VerificationAnchor>,
+) -> String {
+    match anchor {
+        None => "undeclared".to_string(),
+        Some(anchor) => match anchor.kind {
+            crate::core::types::VerificationAnchorKind::External => {
+                match anchor.source.as_deref() {
+                    Some(source) if !source.is_empty() => format!("external ({})", source),
+                    _ => "external".to_string(),
+                }
+            }
+            crate::core::types::VerificationAnchorKind::SelfAuthored => {
+                match anchor.downgraded_reason.as_deref() {
+                    Some(reason) if !reason.is_empty() => {
+                        format!("self-authored (downgraded: {})", reason)
+                    }
+                    _ => "self-authored".to_string(),
+                }
+            }
+            crate::core::types::VerificationAnchorKind::Undeclared => "undeclared".to_string(),
+        },
+    }
 }
 
 /// One verdict vocabulary for every reporting surface, including legacy data.
-pub fn describe_verification_outcome(failed: bool, ran_no_tests: Option<bool>, evidence: Option<&crate::core::types::VerificationEvidence>) -> &'static str {
-	if failed {
-		"FAILED"
-	} else if ran_no_tests == Some(true) {
-		"UNVERIFIED (executed 0 tests)"
-	} else if !evidence.is_some_and(|evidence| evidence.verifies_work()) {
-		"UNVERIFIED"
-	} else {
-		"passed"
-	}
+pub fn describe_verification_outcome(
+    failed: bool,
+    ran_no_tests: Option<bool>,
+    evidence: Option<&crate::core::types::VerificationEvidence>,
+) -> &'static str {
+    if failed {
+        "FAILED"
+    } else if ran_no_tests == Some(true) {
+        "UNVERIFIED (executed 0 tests)"
+    } else if !evidence.is_some_and(|evidence| evidence.verifies_work()) {
+        "UNVERIFIED"
+    } else {
+        "passed"
+    }
 }
 
 pub fn derive_verification_summary(state: &HarnessState) -> Option<VerificationSummary> {
-	let verification = state.last_verification.as_ref()?;
+    let verification = state.last_verification.as_ref()?;
 
-	Some(VerificationSummary {
-		at_iteration: verification.at_iteration,
-		command: verification.command.clone(),
-		failed: verification.failed,
-		mutations_after: state.mutations_since_verification.unwrap_or(0),
-		ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
-		evidence: verification.evidence.clone(),
-		anchor: verification
-			.evidence
-			.as_ref()
-			.and_then(|evidence| evidence.anchor.clone()),
-	})
+    Some(VerificationSummary {
+        at_iteration: verification.at_iteration,
+        command: verification.command.clone(),
+        failed: verification.failed,
+        mutations_after: state.mutations_since_verification.unwrap_or(0),
+        ran_no_tests: verification.ran_no_tests.filter(|flag| *flag),
+        evidence: verification.evidence.clone(),
+        anchor: verification
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.anchor.clone()),
+    })
 }
 
 /// One-line rendering of the pre-registered expectations for prompts/results.
 /// Empty string when nothing is registered; each line shows the latest
 /// observation or `unobserved`.
 pub fn describe_expectations(state: &HarnessState) -> String {
-	if state.expectations.is_empty() {
-		return String::new();
-	}
-	state
-		.expectations
-		.iter()
-		.map(|expectation| {
-			let latest = expectation.observations.last();
-			let observed_part = match latest {
-				None => "unobserved".to_string(),
-				Some(observation) => format!(
-					"observed \"{}\" ({} at iteration {})",
-					observation.observed,
-					if observation.matches { "matched" } else { "mismatched" },
-					observation.at_iteration
-				),
-			};
-			format!(
-				"expectation {} \"{}\": expected \"{}\" — {}",
-				expectation.id, expectation.subject, expectation.expected, observed_part
-			)
-		})
-		.collect::<Vec<_>>()
-		.join("\n")
+    if state.expectations.is_empty() {
+        return String::new();
+    }
+    state
+        .expectations
+        .iter()
+        .map(|expectation| {
+            let latest = expectation.observations.last();
+            let observed_part = match latest {
+                None => "unobserved".to_string(),
+                Some(observation) => format!(
+                    "observed \"{}\" ({} at iteration {})",
+                    observation.observed,
+                    if observation.matches {
+                        "matched"
+                    } else {
+                        "mismatched"
+                    },
+                    observation.at_iteration
+                ),
+            };
+            format!(
+                "expectation {} \"{}\": expected \"{}\" — {}",
+                expectation.id, expectation.subject, expectation.expected, observed_part
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One-line rendering of how the latest completion was anchored, for
 /// prompts/results. Distinguishes an external anchor from an explicit `none`
 /// declaration and from no record at all.
 pub fn describe_completion_anchor(state: &HarnessState) -> String {
-	match &state.completion_anchor {
-		None => "no completion anchor recorded".to_string(),
-		Some(anchor) => match anchor.kind {
-			crate::core::types::CompletionAnchorKind::External => {
-				"completion anchored externally (correctness-class check passed)".to_string()
-			}
-			crate::core::types::CompletionAnchorKind::None => match anchor.note.as_deref() {
-				Some(note) if !note.is_empty() => {
-					format!("completion anchor: none declared — {}", note)
-				}
-				_ => "completion anchor: none declared".to_string(),
-			},
-		},
-	}
+    match &state.completion_anchor {
+        None => "no completion anchor recorded".to_string(),
+        Some(anchor) => match anchor.kind {
+            crate::core::types::CompletionAnchorKind::External => {
+                "completion anchored externally (correctness-class check passed)".to_string()
+            }
+            crate::core::types::CompletionAnchorKind::None => match anchor.note.as_deref() {
+                Some(note) if !note.is_empty() => {
+                    format!("completion anchor: none declared — {}", note)
+                }
+                _ => "completion anchor: none declared".to_string(),
+            },
+        },
+    }
 }
 
-pub fn count_task_stats(tasks: &[HarnessTask]) 
--> TaskStats {
-	TaskStats {
-		blocked: tasks.iter().filter(|task| task.status == HarnessTaskStatus::Blocked).count() as i64,
-		completed: tasks.iter().filter(|task| task
-.status == HarnessTaskStatus::Completed).count() as i64,
-		dropped: tasks.iter().filter(|task| task.status == HarnessTaskStatus::Dropped).count() as i64,
-		pending: tasks
-			.iter()
-			.filter(|task| task.status == HarnessTaskStatus::Pending || task.status == HarnessTaskStatus::InProgress)
-			.count() as i64,
-	}
+pub fn count_task_stats(tasks: &[HarnessTask]) -> TaskStats {
+    TaskStats {
+        blocked: tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Blocked)
+            .count() as i64,
+        completed: tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Completed)
+            .count() as i64,
+        dropped: tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Dropped)
+            .count() as i64,
+        pending: tasks
+            .iter()
+            .filter(|task| {
+                task.status == HarnessTaskStatus::Pending
+                    || task.status == HarnessTaskStatus::InProgress
+            })
+            .count() as i64,
+    }
 }
 
 // ---- answers.jsonl ----------------------------------------------------------
@@ -1104,226 +1221,242 @@ pub fn count_task_stats(tasks: &[HarnessTask])
 // an earlier survey can never be replayed on resume.
 
 pub mod answers {
-	use std::path::Path;
+    use std::path::Path;
 
-	use serde_json::Value;
+    use serde_json::Value;
 
-	use crate::core::types::{HarnessSurveyAnswer, HarnessSurveyAnswers};
+    use crate::core::types::{HarnessSurveyAnswer, HarnessSurveyAnswers};
 
-	/// Marker line appended after a survey's answers are consumed.
-	pub const ANSWERS_BOUNDARY: &str = r#"{"boundary":"consumed"}"#;
+    /// Marker line appended after a survey's answers are consumed.
+    pub const ANSWERS_BOUNDARY: &str = r#"{"boundary":"consumed"}"#;
 
-	/// Validate one {index, choice, other} answer object: index must be a
-	/// non-negative integer, exactly one of choice/other must be a non-empty
-	/// string.
-	pub fn parse_answer(value: &Value) -> Result<HarnessSurveyAnswer, String> {
-		let object = value
-			.as_object()
-			.ok_or_else(|| "answer must be a JSON object".to_string())?;
-		let index = object
-			.get("index")
-			.ok_or_else(|| "answer missing index".to_string())?
-			.as_i64()
-			.ok_or_else(|| "answer index must be an integer".to_string())?;
-		if index < 0 {
-			return Err(format!("answer index must be >= 0, got {index}"));
-		}
-		let choice = parse_optional_text(object.get("choice"), "choice")?;
-		let other = parse_optional_text(object.get("other"), "other")?;
-		if choice.is_none() && other.is_none() {
-			return Err("answer needs a choice label or other text".to_string());
-		}
-		if choice.is_some() && other.is_some() {
-			return Err("answer cannot have both choice and other".to_string());
-		}
-		Ok(HarnessSurveyAnswer { index, choice, other })
-	}
+    /// Validate one {index, choice, other} answer object: index must be a
+    /// non-negative integer, exactly one of choice/other must be a non-empty
+    /// string.
+    pub fn parse_answer(value: &Value) -> Result<HarnessSurveyAnswer, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "answer must be a JSON object".to_string())?;
+        let index = object
+            .get("index")
+            .ok_or_else(|| "answer missing index".to_string())?
+            .as_i64()
+            .ok_or_else(|| "answer index must be an integer".to_string())?;
+        if index < 0 {
+            return Err(format!("answer index must be >= 0, got {index}"));
+        }
+        let choice = parse_optional_text(object.get("choice"), "choice")?;
+        let other = parse_optional_text(object.get("other"), "other")?;
+        if choice.is_none() && other.is_none() {
+            return Err("answer needs a choice label or other text".to_string());
+        }
+        if choice.is_some() && other.is_some() {
+            return Err("answer cannot have both choice and other".to_string());
+        }
+        Ok(HarnessSurveyAnswer {
+            index,
+            choice,
+            other,
+        })
+    }
 
-	fn parse_optional_text(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
-		match value {
-			None | Some(Value::Null) => Ok(None),
-			Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.clone())),
-			Some(Value::String(_)) => Err(format!("answer {field} must not be empty")),
-			Some(_) => Err(format!("answer {field} must be a string or null")),
-		}
-	}
+    fn parse_optional_text(value: Option<&Value>, field: &str) -> Result<Option<String>, String> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.clone())),
+            Some(Value::String(_)) => Err(format!("answer {field} must not be empty")),
+            Some(_) => Err(format!("answer {field} must be a string or null")),
+        }
+    }
 
-	/// Strictly parse one complete answers.jsonl line:
-	/// {"at": <rfc3339>, "answers": [{index, choice, other}, ...]}.
-	/// `at` must be a valid RFC3339 timestamp when present (the writer
-	/// always writes it); readers default a missing `at` to an empty string.
-	pub fn parse_answers_line(line: &str) -> Result<HarnessSurveyAnswers, String> {
-		let value: Value = serde_json::from_str(line)
-			.map_err(|error| format!("invalid JSON in answers.jsonl: {error}"))?;
-		let object = value
-			.as_object()
-			.ok_or_else(|| "answers line must be a JSON object".to_string())?;
-		let at = match object.get("at") {
-			None => String::new(),
-			Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
-			Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
-		};
-		let items = object
-			.get("answers")
-			.and_then(Value::as_array)
-			.ok_or_else(|| "answers line needs an answers array".to_string())?;
-		// A "chat about this" record answers the whole survey with one free-form
-		// message, so it may carry an empty answers array; any other record still
-		// needs at least one answer.
-		let chat = match object.get("chat") {
-			Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
-			Some(Value::String(_)) | None => None,
-			Some(_) => return Err("answers chat must be a string".to_string()),
-		};
-		if chat.is_some() && !items.is_empty() {
-			return Err("answers chat stands for the whole survey: drop the answers array when chat is set".to_string());
-		}
-		if items.is_empty() && chat.is_none() {
-			return Err("answers array must not be empty".to_string());
-		}
-		let mut answers = Vec::with_capacity(items.len());
-		for item in items {
-			answers.push(parse_answer(item)?);
-		}
-		Ok(HarnessSurveyAnswers { at, answers, chat })
-	}
+    /// Strictly parse one complete answers.jsonl line:
+    /// {"at": <rfc3339>, "answers": [{index, choice, other}, ...]}.
+    /// `at` must be a valid RFC3339 timestamp when present (the writer
+    /// always writes it); readers default a missing `at` to an empty string.
+    pub fn parse_answers_line(line: &str) -> Result<HarnessSurveyAnswers, String> {
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| format!("invalid JSON in answers.jsonl: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "answers line must be a JSON object".to_string())?;
+        let at = match object.get("at") {
+            None => String::new(),
+            Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
+            Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
+        };
+        let items = object
+            .get("answers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "answers line needs an answers array".to_string())?;
+        // A "chat about this" record answers the whole survey with one free-form
+        // message, so it may carry an empty answers array; any other record still
+        // needs at least one answer.
+        let chat = match object.get("chat") {
+            Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+            Some(Value::String(_)) | None => None,
+            Some(_) => return Err("answers chat must be a string".to_string()),
+        };
+        if chat.is_some() && !items.is_empty() {
+            return Err(
+                "answers chat stands for the whole survey: drop the answers array when chat is set"
+                    .to_string(),
+            );
+        }
+        if items.is_empty() && chat.is_none() {
+            return Err("answers array must not be empty".to_string());
+        }
+        let mut answers = Vec::with_capacity(items.len());
+        for item in items {
+            answers.push(parse_answer(item)?);
+        }
+        Ok(HarnessSurveyAnswers { at, answers, chat })
+    }
 
-	/// RFC3339 timestamp validator shared by writers and tests.
-	pub fn is_rfc3339(value: &str) -> bool {
-		chrono::DateTime::parse_from_rfc3339(value).is_ok()
-	}
+    /// RFC3339 timestamp validator shared by writers and tests.
+    pub fn is_rfc3339(value: &str) -> bool {
+        chrono::DateTime::parse_from_rfc3339(value).is_ok()
+    }
 
-	/// Validate one complete answers record from an already-parsed JSON value
-	/// (the strict codec behind both `drip --answer` writers: the CLI and the
-	/// TUI survey overlay). Same shape rules as `parse_answers_line`.
-	pub fn parse_answers_value(value: &Value) -> Result<HarnessSurveyAnswers, String> {
-		let object = value
-			.as_object()
-			.ok_or_else(|| "answers payload must be a JSON object".to_string())?;
-		let at = match object.get("at") {
-			None => HarnessSurveyAnswers::now_iso(),
-			Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
-			Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
-		};
-		let items = object
-			.get("answers")
-			.and_then(Value::as_array)
-			.ok_or_else(|| "answers payload needs an answers array".to_string())?;
-		// A "chat about this" record answers the whole survey with one free-form
-		// message, so it may carry an empty answers array; any other record still
-		// needs at least one answer.
-		let chat = match object.get("chat") {
-			Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
-			Some(Value::String(_)) | None => None,
-			Some(_) => return Err("answers chat must be a string".to_string()),
-		};
-		if chat.is_some() && !items.is_empty() {
-			return Err("answers chat stands for the whole survey: drop the answers array when chat is set".to_string());
-		}
-		if items.is_empty() && chat.is_none() {
-			return Err("answers array must not be empty".to_string());
-		}
-		let mut answers = Vec::with_capacity(items.len());
-		for item in items {
-			answers.push(parse_answer(item)?);
-		}
-		Ok(HarnessSurveyAnswers { at, answers, chat })
-	}
+    /// Validate one complete answers record from an already-parsed JSON value
+    /// (the strict codec behind both `drip --answer` writers: the CLI and the
+    /// TUI survey overlay). Same shape rules as `parse_answers_line`.
+    pub fn parse_answers_value(value: &Value) -> Result<HarnessSurveyAnswers, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "answers payload must be a JSON object".to_string())?;
+        let at = match object.get("at") {
+            None => HarnessSurveyAnswers::now_iso(),
+            Some(Value::String(text)) if !text.is_empty() && is_rfc3339(text) => text.clone(),
+            Some(_) => return Err("answers at must be a valid RFC3339 timestamp".to_string()),
+        };
+        let items = object
+            .get("answers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "answers payload needs an answers array".to_string())?;
+        // A "chat about this" record answers the whole survey with one free-form
+        // message, so it may carry an empty answers array; any other record still
+        // needs at least one answer.
+        let chat = match object.get("chat") {
+            Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+            Some(Value::String(_)) | None => None,
+            Some(_) => return Err("answers chat must be a string".to_string()),
+        };
+        if chat.is_some() && !items.is_empty() {
+            return Err(
+                "answers chat stands for the whole survey: drop the answers array when chat is set"
+                    .to_string(),
+            );
+        }
+        if items.is_empty() && chat.is_none() {
+            return Err("answers array must not be empty".to_string());
+        }
+        let mut answers = Vec::with_capacity(items.len());
+        for item in items {
+            answers.push(parse_answer(item)?);
+        }
+        Ok(HarnessSurveyAnswers { at, answers, chat })
+    }
 
-	/// Append one answers record as a single JSONL line (creating the file).
-	pub fn append_answers(path: &Path, record: &HarnessSurveyAnswers) -> std::io::Result<()> {
-		let line = serde_json::to_string(record).expect("answers record serializes");
-		append_line(path, &line)
-	}
+    /// Append one answers record as a single JSONL line (creating the file).
+    pub fn append_answers(path: &Path, record: &HarnessSurveyAnswers) -> std::io::Result<()> {
+        let line = serde_json::to_string(record).expect("answers record serializes");
+        append_line(path, &line)
+    }
 
-	/// Append one "chat about this" record: the operator's free-form message
-	/// stands as the answer to the whole survey (the answers array stays empty).
-	pub fn append_chat(path: &Path, text: &str) -> std::io::Result<()> {
-		append_answers(
-			path,
-			&HarnessSurveyAnswers {
-				at: HarnessSurveyAnswers::now_iso(),
-				answers: Vec::new(),
-				chat: Some(text.to_string()),
-			},
-		)
-	}
+    /// Append one "chat about this" record: the operator's free-form message
+    /// stands as the answer to the whole survey (the answers array stays empty).
+    pub fn append_chat(path: &Path, text: &str) -> std::io::Result<()> {
+        append_answers(
+            path,
+            &HarnessSurveyAnswers {
+                at: HarnessSurveyAnswers::now_iso(),
+                answers: Vec::new(),
+                chat: Some(text.to_string()),
+            },
+        )
+    }
 
-	/// Append one raw JSONL line (also used for the boundary marker).
-	pub fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
-		use std::io::Write;
-		if let Some(parent) = path.parent() {
-			if !parent.as_os_str().is_empty() {
-				std::fs::create_dir_all(parent)?;
-			}
-		}
-		let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-		// A trailing line without a newline is a torn write that is not yet
-		// durable; terminate it so the new record starts on its own line.
-		let torn_tail = std::fs::read(path)
-			.map(|bytes| bytes.last().is_some_and(|&byte| byte != b'\n'))
-			.unwrap_or(false);
-		if torn_tail {
-			file.write_all(b"\n")?;
-		}
-		file.write_all(format!("{line}\n").as_bytes())
-	}
+    /// Append one raw JSONL line (also used for the boundary marker).
+    pub fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        // A trailing line without a newline is a torn write that is not yet
+        // durable; terminate it so the new record starts on its own line.
+        let torn_tail = std::fs::read(path)
+            .map(|bytes| bytes.last().is_some_and(|&byte| byte != b'\n'))
+            .unwrap_or(false);
+        if torn_tail {
+            file.write_all(b"\n")?;
+        }
+        file.write_all(format!("{line}\n").as_bytes())
+    }
 
-	/// Append the consumed-boundary marker line.
-	pub fn append_boundary(path: &Path) -> std::io::Result<()> {
-		append_line(path, ANSWERS_BOUNDARY)
-	}
+    /// Append the consumed-boundary marker line.
+    pub fn append_boundary(path: &Path) -> std::io::Result<()> {
+        append_line(path, ANSWERS_BOUNDARY)
+    }
 
-	/// One parsed answers.jsonl record with its 0-based line number.
-	pub struct AnswersFileRecord {
-		pub line_number: usize,
-		pub record: HarnessSurveyAnswers,
-	}
+    /// One parsed answers.jsonl record with its 0-based line number.
+    pub struct AnswersFileRecord {
+        pub line_number: usize,
+        pub record: HarnessSurveyAnswers,
+    }
 
-	/// Read complete records from the file, skipping blank lines, boundary
-	/// markers, and malformed lines. A partial trailing line (no trailing
-	/// newline) is not yet durable and is ignored.
-	pub fn read_answer_batches(path: &Path) -> Vec<AnswersFileRecord> {
-		let Ok(content) = std::fs::read_to_string(path) else {
-			return Vec::new();
-		};
-		let complete = content.ends_with('\n');
-		let lines: Vec<&str> = content.lines().collect();
-		let mut records = Vec::new();
-		for (position, line) in lines.iter().enumerate() {
-			if position + 1 == lines.len() && !complete {
-				break;
-			}
-			let trimmed = line.trim();
-			if trimmed.is_empty() || trimmed == ANSWERS_BOUNDARY {
-				continue;
-			}
-			if let Ok(record) = parse_answers_line(trimmed) {
-				records.push(AnswersFileRecord { line_number: position, record });
-			}
-		}
-		records
-	}
+    /// Read complete records from the file, skipping blank lines, boundary
+    /// markers, and malformed lines. A partial trailing line (no trailing
+    /// newline) is not yet durable and is ignored.
+    pub fn read_answer_batches(path: &Path) -> Vec<AnswersFileRecord> {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let complete = content.ends_with('\n');
+        let lines: Vec<&str> = content.lines().collect();
+        let mut records = Vec::new();
+        for (position, line) in lines.iter().enumerate() {
+            if position + 1 == lines.len() && !complete {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed == ANSWERS_BOUNDARY {
+                continue;
+            }
+            if let Ok(record) = parse_answers_line(trimmed) {
+                records.push(AnswersFileRecord {
+                    line_number: position,
+                    record,
+                });
+            }
+        }
+        records
+    }
 
-	/// Batches at or after the given 0-based line cursor — the persisted
-	/// "next line I have not consumed" pointer that keeps stale records from
-	/// an earlier survey (or a replayed resume) from being accepted twice.
-	pub fn read_answer_batches_after(path: &Path, cursor: usize) -> Vec<AnswersFileRecord> {
-		read_answer_batches(path)
-			.into_iter()
-			.filter(|entry| entry.line_number >= cursor)
-			.collect()
-	}
+    /// Batches at or after the given 0-based line cursor — the persisted
+    /// "next line I have not consumed" pointer that keeps stale records from
+    /// an earlier survey (or a replayed resume) from being accepted twice.
+    pub fn read_answer_batches_after(path: &Path, cursor: usize) -> Vec<AnswersFileRecord> {
+        read_answer_batches(path)
+            .into_iter()
+            .filter(|entry| entry.line_number >= cursor)
+            .collect()
+    }
 
-	/// Total number of lines currently in the file (0 when missing) — the
-	/// 0-based cursor value just past a freshly appended boundary.
-	pub fn line_count(path: &Path) -> std::io::Result<usize> {
-		match std::fs::read_to_string(path) {
-			Ok(content) => Ok(content.lines().count()),
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
-			Err(err) => Err(err),
-		}
-	}
+    /// Total number of lines currently in the file (0 when missing) — the
+    /// 0-based cursor value just past a freshly appended boundary.
+    pub fn line_count(path: &Path) -> std::io::Result<usize> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => Ok(content.lines().count()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(err) => Err(err),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1344,7 +1477,11 @@ mod tests {
     fn blocked_state(blocked_on: Option<HarnessTaskBlocker>) -> HarnessState {
         let mut state = HarnessState::default();
         state.iteration = 5;
-        add_tasks(&mut state, vec![input("stuck task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("stuck task")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
             HarnessFinishArgs {
@@ -1369,7 +1506,12 @@ mod tests {
         let mut reblocked = blocked_state(Some(HarnessTaskBlocker::Operator));
         finish_task(
             &mut reblocked,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "stalled", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "stalled",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         assert_eq!(reblocked.tasks[0].blocked_on, None);
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
@@ -1383,7 +1525,10 @@ mod tests {
     #[test]
     fn an_operator_reply_after_the_block_reopens_the_task_with_the_reply_noted() {
         let mut state = blocked_state(Some(HarnessTaskBlocker::Operator));
-        assert!(reopen_operator_blocked_tasks(&mut state).is_empty(), "no reply yet");
+        assert!(
+            reopen_operator_blocked_tasks(&mut state).is_empty(),
+            "no reply yet"
+        );
 
         // A message older than the block is not an answer to it.
         state.operator_messages = Some(vec![HarnessOperatorMessage {
@@ -1405,7 +1550,10 @@ mod tests {
         assert_eq!(task.status, HarnessTaskStatus::Pending);
         assert_eq!(task.blocked_on, None);
         assert_eq!(task.finished_at_iteration, None);
-        assert_eq!(task.notes.last().map(String::as_str), Some("Operator input received: originals are in /backup"));
+        assert_eq!(
+            task.notes.last().map(String::as_str),
+            Some("Operator input received: originals are in /backup")
+        );
     }
 
     fn input_with_deps(title: &str, depends_on: &[&str]) -> HarnessTaskInput {
@@ -1452,11 +1600,21 @@ mod tests {
     fn selects_the_current_task_preferring_in_progress_over_pending() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("first"), input("second")], HarnessTaskPlacement::End);
-        assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-1"));
+        add_tasks(
+            &mut state,
+            vec![input("first"), input("second")],
+            HarnessTaskPlacement::End,
+        );
+        assert_eq!(
+            get_current_task(&state).map(|task| task.id.as_str()),
+            Some("task-1")
+        );
 
         state.tasks[1].status = HarnessTaskStatus::InProgress;
-        assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-2"));
+        assert_eq!(
+            get_current_task(&state).map(|task| task.id.as_str()),
+            Some("task-2")
+        );
     }
 
     // Resets ALL per-goal verification state at the goal boundary (pin the full reset list).
@@ -1497,29 +1655,49 @@ mod tests {
     #[test]
     fn unchanged_failure_gets_at_most_one_automatic_reopen_per_recovery_episode() {
         let mut state = create_harness_state("episode goal");
-        add_tasks(&mut state, vec![input("flaky work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("flaky work")],
+            HarnessTaskPlacement::End,
+        );
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "tool failed", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "tool failed",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
 
         // First stalled escalation: the episode's one fresh reopen is allowed.
-        assert_eq!(reopen_blocked_tasks(&mut state, "retry once", Some(3)).len(), 1);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "retry once", Some(3)).len(),
+            1
+        );
         assert_eq!(state.tasks[0].reopen_count, Some(1));
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
 
         // The retry comes back blocked unchanged.
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "tool failed again", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "tool failed again",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
 
         // Second escalation: no fresh reopen left, even though the global
         // reopen budget is far from exhausted. The task stays blocked for the
         // evidence-aware planner instead of replaying the identical loop.
-        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(),
+            0
+        );
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
         assert!(state.tasks[0].reopen_count.unwrap() < 3);
     }
@@ -1528,11 +1706,20 @@ mod tests {
     #[test]
     fn exhaustion_keeps_tasks_whose_fresh_reopen_has_not_been_attempted() {
         let mut state = create_harness_state("exhaustion goal");
-        add_tasks(&mut state, vec![input("needed work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("needed work")],
+            HarnessTaskPlacement::End,
+        );
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "blocked once", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "blocked once",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         drop_exhausted_blocked_tasks(&mut state);
 
@@ -1543,7 +1730,12 @@ mod tests {
         reopen_blocked_tasks(&mut state, "retry", Some(2));
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "still blocked", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "still blocked",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         drop_exhausted_blocked_tasks(&mut state);
 
@@ -1556,17 +1748,34 @@ mod tests {
     #[test]
     fn operator_reply_refreshes_a_spent_recovery_episode() {
         let mut state = create_harness_state("operator goal");
-        add_tasks(&mut state, vec![input("needs input")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("needs input")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "no credentials", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "no credentials",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         reopen_blocked_tasks(&mut state, "retry", Some(3));
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "no credentials still", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "no credentials still",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
-        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(),
+            0
+        );
 
         push_recovery_event(
             &mut state.tasks[0],
@@ -1580,7 +1789,10 @@ mod tests {
             },
         );
 
-        assert_eq!(reopen_blocked_tasks(&mut state, "retry after reply", Some(3)).len(), 1);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "retry after reply", Some(3)).len(),
+            1
+        );
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Pending);
     }
 
@@ -1588,23 +1800,45 @@ mod tests {
     #[test]
     fn reblocking_and_note_churn_do_not_refresh_a_spent_recovery_episode() {
         let mut state = create_harness_state("churn goal");
-        add_tasks(&mut state, vec![input("churny work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("churny work")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "first failure", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "first failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         reopen_blocked_tasks(&mut state, "retry", Some(3));
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "second failure", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "second failure",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
 
         // Pure churn: more blocked notes change nothing.
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "yet another note", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "yet another note",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
-        assert_eq!(reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(), 0);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "retry again", Some(3)).len(),
+            0
+        );
     }
 
     // A replacement task with an identical title is refused, so retry
@@ -1612,34 +1846,57 @@ mod tests {
     #[test]
     fn duplicate_replacement_tasks_cannot_reset_retry_accounting() {
         let mut state = create_harness_state("duplicate goal");
-        add_tasks(&mut state, vec![input("Investigate flake")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("Investigate flake")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "failed once", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "failed once",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         reopen_blocked_tasks(&mut state, "retry", Some(3));
 
-        let added = add_tasks(&mut state, vec![input("  investigate   FLAKE ")], HarnessTaskPlacement::End);
+        let added = add_tasks(
+            &mut state,
+            vec![input("  investigate   FLAKE ")],
+            HarnessTaskPlacement::End,
+        );
 
         assert!(added.is_empty());
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.tasks[0].id, "task-1");
         assert_eq!(state.tasks[0].reopen_count, Some(1));
-        assert!(state
-            .tasks[0]
-            .recovery_history
-            .as_ref()
-            .map(|history| history.len())
-            .unwrap_or(0) >= 2);
+        assert!(
+            state.tasks[0]
+                .recovery_history
+                .as_ref()
+                .map(|history| history.len())
+                .unwrap_or(0)
+                >= 2
+        );
     }
 
     // Genuinely new unblocking work is unaffected by the duplicate guard.
     #[test]
     fn genuinely_new_unblocking_work_is_still_accepted() {
         let mut state = create_harness_state("new work goal");
-        add_tasks(&mut state, vec![input("Investigate flake")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("Investigate flake")],
+            HarnessTaskPlacement::End,
+        );
 
-        let added = add_tasks(&mut state, vec![input("install missing toolchain")], HarnessTaskPlacement::End);
+        let added = add_tasks(
+            &mut state,
+            vec![input("install missing toolchain")],
+            HarnessTaskPlacement::End,
+        );
 
         assert_eq!(added.len(), 1);
         assert_eq!(state.tasks.len(), 2);
@@ -1649,11 +1906,18 @@ mod tests {
     #[test]
     fn operator_blocked_tasks_are_never_reopened_automatically() {
         let mut state = create_harness_state("operator gate goal");
-        add_tasks(&mut state, vec![input("needs operator")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("needs operator")],
+            HarnessTaskPlacement::End,
+        );
         state.tasks[0].status = HarnessTaskStatus::Blocked;
         state.tasks[0].blocked_on = Some(HarnessTaskBlocker::Operator);
 
-        assert_eq!(reopen_blocked_tasks(&mut state, "escalate", Some(3)).len(), 0);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "escalate", Some(3)).len(),
+            0
+        );
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Blocked);
     }
 
@@ -1674,15 +1938,26 @@ mod tests {
 
         // task-2 waits on task-1; task-3's dependency never existed, so it must
         // not deadlock — but ordering still prefers the first workable task.
-        assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-1"));
+        assert_eq!(
+            get_current_task(&state).map(|task| task.id.as_str()),
+            Some("task-1")
+        );
         assert!(has_unmet_dependencies(&state, &state.tasks[1]));
         assert!(!has_unmet_dependencies(&state, &state.tasks[2]));
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "built", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "built",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
-        assert_eq!(get_current_task(&state).map(|task| task.id.as_str()), Some("task-2"));
+        assert_eq!(
+            get_current_task(&state).map(|task| task.id.as_str()),
+            Some("task-2")
+        );
 
         // A dropped dependency also unblocks (the work was resolved either way).
         let mut state2 = create_harness_state("drop goal");
@@ -1693,7 +1968,10 @@ mod tests {
             HarnessTaskPlacement::End,
         );
         drop_task(&mut state2, "task-1", "obsolete");
-        assert_eq!(get_current_task(&state2).map(|task| task.id.as_str()), Some("task-2"));
+        assert_eq!(
+            get_current_task(&state2).map(|task| task.id.as_str()),
+            Some("task-2")
+        );
     }
 
     // Finishes the current task by default and named tasks by id.
@@ -1701,12 +1979,21 @@ mod tests {
     fn finishes_the_current_task_by_default_and_named_tasks_by_id() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("first"), input("second")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("first"), input("second")],
+            HarnessTaskPlacement::End,
+        );
         state.iteration = 3;
 
         let finished_task = finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: None, confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "done",
+                task_id: None,
+                confidence: None,
+            },
         )
         .unwrap();
 
@@ -1716,7 +2003,12 @@ mod tests {
 
         let blocked_task = finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "missing credentials", task_id: Some("task-2"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "missing credentials",
+                task_id: Some("task-2"),
+                confidence: None,
+            },
         )
         .unwrap();
 
@@ -1726,7 +2018,12 @@ mod tests {
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "unblocked and done", task_id: Some("task-2"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "unblocked and done",
+                task_id: Some("task-2"),
+                confidence: None,
+            },
         );
         assert!(is_goal_complete(&state));
     }
@@ -1736,22 +2033,42 @@ mod tests {
     fn persists_finish_task_confidence_on_the_task_record() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("first"), input("second")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("first"), input("second")],
+            HarnessTaskPlacement::End,
+        );
 
         assert_eq!(state.tasks[0].confidence, None);
         assert_eq!(state.tasks[1].confidence, None);
 
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "shipped it", task_id: Some("task-1"), confidence: Some(crate::core::types::ClaimedConfidence::High) },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "shipped it",
+                task_id: Some("task-1"),
+                confidence: Some(crate::core::types::ClaimedConfidence::High),
+            },
         );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "waiting on credentials", task_id: Some("task-2"), confidence: Some(crate::core::types::ClaimedConfidence::Low) },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "waiting on credentials",
+                task_id: Some("task-2"),
+                confidence: Some(crate::core::types::ClaimedConfidence::Low),
+            },
         );
 
-        assert_eq!(state.tasks[0].confidence, Some(crate::core::types::ClaimedConfidence::High));
-        assert_eq!(state.tasks[1].confidence, Some(crate::core::types::ClaimedConfidence::Low));
+        assert_eq!(
+            state.tasks[0].confidence,
+            Some(crate::core::types::ClaimedConfidence::High)
+        );
+        assert_eq!(
+            state.tasks[1].confidence,
+            Some(crate::core::types::ClaimedConfidence::Low)
+        );
     }
 
     // Older state files whose tasks carry no confidence field still load; a newer
@@ -1766,7 +2083,8 @@ mod tests {
         save_harness_state(&state_path, &state).unwrap();
 
         // Simulate an older state.json written before per-task confidence existed.
-        let mut raw: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        let mut raw: Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
         for task in raw.get_mut("tasks").and_then(Value::as_array_mut).unwrap() {
             task.as_object_mut().unwrap().remove("confidence");
         }
@@ -1777,12 +2095,20 @@ mod tests {
 
         finish_task(
             &mut loaded_state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: None, confidence: Some(crate::core::types::ClaimedConfidence::Medium) },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "done",
+                task_id: None,
+                confidence: Some(crate::core::types::ClaimedConfidence::Medium),
+            },
         );
         save_harness_state(&state_path, &loaded_state).unwrap();
 
         let reloaded_state = load_harness_state(&state_path).unwrap().unwrap();
-        assert_eq!(reloaded_state.tasks[0].confidence, Some(crate::core::types::ClaimedConfidence::Medium));
+        assert_eq!(
+            reloaded_state.tasks[0].confidence,
+            Some(crate::core::types::ClaimedConfidence::Medium)
+        );
     }
 
     // Inserts placement-next tasks after the current task, or at the front of the pending queue.
@@ -1790,18 +2116,38 @@ mod tests {
     fn inserts_placement_next_tasks_after_the_current_task_or_at_the_front_of_the_pending_queue() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("first"), input("second")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("first"), input("second")],
+            HarnessTaskPlacement::End,
+        );
         state.tasks[0].status = HarnessTaskStatus::InProgress;
-        add_tasks(&mut state, vec![input("prerequisite")], HarnessTaskPlacement::Next);
+        add_tasks(
+            &mut state,
+            vec![input("prerequisite")],
+            HarnessTaskPlacement::Next,
+        );
         let titles: Vec<&str> = state.tasks.iter().map(|task| task.title.as_str()).collect();
         assert_eq!(titles, ["first", "prerequisite", "second"]);
 
         // Without an in-progress task, "next" lands before the first pending task.
         let mut pending_only = create_harness_state("goal");
 
-        add_tasks(&mut pending_only, vec![input("a"), input("b")], HarnessTaskPlacement::End);
-        add_tasks(&mut pending_only, vec![input("urgent")], HarnessTaskPlacement::Next);
-        let pending_titles: Vec<&str> = pending_only.tasks.iter().map(|task| task.title.as_str()).collect();
+        add_tasks(
+            &mut pending_only,
+            vec![input("a"), input("b")],
+            HarnessTaskPlacement::End,
+        );
+        add_tasks(
+            &mut pending_only,
+            vec![input("urgent")],
+            HarnessTaskPlacement::Next,
+        );
+        let pending_titles: Vec<&str> = pending_only
+            .tasks
+            .iter()
+            .map(|task| task.title.as_str())
+            .collect();
         assert_eq!(pending_titles, ["urgent", "a", "b"]);
 
         // Batch ids stay sequential even when inserted mid-list.
@@ -1815,7 +2161,11 @@ mod tests {
     fn drops_unfinished_tasks_with_a_reason_and_refuses_finished_ones() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("keep"), input("drop me")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("keep"), input("drop me")],
+            HarnessTaskPlacement::End,
+        );
         state.iteration = 2;
 
         let dropped_task = drop_task(&mut state, "task-2", "  superseded  ").unwrap();
@@ -1827,7 +2177,12 @@ mod tests {
         assert!(drop_task(&mut state, "task-2", "again").is_none());
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "done",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         assert!(drop_task(&mut state, "task-1", "too late").is_none());
     }
@@ -1837,7 +2192,11 @@ mod tests {
     fn revises_unfinished_task_titles_and_records_the_old_title_as_a_note() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("vague work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("vague work")],
+            HarnessTaskPlacement::End,
+        );
 
         let revised_task = revise_task(&mut state, "task-1", "  concrete work  ").unwrap();
 
@@ -1853,10 +2212,19 @@ mod tests {
     fn treats_dropped_tasks_as_finished_for_goal_completion_but_never_all_dropped_as_complete() {
         let mut state = create_harness_state("goal");
 
-        add_tasks(&mut state, vec![input("real work"), input("stale work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("real work"), input("stale work")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "done",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         assert!(!is_goal_complete(&state));
 
@@ -1866,7 +2234,11 @@ mod tests {
 
         let mut all_dropped = create_harness_state("goal");
 
-        add_tasks(&mut all_dropped, vec![input("only work")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut all_dropped,
+            vec![input("only work")],
+            HarnessTaskPlacement::End,
+        );
         drop_task(&mut all_dropped, "task-1", "abandoned");
         assert!(!is_goal_complete(&all_dropped));
     }
@@ -1916,7 +2288,9 @@ mod tests {
             serde_json::to_value(&loaded_state).unwrap(),
             serde_json::to_value(&state).unwrap()
         );
-        assert!(load_harness_state(&state_dir.join("missing.json")).unwrap().is_none());
+        assert!(load_harness_state(&state_dir.join("missing.json"))
+            .unwrap()
+            .is_none());
     }
 
     // Rejects state files that are not valid harness state.
@@ -1926,7 +2300,11 @@ mod tests {
         let state_dir = temp.path();
 
         let wrong_shape_path = state_dir.join("wrong-shape.json");
-        fs::write(&wrong_shape_path, json!({ "goal": "g", "version": 2 }).to_string()).unwrap();
+        fs::write(
+            &wrong_shape_path,
+            json!({ "goal": "g", "version": 2 }).to_string(),
+        )
+        .unwrap();
         let error = load_harness_state(&wrong_shape_path).unwrap_err();
         assert!(error.to_string().contains("not a valid harness state file"));
 
@@ -1954,10 +2332,19 @@ mod tests {
     fn archives_the_current_goals_tasks_into_history_on_a_follow_up_and_keeps_memory() {
         let mut state = create_harness_state("first goal");
 
-        add_tasks(&mut state, vec![input("only task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("only task")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "done", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "done",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         add_memory_note(&mut state, "a durable fact");
         state.iteration = 4;
@@ -1985,7 +2372,10 @@ mod tests {
         assert_eq!(state.history[0].archived_at_iteration, 4);
         assert_eq!(state.history[0].tasks[0].summary.as_deref(), Some("done"));
         // The run summary is archived onto the goal record; per-goal scratch state resets.
-        assert_eq!(state.history[0].summary.as_deref(), Some("Finished the only task."));
+        assert_eq!(
+            state.history[0].summary.as_deref(),
+            Some("Finished the only task.")
+        );
         assert!(state.run_summary.is_none());
         assert!(state.last_activation.is_none());
         assert_eq!(state.memory.len(), 1);
@@ -2009,15 +2399,29 @@ mod tests {
         let mut state = create_harness_state("goal");
 
         assert!(!has_unfinished_tasks(&state));
-        add_tasks(&mut state, vec![input("a"), input("b")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("a"), input("b")],
+            HarnessTaskPlacement::End,
+        );
         assert!(has_unfinished_tasks(&state));
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Completed, summary: "", task_id: Some("task-1"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Completed,
+                summary: "",
+                task_id: Some("task-1"),
+                confidence: None,
+            },
         );
         finish_task(
             &mut state,
-            HarnessFinishArgs { status: HarnessTaskStatus::Blocked, summary: "stuck", task_id: Some("task-2"), confidence: None },
+            HarnessFinishArgs {
+                status: HarnessTaskStatus::Blocked,
+                summary: "stuck",
+                task_id: Some("task-2"),
+                confidence: None,
+            },
         );
         // Blocked still counts as unfinished so a same-goal re-run resumes instead of archiving.
         assert!(has_unfinished_tasks(&state));
@@ -2079,7 +2483,11 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let state_path = temp.path().join("state-sample.json");
-        fs::write(&state_path, include_str!("../../tests/fixtures/state-sample.json")).unwrap();
+        fs::write(
+            &state_path,
+            include_str!("../../tests/fixtures/state-sample.json"),
+        )
+        .unwrap();
 
         let loaded = load_harness_state(&state_path).unwrap().unwrap();
 
@@ -2089,11 +2497,11 @@ mod tests {
 
         assert_eq!(expected, saved);
     }
-// ---- clarification survey protocol (ask_user groundwork) ---------------
+    // ---- clarification survey protocol (ask_user groundwork) ---------------
 
     use crate::core::types::{
-		HarnessSurveyAnswer, HarnessSurveyAnswers, HarnessSurveyOption,
-		HarnessSurveyQuestion, QuestionSurvey,
+        HarnessSurveyAnswer, HarnessSurveyAnswers, HarnessSurveyOption, HarnessSurveyQuestion,
+        QuestionSurvey,
     };
 
     fn sample_survey() -> QuestionSurvey {
@@ -2103,8 +2511,14 @@ mod tests {
                 header: "Approach".into(),
                 question: "Should the run block for operator answers?".into(),
                 options: vec![
-                    HarnessSurveyOption { label: "Poll answers.jsonl".into(), description: "Simple synchronous wait".into() },
-                    HarnessSurveyOption { label: "Channel".into(), description: "More plumbing".into() },
+                    HarnessSurveyOption {
+                        label: "Poll answers.jsonl".into(),
+                        description: "Simple synchronous wait".into(),
+                    },
+                    HarnessSurveyOption {
+                        label: "Channel".into(),
+                        description: "More plumbing".into(),
+                    },
                 ],
                 allow_other: true,
                 multiple: false,
@@ -2151,8 +2565,16 @@ mod tests {
         let record = HarnessSurveyAnswers {
             at: "2026-02-03T04:05:06.789Z".into(),
             answers: vec![
-                HarnessSurveyAnswer { index: 0, choice: Some("Poll answers.jsonl".into()), other: None },
-                HarnessSurveyAnswer { index: 1, choice: None, other: Some("do it yourself".into()) },
+                HarnessSurveyAnswer {
+                    index: 0,
+                    choice: Some("Poll answers.jsonl".into()),
+                    other: None,
+                },
+                HarnessSurveyAnswer {
+                    index: 1,
+                    choice: None,
+                    other: Some("do it yourself".into()),
+                },
             ],
             chat: None,
         };
@@ -2161,7 +2583,8 @@ mod tests {
         assert!(line.contains("\"choice\"") && !line.contains("\"other\":null"));
         let parsed = answers::parse_answers_line(&line).unwrap();
         assert_eq!(parsed, record);
-        let reparsed = answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        let reparsed =
+            answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap();
         assert_eq!(reparsed, record);
     }
 
@@ -2172,13 +2595,19 @@ mod tests {
         assert!(answers::parse_answer(&serde_json::json!({"index": -1, "choice": "x"})).is_err());
         assert!(answers::parse_answer(&serde_json::json!({"index": 0})).is_err());
         assert!(answers::parse_answer(&serde_json::json!({"index": "0", "choice": "x"})).is_err());
-        assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": "x", "other": "y"})).is_err());
+        assert!(answers::parse_answer(
+            &serde_json::json!({"index": 0, "choice": "x", "other": "y"})
+        )
+        .is_err());
         assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": ""})).is_err());
         assert!(answers::parse_answer(&serde_json::json!({"index": 0, "choice": 3})).is_err());
         assert!(answers::parse_answers_line("[1,2]").is_err());
         assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[]}").is_err());
         assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[{\"index\":0}]}").is_err());
-        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[{\"index\":0,\"choice\":\"a\"}]}").is_err());
+        assert!(answers::parse_answers_line(
+            "{\"at\":\"t\",\"answers\":[{\"index\":0,\"choice\":\"a\"}]}"
+        )
+        .is_err());
     }
 
     /// A "chat about this" record: an empty answers array is legal only when a
@@ -2188,16 +2617,38 @@ mod tests {
         let line = "{\"at\":\"2026-02-03T04:05:06.789Z\",\"answers\":[],\"chat\":\"ask the maintainer instead of me\"}";
         let parsed = answers::parse_answers_line(line).unwrap();
         assert!(parsed.answers.is_empty());
-        assert_eq!(parsed.chat.as_deref(), Some("ask the maintainer instead of me"));
-        assert_eq!(answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap(), parsed);
+        assert_eq!(
+            parsed.chat.as_deref(),
+            Some("ask the maintainer instead of me")
+        );
+        assert_eq!(
+            answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap(),
+            parsed
+        );
         // an empty chat string is not a chat record: the empty answers array stays invalid
-        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[],\"chat\":\"  \"}").is_err());
+        assert!(
+            answers::parse_answers_line("{\"at\":\"t\",\"answers\":[],\"chat\":\"  \"}").is_err()
+        );
         // A hybrid record would have per-question answers silently discarded
         // in favour of the chat text, so the codec rejects it outright.
-        assert!(answers::parse_answers_line("{\"answers\":[{\"index\":0,\"choice\":\"x\"}],\"chat\":\"also this\"}").is_err());
-        assert!(answers::parse_answers_value(&serde_json::json!({"answers": [{"index": 0, "choice": "x"}], "chat": "also this"})).is_err());
-        assert!(answers::parse_answers_value(&serde_json::json!({"at": "t", "answers": [], "chat": 3})).is_err());
-        assert_ne!(answers::parse_answers_value(&serde_json::json!({"answers": [], "chat": "x"})).unwrap().at, "");
+        assert!(answers::parse_answers_line(
+            "{\"answers\":[{\"index\":0,\"choice\":\"x\"}],\"chat\":\"also this\"}"
+        )
+        .is_err());
+        assert!(answers::parse_answers_value(
+            &serde_json::json!({"answers": [{"index": 0, "choice": "x"}], "chat": "also this"})
+        )
+        .is_err());
+        assert!(answers::parse_answers_value(
+            &serde_json::json!({"at": "t", "answers": [], "chat": 3})
+        )
+        .is_err());
+        assert_ne!(
+            answers::parse_answers_value(&serde_json::json!({"answers": [], "chat": "x"}))
+                .unwrap()
+                .at,
+            ""
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("answers.jsonl");
@@ -2214,7 +2665,11 @@ mod tests {
         let path = temp.path().join("answers.jsonl");
         let record = HarnessSurveyAnswers {
             at: "2026-02-03T04:05:06.789Z".into(),
-            answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+            answers: vec![HarnessSurveyAnswer {
+                index: 0,
+                choice: Some("a".into()),
+                other: None,
+            }],
             chat: None,
         };
         let line = serde_json::to_string(&record).unwrap();
@@ -2237,7 +2692,11 @@ mod tests {
         assert!(answers::read_answer_batches(&path).is_empty());
         let record = HarnessSurveyAnswers {
             at: "2026-02-03T04:05:06.789Z".into(),
-            answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+            answers: vec![HarnessSurveyAnswer {
+                index: 0,
+                choice: Some("a".into()),
+                other: None,
+            }],
             chat: None,
         };
         answers::append_answers(&path, &record).unwrap();
@@ -2245,7 +2704,7 @@ mod tests {
         answers::append_boundary(&path).unwrap();
         assert_eq!(answers::read_answer_batches(&path).len(), 2);
         // cursor semantics: line_number is the 0-based raw file line; the
-		// harness persists "next unconsumed line" (here 3) across resumes.
+        // harness persists "next unconsumed line" (here 3) across resumes.
         assert_eq!(answers::read_answer_batches_after(&path, 0).len(), 2);
         assert_eq!(answers::read_answer_batches_after(&path, 2).len(), 1);
         assert!(answers::read_answer_batches_after(&path, 3).is_empty());
@@ -2273,7 +2732,10 @@ mod tests {
     // undeclared case, and the unavailable legacy record.
     #[test]
     fn verification_evidence_descriptions_cover_each_anchor() {
-        use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        use crate::core::types::{
+            VerificationAnchor, VerificationAnchorKind, VerificationEvidence,
+            VerificationEvidenceKind,
+        };
         let base = |anchor: Option<VerificationAnchor>| VerificationEvidence {
             kind: VerificationEvidenceKind::Tests,
             executed: 4,
@@ -2290,7 +2752,10 @@ mod tests {
             coverage: Some(crate::core::types::CoverageGranularity::ReportedClaim),
             expectation_subject: None,
         }))));
-        assert!(external.contains("; anchor: external (pre-existing project test)"), "{external}");
+        assert!(
+            external.contains("; anchor: external (pre-existing project test)"),
+            "{external}"
+        );
         let self_authored = describe_verification_evidence(Some(&base(Some(VerificationAnchor {
             kind: VerificationAnchorKind::SelfAuthored,
             source: None,
@@ -2299,7 +2764,9 @@ mod tests {
             expectation_subject: None,
         }))));
         assert!(
-            self_authored.contains("; anchor: self-authored (downgraded: command names edited file src/lib.rs)"),
+            self_authored.contains(
+                "; anchor: self-authored (downgraded: command names edited file src/lib.rs)"
+            ),
             "{self_authored}"
         );
         let undeclared = describe_verification_evidence(Some(&base(None)));
@@ -2340,7 +2807,10 @@ mod tests {
             text.contains("expectation e1 \"result count\": expected \"42\" — observed \"41\" (mismatched at iteration 5)"),
             "{text}"
         );
-        assert!(text.contains("expectation e2 \"output shape\": expected \"3 columns\" — unobserved"), "{text}");
+        assert!(
+            text.contains("expectation e2 \"output shape\": expected \"3 columns\" — unobserved"),
+            "{text}"
+        );
     }
 
     // Completion anchors render as external, as an explicit none declaration
@@ -2349,7 +2819,10 @@ mod tests {
     fn describe_completion_anchor_covers_external_none_and_missing() {
         use crate::core::types::{ClaimedConfidence, CompletionAnchor, CompletionAnchorKind};
         let mut state = create_harness_state("ship the feature");
-        assert_eq!(describe_completion_anchor(&state), "no completion anchor recorded");
+        assert_eq!(
+            describe_completion_anchor(&state),
+            "no completion anchor recorded"
+        );
         state.completion_anchor = Some(CompletionAnchor {
             kind: CompletionAnchorKind::External,
             note: None,
@@ -2365,8 +2838,7 @@ mod tests {
             claimed_confidence: Some(ClaimedConfidence::Low),
         });
         assert!(
-            describe_completion_anchor(&state)
-                .starts_with("completion anchor: none declared — "),
+            describe_completion_anchor(&state).starts_with("completion anchor: none declared — "),
             "{}",
             describe_completion_anchor(&state)
         );
@@ -2379,7 +2851,11 @@ mod tests {
     #[test]
     fn old_state_without_recovery_history_loads_as_none() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("legacy task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("legacy task")],
+            HarnessTaskPlacement::End,
+        );
         let value: serde_json::Value = serde_json::to_value(&state.tasks[0]).unwrap();
         assert!(value.get("recoveryHistory").is_none(), "{}", value);
         let task: HarnessTask = serde_json::from_value(value).unwrap();
@@ -2390,7 +2866,11 @@ mod tests {
     #[test]
     fn recovery_history_round_trips_through_serde() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("history task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("history task")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
             HarnessFinishArgs {
@@ -2402,7 +2882,10 @@ mod tests {
         );
         let raw = serde_json::to_string(&state).unwrap();
         let back: HarnessState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(back.tasks[0].recovery_history, state.tasks[0].recovery_history);
+        assert_eq!(
+            back.tasks[0].recovery_history,
+            state.tasks[0].recovery_history
+        );
         let history = back.tasks[0].recovery_history.as_ref().unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].action, HarnessRecoveryAction::Blocked);
@@ -2414,7 +2897,11 @@ mod tests {
     #[test]
     fn recovery_history_evicts_oldest_past_the_cap() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("capped task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("capped task")],
+            HarnessTaskPlacement::End,
+        );
         for round in 0..(MAX_RECOVERY_EVENTS as i64) + 4 {
             push_recovery_event(
                 &mut state.tasks[0],
@@ -2430,9 +2917,16 @@ mod tests {
         }
         let history = state.tasks[0].recovery_history.as_ref().unwrap();
         assert_eq!(history.len(), MAX_RECOVERY_EVENTS);
-        assert_eq!(history[0].detail.as_deref(), Some("failure 4"), "oldest entries evicted first");
+        assert_eq!(
+            history[0].detail.as_deref(),
+            Some("failure 4"),
+            "oldest entries evicted first"
+        );
         let last = format!("failure {}", MAX_RECOVERY_EVENTS as i64 + 3);
-        assert_eq!(history[MAX_RECOVERY_EVENTS - 1].detail.as_deref(), Some(last.as_str()));
+        assert_eq!(
+            history[MAX_RECOVERY_EVENTS - 1].detail.as_deref(),
+            Some(last.as_str())
+        );
     }
 
     /// Clamping must respect Unicode char boundaries: multi-byte text is
@@ -2441,7 +2935,11 @@ mod tests {
     #[test]
     fn recovery_event_text_is_clamped_on_char_boundaries() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("unicode task")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("unicode task")],
+            HarnessTaskPlacement::End,
+        );
         let long = "\u{1F980}".repeat(MAX_RECOVERY_TEXT_CHARS * 2);
         push_recovery_event(
             &mut state.tasks[0],
@@ -2456,10 +2954,21 @@ mod tests {
         );
         let event = &state.tasks[0].recovery_history.as_ref().unwrap()[0];
         let want = MAX_RECOVERY_TEXT_CHARS;
-        assert_eq!(event.task_title.as_ref().map(|t| t.chars().count()), Some(want));
+        assert_eq!(
+            event.task_title.as_ref().map(|t| t.chars().count()),
+            Some(want)
+        );
         assert_eq!(event.detail.as_ref().map(|t| t.chars().count()), Some(want));
-        assert_eq!(event.evidence.as_ref().map(|t| t.chars().count()), Some(want));
-        assert!(event.task_title.as_ref().unwrap().chars().all(|c| c == '\u{1F980}'));
+        assert_eq!(
+            event.evidence.as_ref().map(|t| t.chars().count()),
+            Some(want)
+        );
+        assert!(event
+            .task_title
+            .as_ref()
+            .unwrap()
+            .chars()
+            .all(|c| c == '\u{1F980}'));
     }
 
     /// History is append-only across recovery: reopen and drop both add an
@@ -2467,7 +2976,11 @@ mod tests {
     #[test]
     fn recovery_history_survives_reopen_and_drop() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("survivor")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("survivor")],
+            HarnessTaskPlacement::End,
+        );
         finish_task(
             &mut state,
             HarnessFinishArgs {
@@ -2500,7 +3013,11 @@ mod tests {
     #[test]
     fn same_failure_episode_stops_reopening_and_exhausts_to_honest_drop() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("flaky step")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("flaky step")],
+            HarnessTaskPlacement::End,
+        );
 
         finish_task(
             &mut state,
@@ -2511,7 +3028,10 @@ mod tests {
                 confidence: None,
             },
         );
-        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(),
+            1
+        );
 
         finish_task(
             &mut state,
@@ -2530,10 +3050,15 @@ mod tests {
         let dropped = drop_exhausted_blocked_tasks(&mut state);
         assert_eq!(dropped.len(), 1);
         assert_eq!(state.tasks[0].status, HarnessTaskStatus::Dropped);
-        assert!(state.tasks[0].summary.as_deref().unwrap_or("").contains("Dropped after"));
+        assert!(state.tasks[0]
+            .summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("Dropped after"));
 
         let history = state.tasks[0].recovery_history.as_ref().unwrap();
-        let actions: Vec<HarnessRecoveryAction> = history.iter().map(|event| event.action).collect();
+        let actions: Vec<HarnessRecoveryAction> =
+            history.iter().map(|event| event.action).collect();
         assert_eq!(
             actions,
             vec![
@@ -2552,7 +3077,11 @@ mod tests {
     #[test]
     fn drop_and_readd_churn_cannot_reset_retry_accounting() {
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("flaky step")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("flaky step")],
+            HarnessTaskPlacement::End,
+        );
 
         finish_task(
             &mut state,
@@ -2563,7 +3092,10 @@ mod tests {
                 confidence: None,
             },
         );
-        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(),
+            1
+        );
         finish_task(
             &mut state,
             HarnessFinishArgs {
@@ -2575,16 +3107,32 @@ mod tests {
         );
 
         drop_task(&mut state, "task-1", "moving on");
-        let dropped_history_len =
-            state.tasks[0].recovery_history.as_ref().map(|history| history.len()).unwrap_or(0);
-        assert!(dropped_history_len >= 4, "blocked/reopened/blocked/dropped events are kept");
+        let dropped_history_len = state.tasks[0]
+            .recovery_history
+            .as_ref()
+            .map(|history| history.len())
+            .unwrap_or(0);
+        assert!(
+            dropped_history_len >= 4,
+            "blocked/reopened/blocked/dropped events are kept"
+        );
 
-        let added = add_tasks(&mut state, vec![input("Flaky  Step")], HarnessTaskPlacement::End);
-        assert!(added.is_empty(), "identical replacement is refused after a drop");
+        let added = add_tasks(
+            &mut state,
+            vec![input("Flaky  Step")],
+            HarnessTaskPlacement::End,
+        );
+        assert!(
+            added.is_empty(),
+            "identical replacement is refused after a drop"
+        );
         assert_eq!(state.tasks.len(), 1);
         assert_eq!(state.tasks[0].id, "task-1");
         assert_eq!(
-            state.tasks[0].recovery_history.as_ref().map(|history| history.len()),
+            state.tasks[0]
+                .recovery_history
+                .as_ref()
+                .map(|history| history.len()),
             Some(dropped_history_len),
             "history intact, nothing reset"
         );
@@ -2621,7 +3169,10 @@ mod tests {
         // finish summary carries the human-readable reason.
         assert_eq!(history[0].detail.as_deref(), Some("need the originals"));
         assert_eq!(history[1].action, HarnessRecoveryAction::OperatorReply);
-        assert_eq!(history[1].detail.as_deref(), Some("originals are in /backup"));
+        assert_eq!(
+            history[1].detail.as_deref(),
+            Some("originals are in /backup")
+        );
     }
 
     /// A fresh reopen episode is durable state: after save/load the task is
@@ -2632,7 +3183,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let state_path = temp.path().join("state.json");
         let mut state = HarnessState::default();
-        add_tasks(&mut state, vec![input("retry me")], HarnessTaskPlacement::End);
+        add_tasks(
+            &mut state,
+            vec![input("retry me")],
+            HarnessTaskPlacement::End,
+        );
 
         finish_task(
             &mut state,
@@ -2643,7 +3198,10 @@ mod tests {
                 confidence: None,
             },
         );
-        assert_eq!(reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(), 1);
+        assert_eq!(
+            reopen_blocked_tasks(&mut state, "auto retry", Some(3)).len(),
+            1
+        );
 
         save_harness_state(&state_path, &state).unwrap();
         let mut resumed = load_harness_state(&state_path).unwrap().unwrap();

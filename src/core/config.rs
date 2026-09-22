@@ -6,10 +6,10 @@
 #![allow(non_snake_case)]
 
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashSet;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -54,11 +54,7 @@ pub fn ask_user_default(settings: &IndexMap<String, String>, interactive: bool) 
     } else {
         ASK_USER_HEADLESS_SETTING_ID
     };
-    settings
-        .get(id)
-        .map(|value| value.trim())
-        .unwrap_or("true")
-        != "false"
+    settings.get(id).map(|value| value.trim()).unwrap_or("true") != "false"
 }
 
 /// Optional per-loop skill classifier (the "jev" Decisions API). Off by
@@ -168,7 +164,10 @@ pub(crate) fn baseline_setting_values() -> IndexMap<String, String> {
     let mut settings: IndexMap<String, String> =
         serde_json::from_str(OTHER_SETTINGS_DEFAULT_JSON).expect("embedded other_settings parses");
     settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), "[]".to_string());
-    settings.insert(SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(), "[]".to_string());
+    settings.insert(
+        SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(),
+        "[]".to_string(),
+    );
     settings.insert(STORED_API_KEYS_SETTING_ID.to_string(), "[]".to_string());
     settings
 }
@@ -191,7 +190,11 @@ pub struct InferenceModelProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     // Stored as a number or a numeric string ("64000"); accept both on read.
-    #[serde(default, deserialize_with = "de_max_context_tokens", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "de_max_context_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_context_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -282,10 +285,12 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) => match n.as_i64() {
             Some(v) if v > 0 && n.as_f64().map_or(true, |f| f.fract() == 0.0) => Some(v),
-            _ => return Err(anyhow!(
-                "Inference profile \"{}\" must use a positive integer for max context tokens.",
-                id
-            )),
+            _ => {
+                return Err(anyhow!(
+                    "Inference profile \"{}\" must use a positive integer for max context tokens.",
+                    id
+                ))
+            }
         },
         Some(Value::String(s)) => {
             let trimmed = s.trim();
@@ -387,20 +392,23 @@ pub fn normalize_model_profile(value: &Value, index: usize) -> Result<InferenceM
     })
 }
 
-pub fn normalize_system_prompt_profile(
-    value: &Value,
-    index: usize,
-) -> Result<SystemPromptProfile> {
+pub fn normalize_system_prompt_profile(value: &Value, index: usize) -> Result<SystemPromptProfile> {
     let obj = value
         .as_object()
         .ok_or_else(|| anyhow!("System prompt profile #{} is not an object.", index + 1))?;
     let id = str_field(obj, "id").unwrap_or("");
     if id.is_empty() {
-        return Err(anyhow!("System prompt profile #{} is missing an id.", index + 1));
+        return Err(anyhow!(
+            "System prompt profile #{} is missing an id.",
+            index + 1
+        ));
     }
     let prompt = str_field(obj, "prompt").unwrap_or("");
     if prompt.is_empty() {
-        return Err(anyhow!("System prompt profile \"{}\" is missing a prompt.", id));
+        return Err(anyhow!(
+            "System prompt profile \"{}\" is missing a prompt.",
+            id
+        ));
     }
     let tool_access = str_field(obj, "toolAccess")
         .filter(|value| *value == "all" || *value == "selected")
@@ -427,8 +435,8 @@ pub fn normalize_system_prompt_profile(
 /// Decodes a JSON-string-encoded settings value into an array; the error
 /// messages are part of the contract.
 pub fn parse_settings_json_array(label: &str, raw: &str) -> Result<Vec<Value>> {
-    let parsed: Value = serde_json::from_str(raw)
-        .map_err(|_| anyhow!("{} must be a valid JSON array.", label))?;
+    let parsed: Value =
+        serde_json::from_str(raw).map_err(|_| anyhow!("{} must be a valid JSON array.", label))?;
     match parsed {
         Value::Array(items) => Ok(items),
         _ => Err(anyhow!("{} must be a JSON array.", label)),
@@ -474,7 +482,9 @@ pub fn parse_system_prompt_profiles(
 ) -> Result<Vec<SystemPromptProfile>> {
     // config.json is the only source of profiles: a missing or blank value
     // resolves to an empty list, never the compiled-in seed catalog.
-    let raw = settings.get(SYSTEM_PROMPT_PROFILES_SETTING_ID).map(String::as_str);
+    let raw = settings
+        .get(SYSTEM_PROMPT_PROFILES_SETTING_ID)
+        .map(String::as_str);
     let raw = match raw.map(str::trim).filter(|trimmed| !trimmed.is_empty()) {
         Some(trimmed) => trimmed,
         None => "[]",
@@ -505,12 +515,15 @@ pub fn parse_stored_api_key_entries(
     let mut entries = Vec::new();
     let mut ids = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        let obj = item.as_object().ok_or_else(|| {
-            anyhow!("Stored API key entry #{} is not an object.", index + 1)
-        })?;
+        let obj = item
+            .as_object()
+            .ok_or_else(|| anyhow!("Stored API key entry #{} is not an object.", index + 1))?;
         let id = str_field(obj, "id").unwrap_or("").to_string();
         if id.is_empty() {
-            return Err(anyhow!("Stored API key entry #{} is missing an id.", index + 1));
+            return Err(anyhow!(
+                "Stored API key entry #{} is missing an id.",
+                index + 1
+            ));
         }
         let value = str_field(obj, "value").unwrap_or("").to_string();
         ids.push(id.clone());
@@ -597,9 +610,7 @@ pub fn parse_editable_inference_model_profiles(
                     Some(Value::String(s)) => s.clone(),
                     _ => String::new(),
                 },
-                reasoning_effort: str_field(&obj, "reasoningEffort")
-                    .unwrap_or("")
-                    .to_string(),
+                reasoning_effort: str_field(&obj, "reasoningEffort").unwrap_or("").to_string(),
                 credential_mode: credential_mode.to_string(),
                 credential_value,
                 fallback_profile_id: str_field(&obj, "fallbackProfileId")
@@ -621,7 +632,10 @@ pub fn serialize_editable_inference_model_profiles(
             let mut map = serde_json::Map::new();
             map.insert("id".to_string(), Value::String(profile.id.clone()));
             map.insert("model".to_string(), Value::String(profile.model.clone()));
-            map.insert("provider".to_string(), Value::String(profile.provider.clone()));
+            map.insert(
+                "provider".to_string(),
+                Value::String(profile.provider.clone()),
+            );
             if !profile.base_url.trim().is_empty() {
                 map.insert(
                     "baseUrl".to_string(),
@@ -844,7 +858,9 @@ pub fn validate_status_line(
         ));
     }
 
-    let padding = setting.padding.clamp(STATUS_LINE_MIN_PADDING, STATUS_LINE_MAX_PADDING);
+    let padding = setting
+        .padding
+        .clamp(STATUS_LINE_MIN_PADDING, STATUS_LINE_MAX_PADDING);
     if padding != setting.padding {
         warnings.push(format!(
             "statusLine.padding clamped to {padding} (supported range {}-{}).",
@@ -1108,9 +1124,16 @@ pub struct CliConfig {
     pub path: Option<PathBuf>,
     #[serde(with = "setting_map_codec")]
     pub settings: IndexMap<String, String>,
-    #[serde(rename = "statusLine", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "statusLine",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub status_line: Option<StatusLineSetting>,
-    #[serde(default, skip_serializing_if = "crate::harness::hooks::HooksConfig::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::harness::hooks::HooksConfig::is_empty"
+    )]
     pub hooks: crate::harness::hooks::HooksConfig,
     #[serde(
         rename = "mcpServers",
@@ -1192,7 +1215,8 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         ));
     }
 
-    let mut settings = normalize_web_setting_values(settings_value.unwrap_or(&serde_json::Value::Null));
+    let mut settings =
+        normalize_web_setting_values(settings_value.unwrap_or(&serde_json::Value::Null));
 
     // config.json is the only source of profiles once the file exists: the
     // compiled-in catalogs are never merged, backfilled, or looked up here.
@@ -1205,10 +1229,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         .map(|hooks_value| {
             serde_json::from_value::<crate::harness::hooks::HooksConfig>(hooks_value.clone())
                 .unwrap_or_else(|error| {
-                    eprintln!(
-                        "warning: {}: ignoring \"hooks\": {error}",
-                        path.display()
-                    );
+                    eprintln!("warning: {}: ignoring \"hooks\": {error}", path.display());
                     crate::harness::hooks::HooksConfig::default()
                 })
         })
@@ -1218,12 +1239,14 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     // warns and the rest of the config still loads. No process is spawned
     // here — spawning happens later, at session wiring time.
     let mut mcp_warnings = Vec::new();
-    let mcp_servers =
-        crate::tools::mcp::config::parse_mcp_servers(parsed_value.get("mcpServers"), &mut mcp_warnings)
-            .unwrap_or_else(|error| {
-                eprintln!("warning: {}: {error}", path.display());
-                std::collections::BTreeMap::new()
-            });
+    let mcp_servers = crate::tools::mcp::config::parse_mcp_servers(
+        parsed_value.get("mcpServers"),
+        &mut mcp_warnings,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("warning: {}: {error}", path.display());
+        std::collections::BTreeMap::new()
+    });
     for warning in mcp_warnings {
         eprintln!("warning: {}: {warning}", path.display());
     }
@@ -1233,7 +1256,10 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     let (status_line, warnings) = match parse_status_line_setting(parsed_value.get("statusLine")) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprintln!("warning: {}: ignoring \"statusLine\": {error}", path.display());
+            eprintln!(
+                "warning: {}: ignoring \"statusLine\": {error}",
+                path.display()
+            );
             (None, Vec::new())
         }
     };
@@ -1255,7 +1281,8 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         document["settings"] = migrated_settings;
         match serde_json::to_string_pretty(&document) {
             Ok(body) => {
-                if let Err(error) = crate::lib_fs::write_file_atomic(path, &format!("{body}\n"), true)
+                if let Err(error) =
+                    crate::lib_fs::write_file_atomic(path, &format!("{body}\n"), true)
                 {
                     eprintln!(
                         "warning: {}: could not migrate legacy settings to nested JSON: {error}",
@@ -1321,7 +1348,9 @@ pub fn resolve_cli_inference(
     crate::core::inference::resolve_inference_config(&config.settings, env)
 }
 
-pub fn list_cli_model_profiles(settings: &IndexMap<String, String>) -> Result<Vec<InferenceModelProfile>> {
+pub fn list_cli_model_profiles(
+    settings: &IndexMap<String, String>,
+) -> Result<Vec<InferenceModelProfile>> {
     parse_inference_model_profiles(settings)
 }
 
@@ -1354,9 +1383,10 @@ pub fn set_active_cli_profile(mut config: CliConfig, profile_id: &str) -> Result
             "Unknown model profile \"{profile_id}\". Add it to ~/.drip/config.json under settings.runtime.model_profiles."
         ));
     }
-    config
-        .settings
-        .insert(ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(), profile_id.to_string());
+    config.settings.insert(
+        ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+        profile_id.to_string(),
+    );
     Ok(config)
 }
 
@@ -1378,13 +1408,17 @@ pub fn set_active_cli_tool_profile(mut config: CliConfig, profile_id: &str) -> R
             ));
         }
     }
-    config
-        .settings
-        .insert(ACTIVE_TOOL_PROFILE_SETTING_ID.to_string(), profile_id.to_string());
+    config.settings.insert(
+        ACTIVE_TOOL_PROFILE_SETTING_ID.to_string(),
+        profile_id.to_string(),
+    );
     Ok(config)
 }
 
-pub fn set_active_cli_system_prompt(mut config: CliConfig, prompt_profile_id: &str) -> Result<CliConfig> {
+pub fn set_active_cli_system_prompt(
+    mut config: CliConfig,
+    prompt_profile_id: &str,
+) -> Result<CliConfig> {
     let known = list_cli_system_prompt_profiles(&config.settings)?
         .iter()
         .any(|profile| profile.id == prompt_profile_id);
@@ -1393,9 +1427,10 @@ pub fn set_active_cli_system_prompt(mut config: CliConfig, prompt_profile_id: &s
             "Unknown system prompt profile \"{prompt_profile_id}\". Add it to ~/.drip/config.json under settings.runtime.system_prompt_profiles."
         ));
     }
-    config
-        .settings
-        .insert(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID.to_string(), prompt_profile_id.to_string());
+    config.settings.insert(
+        ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID.to_string(),
+        prompt_profile_id.to_string(),
+    );
     Ok(config)
 }
 
@@ -1483,7 +1518,10 @@ mod tests {
         let config = load_cli_config(&path).unwrap();
         assert!(path.exists(), "first run writes the config file");
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(on_disk.contains("glm-5-3-flash"), "seed catalog written once");
+        assert!(
+            on_disk.contains("glm-5-3-flash"),
+            "seed catalog written once"
+        );
         let profiles = list_cli_model_profiles(&config.settings).unwrap();
         assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1495,19 +1533,38 @@ mod tests {
         // Missing key (an older config file) keeps surveys on in both scopes.
         assert!(ask_user_default(&settings, true));
         assert!(ask_user_default(&settings, false));
-        settings.insert(ASK_USER_INTERACTIVE_SETTING_ID.to_string(), "false".to_string());
+        settings.insert(
+            ASK_USER_INTERACTIVE_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
         assert!(!ask_user_default(&settings, true));
         assert!(ask_user_default(&settings, false));
-        settings.insert(ASK_USER_HEADLESS_SETTING_ID.to_string(), "false".to_string());
+        settings.insert(
+            ASK_USER_HEADLESS_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
         assert!(!ask_user_default(&settings, false));
-        settings.insert(ASK_USER_INTERACTIVE_SETTING_ID.to_string(), "true".to_string());
+        settings.insert(
+            ASK_USER_INTERACTIVE_SETTING_ID.to_string(),
+            "true".to_string(),
+        );
         settings.insert(ASK_USER_HEADLESS_SETTING_ID.to_string(), "true".to_string());
         assert!(ask_user_default(&settings, true));
         assert!(ask_user_default(&settings, false));
         // The shipped default catalog carries both keys as "true".
         let defaults = default_setting_values();
-        assert_eq!(defaults.get(ASK_USER_INTERACTIVE_SETTING_ID).map(String::as_str), Some("true"));
-        assert_eq!(defaults.get(ASK_USER_HEADLESS_SETTING_ID).map(String::as_str), Some("true"));
+        assert_eq!(
+            defaults
+                .get(ASK_USER_INTERACTIVE_SETTING_ID)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            defaults
+                .get(ASK_USER_HEADLESS_SETTING_ID)
+                .map(String::as_str),
+            Some("true")
+        );
     }
 
     #[test]
@@ -1528,18 +1585,34 @@ mod tests {
         assert_eq!(profile.base_url, None);
         assert_eq!(profile.label.as_deref(), Some("L"));
         assert_eq!(profile.headers.as_ref().unwrap().len(), 1);
-        assert_eq!(profile.headers.as_ref().unwrap().get("X-B").map(String::as_str), Some("b"));
+        assert_eq!(
+            profile
+                .headers
+                .as_ref()
+                .unwrap()
+                .get("X-B")
+                .map(String::as_str),
+            Some("b")
+        );
 
         let bad = r#"{"id":"p1","model":"m","provider":"openai","headers":"nope"}"#;
-        let error = normalize_model_profile(&serde_json::from_str(bad).unwrap(), 0).unwrap_err().to_string();
-        assert_eq!(error, "Inference profile \"p1\" must use an object for headers.");
+        let error = normalize_model_profile(&serde_json::from_str(bad).unwrap(), 0)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Inference profile \"p1\" must use an object for headers."
+        );
     }
 
     #[test]
     fn test_round_trip_string_max_context_tokens() {
         let profile_json = r#"[{"id":"p1","model":"m","provider":"openai","maxContextTokens":"64000","label":"L","apiKeyRef":"env:X"}]"#;
         let mut settings = IndexMap::new();
-        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profile_json.to_string());
+        settings.insert(
+            MODEL_PROFILES_SETTING_ID.to_string(),
+            profile_json.to_string(),
+        );
         let profiles = parse_inference_model_profiles(&settings).expect("parse");
         assert_eq!(profiles[0].max_context_tokens, Some(64000));
         let serialized = serialize_editable_inference_model_profiles(
@@ -1555,7 +1628,9 @@ mod tests {
         let json = r#"[{"id":"dup","model":"m","provider":"openai"},{"id":"dup","model":"m2","provider":"openai"}]"#;
         let mut settings = IndexMap::new();
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
-        let error = parse_inference_model_profiles(&settings).unwrap_err().to_string();
+        let error = parse_inference_model_profiles(&settings)
+            .unwrap_err()
+            .to_string();
         assert_eq!(error, "Inference profile \"dup\" is duplicated.");
     }
     // upgradeCerebrasProfiles(): a cerebras profile with an inline apiKey has
@@ -1584,7 +1659,10 @@ mod tests {
         // A legacy key configured by the user blocks the upgrade.
         let mut settings2 = IndexMap::new();
         settings2.insert(MODEL_PROFILES_SETTING_ID.to_string(), json.to_string());
-        settings2.insert(CEREBRAS_API_KEY_SETTING_ID.to_string(), "sk-legacy".to_string());
+        settings2.insert(
+            CEREBRAS_API_KEY_SETTING_ID.to_string(),
+            "sk-legacy".to_string(),
+        );
         upgrade_cerebras_profiles(&mut settings2);
         let items2: Vec<Value> =
             serde_json::from_str(&settings2[MODEL_PROFILES_SETTING_ID]).expect("json");
@@ -1608,9 +1686,15 @@ mod tests {
     // (codex-1) provider id: "codex" parses, is case-sensitive, and round-trips.
     #[test]
     fn test_codex_provider_id_parses() {
-        assert_eq!(InferenceProviderId::parse("codex"), Some(InferenceProviderId::Codex));
+        assert_eq!(
+            InferenceProviderId::parse("codex"),
+            Some(InferenceProviderId::Codex)
+        );
         assert_eq!(InferenceProviderId::parse("Codex"), None);
-        assert_eq!(InferenceProviderId::parse("openai"), Some(InferenceProviderId::OpenAi));
+        assert_eq!(
+            InferenceProviderId::parse("openai"),
+            Some(InferenceProviderId::OpenAi)
+        );
         assert_eq!(InferenceProviderId::Codex.as_str(), "codex");
         let profile = normalize_model_profile(
             &serde_json::from_str::<Value>(
@@ -1661,9 +1745,12 @@ mod tests {
         let mut settings = IndexMap::new();
         settings.insert(
             MODEL_PROFILES_SETTING_ID.to_string(),
-            r#"[{"id":"c4","model":"gpt-5.6-luna","provider":"codex","apiKey":"sk-x"}]"#.to_string(),
+            r#"[{"id":"c4","model":"gpt-5.6-luna","provider":"codex","apiKey":"sk-x"}]"#
+                .to_string(),
         );
-        let error = parse_inference_model_profiles(&settings).unwrap_err().to_string();
+        let error = parse_inference_model_profiles(&settings)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("codex"), "parse-level diagnostic: {error}");
     }
 
@@ -1680,11 +1767,15 @@ mod tests {
         )
         .expect("openai keeps credentials");
         assert_eq!(inline.api_key.as_deref(), Some("sk-y"));
-        assert_eq!(inline.base_url.as_deref(), Some("https://api.openai.com/v1"));
+        assert_eq!(
+            inline.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
         assert!(inline.headers.is_some());
 
         let bare = normalize_model_profile(
-            &serde_json::from_str::<Value>(r#"{"id":"o2","model":"m","provider":"openai"}"#).unwrap(),
+            &serde_json::from_str::<Value>(r#"{"id":"o2","model":"m","provider":"openai"}"#)
+                .unwrap(),
             0,
         )
         .expect("openai without credentials still parses");
@@ -1746,7 +1837,11 @@ mod tests {
             STATUS_LINE_MIN_UPDATE_INTERVAL_MS
         );
         assert_eq!(setting.timeout_ms, STATUS_LINE_MAX_TIMEOUT_MS);
-        assert_eq!(warnings.len(), 3, "one warning per clamped field: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            3,
+            "one warning per clamped field: {warnings:?}"
+        );
 
         // Command is trimmed.
         let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
@@ -1764,7 +1859,10 @@ mod tests {
             (r#"42"#, "must be an object"),
             (r#"{"type":"tty","command":"x"}"#, "statusLine.type"),
             (r#"{"type":"command"}"#, "statusLine.command"),
-            (r#"{"type":"command","command":"   "}"#, "statusLine.command"),
+            (
+                r#"{"type":"command","command":"   "}"#,
+                "statusLine.command",
+            ),
             (r#"{}"#, "statusLine.command"),
         ] {
             let error = parse_status_line_setting(Some(&status_line_value(json)))
@@ -1840,8 +1938,10 @@ mod tests {
     fn status_line_command_length_boundary_pins_chars_not_bytes() {
         let base = "echo ";
         // Exactly 4096 characters is accepted.
-        let ok_command =
-            format!("{base}{}", "a".repeat(STATUS_LINE_MAX_COMMAND_CHARS - base.len()));
+        let ok_command = format!(
+            "{base}{}",
+            "a".repeat(STATUS_LINE_MAX_COMMAND_CHARS - base.len())
+        );
         assert_eq!(ok_command.chars().count(), STATUS_LINE_MAX_COMMAND_CHARS);
         let (setting, warnings) = parse_status_line_setting(Some(&status_line_value(
             &serde_json::json!({"type":"command","command":ok_command}).to_string(),
@@ -1864,8 +1964,9 @@ mod tests {
 
         // Unicode pins chars, not bytes: 4096 three-byte glyphs (~12 KiB of
         // UTF-8) are accepted because they are 4096 characters.
-        let unicode_ok: String =
-            std::iter::repeat('\u{65e5}').take(STATUS_LINE_MAX_COMMAND_CHARS).collect();
+        let unicode_ok: String = std::iter::repeat('\u{65e5}')
+            .take(STATUS_LINE_MAX_COMMAND_CHARS)
+            .collect();
         let (setting, _) = parse_status_line_setting(Some(&status_line_value(
             &serde_json::json!({"type":"command","command":unicode_ok}).to_string(),
         )))
@@ -2099,23 +2200,40 @@ mod tests {
         .unwrap();
         let config = load_cli_config(&path).unwrap();
         assert_eq!(
-            config.settings.get(ROLE_BINDINGS_SETTING_ID).map(String::as_str),
+            config
+                .settings
+                .get(ROLE_BINDINGS_SETTING_ID)
+                .map(String::as_str),
             Some("{\"planner\":{\"task\":\"author\"}}")
         );
-        assert!(!parse_inference_model_profiles(&config.settings).unwrap().is_empty());
+        assert!(!parse_inference_model_profiles(&config.settings)
+            .unwrap()
+            .is_empty());
 
         // Saving writes real nested containers in the pretty file JSON.
         save_cli_config(&path, &config).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         let value: Value = serde_json::from_str(&saved).unwrap();
-        assert!(value["settings"][MODEL_PROFILES_SETTING_ID].is_array(), "{saved}");
+        assert!(
+            value["settings"][MODEL_PROFILES_SETTING_ID].is_array(),
+            "{saved}"
+        );
         assert!(
             value["settings"][SYSTEM_PROMPT_PROFILES_SETTING_ID].is_array(),
             "{saved}"
         );
-        assert!(value["settings"][STORED_API_KEYS_SETTING_ID].is_array(), "{saved}");
-        assert!(value["settings"][ROLE_PROFILES_SETTING_ID].is_array(), "{saved}");
-        assert!(value["settings"][ROLE_BINDINGS_SETTING_ID].is_object(), "{saved}");
+        assert!(
+            value["settings"][STORED_API_KEYS_SETTING_ID].is_array(),
+            "{saved}"
+        );
+        assert!(
+            value["settings"][ROLE_PROFILES_SETTING_ID].is_array(),
+            "{saved}"
+        );
+        assert!(
+            value["settings"][ROLE_BINDINGS_SETTING_ID].is_object(),
+            "{saved}"
+        );
         assert!(
             value["settings"][ROLE_BINDINGS_SETTING_ID]["planner"].is_object(),
             "{saved}"
@@ -2139,7 +2257,6 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
-
 
     // ---- nested-JSON migration on load (task: unflatten legacy blobs) ----
 
@@ -2182,16 +2299,23 @@ mod tests {
         // Runtime semantics retained: the settings map still carries the
         // encoded string form for legacy consumers.
         assert_eq!(
-            config.settings.get("runtime.role_profiles").map(String::as_str),
+            config
+                .settings
+                .get("runtime.role_profiles")
+                .map(String::as_str),
             Some("[{\"id\":\"planner\",\"description\":\"plans\"}]")
         );
         assert_eq!(
-            config.settings.get("runtime.role_bindings").map(String::as_str),
+            config
+                .settings
+                .get("runtime.role_bindings")
+                .map(String::as_str),
             Some("{\"planner\":\"author\"}")
         );
 
         // On disk the values are now real nested containers...
-        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let settings = on_disk.get("settings").unwrap().as_object().unwrap();
         assert_eq!(
             settings
@@ -2252,7 +2376,10 @@ mod tests {
 
         let config = load_cli_config(&path).unwrap();
         assert_eq!(
-            config.settings.get("runtime.role_profiles").map(String::as_str),
+            config
+                .settings
+                .get("runtime.role_profiles")
+                .map(String::as_str),
             Some(r#"[{"id":"planner"}]"#)
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
@@ -2277,13 +2404,20 @@ mod tests {
 
         let config = load_cli_config(&path).unwrap();
         assert_eq!(
-            config.settings.get("runtime.role_profiles").map(String::as_str),
+            config
+                .settings
+                .get("runtime.role_profiles")
+                .map(String::as_str),
             Some("not-json{{")
         );
-        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let settings = on_disk.get("settings").unwrap().as_object().unwrap();
         assert_eq!(settings.get("runtime.role_profiles").unwrap(), "not-json{{");
-        assert_eq!(settings.get("runtime.role_bindings").unwrap(), "[wrong-shape]");
+        assert_eq!(
+            settings.get("runtime.role_bindings").unwrap(),
+            "[wrong-shape]"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2319,11 +2453,18 @@ mod tests {
 
         let config = load_cli_config(&path).unwrap();
         assert!(path.exists());
-        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let settings = on_disk.get("settings").unwrap().as_object().unwrap();
         assert!(settings.get("runtime.model_profiles").unwrap().is_array());
-        assert!(settings.get("runtime.system_prompt_profiles").unwrap().is_array());
-        assert!(settings.get("credentials.stored_api_keys").unwrap().is_array());
+        assert!(settings
+            .get("runtime.system_prompt_profiles")
+            .unwrap()
+            .is_array());
+        assert!(settings
+            .get("credentials.stored_api_keys")
+            .unwrap()
+            .is_array());
         assert_eq!(on_disk.get("version"), Some(&Value::from(1)));
 
         // A subsequent save keeps the nested form and the runtime round trip.
@@ -2333,14 +2474,18 @@ mod tests {
             r#"{"planner":"author"}"#.to_string(),
         );
         save_cli_config(&path, &config).unwrap();
-        let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
             on_disk["settings"]["runtime.role_bindings"]["planner"],
             "author"
         );
         let reloaded = load_cli_config(&path).unwrap();
         assert_eq!(
-            reloaded.settings.get("runtime.role_bindings").map(String::as_str),
+            reloaded
+                .settings
+                .get("runtime.role_bindings")
+                .map(String::as_str),
             Some(r#"{"planner":"author"}"#)
         );
         let _ = std::fs::remove_dir_all(&dir);

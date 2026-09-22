@@ -168,7 +168,10 @@ pub fn load_marketplaces_file(marketplaces_path: &Path) -> anyhow::Result<Market
     })
 }
 
-pub fn save_marketplaces_file(marketplaces_path: &Path, file: &MarketplacesFile) -> std::io::Result<()> {
+pub fn save_marketplaces_file(
+    marketplaces_path: &Path,
+    file: &MarketplacesFile,
+) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(file)?;
     write_file_atomic(marketplaces_path, &format!("{json}\n"), true)
 }
@@ -320,11 +323,7 @@ pub fn add_marketplace(args: AddMarketplaceArgs<'_>) -> anyhow::Result<AddedMark
         .replace_all(&raw_name, "-")
         .into_owned();
 
-    if file
-        .marketplaces
-        .iter()
-        .any(|record| record.name == name)
-    {
+    if file.marketplaces.iter().any(|record| record.name == name) {
         anyhow::bail!(
             "A marketplace named \"{}\" is already registered. Remove it first or pass a different name.",
             name
@@ -338,7 +337,11 @@ pub fn add_marketplace(args: AddMarketplaceArgs<'_>) -> anyhow::Result<AddedMark
 
     let record = MarketplaceRecord {
         added_at: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        kind: if is_local { "local".to_string() } else { "git".to_string() },
+        kind: if is_local {
+            "local".to_string()
+        } else {
+            "git".to_string()
+        },
         name: name.clone(),
         source: if is_local {
             local_path.to_string_lossy().to_string()
@@ -383,10 +386,7 @@ pub fn remove_marketplace(
     name: &str,
 ) -> anyhow::Result<MarketplacesFile> {
     let file = load_marketplaces_file(std::path::Path::new(&home.marketplaces_path))?;
-    let record = file
-        .marketplaces
-        .iter()
-        .find(|entry| entry.name == name);
+    let record = file.marketplaces.iter().find(|entry| entry.name == name);
 
     let Some(record) = record else {
         anyhow::bail!("No marketplace named \"{}\" is registered.", name);
@@ -526,9 +526,23 @@ fn parse_agent_frontmatter(markdown: &str) -> ParsedAgentFrontmatter {
                 fields.tools = Some(tool_names);
             }
         } else if field_name == "description" {
-            fields.description = Some(field_match.get(2).map(|m| m.as_str()).unwrap_or("").trim().to_string());
+            fields.description = Some(
+                field_match
+                    .get(2)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            );
         } else {
-            fields.name = Some(field_match.get(2).map(|m| m.as_str()).unwrap_or("").trim().to_string());
+            fields.name = Some(
+                field_match
+                    .get(2)
+                    .map(|m| m.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            );
         }
     }
 
@@ -537,7 +551,11 @@ fn parse_agent_frontmatter(markdown: &str) -> ParsedAgentFrontmatter {
     fields
 }
 
-fn collect_agent_roles(agents_dir: &Path, marketplace_name: &str, plugin_name: &str) -> Vec<MarketplaceRoleEntry> {
+fn collect_agent_roles(
+    agents_dir: &Path,
+    marketplace_name: &str,
+    plugin_name: &str,
+) -> Vec<MarketplaceRoleEntry> {
     if !agents_dir.exists() {
         return Vec::new();
     }
@@ -622,7 +640,12 @@ fn parse_skill_frontmatter(markdown: &str) -> ParsedSkillFrontmatter {
 
     for line in frontmatter.split('\n') {
         if let Some(field_match) = field_re.captures(line) {
-            let value = field_match.get(2).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+            let value = field_match
+                .get(2)
+                .map(|m| m.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
 
             match field_match.get(1).map(|m| m.as_str()) {
                 Some("description") => fields.description = Some(value),
@@ -738,7 +761,9 @@ fn parse_plugin_dir(
                     }
                 }
 
-                if let Some(manifest_description) = manifest.get("description").and_then(Value::as_str) {
+                if let Some(manifest_description) =
+                    manifest.get("description").and_then(Value::as_str)
+                {
                     description = manifest_description.trim().to_string();
                 }
             }
@@ -794,7 +819,12 @@ pub fn parse_marketplace_repo(root_dir: &Path, marketplace_name: &str) -> Parsed
     }
 
     if !manifest_path.exists() {
-        let bare_plugin = parse_plugin_dir(root_dir, marketplace_name, marketplace_name, "Bare skills repo.");
+        let bare_plugin = parse_plugin_dir(
+            root_dir,
+            marketplace_name,
+            marketplace_name,
+            "Bare skills repo.",
+        );
 
         if bare_plugin.skills.is_empty() && bare_plugin.roles.is_empty() {
             issues.push(format!(
@@ -853,7 +883,13 @@ pub fn parse_marketplace_repo(root_dir: &Path, marketplace_name: &str) -> Parsed
         let plugin_path = resolve_path(root_dir, Path::new(source));
 
         // A source like "../../etc" must not escape the marketplace repo.
-        if plugin_path != root_dir && !plugin_path.starts_with(format!("{}{}", root_dir.display(), std::path::MAIN_SEPARATOR)) {
+        if plugin_path != root_dir
+            && !plugin_path.starts_with(format!(
+                "{}{}",
+                root_dir.display(),
+                std::path::MAIN_SEPARATOR
+            ))
+        {
             issues.push(format!(
                 "marketplace \"{marketplace_name}\": plugin \"{plugin_name}\" source escapes the marketplace repo and was skipped"
             ));
@@ -867,7 +903,12 @@ pub fn parse_marketplace_repo(root_dir: &Path, marketplace_name: &str) -> Parsed
             continue;
         }
 
-        plugins.push(parse_plugin_dir(&plugin_path, marketplace_name, plugin_name, description));
+        plugins.push(parse_plugin_dir(
+            &plugin_path,
+            marketplace_name,
+            plugin_name,
+            description,
+        ));
     }
 
     ParsedMarketplaceRepo { issues, plugins }
@@ -909,7 +950,11 @@ fn normalize_path(path: &Path) -> PathBuf {
                 // Node path.normalize: pop the previous component unless it is
                 // itself ".." or there is nothing to pop; a relative path keeps
                 // leading ".." segments, an absolute path cannot go above root.
-                if components.last().map(|c| c.as_os_str() != "..").unwrap_or(false) {
+                if components
+                    .last()
+                    .map(|c| c.as_os_str() != "..")
+                    .unwrap_or(false)
+                {
                     components.pop();
                 } else if prefix_len == 0 {
                     components.push(std::ffi::OsString::from(".."));

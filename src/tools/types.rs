@@ -10,9 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::chat::types::{
-    ChatMessage, ChatMessageBlock, ChatRuntimeContext,
-};
+use crate::chat::types::{ChatMessage, ChatMessageBlock, ChatRuntimeContext};
 
 // export type ChatToolParameters = {
 //   additionalProperties?: boolean; properties: Record<string, unknown>;
@@ -174,12 +172,20 @@ pub struct ChatAsyncToolTaskRequest {
 // export type ChatAsyncToolRuntime = { getJob, startCommand, startTask, tailJob, waitForJob }
 pub trait ChatAsyncToolRuntime: Send + Sync {
     fn get_job(&self, job_id: &str) -> Option<ChatAsyncToolJob>;
-    fn start_command(&self, request: ChatAsyncToolCommandRequest) -> anyhow::Result<ChatAsyncToolJob>;
+    fn start_command(
+        &self,
+        request: ChatAsyncToolCommandRequest,
+    ) -> anyhow::Result<ChatAsyncToolJob>;
     fn start_task(&self, request: ChatAsyncToolTaskRequest) -> anyhow::Result<ChatAsyncToolJob>;
     /// tailJob(jobId, lines = 60)
-    fn tail_job(&self, job_id: &str, lines: Option<i64>) -> anyhow::Result<ChatAsyncToolTailResult>;
+    fn tail_job(&self, job_id: &str, lines: Option<i64>)
+        -> anyhow::Result<ChatAsyncToolTailResult>;
     /// waitForJob(jobId, timeoutMs = 60_000)
-    fn wait_for_job(&self, job_id: &str, timeout_ms: Option<i64>) -> anyhow::Result<ChatAsyncToolWaitResult>;
+    fn wait_for_job(
+        &self,
+        job_id: &str,
+        timeout_ms: Option<i64>,
+    ) -> anyhow::Result<ChatAsyncToolWaitResult>;
     /// Settled jobs whose result nobody has seen yet (no completed wait, no
     /// tail after settling). Each job is returned once; the harness reports
     /// them to the model at the next round so it never spends a round polling.
@@ -285,14 +291,10 @@ pub struct ChatToolDefinition {
     /// mutatesWorkspace?: boolean — declares progress for stall accounting.
     pub mutates_workspace: bool,
     pub mode: ChatToolMode,
-    pub prepare:
-        Box<dyn Fn(ChatToolPrepareRequest<'_>) -> Result<ChatToolPreparedInput, String>>,
-    pub execute: Box<
-        dyn Fn(ChatToolExecuteRequest<'_>) -> Result<ChatToolResult, String>,
-    >,
-    pub complete: Box<
-        dyn Fn(ChatToolCompleteRequest<'_>) -> Result<ChatToolCompletionResult, String>,
-    >,
+    pub prepare: Box<dyn Fn(ChatToolPrepareRequest<'_>) -> Result<ChatToolPreparedInput, String>>,
+    pub execute: Box<dyn Fn(ChatToolExecuteRequest<'_>) -> Result<ChatToolResult, String>>,
+    pub complete:
+        Box<dyn Fn(ChatToolCompleteRequest<'_>) -> Result<ChatToolCompletionResult, String>>,
 }
 
 // export function defineSyncTool(definition) — normalizes mode to "sync".
@@ -322,10 +324,9 @@ mod tests {
 
     fn object_parameters() -> ChatToolParameters {
         let mut parameters = ChatToolParameters::object();
-        parameters.properties.insert(
-            "label".to_string(),
-            serde_json::json!({ "type": "string" }),
-        );
+        parameters
+            .properties
+            .insert("label".to_string(), serde_json::json!({ "type": "string" }));
         parameters.required = Some(vec!["label".to_string()]);
         parameters
     }
@@ -359,10 +360,7 @@ mod tests {
                 Ok(ChatToolCompletionResult {
                     tags: None,
                     blocks: Some(vec![]),
-                    tool_content: request
-                        .result
-                        .output_text
-                        .clone(),
+                    tool_content: request.result.output_text.clone(),
                 })
             }),
         }
@@ -431,8 +429,7 @@ mod tests {
             (ChatAsyncToolJobStatus::Running, "\"running\""),
         ] {
             assert_eq!(serde_json::to_string(&status).unwrap(), encoded);
-            let decoded: ChatAsyncToolJobStatus =
-                serde_json::from_str(encoded).unwrap();
+            let decoded: ChatAsyncToolJobStatus = serde_json::from_str(encoded).unwrap();
             assert_eq!(decoded, status);
         }
     }
@@ -446,10 +443,7 @@ mod tests {
         let definition = define_sync_tool(definition);
 
         assert_eq!(definition.mode, ChatToolMode::Sync);
-        assert_eq!(
-            serde_json::to_string(&definition.mode).unwrap(),
-            "\"sync\""
-        );
+        assert_eq!(serde_json::to_string(&definition.mode).unwrap(), "\"sync\"");
     }
 
     #[test]
@@ -466,16 +460,15 @@ mod tests {
         definition.name = "INSPECT".to_string();
         definition.parameters = {
             let mut parameters = ChatToolParameters::object();
-            parameters.properties.insert(
-                "path".to_string(),
-                serde_json::json!({ "type": "string" }),
-            );
+            parameters
+                .properties
+                .insert("path".to_string(), serde_json::json!({ "type": "string" }));
             parameters.required = Some(vec!["path".to_string()]);
             parameters
         };
         definition.prepare = Box::new(|request| {
-            let input: Value = serde_json::from_str(request.raw_input)
-                .map_err(|error| error.to_string())?;
+            let input: Value =
+                serde_json::from_str(request.raw_input).map_err(|error| error.to_string())?;
             Ok(ChatToolPreparedInput {
                 display_input: input["path"].as_str().unwrap_or_default().to_string(),
                 input,
@@ -552,9 +545,7 @@ mod tests {
         // error arrives via Err.
         let mut definition = stub_definition();
         definition.name = "FAILS".to_string();
-        definition.execute = Box::new(|_request| {
-            Err("tool exploded".to_string())
-        });
+        definition.execute = Box::new(|_request| Err("tool exploded".to_string()));
 
         let prepared = ChatToolPreparedInput {
             display_input: "{}".to_string(),
@@ -633,11 +624,19 @@ mod tests {
             anyhow::bail!("stub async runtime has no jobs")
         }
 
-        fn tail_job(&self, _job_id: &str, _lines: Option<i64>) -> anyhow::Result<ChatAsyncToolTailResult> {
+        fn tail_job(
+            &self,
+            _job_id: &str,
+            _lines: Option<i64>,
+        ) -> anyhow::Result<ChatAsyncToolTailResult> {
             anyhow::bail!("stub async runtime has no jobs")
         }
 
-        fn wait_for_job(&self, _job_id: &str, _timeout_ms: Option<i64>) -> anyhow::Result<ChatAsyncToolWaitResult> {
+        fn wait_for_job(
+            &self,
+            _job_id: &str,
+            _timeout_ms: Option<i64>,
+        ) -> anyhow::Result<ChatAsyncToolWaitResult> {
             anyhow::bail!("stub async runtime has no jobs")
         }
     }

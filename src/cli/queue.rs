@@ -86,7 +86,11 @@ pub fn append_queued_goal(queue_path: &Path, goal: &str, max_iterations: Option<
     let line = format!("{}\n", serde_json::to_string(&entry).unwrap_or_default());
     use std::fs::OpenOptions;
     use std::io::Write;
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(queue_path) {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(queue_path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 
@@ -200,7 +204,10 @@ pub fn drain_queued_goals(
         }
     }
 
-    Ok(DrainOutcome { exit_code, ran_goals })
+    Ok(DrainOutcome {
+        exit_code,
+        ran_goals,
+    })
 }
 
 /// Errors that drain_queued_goals recognises.
@@ -303,7 +310,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(ran, vec!["first", "second", "third"]);
-        assert_eq!(outcome, DrainOutcome { exit_code: 0, ran_goals: 3 });
+        assert_eq!(
+            outcome,
+            DrainOutcome {
+                exit_code: 0,
+                ran_goals: 3
+            }
+        );
     }
 
     #[test]
@@ -318,12 +331,22 @@ mod tests {
             &queue_path,
             0,
             Some(&mut |msg: &str| refusals.push(msg.to_string())),
-            &mut |_| Err(DrainError::LiveRunError("another process owns the lease".to_string())),
+            &mut |_| {
+                Err(DrainError::LiveRunError(
+                    "another process owns the lease".to_string(),
+                ))
+            },
             &|| false,
         )
         .unwrap();
 
-        assert_eq!(outcome, DrainOutcome { exit_code: 0, ran_goals: 0 });
+        assert_eq!(
+            outcome,
+            DrainOutcome {
+                exit_code: 0,
+                ran_goals: 0
+            }
+        );
         assert_eq!(refusals.len(), 1);
 
         // Abort scenario — signal is aborted before the drain starts
@@ -335,7 +358,13 @@ mod tests {
             &|| true, // abort signal already fired before the first lap
         )
         .unwrap();
-        assert_eq!(aborted_outcome, DrainOutcome { exit_code: 2, ran_goals: 0 });
+        assert_eq!(
+            aborted_outcome,
+            DrainOutcome {
+                exit_code: 2,
+                ran_goals: 0
+            }
+        );
     }
 
     // Non-live-run errors are returned instead of swallowed; the

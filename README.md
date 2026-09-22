@@ -954,8 +954,10 @@ dripw
 Panels: `[1]` Running, `[2]` Recent, `[3]` Shells, plus the
 transcript. Keys: `1`/`2`/`3` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
-Hovering the transcript (or the shell log with `[3]` focused) and rolling the
-scroll wheel scrolls it too — older lines up, newer down.
+Clicking a row of the Sessions, Tasks or Shells pane focuses that pane and
+selects the row under the pointer (clicking a session also focuses its
+transcript). Hovering the transcript (or the shell log with `[3]` focused) and
+rolling the scroll wheel scrolls it too — older lines up, newer down.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 

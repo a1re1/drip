@@ -18,8 +18,8 @@ use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRe
 use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
-use crate::watch::mouse::parse_sgr_mouse;
-use crate::watch::render::{diff_lines, render_frame, transcript_region, SessionsMode, WatchViewModel};
+use crate::watch::mouse::{parse_mouse_event, MouseEvent};
+use crate::watch::render::{diff_lines, list_row_at, render_frame, transcript_region, SessionsMode, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
@@ -126,6 +126,14 @@ pub struct WatchApp {
     tasks_src: Option<(String, SystemTime)>,
     tail: Option<TranscriptTail>,
     focused_id: String,
+    /// Ids of the task rows in the frame last painted, top to bottom — the
+    /// in-progress-first order `task_rows` renders. A click is resolved
+    /// through this, so the row it lands on is the row the user saw: a ledger
+    /// re-sorted between the click's arrival and the next paint still selects
+    /// the task under the pointer. Empty until the first paint fills it.
+    painted_task_ids: Vec<String>,
+    /// Pids of the shell rows in the frame last painted, top to bottom.
+    painted_shell_pids: Vec<i64>,
     /// Lease pid per running session id, refreshed with the session list.
     pid_by_id: HashMap<String, i32>,
     ps_in_flight: bool,
@@ -155,6 +163,8 @@ impl WatchApp {
             tasks_src: None,
             tail: None,
             focused_id: String::new(),
+            painted_task_ids: Vec::new(),
+            painted_shell_pids: Vec::new(),
             pid_by_id: HashMap::new(),
             ps_in_flight: false,
             cur_shell_pid: 0,
@@ -451,6 +461,14 @@ impl WatchApp {
         self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64, self.vm.shells.len());
     }
 
+    /// Remember which task and which process sit on each painted row, right
+    /// before the frame is drawn, so a later click can be resolved back to the
+    /// row the user actually saw.
+    fn snapshot_panes(&mut self) {
+        self.painted_task_ids = crate::watch::render::ordered_tasks(&self.vm.tasks).iter().map(|t| t.id.clone()).collect();
+        self.painted_shell_pids = self.vm.shells.iter().map(|p| p.pid).collect();
+    }
+
     fn selected_record(&self) -> Option<SessionRecord> {
         self.vm.sessions.get(self.vm.sel_session).cloned()
     }
@@ -631,10 +649,47 @@ impl WatchApp {
 
     /// A stdin chunk is either a mouse report or ordinary key text.
     fn on_input(&mut self, chunk: &str) {
-        match parse_sgr_mouse(chunk) {
-            Some(scroll) => self.on_mouse_scroll(scroll),
+        match parse_mouse_event(chunk) {
+            Some(MouseEvent::Wheel(scroll)) => self.on_mouse_scroll(scroll),
+            Some(MouseEvent::Click { col, row }) => self.on_mouse_click(col, row),
             None => self.on_key(chunk),
         }
+    }
+
+    /// A left click on a list row focuses that pane and moves its selection to
+    /// the row under the pointer — the navigation `j`/`k` and Tab give, aimed
+    /// with the mouse. Selecting a session also re-focuses its transcript. A
+    /// click anywhere else (a border, the transcript, blank space) is ignored,
+    /// so the wheel keeps its scroll-only meaning.
+    fn on_mouse_click(&mut self, col: usize, row: usize) {
+        let (cols, rows) = terminal_size();
+        self.click_at(col, row, cols, rows);
+    }
+
+    /// The click handler proper, with the frame size the click was measured in.
+    /// Split from `on_mouse_click` so the navigation a click performs can be
+    /// unit-tested at a fixed terminal size.
+    fn click_at(&mut self, col: usize, row: usize, cols: usize, rows: usize) {
+        let Some((panel, index)) = list_row_at(&self.vm, cols, rows, col, row) else {
+            return;
+        };
+        match panel {
+            0 => {
+                self.vm.focus = 1;
+                self.vm.sel_session = index;
+                self.sync_focused();
+            }
+            1 => {
+                self.vm.focus = 2;
+                self.vm.sel_task = self.painted_task_row(index);
+            }
+            _ => {
+                self.vm.focus = 3;
+                self.vm.sel_shell = self.painted_shell_row(index);
+                self.sync_shell_log();
+            }
+        }
+        self.draw();
     }
 
     /// Wheel over the `[0]` pane scrolls it — older lines on wheel up, newer
@@ -650,6 +705,23 @@ impl WatchApp {
         }
         self.scroll_transcript(scroll.delta(WHEEL_LINES));
         self.draw();
+    }
+
+    /// The rendered row of the task painted on row `index` of the Tasks pane
+    /// (the same in-progress-first order `vm.sel_task` indexes), found again by
+    /// id so a re-ordered ledger cannot move the selection off the row the user
+    /// clicked. Falls back to `index` for a row painted before the first
+    /// snapshot or whose task is gone.
+    fn painted_task_row(&self, index: usize) -> usize {
+        let Some(id) = self.painted_task_ids.get(index) else { return index };
+        crate::watch::render::ordered_tasks(&self.vm.tasks).iter().position(|t| &t.id == id).unwrap_or(index)
+    }
+
+    /// The shells index of the process painted on row `index`, found again by
+    /// pid so a refreshed `ps` snapshot cannot move the selection off it.
+    fn painted_shell_row(&self, index: usize) -> usize {
+        let Some(pid) = self.painted_shell_pids.get(index) else { return index };
+        self.vm.shells.iter().position(|p| p.pid == *pid).unwrap_or(index)
     }
 
     fn mv(&mut self, delta: i64) {
@@ -691,6 +763,11 @@ impl WatchApp {
         // Keep now fresh so timer cells tick even between list refreshes when
         // something else (tail/key) triggers a repaint.
         self.vm.now = now_ms();
+
+        // The panes are hit-tested against the frame that is about to be
+        // painted, so the row identities are snapshotted here — one place,
+        // whatever tick, key or click asked for the repaint.
+        self.snapshot_panes();
 
         let frame = render_frame(&self.vm, cols, rows);
         if frame == self.last_frame && !self.force_full {
@@ -736,6 +813,7 @@ pub fn run_watch_app(project: DripProject, watch_dir: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::{HarnessTask, HarnessTaskStatus};
 
     fn record(id: &str) -> SessionRecord {
         SessionRecord {
@@ -756,6 +834,56 @@ mod tests {
         list.iter().map(|r| r.id.clone()).collect()
     }
 
+    fn project() -> DripProject {
+        DripProject {
+            legacy_index_db_path: None,
+            legacy_sessions_dir: None,
+            home_root: "/tmp/drip-h".into(),
+            index_db_path: "/tmp/drip-h/p/index.sqlite".into(),
+            memory_dir: "/tmp/drip-h/p/memory".into(),
+            project_root: Some("/r".into()),
+            repo_root: Some("/r".into()),
+            repo_slug: "p".into(),
+            root: "/r/.drip".into(),
+            sessions_dir: "/tmp/drip-h/p/sessions".into(),
+            slug: "p".into(),
+            worktree_root: Some("/r".into()),
+        }
+    }
+
+    fn task(id: &str, status: HarnessTaskStatus) -> HarnessTask {
+        HarnessTask {
+            activations: None,
+            created_at_iteration: 0,
+            depends_on: None,
+            footprint: None,
+            dropped_exhausted: None,
+            finished_at_iteration: None,
+            id: id.into(),
+            notes: vec![],
+            reopen_count: None,
+            review_of: None,
+            reviews: None,
+            review_round: None,
+            awaiting_review_by: None,
+            role: None,
+            loops_run: None,
+            stall_count: 0,
+            status,
+            summary: None,
+            title: format!("title {id}"),
+            verify_nudged: None,
+            edit_nudged: None,
+            confidence: None,
+            blocked_on: None,
+            recovery_history: None,
+        }
+    }
+
+    fn proc(pid: i64, command: &str) -> PsProc {
+        PsProc { pid, ppid: 1, etime_sec: Some(3), command: command.into() }
+    }
+
     #[test]
     fn all_mode_concatenates_running_then_recent_in_order() {
         let running = vec![record("run-1"), record("run-2")];
@@ -769,6 +897,104 @@ mod tests {
         );
         assert!(visible_sessions(SessionsMode::Running, &[], &recent).is_empty());
         assert_eq!(ids(&visible_sessions(SessionsMode::All, &[], &recent)), vec!["old-1", "old-2"]);
+    }
+
+    #[test]
+    fn a_click_lands_on_the_row_that_was_painted() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.tasks = vec![
+            task("task-1", HarnessTaskStatus::Pending),
+            task("task-2", HarnessTaskStatus::Pending),
+            task("task-3", HarnessTaskStatus::Pending),
+        ];
+        app.snapshot_panes();
+        assert_eq!(app.painted_task_ids, vec!["task-1", "task-2", "task-3"]);
+        assert_eq!(app.painted_task_row(1), 1);
+
+        // The ledger re-sorts (task-3 goes in progress) after the paint: row 1
+        // still means task-2, the row the user clicked, not whatever slid up.
+        app.vm.tasks[2].status = HarnessTaskStatus::InProgress;
+        assert_eq!(app.painted_task_row(1), 2);
+        let ordered = crate::watch::render::ordered_tasks(&app.vm.tasks);
+        assert_eq!(ordered[app.painted_task_row(1)].id, "task-2");
+        // Row 0 was painted as task-1, which the re-order pushed down to 1.
+        assert_eq!(ordered[app.painted_task_row(0)].id, "task-1");
+        assert_eq!(ordered[0].id, "task-3");
+        // A task that vanished leaves the index alone rather than panicking.
+        app.vm.tasks.retain(|t| t.id != "task-2");
+        assert_eq!(app.painted_task_row(1), 1);
+        // A row painted before the first snapshot falls back to its position.
+        app.painted_task_ids.clear();
+        assert_eq!(app.painted_task_row(2), 2);
+    }
+
+    #[test]
+    fn a_shell_click_follows_the_pid_not_the_row_number() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.shells = vec![proc(11, "one"), proc(22, "two")];
+        app.snapshot_panes();
+        assert_eq!(app.painted_shell_pids, vec![11, 22]);
+        assert_eq!(app.painted_shell_row(1), 1);
+
+        // A child appears above them: row 1 still means pid 22.
+        app.vm.shells = vec![proc(33, "new"), proc(11, "one"), proc(22, "two")];
+        let row = app.painted_shell_row(1);
+        assert_eq!(app.vm.shells[row].pid, 22);
+        // A process that exited leaves the index alone rather than panicking.
+        app.vm.shells.retain(|p| p.pid != 22);
+        assert_eq!(app.painted_shell_row(1), 1);
+    }
+
+    #[test]
+    fn a_session_click_focuses_the_pane_and_selects_that_session() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.sessions = vec![record("s-1"), record("s-2"), record("s-3")];
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[0];
+
+        app.click_at(c0 + 3, r0 + 2, cols, rows);
+        assert_eq!(app.vm.focus, 1);
+        assert_eq!(app.vm.sel_session, 1);
+        assert_eq!(app.focused_id, "s-2", "the transcript follows the clicked session");
+
+        // A border row is not a row: the selection stays put.
+        app.click_at(c0 + 3, r0, cols, rows);
+        assert_eq!(app.vm.sel_session, 1);
+        // Nor is a cell outside the pane.
+        app.click_at(c0.saturating_sub(1), r0 + 2, cols, rows);
+        assert_eq!(app.vm.sel_session, 1);
+    }
+
+    #[test]
+    fn a_task_click_focuses_the_tasks_pane_and_follows_the_painted_row() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.tasks = vec![task("task-1", HarnessTaskStatus::Pending), task("task-2", HarnessTaskStatus::Pending)];
+        app.snapshot_panes();
+        // task-2 goes in progress after the paint and sorts to the top.
+        app.vm.tasks[1].status = HarnessTaskStatus::InProgress;
+
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[1];
+        app.click_at(c0 + 3, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 2);
+        let ordered = crate::watch::render::ordered_tasks(&app.vm.tasks);
+        assert_eq!(ordered[app.vm.sel_task].id, "task-1", "the row painted there, not the row number");
+    }
+
+    #[test]
+    fn a_shell_click_focuses_the_shells_pane_and_follows_the_painted_pid() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.shells = vec![proc(11, "one"), proc(22, "two")];
+        app.snapshot_panes();
+        // A child appears above the painted rows before the click arrives.
+        app.vm.shells = vec![proc(33, "new"), proc(11, "one"), proc(22, "two")];
+
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[2];
+        app.click_at(c0 + 3, r0 + 2, cols, rows);
+        assert_eq!(app.vm.focus, 3);
+        assert_eq!(app.vm.sel_shell, 2, "the pid painted on that row, not the row number");
+        assert_eq!(app.vm.shells[app.vm.sel_shell].pid, 22);
     }
 
     #[test]

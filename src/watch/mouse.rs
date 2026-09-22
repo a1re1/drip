@@ -1,11 +1,11 @@
 // SGR (1006) mouse-event parsing for the dripw watch TUI.
 //
-// Once mouse reporting is on, the terminal writes wheel motion to stdin as
+// Once mouse reporting is on, the terminal writes pointer activity to stdin as
 // `ESC [ < Cb ; Cx ; Cy M`: Cb 64 = wheel up and 65 = wheel down (the 64 flag
-// marks a wheel event, the low bit picks the direction), Cx/Cy are the
-// 1-based column and row the pointer hovered. dripw listens only for the
-// wheel — clicks, motion and releases are ignored so the selection stays
-// where the keyboard put it.
+// marks a wheel event, the low bit picks the direction), Cb 0 = left-button
+// press. Cx/Cy are the 1-based column and row the pointer hovered. dripw acts
+// on the wheel and on a left click; motion, releases and the other buttons are
+// ignored so the selection only moves where the user aimed it.
 
 /// Prefix of every SGR mouse report (`CSI <`).
 pub const SGR_PREFIX: &str = "\x1b[<";
@@ -42,12 +42,47 @@ impl MouseScroll {
     }
 }
 
-/// Parse a mouse report that starts at the first byte of `chunk`; `None` for
-/// anything else (a key, a truncated report, a non-wheel button, or an
-/// extended report). Bytes after the first report are ignored.
+/// One pointer report: a wheel notch, or a left-button press on a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEvent {
+    Wheel(MouseScroll),
+    /// A left-button press with the 1-based cell under the pointer. Releases,
+    /// drags, motion and the other buttons are not clicks.
+    Click { col: usize, row: usize },
+}
+
+/// Parse one SGR mouse report at the first byte of `chunk`: a wheel notch or a
+/// left-button press. `None` for anything else (a key, a truncated report, a
+/// right/middle button, a release, a drag, or an extended report). Bytes after
+/// the first report are ignored.
+pub fn parse_mouse_event(chunk: &str) -> Option<MouseEvent> {
+    let (cb, col, row, terminator) = parse_sgr_body(chunk)?;
+    // 64 marks a wheel event; bits 0-1 carry the direction (0 up, 1 down).
+    if cb & 64 != 0 {
+        let wheel = if cb & 1 == 0 { MouseWheel::Up } else { MouseWheel::Down };
+        return Some(MouseEvent::Wheel(MouseScroll { wheel, col, row }));
+    }
+    // Bit 5 marks pointer motion (a drag) and the 'm' terminator a release:
+    // only a fresh left-button press navigates. Modifier bits are ignored.
+    if cb & 3 == 0 && cb & 32 == 0 && terminator == 'M' {
+        return Some(MouseEvent::Click { col, row });
+    }
+    None
+}
+
+/// The wheel-only view of a report, kept for callers that never navigate.
 pub fn parse_sgr_mouse(chunk: &str) -> Option<MouseScroll> {
+    match parse_mouse_event(chunk)? {
+        MouseEvent::Wheel(scroll) => Some(scroll),
+        MouseEvent::Click { .. } => None,
+    }
+}
+
+/// `Cb ; Cx ; Cy` plus the terminating `M` (press) / `m` (release).
+fn parse_sgr_body(chunk: &str) -> Option<(u32, usize, usize, char)> {
     let rest = chunk.strip_prefix(SGR_PREFIX)?;
-    let end = rest.find(|c: char| c == 'M' || c == 'm')?;
+    let end = rest.find(['M', 'm'])?;
+    let terminator = rest[end..].chars().next()?;
     let body = &rest[..end];
     let mut parts = body.split(';');
     let cb: u32 = parts.next()?.parse().ok()?;
@@ -56,16 +91,7 @@ pub fn parse_sgr_mouse(chunk: &str) -> Option<MouseScroll> {
     if parts.next().is_some() {
         return None;
     }
-    // 64 marks a wheel event; bits 0-1 carry the direction (0 up, 1 down).
-    if cb & 64 == 0 {
-        return None;
-    }
-    let wheel = if cb & 1 == 0 {
-        MouseWheel::Up
-    } else {
-        MouseWheel::Down
-    };
-    Some(MouseScroll { wheel, col, row })
+    Some((cb, col, row, terminator))
 }
 
 #[cfg(test)]
@@ -136,4 +162,37 @@ mod tests {
         assert!(!below.inside(log));
         assert!(!right_of.inside(log));
     }
+
+    fn wheel_of(event: MouseEvent) -> MouseWheel {
+        match event {
+            MouseEvent::Wheel(scroll) => scroll.wheel,
+            MouseEvent::Click { .. } => panic!("expected a wheel report"),
+        }
+    }
+
+    #[test]
+    fn left_press_is_a_click_and_the_other_buttons_are_ignored() {
+        assert_eq!(parse_mouse_event("\x1b[<0;12;7M"), Some(MouseEvent::Click { col: 12, row: 7 }));
+        // Modifier bits ride along with the button and still mean the left one.
+        assert_eq!(parse_mouse_event("\x1b[<4;3;4M"), Some(MouseEvent::Click { col: 3, row: 4 }));
+        assert_eq!(parse_mouse_event("\x1b[<16;3;4M"), Some(MouseEvent::Click { col: 3, row: 4 }));
+        // Middle (1), right (2), release (3), a drag (32) and the 'm' release
+        // terminator never navigate.
+        assert_eq!(parse_mouse_event("\x1b[<1;10;5M"), None);
+        assert_eq!(parse_mouse_event("\x1b[<2;10;5M"), None);
+        assert_eq!(parse_mouse_event("\x1b[<3;10;5M"), None);
+        assert_eq!(parse_mouse_event("\x1b[<32;10;5M"), None);
+        assert_eq!(parse_mouse_event("\x1b[<0;10;5m"), None);
+        assert_eq!(parse_mouse_event("q"), None);
+        assert_eq!(parse_mouse_event("\x1b[B"), None);
+    }
+
+    #[test]
+    fn wheel_reports_survive_the_event_layer() {
+        assert_eq!(parse_mouse_event("\x1b[<64;12;7M").map(wheel_of), Some(MouseWheel::Up));
+        assert_eq!(parse_mouse_event("\x1b[<65;3;4M").map(wheel_of), Some(MouseWheel::Down));
+        // The wheel-only helper still rejects a click.
+        assert_eq!(parse_sgr_mouse("\x1b[<0;12;7M"), None);
+    }
+
 }

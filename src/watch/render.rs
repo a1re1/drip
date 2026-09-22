@@ -400,7 +400,7 @@ fn session_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowC
 
 /// in_progress tasks float to the top; everything else keeps ledger order.
 /// Mirrors the active/rest split in web/src/components/detail-panel.tsx.
-fn ordered_tasks(tasks: &[HarnessTask]) -> Vec<&HarnessTask> {
+pub fn ordered_tasks(tasks: &[HarnessTask]) -> Vec<&HarnessTask> {
     let mut out: Vec<&HarnessTask> = tasks.iter().filter(|t| t.status == HarnessTaskStatus::InProgress).collect();
     out.extend(tasks.iter().filter(|t| t.status != HarnessTaskStatus::InProgress));
     out
@@ -625,10 +625,72 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · j/k move · [/] h/l/wheel scroll log · q quit";
+const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · click/j/k move · [/] h/l/wheel scroll log · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
+/// The pane geometry `render_frame` paints with, read by every hit test so the
+/// rectangles a click is measured against cannot drift from the frame.
+struct PaneLayout {
+    /// Sessions / Tasks / Shells heights, top to bottom.
+    heights: [usize; 3],
+    /// Width of the list column (portrait: the full frame).
+    list_w: usize,
+    /// Height of the `[0]` pane: the stacked transcript in portrait, the full
+    /// body height in landscape.
+    zero_h: usize,
+    /// Width of the `[0]` column; `None` in portrait, where `[0]` sits below
+    /// the lists at full width.
+    zero_w: Option<usize>,
+}
+
+/// The layout of a terminal, or `None` when it is too small to paint the frame
+/// at all. `render_frame`, `transcript_region` and `panel_regions` all compute
+/// their geometry here, so the pane budgeting — and with it the mapping from a
+/// painted cell back to a list row — exists once: a change to the layout moves
+/// the hit-test rectangles with it.
+fn pane_layout(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<PaneLayout> {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    if cols < 20 || rows < 8 {
+        return None;
+    }
+    let body_h = rows - 1;
+
+    if cols < PORTRAIT_MAX_COLS {
+        // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
+        // transcript absorbs the reclaimed rows.
+        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
+        return Some(PaneLayout {
+            heights: [heights[0], heights[1], heights[2]],
+            list_w: cols,
+            zero_h: heights[3],
+            zero_w: None,
+        });
+    }
+
+    // Landscape: left [1]/[2]/Shells (~40% width), right full-height [0].
+    // Content-hug sessions and shells; tasks takes the rest of the left column.
+    let list_w = (cols * 2 / 5).max(30).min(cols - 20);
+    let sessions_desired = vm.sessions.len().max(1) + 2;
+    let shells_desired = vm.shells.len().max(1) + 2;
+    let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
+    let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + MIN_PANE)));
+    let mut h2 = body_h as i64 - h1 as i64 - h3 as i64;
+    if h2 < MIN_PANE as i64 {
+        let capped = split_heights(body_h, &[4, 4, 3]);
+        h1 = capped[0];
+        h2 = capped[1] as i64;
+        h3 = capped[2];
+    }
+    Some(PaneLayout {
+        heights: [h1, h2.max(0) as usize, h3],
+        list_w,
+        zero_h: body_h,
+        zero_w: Some(cols - list_w),
+    })
+}
+
 pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     let cols = cols.max(1);
     let rows = rows.max(1);
@@ -640,8 +702,6 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     }
 
     let footer = c::dim(&fit(FOOTER_HINT, cols, true));
-    let body_h = rows - 1;
-
     let sessions_focused = vm.focus == 1;
     let tasks_focused = vm.focus == 2;
 
@@ -697,38 +757,26 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
         out
     };
 
-    let body: Vec<String> = if cols < PORTRAIT_MAX_COLS {
-        // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
-        // transcript absorbs the reclaimed rows.
-        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
-        let (h1, h2, h3, h0) = (heights[0], heights[1], heights[2], heights[3]);
-        let mut body = mk_sessions(cols, h1.saturating_sub(2), h1);
-        body.extend(mk_tasks(cols, h2.saturating_sub(2), h2));
-        body.extend(mk_shells(cols, h3));
-        body.extend(mk_zero(cols, h0));
-        body
-    } else {
-        // Landscape: left [1]/[2]/Shells (~40% width), right full-height [0].
-        let left_w = (cols * 2 / 5).max(30).min(cols - 20);
-        let right_w = cols - left_w;
-        // Content-hug sessions and shells; tasks takes the rest of the left column.
-        let sessions_desired = vm.sessions.len().max(1) + 2;
-        let shells_desired = vm.shells.len().max(1) + 2;
-        let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
-        let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + MIN_PANE)));
-        let mut h2 = body_h as i64 - h1 as i64 - h3 as i64;
-        if h2 < MIN_PANE as i64 {
-            let capped = split_heights(body_h, &[4, 4, 3]);
-            h1 = capped[0];
-            h2 = capped[1] as i64;
-            h3 = capped[2];
+    // The one place the pane budgeting lives; the hit tests below read it too.
+    let layout = pane_layout(vm, cols, rows).expect("terminal size checked above");
+    let (h1, h2, h3) = (layout.heights[0], layout.heights[1], layout.heights[2]);
+
+    let body: Vec<String> = match layout.zero_w {
+        None => {
+            let mut body = mk_sessions(layout.list_w, h1.saturating_sub(2), h1);
+            body.extend(mk_tasks(layout.list_w, h2.saturating_sub(2), h2));
+            body.extend(mk_shells(layout.list_w, h3));
+            body.extend(mk_zero(layout.list_w, layout.zero_h));
+            body
         }
-        let h2 = h2.max(0) as usize;
-        let mut left = mk_sessions(left_w, h1.saturating_sub(2), h1);
-        left.extend(mk_tasks(left_w, h2.saturating_sub(2), h2));
-        left.extend(mk_shells(left_w, h3));
-        let right = mk_zero(right_w, body_h);
-        hconcat(&left, &right)
+        Some(right_w) => {
+            let left_w = layout.list_w;
+            let mut left = mk_sessions(left_w, h1.saturating_sub(2), h1);
+            left.extend(mk_tasks(left_w, h2.saturating_sub(2), h2));
+            left.extend(mk_shells(left_w, h3));
+            let right = mk_zero(right_w, layout.zero_h);
+            hconcat(&left, &right)
+        }
     };
 
     let mut all = body;
@@ -746,29 +794,85 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 /// shell-log box when the Shells pane is focused — as
 /// `(row_start, row_end, col_start, col_end)`.
 ///
-/// Mirrors exactly the layout `render_frame` uses (portrait stacks the pane
-/// full-width at the bottom; landscape puts it in the right column), so a
-/// wheel event's hovered cell can be tested against it. `None` when the
-/// terminal is too small to paint the frame at all.
+/// Taken from `pane_layout`, the same geometry `render_frame` paints with
+/// (portrait stacks the pane full-width at the bottom; landscape puts it in
+/// the right column), so a wheel event's hovered cell is tested against the
+/// pane the user actually sees. `None` when the terminal is too small to paint
+/// the frame at all.
 pub fn transcript_region(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<(usize, usize, usize, usize)> {
-    let cols = cols.max(1);
-    let rows = rows.max(1);
-    if cols < 20 || rows < 8 {
-        return None;
-    }
-    let body_h = rows - 1;
-    if cols < PORTRAIT_MAX_COLS {
-        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
-        let top: usize = heights[..3].iter().sum();
-        let height = heights[3];
-        if height == 0 {
-            return None;
+    let layout = pane_layout(vm, cols, rows)?;
+    match layout.zero_w {
+        None => {
+            // Portrait: below the three list panes, absorbing what is left.
+            let top: usize = layout.heights.iter().sum();
+            if layout.zero_h == 0 {
+                return None;
+            }
+            Some((top + 1, top + layout.zero_h, 1, cols))
         }
-        Some((top + 1, top + height, 1, cols))
-    } else {
-        let left_w = (cols * 2 / 5).max(30).min(cols - 20);
-        Some((1, body_h, left_w + 1, cols))
+        Some(_) => Some((1, layout.zero_h, layout.list_w + 1, cols)),
     }
+}
+
+/// The 1-based inclusive rectangle of each list pane, in panel order — `[0]`
+/// Sessions, `[1]` Tasks, `[2]` Shells — as `(row_start, row_end, col_start,
+/// col_end)`.
+///
+/// Read from `pane_layout`, the same geometry `render_frame` paints with
+/// (portrait stacks them full-width; landscape seats them in the left column),
+/// so a click's cell maps back to the list row it landed on by construction.
+/// Empty when the terminal is too small to paint the frame at all.
+pub fn panel_regions(vm: &WatchViewModel, cols: usize, rows: usize) -> Vec<(usize, usize, usize, usize)> {
+    let Some(layout) = pane_layout(vm, cols, rows) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut top = 0usize;
+    for h in layout.heights {
+        out.push((top + 1, top + h, 1, layout.list_w));
+        top += h;
+    }
+    out
+}
+
+/// The selectable list row under a 1-based cell: `Some((panel, index))` where
+/// panel 0/1/2 is Sessions/Tasks/Shells and `index` is the row's position in
+/// that pane's rendered window (Sessions and Shells index straight into
+/// `vm.sessions` / `vm.shells`; Tasks index into `ordered_tasks`).
+///
+/// `None` for a cell on a border, on a pane's empty-state message, past the
+/// last row, or when the terminal is too small to paint the frame.
+pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, row: usize) -> Option<(usize, usize)> {
+    for (panel, &(r0, r1, c0, c1)) in panel_regions(vm, cols, rows).iter().enumerate() {
+        if row < r0 || row > r1 || col < c0 || col > c1 {
+            continue;
+        }
+        // Every list pane seats its rows between a top and a bottom border row;
+        // the borders themselves and any clipped row are not rows.
+        // `r0`/`r1` are the pane's own top and bottom border rows, so the rows
+        // it can seat sit strictly between them.
+        if row <= r0 || row >= r1 {
+            continue;
+        }
+        let inner_h = r1 - r0 - 1;
+        let within = row - (r0 + 1);
+        if within >= inner_h {
+            continue;
+        }
+        let (len, sel) = match panel {
+            0 => (vm.sessions.len(), vm.sel_session),
+            1 => (ordered_tasks(&vm.tasks).len(), vm.sel_task),
+            _ => (vm.shells.len(), vm.sel_shell),
+        };
+        if len == 0 {
+            continue; // the pane shows its empty-state message, not rows
+        }
+        let index = scroll_start(sel, len, inner_h) + within;
+        if index < len {
+            return Some((panel, index));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -907,6 +1011,64 @@ mod tests {
         assert_eq!(plain[r0 - 1].chars().nth(c0), Some('─'));
         let title_at = plain[r0 - 1].find("[0]").expect("transcript title");
         assert!(title_at >= c0 - 1 && title_at < c1);
+    }
+
+    #[test]
+    fn list_row_at_maps_a_cell_back_to_the_clicked_row() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        for i in 0..4 {
+            vm.sessions.push(record(&format!("aaaaaaaa-{i}"), "goal"));
+        }
+        vm.tasks = vec![
+            task("task-1", "first", HarnessTaskStatus::Pending),
+            task("task-2", "second", HarnessTaskStatus::Pending),
+        ];
+        vm.shells.push(PsProc { pid: 12, ppid: 1, etime_sec: Some(61), command: "bash -c sleep".into() });
+
+        for (cols, rows) in [(100usize, 30usize), (60, 24)] {
+            let regions = panel_regions(&vm, cols, rows);
+            assert_eq!(regions.len(), 3, "{cols}x{rows}");
+            let (sr0, sr1, sc0, sc1) = regions[0];
+            // Every pane's rows are bracketed by its own top and bottom border.
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0), None, "top border {cols}x{rows}");
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr1), None, "bottom border {cols}x{rows}");
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 - 1, sr0 + 1), None, "left of pane");
+            assert_eq!(list_row_at(&vm, cols, rows, sc1 + 1, sr0 + 1), None, "right of pane");
+            for i in 0..4 {
+                assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0 + 1 + i), Some((0, i)), "session {i} {cols}x{rows}");
+            }
+            // The row after the last session is blank, not a fourth pane hit.
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0 + 1 + 4), None, "past the last session");
+
+            let (tr0, tr1, _, _) = regions[1];
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 1), Some((1, 0)), "first task");
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 2), Some((1, 1)), "second task");
+            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr1), None, "task bottom border");
+
+            let (kr0, _, kc0, _) = regions[2];
+            assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 1), Some((2, 0)), "first shell");
+            assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 2), None, "no second shell");
+        }
+
+        // Too small to paint: no panes, no hits.
+        assert!(panel_regions(&vm, 19, 5).is_empty());
+        assert_eq!(list_row_at(&vm, 19, 5, 1, 1), None);
+    }
+
+    #[test]
+    fn list_row_at_is_scoped_to_the_pane_the_cell_sits_in() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.tasks = vec![task("task-1", "only task", HarnessTaskStatus::Pending)];
+        // A task row is only clickable inside the [2] pane, never in [1].
+        let regions = panel_regions(&vm, 100, 30);
+        let (sr0, _, sc0, _) = regions[0];
+        let (tr0, _, _, _) = regions[1];
+        assert_eq!(list_row_at(&vm, 100, 30, sc0 + 3, sr0 + 1), None, "empty sessions pane");
+        assert_eq!(list_row_at(&vm, 100, 30, sc0 + 3, tr0 + 1), Some((1, 0)));
     }
 
     #[test]

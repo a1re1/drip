@@ -6760,17 +6760,15 @@ impl HarnessRun {
         };
 
         // the loop-start event.
-        let skills_suffix = if self.dynamic_skills.is_empty() {
+        // The skills this loop composed, kept both as prose (the detail a
+        // human reads) and as structure (the loop-start event's `skills`,
+        // which dripw and the browser UI read instead of parsing the prose).
+        let loaded_skills: Vec<String> =
+            self.dynamic_skills.iter().map(|skill| skill.name.clone()).collect();
+        let skills_suffix = if loaded_skills.is_empty() {
             String::new()
         } else {
-            format!(
-                " [skills: {}]",
-                self.dynamic_skills
-                    .iter()
-                    .map(|skill| skill.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!(" [skills: {}]", loaded_skills.join(", "))
         };
         let detail = format!(
             "loop {}{}{} — {}",
@@ -6793,6 +6791,7 @@ impl HarnessRun {
         self.emit(HarnessEvent {
             data: Some(HarnessEventData {
                 r#loop: Some(self.state.r#loop),
+                skills: if loaded_skills.is_empty() { None } else { Some(loaded_skills) },
                 task_id: current_task_id.clone(),
                 ..Default::default()
             }),

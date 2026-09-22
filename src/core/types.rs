@@ -920,6 +920,11 @@ pub struct HarnessEventData {
 	// last when both are present).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub tool_name: Option<String>,
+	/// "loop-start" events: the skills composed into this loop's system prompt,
+	/// in composition order. Absent when the loop ran with none of its own
+	/// (base-prompt `--skill` activations are not repeated here).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub skills: Option<Vec<String>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub task_id: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_js_number_option")]

@@ -337,7 +337,7 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     // A disabled composer with empty text shows the run placeholder instead.
     let placeholder = props.disabled && props.text.is_empty();
     let queued_placeholder = format!(
-        "{} queued — shift+enter steers the run with them all",
+        "{} queued — ctrl+s steers the run with them all",
         props.queued.len()
     );
     let display: &str = if placeholder && !props.queued.is_empty() {
@@ -449,14 +449,14 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     // Kept short enough to survive one line at a normal terminal width.
     let hint = if props.disabled {
         if !props.queued.is_empty() {
-            "enter queues · empty shift+enter steers with the whole queue".to_string()
+            "enter queues · ctrl+s steers the run (whole queue when empty)".to_string()
         } else {
-            "enter queues · shift+enter steers the run".to_string()
+            "enter queues · ctrl+s steers the run".to_string()
         }
     } else if !props.queued.is_empty() {
-        format!("{} queued — shift+enter runs the next one", props.queued.len())
+        format!("{} queued — ctrl+s runs the next one", props.queued.len())
     } else {
-        "enter sends · shift+enter steers with a queued message".to_string()
+        "enter sends · ctrl+s steers with a queued message".to_string()
     };
     rows.push(dim(&composer_hint_row(&hint, width)));
 
@@ -641,7 +641,7 @@ mod tests {
         let rows = plain(&render_composer(&props, 20));
         // Rule, "❯ line one" (the cursor on the newline is an inverse cell at
         // the line end), the two-space continuation row, the closing rule, then
-        // the enter/shift+enter hint.
+        // the enter/ctrl+s hint.
         assert_eq!(rows.len(), 5, "{rows:?}");
         assert_eq!(rows[0], "─".repeat(20), "{rows:?}");
         assert_eq!(rows[1].trim_end(), "❯ line one", "{rows:?}");
@@ -903,7 +903,7 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("shift+enter steers the run")),
+                .any(|row| row.contains("ctrl+s steers the run")),
             "{rows:?}"
         );
     }
@@ -935,7 +935,7 @@ mod tests {
         // With nothing typed the composer itself carries the steer-all hint,
         // and no per-message hint is repeated anywhere.
         assert!(
-            rows[4].contains("2 queued — shift+enter steers the run with them all"),
+            rows[4].contains("2 queued — ctrl+s steers the run with them all"),
             "{rows:?}"
         );
         assert!(
@@ -987,7 +987,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("2 queued")), "{rows:?}");
         assert!(
             rows.iter()
-                .any(|row| row.contains("shift+enter runs the next one")),
+                .any(|row| row.contains("ctrl+s runs the next one")),
             "{rows:?}"
         );
     }

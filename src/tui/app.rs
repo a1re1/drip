@@ -142,7 +142,7 @@ fn help_text() -> String {
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
-            "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); shift+enter steers the running goal with what you typed, or with the whole queue when the input is empty",
+            "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
             "  esc — clear the composer, or stop the running goal",
             "  ctrl+c — exit",
@@ -248,7 +248,6 @@ enum Key {
     Paste(String),
     Return,
     Right,
-    ShiftReturn,
     Tab,
     Text(String),
     Up,
@@ -258,16 +257,6 @@ enum Key {
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// Ask the terminal to report modified keys so shift+enter can be told apart
-/// from enter: the kitty keyboard protocol's "disambiguate" flag (`CSI > 1 u`,
-/// honoured by kitty, Ghostty, WezTerm, foot, Alacritty, iTerm2 3.5+) and
-/// xterm's modifyOtherKeys level 1 (`CSI > 4;1 m`, honoured by xterm and
-/// iTerm2). Level 1 leaves ctrl+letter and the arrows in their legacy form
-/// and only encodes combinations that have no legacy bytes, which is exactly
-/// shift+enter. A terminal that knows neither ignores both sequences.
-const ENABLE_MODIFIED_KEYS: &str = "\u{1b}[>1u\u{1b}[>4;1m";
-/// Pops the kitty flags pushed above and resets modifyOtherKeys.
-const DISABLE_MODIFIED_KEYS: &str = "\u{1b}[<u\u{1b}[>4;0m";
 
 /// Splits a raw stdin chunk into keys. Bracketed pastes may span chunks, so
 /// the caller keeps `paste_buffer` between calls.
@@ -339,14 +328,6 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         };
         let (sequence, rest) = chunk.split_at(end);
         let key = match sequence {
-            // Shift+enter has no portable byte of its own. With the modified
-            // key reporting requested at startup it arrives as the kitty
-            // `CSI 13;2 u` or the xterm `CSI 27;2;13 ~` form; terminals set up
-            // by hand (Claude Code's terminal-setup) send the classic ESC CR.
-            b"\x1b[13;2u" | b"\x1b[27;2;13~" | b"\x1b\r" => Key::ShiftReturn,
-            // Under the kitty protocol a bare escape key is reported as
-            // `CSI 27 u` so it can never be confused with a sequence prefix.
-            b"\x1b[27u" | b"\x1b[27;1u" => Key::Escape,
             b"\x1b[A" | b"\x1bOA" => Key::Up,
             b"\x1b[B" | b"\x1bOB" => Key::Down,
             b"\x1b[C" | b"\x1bOC" => Key::Right,
@@ -505,7 +486,7 @@ struct TuiApp {
     pending_cells: Vec<TranscriptEntry>,
     prompt_history: PromptHistory,
     /// Prompts typed while a run was in flight. `enter` stacks them for the
-    /// NEXT run and the composer lists them; `shift+enter` on an empty
+    /// NEXT run and the composer lists them; `ctrl+s` on an empty
     /// composer steers the running goal with the whole queue at once (the
     /// inbox handoff), so a queue never becomes a dead end.
     queued_prompts: VecDeque<String>,
@@ -1216,7 +1197,7 @@ impl TuiApp {
     /// Enter while a run is in flight: hold the prompt for the NEXT run. It is
     /// deliberately not written to the session inbox — that handoff is what
     /// steering is — so a queued message only reaches the agent once the
-    /// running goal has ended (or the operator promotes it with shift+enter).
+    /// running goal has ended (or the operator promotes it with ctrl+s).
     /// The queue is shown above the composer, not in the timeline, so nothing
     /// is logged here.
     fn queue_prompt(&mut self, text: String) {
@@ -1228,7 +1209,7 @@ impl TuiApp {
         self.repaint();
     }
 
-    /// Shift+enter while a run is in flight: steer the live session through
+    /// Ctrl+s while a run is in flight: steer the live session through
     /// its inbox. Typed text steers on its own and leaves the queue alone; an
     /// empty composer steers with the WHOLE queue, in order, and flushes it.
     /// The harness picks the messages up at its next cycle boundary and
@@ -1370,10 +1351,12 @@ impl TuiApp {
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
-                // Enter queues for the next run; shift+enter steers the LIVE
-                // run with the typed text, or with the whole queue when empty.
+                // Enter queues for the next run; ctrl+s steers the LIVE run
+                // with the typed text, or with the whole queue when empty.
+                // Ctrl+s is one raw-mode byte every terminal delivers, unlike
+                // shift+enter, which most terminals report as plain enter.
                 Key::Return => self.submit(),
-                Key::ShiftReturn => self.steer_running_goal(),
+                Key::Ctrl('s') => self.steer_running_goal(),
                 // The composer stays editable while a run is in flight, so a
                 // message can be composed (and corrected) before queueing.
                 Key::Backspace | Key::Delete => {
@@ -1428,9 +1411,9 @@ impl TuiApp {
 
         match key {
             Key::Escape => self.apply_edit(String::new(), 0),
-            // Idle shift+enter: drain the queue into a run, else it just sends
-            // what is typed (the idle composer has no running goal to steer).
-            Key::ShiftReturn => match self.queued_prompts.pop_front() {
+            // Idle ctrl+s: drain the queue into a run, else it just sends
+            // what is typed (there is no running goal to steer).
+            Key::Ctrl('s') => match self.queued_prompts.pop_front() {
                 Some(next) if !next.trim().is_empty() => self.run_goal(next),
                 Some(_) => {}
                 None => self.submit(),
@@ -2648,7 +2631,7 @@ impl TuiApp {
         self.finish_run();
         // A prompt queued while the run was in flight is what the operator
         // wanted next: the run ending is the moment the queue drains into a
-        // fresh goal. Steering (shift+enter) is the other way out of it.
+        // fresh goal. Steering (ctrl+s) is the other way out of it.
         if let Some(next) = self.queued_prompts.pop_front() {
             if !next.trim().is_empty() {
                 self.run_goal(next);
@@ -2972,7 +2955,7 @@ impl TuiApp {
                     if matches!(&result, Err(SessionGoalError::Run(message)) if message == RUN_THREAD_PANIC) {
                         // The panic hook restored the terminal for a crash that
                         // did not happen on this thread; take it back.
-                        write_out(&format!("{ENABLE_BRACKETED_PASTE}{ENABLE_MODIFIED_KEYS}{HIDE_CURSOR}"));
+                        write_out(&format!("{ENABLE_BRACKETED_PASTE}{HIDE_CURSOR}"));
                     }
                     self.on_run_done(result);
                     self.repaint();
@@ -3208,12 +3191,12 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let cwd = bootstrap.cwd.clone();
 
     let mut raw = RawMode::enable();
-    write_out(&format!("{ENABLE_BRACKETED_PASTE}{ENABLE_MODIFIED_KEYS}"));
+    write_out(ENABLE_BRACKETED_PASTE);
 
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        write_out(&format!("{SHOW_CURSOR}{DISABLE_MODIFIED_KEYS}{DISABLE_BRACKETED_PASTE}\n"));
+        write_out(&format!("{SHOW_CURSOR}{DISABLE_BRACKETED_PASTE}\n"));
         previous_hook(info);
     }));
 
@@ -3223,7 +3206,7 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let mut app = TuiApp::new(bootstrap, tx, mention_tx);
     let code = app.run(rx);
 
-    write_out(&format!("{DISABLE_MODIFIED_KEYS}{DISABLE_BRACKETED_PASTE}"));
+    write_out(DISABLE_BRACKETED_PASTE);
     raw.restore();
     let _ = std::panic::take_hook();
     code
@@ -3367,7 +3350,6 @@ mod tests {
                 Key::Paste(_) => "paste",
                 Key::Return => "return",
                 Key::Right => "right",
-                Key::ShiftReturn => "shift-return",
                 Key::Tab => "tab",
                 Key::Text(_) => "text",
                 Key::Up => "up",
@@ -3390,26 +3372,11 @@ mod tests {
             _ => panic!("ctrl+v expected"),
         }
         assert_eq!(kinds(&decode_input("é".as_bytes(), &mut paste)), vec!["text"]);
-        // shift+enter arrives as a modifyOtherKeys sequence or the classic
-        // ESC CR; a multi-byte chunk is never reinterpreted as shift+enter.
-        assert_eq!(
-            kinds(&decode_input(b"\x1b[13;2u", &mut paste)),
-            vec!["shift-return"]
-        );
-        assert_eq!(
-            kinds(&decode_input(b"\x1b\r", &mut paste)),
-            vec!["shift-return"]
-        );
-        assert_eq!(
-            kinds(&decode_input(b"\x1b[27;2;13~", &mut paste)),
-            vec!["shift-return"],
-            "xterm modifyOtherKeys form"
-        );
-        assert_eq!(
-            kinds(&decode_input(b"\x1b[27u", &mut paste)),
-            vec!["escape"],
-            "kitty-protocol escape key"
-        );
+        // Ctrl+s is the steer key: a single raw-mode byte on every terminal.
+        match &decode_input(b"\x13", &mut paste)[0] {
+            Key::Ctrl(c) => assert_eq!(*c, 's'),
+            _ => panic!("ctrl+s expected"),
+        }
         // A bare LF (ctrl+enter on some terminals) stays a plain return so a
         // stray newline can never steer.
         assert_eq!(kinds(&decode_input(b"\n", &mut paste)), vec!["return"]);
@@ -4701,7 +4668,7 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_on_an_empty_composer_steers_with_the_whole_queue_and_flushes_it() {
+    fn ctrl_s_on_an_empty_composer_steers_with_the_whole_queue_and_flushes_it() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "first".to_string();
@@ -4710,11 +4677,11 @@ mod skill_activation_tests {
         fixture.app.on_key(Key::Return);
         assert_eq!(fixture.app.queued_prompts.len(), 2);
 
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
 
         assert!(
             fixture.app.queued_prompts.is_empty(),
-            "an empty shift+enter flushes the whole queue"
+            "an empty steer flushes the whole queue"
         );
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
@@ -4732,13 +4699,13 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_with_typed_text_steers_only_that_text_and_keeps_the_queue() {
+    fn ctrl_s_with_typed_text_steers_only_that_text_and_keeps_the_queue() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "queued".to_string();
         fixture.app.on_key(Key::Return);
         fixture.app.text = "steer me now".to_string();
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
 
         assert_eq!(fixture.app.queued_prompts.len(), 1, "the queue is untouched");
         assert_eq!(fixture.app.queued_prompts[0], "queued");
@@ -4753,11 +4720,11 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_while_running_with_an_empty_queue_steers_the_typed_message() {
+    fn ctrl_s_while_running_with_an_empty_queue_steers_the_typed_message() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "steer me now".to_string();
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
         let parsed: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
@@ -4767,10 +4734,10 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_with_nothing_to_steer_reports_it_and_writes_no_inbox() {
+    fn ctrl_s_with_nothing_to_steer_reports_it_and_writes_no_inbox() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
         assert!(!Path::new(&fixture.app.paths.inbox_path).exists());
         assert!(
             fixture
@@ -4778,7 +4745,7 @@ mod skill_activation_tests {
                 .cells
                 .iter()
                 .any(|entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("nothing to steer"))),
-            "an empty shift+enter must say so"
+            "an empty steer must say so"
         );
     }
 

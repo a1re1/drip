@@ -84,7 +84,9 @@ const LEAKED_ARG_MARKER: &str = "</arg_value><arg_key>";
 /// - stray `<arg_key>` / `</arg_key>` tags around a key are stripped;
 /// - `timeout` with no `timeoutMs` becomes `timeoutMs` (a value under 1000
 ///   is read as seconds, a larger one as milliseconds).
-pub fn repair_argument_keys(map: serde_json::Map<String, serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+pub fn repair_argument_keys(
+    map: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut repaired = serde_json::Map::new();
     let mut deferred: Vec<(String, serde_json::Value)> = Vec::new();
     for (key, value) in map {
@@ -92,7 +94,11 @@ pub fn repair_argument_keys(map: serde_json::Map<String, serde_json::Value>) -> 
         if let Some(at) = cleaned.rfind(LEAKED_ARG_MARKER) {
             cleaned = &cleaned[at + LEAKED_ARG_MARKER.len()..];
         }
-        let cleaned = cleaned.trim().trim_start_matches("<arg_key>").trim_end_matches("</arg_key>").trim();
+        let cleaned = cleaned
+            .trim()
+            .trim_start_matches("<arg_key>")
+            .trim_end_matches("</arg_key>")
+            .trim();
         if cleaned.is_empty() {
             continue;
         }
@@ -108,7 +114,11 @@ pub fn repair_argument_keys(map: serde_json::Map<String, serde_json::Value>) -> 
     if !repaired.contains_key("timeoutMs") {
         if let Some(seconds_or_ms) = repaired.get("timeout").and_then(|v| v.as_f64()) {
             if seconds_or_ms > 0.0 {
-                let ms = if seconds_or_ms < 1000.0 { seconds_or_ms * 1000.0 } else { seconds_or_ms };
+                let ms = if seconds_or_ms < 1000.0 {
+                    seconds_or_ms * 1000.0
+                } else {
+                    seconds_or_ms
+                };
                 repaired.insert("timeoutMs".to_string(), serde_json::json!(ms));
             }
         }
@@ -162,7 +172,8 @@ pub fn get_optional_number_argument(
 /// `nan`/`inf`/`infinity` and rejects the hex/octal/binary forms.
 pub fn js_number(text: &str) -> Option<f64> {
     static DECIMAL: OnceLock<regex::Regex> = OnceLock::new();
-    let decimal = DECIMAL.get_or_init(|| regex::Regex::new(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$").unwrap());
+    let decimal = DECIMAL
+        .get_or_init(|| regex::Regex::new(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$").unwrap());
 
     match text {
         "Infinity" | "+Infinity" => return Some(f64::INFINITY),
@@ -186,9 +197,10 @@ pub fn js_number(text: &str) -> Option<f64> {
             return None;
         }
 
-        return digits
-            .chars()
-            .try_fold(0.0_f64, |acc, ch| ch.to_digit(radix).map(|digit| acc * radix as f64 + digit as f64));
+        return digits.chars().try_fold(0.0_f64, |acc, ch| {
+            ch.to_digit(radix)
+                .map(|digit| acc * radix as f64 + digit as f64)
+        });
     }
 
     if decimal.is_match(text) {
@@ -204,7 +216,10 @@ pub fn js_number(text: &str) -> Option<f64> {
 pub fn resolve_tool_path(cwd: &str, path_value: &str) -> PathBuf {
     let normalized_path = path_value.trim();
 
-    if CWD_ALIASES.iter().any(|alias| alias.eq_ignore_ascii_case(normalized_path)) {
+    if CWD_ALIASES
+        .iter()
+        .any(|alias| alias.eq_ignore_ascii_case(normalized_path))
+    {
         return PathBuf::from(cwd);
     }
 
@@ -384,7 +399,8 @@ const ICU_ASCII_SYMBOL_ORDER: &str = "\t\n _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
 /// (primary weight, has accent, is upper) per collation element; a char may
 /// expand to two elements (æ → a e, ß → s s).
 fn collation_elements(ch: char, out: &mut Vec<(u32, bool, bool)>) {
-    let letter = |base: char, accent: bool, upper: bool| (200 + (base as u32 - 'a' as u32), accent, upper);
+    let letter =
+        |base: char, accent: bool, upper: bool| (200 + (base as u32 - 'a' as u32), accent, upper);
     match ch {
         'a'..='z' => out.push(letter(ch, false, false)),
         'A'..='Z' => out.push(letter(ch.to_ascii_lowercase(), false, true)),
@@ -466,18 +482,28 @@ mod tests {
 
     #[test]
     fn leaked_arg_markers_and_timeout_alias_are_repaired() {
-        let parsed = parse_tool_arguments(r#"{"glob": "*.rs", "head</arg_value><arg_key>pattern": "fn x", "timeout": 300}"#).unwrap();
+        let parsed = parse_tool_arguments(
+            r#"{"glob": "*.rs", "head</arg_value><arg_key>pattern": "fn x", "timeout": 300}"#,
+        )
+        .unwrap();
         assert_eq!(parsed.get("pattern").and_then(|v| v.as_str()), Some("fn x"));
         assert_eq!(parsed.get("glob").and_then(|v| v.as_str()), Some("*.rs"));
         assert!(!parsed.keys().any(|k| k.contains("arg_")), "{parsed:?}");
-        assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(300_000.0));
+        assert_eq!(
+            parsed.get("timeoutMs").and_then(|v| v.as_f64()),
+            Some(300_000.0)
+        );
         // An intact key wins over a repaired duplicate; a millisecond value stays.
         let parsed = parse_tool_arguments(r#"{"pattern": "real", "x</arg_value><arg_key>pattern": "junk", "<arg_key>path</arg_key>": "src", "timeout": 45000}"#).unwrap();
         assert_eq!(parsed.get("pattern").and_then(|v| v.as_str()), Some("real"));
         assert_eq!(parsed.get("path").and_then(|v| v.as_str()), Some("src"));
-        assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(45_000.0));
+        assert_eq!(
+            parsed.get("timeoutMs").and_then(|v| v.as_f64()),
+            Some(45_000.0)
+        );
         // An explicit timeoutMs is never overridden.
-        let parsed = parse_tool_arguments(r#"{"command": "ls", "timeout": 5, "timeoutMs": 20}"#).unwrap();
+        let parsed =
+            parse_tool_arguments(r#"{"command": "ls", "timeout": 5, "timeoutMs": 20}"#).unwrap();
         assert_eq!(parsed.get("timeoutMs").and_then(|v| v.as_f64()), Some(20.0));
     }
 
@@ -498,7 +524,11 @@ mod tests {
     fn parse_tool_arguments_non_object_rejected() {
         for raw in ["[1,2,3]", "\"text\"", "42", "null", "true"] {
             let err = parse_tool_arguments(raw).unwrap_err();
-            assert_eq!(err.to_string(), "Tool arguments must be a JSON object.", "raw={raw}");
+            assert_eq!(
+                err.to_string(),
+                "Tool arguments must be a JSON object.",
+                "raw={raw}"
+            );
         }
     }
 
@@ -518,19 +548,25 @@ mod tests {
     fn get_required_string_argument_missing_blank_or_wrong_type() {
         let empty = serde_json::Map::new();
         assert_eq!(
-            get_required_string_argument(&empty, "path").unwrap_err().to_string(),
+            get_required_string_argument(&empty, "path")
+                .unwrap_err()
+                .to_string(),
             "Missing required string argument \"path\"."
         );
 
         let blank = json!({"path": "   "}).as_object().unwrap().clone();
         assert_eq!(
-            get_required_string_argument(&blank, "path").unwrap_err().to_string(),
+            get_required_string_argument(&blank, "path")
+                .unwrap_err()
+                .to_string(),
             "Missing required string argument \"path\"."
         );
 
         let numeric = json!({"path": 7}).as_object().unwrap().clone();
         assert_eq!(
-            get_required_string_argument(&numeric, "path").unwrap_err().to_string(),
+            get_required_string_argument(&numeric, "path")
+                .unwrap_err()
+                .to_string(),
             "Missing required string argument \"path\"."
         );
     }
@@ -539,13 +575,22 @@ mod tests {
 
     #[test]
     fn get_optional_number_argument_accepts_number_and_numeric_string() {
-        let args = json!({"a": 5, "b": "12", "c": " 3.5 ", "d": null}).as_object().unwrap().clone();
+        let args = json!({"a": 5, "b": "12", "c": " 3.5 ", "d": null})
+            .as_object()
+            .unwrap()
+            .clone();
         assert_eq!(get_optional_number_argument(&args, "a").unwrap(), Some(5.0));
-        assert_eq!(get_optional_number_argument(&args, "b").unwrap(), Some(12.0));
+        assert_eq!(
+            get_optional_number_argument(&args, "b").unwrap(),
+            Some(12.0)
+        );
         assert_eq!(get_optional_number_argument(&args, "c").unwrap(), Some(3.5));
         // null means "absent", not "invalid".
         assert_eq!(get_optional_number_argument(&args, "d").unwrap(), None);
-        assert_eq!(get_optional_number_argument(&args, "missing").unwrap(), None);
+        assert_eq!(
+            get_optional_number_argument(&args, "missing").unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -566,7 +611,10 @@ mod tests {
         assert_eq!(js_number("1_000"), None);
         assert_eq!(js_number("-0x10"), None);
         assert_eq!(js_number("0x"), None);
-        assert_eq!(js_number("0xFFFFFFFFFFFFFFFFFF"), Some(4722366482869645213695.0));
+        assert_eq!(
+            js_number("0xFFFFFFFFFFFFFFFFFF"),
+            Some(4722366482869645213695.0)
+        );
         assert_eq!(js_number("12abc"), None);
     }
 
@@ -574,11 +622,15 @@ mod tests {
     fn get_optional_number_argument_rejects_non_numeric() {
         let args = json!({"a": "abc", "b": true}).as_object().unwrap().clone();
         assert_eq!(
-            get_optional_number_argument(&args, "a").unwrap_err().to_string(),
+            get_optional_number_argument(&args, "a")
+                .unwrap_err()
+                .to_string(),
             "Expected \"a\" to be a number."
         );
         assert_eq!(
-            get_optional_number_argument(&args, "b").unwrap_err().to_string(),
+            get_optional_number_argument(&args, "b")
+                .unwrap_err()
+                .to_string(),
             "Expected \"b\" to be a number."
         );
     }
@@ -652,7 +704,10 @@ mod tests {
         let missing = dir.path().join("nope.txt");
 
         assert_eq!(get_tool_path_kind(&file_path).unwrap(), ToolPathKind::File);
-        assert_eq!(get_tool_path_kind(dir.path()).unwrap(), ToolPathKind::Directory);
+        assert_eq!(
+            get_tool_path_kind(dir.path()).unwrap(),
+            ToolPathKind::Directory
+        );
         assert_eq!(get_tool_path_kind(&missing).unwrap(), ToolPathKind::Missing);
     }
 
@@ -723,7 +778,14 @@ mod tests {
     fn default_ignored_dirs_matches_ts_set() {
         assert_eq!(
             default_ignored_dirs(),
-            &HashSet::from([".git", ".drip", ".local-coding-app", ".solid-state", "dist", "node_modules"])
+            &HashSet::from([
+                ".git",
+                ".drip",
+                ".local-coding-app",
+                ".solid-state",
+                "dist",
+                "node_modules"
+            ])
         );
     }
 
@@ -835,14 +897,23 @@ mod tests {
             "X.rs",
             "x$",
             "z",
-            "Z"
+            "Z",
         ];
         let mut shuffled: Vec<&str> = expected.iter().rev().copied().collect();
         shuffled.sort_by(|a, b| locale_compare(a, b));
         assert_eq!(shuffled, expected);
         for pair in expected.windows(2) {
-            assert_eq!(locale_compare(pair[0], pair[1]), std::cmp::Ordering::Less, "{:?} < {:?}", pair[0], pair[1]);
-            assert_eq!(locale_compare(pair[1], pair[0]), std::cmp::Ordering::Greater);
+            assert_eq!(
+                locale_compare(pair[0], pair[1]),
+                std::cmp::Ordering::Less,
+                "{:?} < {:?}",
+                pair[0],
+                pair[1]
+            );
+            assert_eq!(
+                locale_compare(pair[1], pair[0]),
+                std::cmp::Ordering::Greater
+            );
         }
         assert_eq!(locale_compare("same", "same"), std::cmp::Ordering::Equal);
     }

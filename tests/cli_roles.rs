@@ -8,16 +8,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use drip::cli::marketplaces::MarketplaceRoleEntry;
-use drip::cli::roles::{load_skill_content as load_roles_skill_content, RoleDefinition};
-use drip::cli::skills::{
-    load_skill_content as load_cli_skill_content, CliSkill, SkillSource,
-};
 use drip::cli::roles::{
-    builtin_role_preset, load_roles_from_file, resolve_role_setup,
-    resolve_roles_flag, ResolveRoleSetupArgs,
-    PRESET_FAST_PROFILE_ID, PRESET_REVIEW_PROFILE_ID, ROLE_BINDINGS_SETTING_ID,
-    ROLE_PROFILES_SETTING_ID,
+    builtin_role_preset, load_roles_from_file, resolve_role_setup, resolve_roles_flag,
+    ResolveRoleSetupArgs, PRESET_FAST_PROFILE_ID, PRESET_REVIEW_PROFILE_ID,
+    ROLE_BINDINGS_SETTING_ID, ROLE_PROFILES_SETTING_ID,
 };
+use drip::cli::roles::{load_skill_content as load_roles_skill_content, RoleDefinition};
+use drip::cli::skills::{load_skill_content as load_cli_skill_content, CliSkill, SkillSource};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,7 +29,7 @@ fn make_temp_root(prefix: &str) -> PathBuf {
 fn default_config() -> CliConfig {
     CliConfig {
         status_line: None,
-    hooks: drip::harness::hooks::HooksConfig::default(),
+        hooks: drip::harness::hooks::HooksConfig::default(),
         path: None,
         settings: indexmap::IndexMap::new(),
         mcp_servers: std::collections::BTreeMap::new(),
@@ -83,12 +80,24 @@ fn planned_preset_strong_architect_plans_fast_author_executes() {
     let architect = setup.roles.iter().find(|r| r.name == "architect").unwrap();
     let author = setup.roles.iter().find(|r| r.name == "author").unwrap();
     assert_eq!(architect.model.as_deref(), Some(PRESET_REVIEW_PROFILE_ID));
-    assert!(!architect.tools.as_ref().unwrap().contains(&"PATCH".to_string()));
-    assert!(architect.prompt.as_deref().unwrap().contains("exact\n  verification command"));
+    assert!(!architect
+        .tools
+        .as_ref()
+        .unwrap()
+        .contains(&"PATCH".to_string()));
+    assert!(architect
+        .prompt
+        .as_deref()
+        .unwrap()
+        .contains("exact\n  verification command"));
     assert_eq!(author.model.as_deref(), Some(PRESET_FAST_PROFILE_ID));
     assert!(author.tools.is_none());
     assert!(author.verified_by.is_none());
-    assert!(author.prompt.as_deref().unwrap().contains("finish_task blocked instead of improvising"));
+    assert!(author
+        .prompt
+        .as_deref()
+        .unwrap()
+        .contains("finish_task blocked instead of improvising"));
 }
 
 #[test]
@@ -97,7 +106,11 @@ fn every_preset_planning_role_is_denied_patch() {
         let setup = builtin_role_preset(preset_name).unwrap();
         let bindings = setup.bindings.as_ref().unwrap();
         let planning_name = bindings.planning.as_ref().unwrap();
-        let planning = setup.roles.iter().find(|r| &r.name == planning_name).unwrap();
+        let planning = setup
+            .roles
+            .iter()
+            .find(|r| &r.name == planning_name)
+            .unwrap();
         let tools = planning.tools.as_ref().unwrap();
         assert!(
             !tools.contains(&"PATCH".to_string()),
@@ -287,7 +300,14 @@ fn load_roles_from_file_reads_the_replanning_binding() {
     assert_eq!(bindings.planning.as_deref(), Some("architect"));
     assert_eq!(bindings.replanning, None);
     assert_eq!(bindings.task.as_deref(), Some("author"));
-    assert!(setup.issues.iter().any(|issue| issue.contains("replanning is bound to unknown role \"ghost\"")), "{:?}", setup.issues);
+    assert!(
+        setup
+            .issues
+            .iter()
+            .any(|issue| issue.contains("replanning is bound to unknown role \"ghost\"")),
+        "{:?}",
+        setup.issues
+    );
 
     // A valid config-level replanning binding survives the merge.
     config.settings.insert(
@@ -309,7 +329,10 @@ fn load_roles_from_file_reads_the_replanning_binding() {
         tool_names: vec![],
         mcp_server_names: vec![],
     });
-    assert_eq!(setup.bindings.as_ref().unwrap().replanning.as_deref(), Some("scout"));
+    assert_eq!(
+        setup.bindings.as_ref().unwrap().replanning.as_deref(),
+        Some("scout")
+    );
     assert!(setup.issues.is_empty(), "{:?}", setup.issues);
 }
 
@@ -360,7 +383,10 @@ fn resolve_roles_flag_names_builtin_presets_when_preset_shaped_value_is_not_one(
     let err = resolve_roles_flag("reviewd").unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("not a built-in preset") && msg.contains("reviewed") && msg.contains("research") && msg.contains("team"),
+        msg.contains("not a built-in preset")
+            && msg.contains("reviewed")
+            && msg.contains("research")
+            && msg.contains("team"),
         "unexpected error: {msg}"
     );
 }
@@ -423,13 +449,19 @@ fn resolve_role_setup_reports_and_disarms_dangling_references() {
     // ghost is not a defined role → verifiedBy cleared
     assert!(worker.verified_by.is_none());
     // NO_SUCH_TOOL filtered out; READ kept
-    assert_eq!(worker.tool_names.as_deref(), Some(&["READ".to_string()][..]));
+    assert_eq!(
+        worker.tool_names.as_deref(),
+        Some(&["READ".to_string()][..])
+    );
     // Model could not resolve → route is None
     assert!(worker.route.is_none());
     // nobody binding → cleared
     assert!(setup.bindings.is_none());
     // Issues mention the problems
-    assert!(setup.issues.iter().any(|i| i.contains("unknown skill") && i.contains("missing-skill")));
+    assert!(setup
+        .issues
+        .iter()
+        .any(|i| i.contains("unknown skill") && i.contains("missing-skill")));
 }
 
 #[test]
@@ -530,7 +562,10 @@ fn resolve_role_setup_project_roles_json_override_config_roles_and_bindings() {
         reviewer.system_prompt_suffix.as_deref(),
         Some("Project reviewer.")
     );
-    assert_eq!(reviewer.tool_names.as_deref(), Some(&["READ".to_string()][..]));
+    assert_eq!(
+        reviewer.tool_names.as_deref(),
+        Some(&["READ".to_string()][..])
+    );
     // Empty tools array = harness ops only
     assert_eq!(planner.tool_names.as_deref(), Some(&[][..]));
     // Marketplace-only roles still land
@@ -583,7 +618,11 @@ fn resolve_role_setup_bad_json_in_settings_produces_issues() {
 #[test]
 fn roles_flag_parses_preset_name() {
     use drip::cli::args::parse_cli_args;
-    let parsed = parse_cli_args(&["--roles".to_string(), "reviewed".to_string(), "goal".to_string()]);
+    let parsed = parse_cli_args(&[
+        "--roles".to_string(),
+        "reviewed".to_string(),
+        "goal".to_string(),
+    ]);
     assert!(parsed.errors.is_empty());
     assert_eq!(parsed.roles_preset_or_path.as_deref(), Some("reviewed"));
 }
@@ -666,7 +705,10 @@ fn resolve_role_setup_extra_roles_override_config_roles() {
         reviewer.system_prompt_suffix.as_deref(),
         Some("Flag reviewer.")
     );
-    assert_eq!(reviewer.tool_names.as_deref(), Some(&["READ".to_string()][..]));
+    assert_eq!(
+        reviewer.tool_names.as_deref(),
+        Some(&["READ".to_string()][..])
+    );
     // Config roles the flag does not mention still resolve
     let planner = setup.roles.iter().find(|r| r.name == "planner").unwrap();
     assert_eq!(
@@ -711,7 +753,6 @@ fn resolve_role_setup_extra_bindings_override_config_bindings() {
     assert_eq!(bindings.task.as_deref(), Some("author"));
 }
 
-
 // ---------------------------------------------------------------------------
 // Skill role hints: role-embedded composition + cross-loader parity
 // ---------------------------------------------------------------------------
@@ -739,7 +780,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
         env: None,
         extra_roles: Some(vec![RoleDefinition {
             blind: false,
-        mcp_servers: None,
+            mcp_servers: None,
             description: None,
             r#loop: None,
             model: None,
@@ -748,7 +789,7 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
             skills: Some(vec![skill.name.clone()]),
             tools: None,
             verified_by: None,
-        reasoning_effort: None,
+            reasoning_effort: None,
         }]),
         extra_bindings: None,
         marketplace_roles: None,
@@ -756,8 +797,16 @@ fn reviewer_setup(skill: CliSkill) -> drip::harness::roles::HarnessRoleRuntime {
         tool_names: vec![],
         mcp_server_names: vec![],
     });
-    assert!(setup.issues.is_empty(), "unexpected issues: {:?}", setup.issues);
-    setup.roles.into_iter().find(|r| r.name == "reviewer").unwrap()
+    assert!(
+        setup.issues.is_empty(),
+        "unexpected issues: {:?}",
+        setup.issues
+    );
+    setup
+        .roles
+        .into_iter()
+        .find(|r| r.name == "reviewer")
+        .unwrap()
 }
 
 #[test]
@@ -770,7 +819,10 @@ fn role_embedded_skill_with_hints_gets_advisory_guidance_section() {
     );
 
     let reviewer = reviewer_setup(skill);
-    let suffix = reviewer.system_prompt_suffix.as_deref().expect("suffix composed");
+    let suffix = reviewer
+        .system_prompt_suffix
+        .as_deref()
+        .expect("suffix composed");
     // Role-embedded skills go through the shared composer: skill section AND
     // the advisory hints block the README promises.
     assert!(suffix.contains("# Skill: hinted"));
@@ -789,7 +841,10 @@ fn role_embedded_skill_without_hints_keeps_legacy_layout() {
     );
 
     let reviewer = reviewer_setup(skill);
-    let suffix = reviewer.system_prompt_suffix.as_deref().expect("suffix composed");
+    let suffix = reviewer
+        .system_prompt_suffix
+        .as_deref()
+        .expect("suffix composed");
     assert!(suffix.contains("# Skill: plain-skill"));
     assert!(suffix.contains("Just the body."));
     // No hints declared -> no advisory section, legacy prompt layout intact.

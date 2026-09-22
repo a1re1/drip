@@ -50,8 +50,14 @@ fn sha256_hex(text: &str) -> String {
 /// tool names that server exposes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
-    Tool { name: String, description: String },
-    McpServer { name: String, tool_names: Vec<String> },
+    Tool {
+        name: String,
+        description: String,
+    },
+    McpServer {
+        name: String,
+        tool_names: Vec<String>,
+    },
 }
 
 impl Capability {
@@ -105,20 +111,28 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|error| {
-                format!("skill requirements: could not create {}: {error}", parent.display())
+                format!(
+                    "skill requirements: could not create {}: {error}",
+                    parent.display()
+                )
             })?;
         }
     }
 
-    let conn = Connection::open(path)
-        .map_err(|error| format!("skill requirements: could not open {}: {error}", path.display()))?;
+    let conn = Connection::open(path).map_err(|error| {
+        format!(
+            "skill requirements: could not open {}: {error}",
+            path.display()
+        )
+    })?;
 
     conn.execute_batch("PRAGMA journal_mode = WAL;")
         .map_err(|error| format!("skill requirements: could not enable WAL: {error}"))?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")
         .map_err(|error| format!("skill requirements: could not set the busy timeout: {error}"))?;
-    conn.execute_batch(CREATE_TABLE)
-        .map_err(|error| format!("skill requirements: could not create the cache table: {error}"))?;
+    conn.execute_batch(CREATE_TABLE).map_err(|error| {
+        format!("skill requirements: could not create the cache table: {error}")
+    })?;
 
     Ok(conn)
 }
@@ -158,7 +172,9 @@ fn cached_required(
     current: &BTreeMap<String, String>,
 ) -> Result<BTreeSet<String>, String> {
     let mut statement = conn
-        .prepare("SELECT capability_hash, probability FROM skill_capabilities WHERE skill_hash = ?1")
+        .prepare(
+            "SELECT capability_hash, probability FROM skill_capabilities WHERE skill_hash = ?1",
+        )
         .map_err(|error| format!("skill requirements: could not read the cache: {error}"))?;
     let rows = statement
         .query_map(params![skill_hash], |row| {
@@ -309,7 +325,12 @@ pub async fn ensure_requirements(
     // Current capabilities, hashed once: the cache is keyed by descriptor hash.
     let cap_entries: Vec<(Capability, String)> = capabilities
         .iter()
-        .map(|capability| (capability.clone(), capability_hash(&capability.descriptor())))
+        .map(|capability| {
+            (
+                capability.clone(),
+                capability_hash(&capability.descriptor()),
+            )
+        })
         .collect();
     let current: BTreeMap<String, String> = cap_entries
         .iter()
@@ -325,7 +346,10 @@ pub async fn ensure_requirements(
                 if declared.is_none() {
                     results.insert(
                         skill.name.clone(),
-                        SkillRequirements { required: BTreeSet::new(), known: false },
+                        SkillRequirements {
+                            required: BTreeSet::new(),
+                            known: false,
+                        },
                     );
                 }
             }
@@ -341,12 +365,22 @@ pub async fn ensure_requirements(
             let mut required: BTreeSet<String> = BTreeSet::new();
             required.extend(declared.tools.iter().cloned());
             required.extend(declared.mcp_servers.iter().cloned());
-            results.insert(skill.name.clone(), SkillRequirements { required, known: true });
+            results.insert(
+                skill.name.clone(),
+                SkillRequirements {
+                    required,
+                    known: true,
+                },
+            );
             continue;
         }
 
         let hash = skill_body_hash(markdown);
-        let cached = match cached_hashes(&conn, &hash, cap_entries.iter().map(|(_, hash)| hash.as_str())) {
+        let cached = match cached_hashes(
+            &conn,
+            &hash,
+            cap_entries.iter().map(|(_, hash)| hash.as_str()),
+        ) {
             Ok(cached) => cached,
             Err(error) => {
                 warnings.push(error);
@@ -368,10 +402,12 @@ pub async fn ensure_requirements(
         });
     }
 
-    let mut answers: BTreeMap<usize, Result<Vec<(String, String, String, f64)>, String>> = BTreeMap::new();
+    let mut answers: BTreeMap<usize, Result<Vec<(String, String, String, f64)>, String>> =
+        BTreeMap::new();
 
     if pending.iter().any(|entry| !entry.missing.is_empty()) {
-        let mut set: JoinSet<(usize, Result<Vec<(String, String, String, f64)>, String>)> = JoinSet::new();
+        let mut set: JoinSet<(usize, Result<Vec<(String, String, String, f64)>, String>)> =
+            JoinSet::new();
 
         for entry in pending.iter().filter(|entry| !entry.missing.is_empty()) {
             let route = route.clone();
@@ -383,14 +419,16 @@ pub async fn ensure_requirements(
 
         let bound = Duration::from_millis(route.timeout_ms.max(1));
         let collected = tokio::time::timeout(bound, async move {
-            let mut collected: Vec<(usize, Result<Vec<(String, String, String, f64)>, String>)> = Vec::new();
+            let mut collected: Vec<(usize, Result<Vec<(String, String, String, f64)>, String>)> =
+                Vec::new();
 
             while let Some(joined) = set.join_next().await {
                 match joined {
                     Ok(entry) => collected.push(entry),
-                    Err(error) => {
-                        collected.push((usize::MAX, Err(format!("requirements task failed: {error}"))))
-                    }
+                    Err(error) => collected.push((
+                        usize::MAX,
+                        Err(format!("requirements task failed: {error}")),
+                    )),
                 }
             }
 
@@ -431,7 +469,10 @@ pub async fn ensure_requirements(
                 ));
                 results.insert(
                     entry.name.clone(),
-                    SkillRequirements { required: BTreeSet::new(), known: false },
+                    SkillRequirements {
+                        required: BTreeSet::new(),
+                        known: false,
+                    },
                 );
                 continue;
             }
@@ -443,7 +484,10 @@ pub async fn ensure_requirements(
                 ));
                 results.insert(
                     entry.name.clone(),
-                    SkillRequirements { required: BTreeSet::new(), known: false },
+                    SkillRequirements {
+                        required: BTreeSet::new(),
+                        known: false,
+                    },
                 );
                 continue;
             }
@@ -463,7 +507,13 @@ pub async fn ensure_requirements(
             }
         }
 
-        results.insert(entry.name.clone(), SkillRequirements { required, known: true });
+        results.insert(
+            entry.name.clone(),
+            SkillRequirements {
+                required,
+                known: true,
+            },
+        );
     }
 
     (results, warnings)
@@ -485,7 +535,10 @@ mod tests {
     }
 
     fn tool(name: &str, description: &str) -> Capability {
-        Capability::Tool { name: name.to_string(), description: description.to_string() }
+        Capability::Tool {
+            name: name.to_string(),
+            description: description.to_string(),
+        }
     }
 
     fn mcp(name: &str, tools: &[&str]) -> Capability {
@@ -556,7 +609,10 @@ mod tests {
             .iter()
             .map(|(id, value)| format!("\"{id}\":{{\"type\":\"noul\",\"noul\":{value}}}"))
             .collect();
-        format!("{{\"model\":\"jev-test\",\"answers\":{{{}}}}}", answers.join(","))
+        format!(
+            "{{\"model\":\"jev-test\",\"answers\":{{{}}}}}",
+            answers.join(",")
+        )
     }
 
     fn temp_db() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -578,7 +634,10 @@ mod tests {
             "mcp:files\na\nb",
             "MCP descriptors sort and dedupe their tool names"
         );
-        assert_eq!(tool("BASH", "run commands").descriptor(), "tool:BASH\nrun commands");
+        assert_eq!(
+            tool("BASH", "run commands").descriptor(),
+            "tool:BASH\nrun commands"
+        );
         assert_eq!(tool("BASH", "run commands").key_name(), "BASH");
         assert_eq!(mcp("files", &["read"]).key_name(), "files");
     }
@@ -594,8 +653,7 @@ mod tests {
         let route = hand_route(&base, 10_000);
         let skills = vec![(skill("migrate"), markdown.to_string(), None)];
 
-        let (first, warnings) =
-            ensure_requirements(&db, &route, &skills, &capabilities).await;
+        let (first, warnings) = ensure_requirements(&db, &route, &skills, &capabilities).await;
 
         assert!(warnings.is_empty(), "{warnings:?}");
         let requirements = first.get("migrate").unwrap();
@@ -605,8 +663,7 @@ mod tests {
         assert_eq!(requirements.required.len(), 1);
 
         // Same body: every pair is cached, so the second pass asks nothing.
-        let (second, warnings) =
-            ensure_requirements(&db, &route, &skills, &capabilities).await;
+        let (second, warnings) = ensure_requirements(&db, &route, &skills, &capabilities).await;
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(second.get("migrate"), first.get("migrate"));
 
@@ -675,9 +732,13 @@ mod tests {
 
         // The run no longer has any capability: the cached row must not come
         // back as a requirement, and nothing needs asking.
-        let (second, warnings) =
-            ensure_requirements(&db, &route, &[(skill("migrate"), "body".to_string(), None)], &[])
-                .await;
+        let (second, warnings) = ensure_requirements(
+            &db,
+            &route,
+            &[(skill("migrate"), "body".to_string(), None)],
+            &[],
+        )
+        .await;
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(second.get("migrate").unwrap().required.is_empty());
         assert!(second.get("migrate").unwrap().known);
@@ -709,7 +770,11 @@ mod tests {
             entry.required.iter().cloned().collect::<Vec<_>>(),
             vec!["BASH".to_string(), "PATCH".to_string(), "files".to_string()]
         );
-        assert_eq!(server.join().unwrap().len(), 0, "no classifier call for declared requirements");
+        assert_eq!(
+            server.join().unwrap().len(),
+            0,
+            "no classifier call for declared requirements"
+        );
 
         // Nothing was cached either: the same skill asked without the
         // declaration (and with no capabilities in this run) still resolves
@@ -742,7 +807,10 @@ mod tests {
         .await;
 
         let entry = requirements.get("migrate").unwrap();
-        assert!(!entry.known, "an unanswerable pass must be treated as satisfiable");
+        assert!(
+            !entry.known,
+            "an unanswerable pass must be treated as satisfiable"
+        );
         assert!(entry.required.is_empty());
         assert!(
             warnings.iter().any(|warning| warning.contains("migrate")),
@@ -768,7 +836,11 @@ mod tests {
         .await;
 
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(requirements.get("files-skill").unwrap().required.contains("files"));
+        assert!(requirements
+            .get("files-skill")
+            .unwrap()
+            .required
+            .contains("files"));
 
         let sent: Value = serde_json::from_str(&server.join().unwrap()[0]).unwrap();
         assert_eq!(

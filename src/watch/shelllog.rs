@@ -238,7 +238,11 @@ pub fn seed_shell_log(files: &[String], max_bytes: u64) -> ShellSeed {
             Ok(s) => s,
             Err(_) => continue, // unreadable — skip this file entirely
         };
-        let start = if size > max_bytes { size - max_bytes } else { 0 };
+        let start = if size > max_bytes {
+            size - max_bytes
+        } else {
+            0
+        };
         let len = size - start;
         let follower = if len > 0 {
             let mut buf = vec![0u8; len as usize];
@@ -250,8 +254,7 @@ pub fn seed_shell_log(files: &[String], max_bytes: u64) -> ShellSeed {
                     // follower will read whole later.
                     match rfind_byte(&buf, 0x0a) {
                         Some(last_nl) => {
-                            let text =
-                                String::from_utf8_lossy(&buf[..last_nl]).into_owned();
+                            let text = String::from_utf8_lossy(&buf[..last_nl]).into_owned();
                             let mut parts: Vec<String> =
                                 text.split('\n').map(|s| s.to_string()).collect();
                             // Note: unlike JS, Rust's split never yields a
@@ -371,18 +374,21 @@ a 1 u 2w REG 1,17 2 22 /tmp/b
         assert_eq!(f.poll(), Vec::<String>::new()); // no new data
 
         // A partial line is withheld until its newline arrives.
-        let mut app = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut app = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         app.write_all(b"thr").unwrap();
         drop(app);
         assert_eq!(f.poll(), Vec::<String>::new());
 
-        app = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        app = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         app.write_all(b"ee\nfour\n").unwrap();
         drop(app);
-        assert_eq!(
-            f.poll(),
-            vec!["three".to_string(), "four".to_string()]
-        );
+        assert_eq!(f.poll(), vec!["three".to_string(), "four".to_string()]);
         assert_eq!(f.poll(), Vec::<String>::new());
     }
 
@@ -418,7 +424,10 @@ a 1 u 2w REG 1,17 2 22 /tmp/b
         // The in-progress "thr" is still in the file, not yet reported.
         let mut f = seed.followers.into_iter().next().unwrap();
         assert_eq!(f.poll(), Vec::<String>::new());
-        let mut app = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut app = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         app.write_all(b"ee\n").unwrap();
         drop(app);
         assert_eq!(f.poll(), vec!["three".to_string()]);
@@ -434,7 +443,10 @@ a 1 u 2w REG 1,17 2 22 /tmp/b
         let seed = seed_shell_log(&[path.clone()], 16);
         assert!(seed.lines.is_empty());
         let mut f = seed.followers.into_iter().next().unwrap();
-        let mut app = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut app = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         app.write_all(b" done\n").unwrap();
         drop(app);
         assert_eq!(f.poll(), vec!["partial line done".to_string()]);

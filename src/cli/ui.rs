@@ -65,7 +65,9 @@ pub fn unpack_ui(home_root: &Path) -> std::io::Result<(PathBuf, usize)> {
     let mut written = 0;
     for (relative, content) in UI_FILES {
         let target = dir.join(relative);
-        let unchanged = std::fs::read_to_string(&target).map(|current| current == *content).unwrap_or(false);
+        let unchanged = std::fs::read_to_string(&target)
+            .map(|current| current == *content)
+            .unwrap_or(false);
         if unchanged {
             continue;
         }
@@ -91,10 +93,16 @@ pub struct UiLaunch {
 /// The env contract with `web/server.ts` (see `dripConfig` there).
 pub fn ui_child_env(launch: &UiLaunch) -> Vec<(String, String)> {
     let mut env = vec![
-        ("DRIP_BIN".to_string(), launch.drip_bin.to_string_lossy().into_owned()),
+        (
+            "DRIP_BIN".to_string(),
+            launch.drip_bin.to_string_lossy().into_owned(),
+        ),
         ("DRIP_CWD".to_string(), launch.cwd.clone()),
         ("DRIP_HOME".to_string(), launch.home_root.clone()),
-        ("DRIP_UI_VERSION".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+        (
+            "DRIP_UI_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
     ];
     if let Some(port) = launch.port {
         env.push(("DRIP_UI_PORT".to_string(), port.to_string()));
@@ -133,7 +141,9 @@ impl Drop for PrepareLock {
 }
 
 pub fn prepare_lock_path(home_root: &Path) -> PathBuf {
-    home_root.join("ui").join(format!("{}.lock", env!("CARGO_PKG_VERSION")))
+    home_root
+        .join("ui")
+        .join(format!("{}.lock", env!("CARGO_PKG_VERSION")))
 }
 
 pub fn acquire_prepare_lock(home_root: &Path) -> std::io::Result<PrepareLock> {
@@ -152,7 +162,11 @@ fn acquire_prepare_lock_with(
     }
     let started = std::time::Instant::now();
     loop {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 let _ = writeln!(file, "{}", std::process::id());
                 return Ok(PrepareLock(path));
@@ -178,7 +192,11 @@ fn acquire_prepare_lock_with(
                 if started.elapsed() >= wait {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        format!("another drip --ui is still preparing {} (lock {})", home_root.display(), path.display()),
+                        format!(
+                            "another drip --ui is still preparing {} (lock {})",
+                            home_root.display(),
+                            path.display()
+                        ),
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -206,12 +224,19 @@ fn pid_alive(_pid: u32) -> bool {
 /// First `bun` on PATH, if any.
 pub fn find_bun() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join("bun")).find(|candidate| candidate.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("bun"))
+        .find(|candidate| candidate.is_file())
 }
 
 /// The `--ui` mode: unpack, install once, print the URL, and run bun until it
 /// exits or the operator presses Ctrl-C.
-pub async fn run_ui(cwd: &str, home_root: &str, settings: &IndexMap<String, String>, port: Option<u16>) -> i32 {
+pub async fn run_ui(
+    cwd: &str,
+    home_root: &str,
+    settings: &IndexMap<String, String>,
+    port: Option<u16>,
+) -> i32 {
     let Some(bun) = find_bun() else {
         eprintln!("drip --ui needs bun on PATH — install from https://bun.sh");
         return 1;
@@ -238,7 +263,11 @@ pub async fn run_ui(cwd: &str, home_root: &str, settings: &IndexMap<String, Stri
     let marker = install_marker(&dir);
     if !marker.is_file() {
         eprintln!("drip ui: installing web dependencies (first run for this version)…");
-        match std::process::Command::new(&bun).arg("install").current_dir(&dir).status() {
+        match std::process::Command::new(&bun)
+            .arg("install")
+            .current_dir(&dir)
+            .status()
+        {
             Ok(status) if status.success() => {
                 if let Err(error) = std::fs::write(&marker, env!("CARGO_PKG_VERSION")) {
                     eprintln!("drip ui: could not record the install: {error}");
@@ -262,7 +291,9 @@ pub async fn run_ui(cwd: &str, home_root: &str, settings: &IndexMap<String, Stri
         home_root: home_root.to_string(),
         port,
         drip_bin: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("drip")),
-        max_context_tokens: match crate::core::inference::resolve_active_profile_max_context_tokens(settings) {
+        max_context_tokens: match crate::core::inference::resolve_active_profile_max_context_tokens(
+            settings,
+        ) {
             Ok(max) => Some(max),
             Err(error) => {
                 eprintln!("drip ui: context bar disabled — active profile has no usable max_context_tokens: {error}");
@@ -274,7 +305,10 @@ pub async fn run_ui(cwd: &str, home_root: &str, settings: &IndexMap<String, Stri
     // Run the server file directly rather than `bun run dev`: the script
     // runner is a separate process, so a signal aimed at our child would
     // stop the wrapper and orphan the server that holds the port.
-    command.arg("server.ts").current_dir(&dir).envs(ui_child_env(&launch));
+    command
+        .arg("server.ts")
+        .current_dir(&dir)
+        .envs(ui_child_env(&launch));
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -321,7 +355,8 @@ mod tests {
             .into_iter()
             .filter_entry(|entry| {
                 let name = entry.file_name().to_string_lossy();
-                !(entry.file_type().is_dir() && (name == "node_modules" || name == "dist")) && name != ".DS_Store"
+                !(entry.file_type().is_dir() && (name == "node_modules" || name == "dist"))
+                    && name != ".DS_Store"
             })
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
@@ -344,9 +379,14 @@ mod tests {
     // from the unpacked app at runtime.
     #[test]
     fn every_web_file_is_embedded() {
-        let mut registered: Vec<String> = UI_FILES.iter().map(|(path, _)| path.to_string()).collect();
+        let mut registered: Vec<String> =
+            UI_FILES.iter().map(|(path, _)| path.to_string()).collect();
         registered.sort();
-        assert_eq!(shipped_web_files(), registered, "web/ and UI_FILES disagree");
+        assert_eq!(
+            shipped_web_files(),
+            registered,
+            "web/ and UI_FILES disagree"
+        );
     }
 
     #[test]
@@ -356,7 +396,11 @@ mod tests {
         assert_eq!(first, UI_FILES.len());
         assert!(dir.starts_with(temp.path().join("ui")));
         for (relative, content) in UI_FILES {
-            assert_eq!(std::fs::read_to_string(dir.join(relative)).unwrap(), *content, "{relative}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join(relative)).unwrap(),
+                *content,
+                "{relative}"
+            );
         }
 
         let (_, second) = unpack_ui(temp.path()).unwrap();
@@ -388,8 +432,14 @@ mod tests {
 
         // No --port and no usable profile: the server picks the port itself
         // and the context bar stays off — neither key is sent at all.
-        let without = ui_child_env(&UiLaunch { port: None, max_context_tokens: None, ..launch });
-        assert!(without.iter().all(|(k, _)| k != "DRIP_MAX_CONTEXT_TOKENS" && k != "DRIP_UI_PORT"));
+        let without = ui_child_env(&UiLaunch {
+            port: None,
+            max_context_tokens: None,
+            ..launch
+        });
+        assert!(without
+            .iter()
+            .all(|(k, _)| k != "DRIP_MAX_CONTEXT_TOKENS" && k != "DRIP_UI_PORT"));
         assert_eq!(without.len(), 4);
     }
 
@@ -401,16 +451,31 @@ mod tests {
         // A pid no live process can have (beyond the platform's pid_max).
         std::fs::write(&path, "4194304999\n").unwrap();
         let started = std::time::Instant::now();
-        let lock = acquire_prepare_lock_with(temp.path(), std::time::Duration::from_secs(5), std::time::Duration::from_secs(3600)).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(2), "dead holder should be reclaimed immediately");
-        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), std::process::id().to_string());
+        let lock = acquire_prepare_lock_with(
+            temp.path(),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "dead holder should be reclaimed immediately"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            std::process::id().to_string()
+        );
         drop(lock);
         assert!(!path.exists());
         // Our own pid is alive: the lock is honoured and the wait times out.
         std::fs::write(&path, format!("{}\n", std::process::id())).unwrap();
-        let kind = acquire_prepare_lock_with(temp.path(), std::time::Duration::from_millis(50), std::time::Duration::from_secs(3600))
-            .err()
-            .map(|error| error.kind());
+        let kind = acquire_prepare_lock_with(
+            temp.path(),
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(3600),
+        )
+        .err()
+        .map(|error| error.kind());
         assert_eq!(kind, Some(std::io::ErrorKind::TimedOut));
     }
 
@@ -423,9 +488,15 @@ mod tests {
         assert!(prepare_lock_path(temp.path()).is_file());
         // A second launch waits, then gives up after `wait`.
         let contended = acquire_prepare_lock_with(temp.path(), short, never_stale);
-        assert_eq!(contended.err().map(|e| e.kind()), Some(std::io::ErrorKind::TimedOut));
+        assert_eq!(
+            contended.err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::TimedOut)
+        );
         drop(lock);
-        assert!(!prepare_lock_path(temp.path()).exists(), "lock must go away with its holder");
+        assert!(
+            !prepare_lock_path(temp.path()).exists(),
+            "lock must go away with its holder"
+        );
 
         // A lock left by a launch that died is reclaimed once it is older than `stale`.
         std::fs::write(prepare_lock_path(temp.path()), "999999\n").unwrap();
@@ -436,6 +507,9 @@ mod tests {
     #[test]
     fn install_marker_lives_inside_node_modules() {
         let dir = PathBuf::from("/x/ui/1.0.0");
-        assert_eq!(install_marker(&dir), dir.join("node_modules").join(".drip-installed"));
+        assert_eq!(
+            install_marker(&dir),
+            dir.join("node_modules").join(".drip-installed")
+        );
     }
 }

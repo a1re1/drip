@@ -7,14 +7,12 @@
 //! token accounting, or harness tools.
 
 use crate::core::config::{
-    baseline_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID,
-    ACTIVE_TOOL_PROFILE_SETTING_ID,
+    baseline_setting_values, ACTIVE_INFERENCE_PROFILE_SETTING_ID, ACTIVE_TOOL_PROFILE_SETTING_ID,
     TERMINAL_TITLE_ENABLED_SETTING_ID, TERMINAL_TITLE_PROFILE_SETTING_ID,
 };
 use crate::core::inference::{resolve_inference_config, EnvSource};
 use crate::harness::model_call::{
-    create_model_caller, ModelCallOptions, ModelCallerDeps, ModelRoute,
-    OpenAICompatibleResponse,
+    create_model_caller, ModelCallOptions, ModelCallerDeps, ModelRoute, OpenAICompatibleResponse,
 };
 use crate::harness::transport::{TransportContent, TransportRequestMessage};
 use crate::tui::pane_title::{bound_words, sanitize};
@@ -90,7 +88,6 @@ pub fn terminal_title_profile_id(settings: &indexmap::IndexMap<String, String>) 
                 .unwrap_or_default()
         })
 }
-
 
 /// The configured wall-clock cap for the one-shot title request, in
 /// milliseconds; non-numeric or sub-millisecond values fall back to the
@@ -172,11 +169,7 @@ pub async fn generate_session_title(
 /// Every failure (offline restriction, timeout, malformed or empty reply) is
 /// `None` so the caller keeps the fallback; this never fails the chat and
 /// never invokes harness tools.
-pub async fn generate_chat_title(
-    route: ModelRoute,
-    goal: &str,
-    timeout_ms: u64,
-) -> Option<String> {
+pub async fn generate_chat_title(route: ModelRoute, goal: &str, timeout_ms: u64) -> Option<String> {
     let timeout_ms = timeout_ms.max(1);
     let caller = create_model_caller(ModelCallerDeps {
         codex_executable: None,
@@ -275,8 +268,7 @@ mod tests {
     fn extract_title_rejects_empty_malformed_and_fallback_replies() {
         assert!(extract_title(&response_with_content("   ")).is_none());
         assert!(extract_title(&response_with_content("drip")).is_none());
-        let missing: OpenAICompatibleResponse =
-            serde_json::from_str(r#"{"choices":[]}"#).unwrap();
+        let missing: OpenAICompatibleResponse = serde_json::from_str(r#"{"choices":[]}"#).unwrap();
         assert!(extract_title(&missing).is_none());
         let broken: OpenAICompatibleResponse =
             serde_json::from_str(r#"{"choices":[{"message":{"content":123}}]}"#).unwrap();
@@ -287,12 +279,16 @@ mod tests {
     fn default_settings_ship_terminal_title_values() {
         let defaults = default_setting_values();
         assert_eq!(
-            defaults.get(TERMINAL_TITLE_ENABLED_SETTING_ID).map(String::as_str),
+            defaults
+                .get(TERMINAL_TITLE_ENABLED_SETTING_ID)
+                .map(String::as_str),
             Some("true")
         );
         // The shipped default profile is the fast preset.
         assert_eq!(
-            defaults.get(TERMINAL_TITLE_PROFILE_SETTING_ID).map(String::as_str),
+            defaults
+                .get(TERMINAL_TITLE_PROFILE_SETTING_ID)
+                .map(String::as_str),
             Some("glm-5-3-flash")
         );
     }
@@ -300,8 +296,14 @@ mod tests {
     #[test]
     fn terminal_title_settings_override_defaults() {
         let mut settings = default_setting_values();
-        settings.insert(TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(), "false".to_string());
-        settings.insert(TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(), "kimi-k3".to_string());
+        settings.insert(
+            TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "kimi-k3".to_string(),
+        );
         assert!(!terminal_title_enabled(&settings));
         assert_eq!(terminal_title_profile_id(&settings), "kimi-k3");
     }
@@ -318,10 +320,16 @@ mod tests {
         let mut settings = default_setting_values();
         let profiles = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:MOCK_KEY"}]"#;
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles.to_string());
-        settings.insert(ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         // Override the title profile onto the mock list (exercises the
         // terminal_title_profile_id override path end to end).
-        settings.insert(TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         let mut env = std::collections::HashMap::new();
         env.insert("MOCK_KEY".to_string(), "k".to_string());
         let route = resolve_title_route(&settings, Some(&env)).expect("route resolves");
@@ -332,7 +340,10 @@ mod tests {
     #[test]
     fn resolve_title_route_is_none_when_disabled() {
         let mut settings = default_setting_values();
-        settings.insert(TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(), "false".to_string());
+        settings.insert(
+            TERMINAL_TITLE_ENABLED_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
         let env = std::collections::HashMap::new();
         assert!(resolve_title_route(&settings, Some(&env)).is_none());
     }
@@ -358,10 +369,16 @@ mod tests {
             r#"[{{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://{addr}/v1/","apiKeyRef":"env:MOCK_KEY"}}]"#
         );
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles);
-        settings.insert(ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         // Override the title profile onto the mock list (exercises the
         // terminal_title_profile_id override path end to end).
-        settings.insert(TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         let mut env = std::collections::HashMap::new();
         env.insert("MOCK_KEY".to_string(), "k".to_string());
         let route = resolve_title_route(&settings, Some(&env)).expect("route resolves");
@@ -381,10 +398,16 @@ mod tests {
             r#"[{{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://{addr}/v1/","apiKeyRef":"env:MOCK_KEY"}}]"#
         );
         settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles);
-        settings.insert(ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         // Override the title profile onto the mock list (exercises the
         // terminal_title_profile_id override path end to end).
-        settings.insert(TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(), "mock".to_string());
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
         let mut env = std::collections::HashMap::new();
         env.insert("MOCK_KEY".to_string(), "k".to_string());
         let route = resolve_title_route(&settings, Some(&env)).expect("route resolves");
@@ -395,7 +418,10 @@ mod tests {
     #[test]
     fn terminal_title_timeout_ms_parses_and_falls_back() {
         let mut settings = default_setting_values();
-        assert_eq!(terminal_title_timeout_ms(&settings), DEFAULT_TITLE_TIMEOUT_MS);
+        assert_eq!(
+            terminal_title_timeout_ms(&settings),
+            DEFAULT_TITLE_TIMEOUT_MS
+        );
         settings.insert(
             crate::core::config::TERMINAL_TITLE_TIMEOUT_MS_SETTING_ID.to_string(),
             "1234".to_string(),
@@ -406,7 +432,10 @@ mod tests {
                 crate::core::config::TERMINAL_TITLE_TIMEOUT_MS_SETTING_ID.to_string(),
                 bad.to_string(),
             );
-            assert_eq!(terminal_title_timeout_ms(&settings), DEFAULT_TITLE_TIMEOUT_MS);
+            assert_eq!(
+                terminal_title_timeout_ms(&settings),
+                DEFAULT_TITLE_TIMEOUT_MS
+            );
         }
     }
 }

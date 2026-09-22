@@ -57,12 +57,20 @@ fn parses_a_manifest_repo_into_plugins_with_skills_and_agents() {
     );
     write_skill(repo, "strict-review", "Review a diff strictly.");
     write_skill(repo, "test-audit", "Audit test coverage.");
-    write_skill(&repo.join("plugins").join("builder"), "scaffold", "Scaffold a module.");
+    write_skill(
+        &repo.join("plugins").join("builder"),
+        "scaffold",
+        "Scaffold a module.",
+    );
     write_reviewer_agent(repo);
 
     let parsed = parse_marketplace_repo(repo, "acme");
 
-    let plugin_keys: Vec<&str> = parsed.plugins.iter().map(|plugin| plugin.key.as_str()).collect();
+    let plugin_keys: Vec<&str> = parsed
+        .plugins
+        .iter()
+        .map(|plugin| plugin.key.as_str())
+        .collect();
 
     assert_eq!(plugin_keys, vec!["acme/reviewer-kit", "acme/builder-kit"]);
 
@@ -75,7 +83,10 @@ fn parses_a_manifest_repo_into_plugins_with_skills_and_agents() {
             .iter()
             .map(|skill| skill.key.as_str())
             .collect::<Vec<_>>(),
-        vec!["acme/reviewer-kit/strict-review", "acme/reviewer-kit/test-audit"]
+        vec![
+            "acme/reviewer-kit/strict-review",
+            "acme/reviewer-kit/test-audit"
+        ]
     );
     assert_eq!(reviewer_kit.roles.len(), 1);
     assert_eq!(
@@ -88,16 +99,19 @@ fn parses_a_manifest_repo_into_plugins_with_skills_and_agents() {
         reviewer_kit.roles[0].tools.as_deref(),
         Some(&["READ".to_string(), "DIR".to_string()][..])
     );
-    assert!(reviewer_kit.roles[0].prompt.contains("Never trust a summary"));
+    assert!(reviewer_kit.roles[0]
+        .prompt
+        .contains("Never trust a summary"));
 
     // The remote-source plugin and the repo-escaping path are refused, loudly.
-    assert!(parsed.issues.iter().any(|issue| issue.contains("remote-kit")));
-    assert!(
-        parsed
-            .issues
-            .iter()
-            .any(|issue| issue.contains("escape-kit") && issue.contains("escapes"))
-    );
+    assert!(parsed
+        .issues
+        .iter()
+        .any(|issue| issue.contains("remote-kit")));
+    assert!(parsed
+        .issues
+        .iter()
+        .any(|issue| issue.contains("escape-kit") && issue.contains("escapes")));
 }
 
 #[test]

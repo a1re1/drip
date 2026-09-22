@@ -3,7 +3,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-
 use crate::cli::follow::{read_inbox_entries, read_inbox_messages};
 use crate::cli::skills::{compose_skill_system_prompt, LoadedCliSkill};
 use crate::core::inference::ResolvedInferenceConfig;
@@ -12,12 +11,16 @@ use crate::core::state::{
     add_tasks, create_harness_state, has_unfinished_tasks, load_harness_state, save_harness_state,
     start_follow_up_goal, HarnessTaskInput, HarnessTaskPlacement,
 };
-use crate::core::types::{HarnessEvent, HarnessEventType, HarnessOperatorMessage, HarnessRunResult, HarnessState};
+use crate::core::types::{
+    HarnessEvent, HarnessEventType, HarnessOperatorMessage, HarnessRunResult, HarnessState,
+};
 use crate::harness::harness_tools::RepoMemoryConfig;
+use crate::harness::hooks::git_publish_pattern;
 use crate::harness::model_call::AbortSignal;
 use crate::harness::prompt::compose_harness_system_prompt;
-use crate::harness::r#loop::{run_solid_state_harness, EmitFn, OperatorInboxEntry, SolidStateHarnessOptions};
-use crate::harness::hooks::git_publish_pattern;
+use crate::harness::r#loop::{
+    run_solid_state_harness, EmitFn, OperatorInboxEntry, SolidStateHarnessOptions,
+};
 use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
@@ -94,11 +97,17 @@ pub struct PreparedGoalState {
 // Mirrors the web server's follow-up semantics: a new goal (or an explicit re-run
 // of a finished one) archives the previous goal's tasks into history, while the
 // same goal with unfinished tasks resumes in place.
-pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> Result<PreparedGoalState, String> {
+pub fn prepare_state_for_goal(
+    state_path: &Path,
+    goal: &str,
+    new_goal: bool,
+) -> Result<PreparedGoalState, String> {
     // A corrupt or foreign state.json is allowed to abort the run here:
     // fail loudly rather than silently replan over it and lose history.
     // state.json aborts the run instead of being replanned over and lost.
-    let Some(mut existing_state) = load_harness_state(state_path).map_err(|error| error.to_string())? else {
+    let Some(mut existing_state) =
+        load_harness_state(state_path).map_err(|error| error.to_string())?
+    else {
         return Ok(PreparedGoalState {
             resumed_unfinished: false,
             state: None,
@@ -118,7 +127,8 @@ pub fn prepare_state_for_goal(state_path: &Path, goal: &str, new_goal: bool) -> 
     // text, so "complete the remaining tasks" silently replanned from scratch
     // (debt audit N6). --new-goal is the explicit archive-and-replan path.
     if has_unfinished_tasks(&existing_state) && !new_goal {
-        let mut messages: Vec<HarnessOperatorMessage> = existing_state.operator_messages.clone().unwrap_or_default();
+        let mut messages: Vec<HarnessOperatorMessage> =
+            existing_state.operator_messages.clone().unwrap_or_default();
         let keep_from = messages.len().saturating_sub(7);
         messages = messages.split_off(keep_from);
         messages.push(HarnessOperatorMessage {
@@ -222,7 +232,8 @@ pub fn load_repo_memory_index(repo_memory: Option<&RepoMemoryConfig>) -> Option<
     }
 
     // Missing index means an empty bank: inject nothing.
-    let index = std::fs::read_to_string(Path::new(&repo_memory.memory_dir).join("MEMORY.md")).ok()?;
+    let index =
+        std::fs::read_to_string(Path::new(&repo_memory.memory_dir).join("MEMORY.md")).ok()?;
 
     if index.trim().is_empty() {
         None
@@ -272,8 +283,10 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         resumed_unfinished,
         state: prepared_state,
     } = prepare_state_for_goal(&args.state_path, &args.goal, args.new_goal)?;
-    let state = prepared_state.or_else(|| seed_initial_state(&args.goal, args.seed_tasks.as_deref()));
-    let persona_with_skills = compose_skill_system_prompt(&args.inference.system_prompt, &args.skills);
+    let state =
+        prepared_state.or_else(|| seed_initial_state(&args.goal, args.seed_tasks.as_deref()));
+    let persona_with_skills =
+        compose_skill_system_prompt(&args.inference.system_prompt, &args.skills);
     let repo_memory_index = load_repo_memory_index(args.repo_memory.as_ref());
     let published_from_workspace = Arc::new(AtomicBool::new(false));
 
@@ -420,8 +433,16 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         lite: args.lite,
         no_review: args.no_review || args.lite,
         system_prompt: Some(compose_harness_system_prompt(Some(&persona_with_skills))),
-        fallback_route: args.inference.fallback_route.as_ref().map(|route| route.to_model_route()),
-        tool_route: args.inference.tool_route.as_ref().map(|route| route.to_model_route()),
+        fallback_route: args
+            .inference
+            .fallback_route
+            .as_ref()
+            .map(|route| route.to_model_route()),
+        tool_route: args
+            .inference
+            .tool_route
+            .as_ref()
+            .map(|route| route.to_model_route()),
         tools: args.tools,
         tool_services: args.tool_services.clone(),
         mcp_servers: args.mcp_servers.clone(),
@@ -462,7 +483,11 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -565,7 +590,15 @@ mod tests {
         run_git(
             root.path(),
             &[
-                "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
             ],
         );
 
@@ -574,8 +607,8 @@ mod tests {
         fs::write(root.path().join("work.txt"), "uncommitted").unwrap();
         run_git(root.path(), &["add", "work.txt"]);
 
-        let baseline =
-            capture_workspace_baseline(root.path(), "session-1").expect("dirty tree should pin a baseline");
+        let baseline = capture_workspace_baseline(root.path(), "session-1")
+            .expect("dirty tree should pin a baseline");
 
         assert!(baseline.note.contains("refs/drip/baseline/session-1"));
 

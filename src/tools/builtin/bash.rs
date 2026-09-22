@@ -9,13 +9,15 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use super::{ToolCompletion, ToolCompletionBlock, ToolCtx, ToolOutcome};
+use crate::tools::child_process::{
+    build_combined_output, run_captured_process, CapturedProcessArgs,
+};
+use crate::tools::command_policy::{
+    allow_destructive_enabled, evaluate_command_policy, format_policy_refusal,
+};
 use crate::tools::helpers::{
     assert_directory_path, format_tool_path, get_optional_number_argument,
     get_required_string_argument, parse_tool_arguments, resolve_tool_path,
-};
-use crate::tools::child_process::{build_combined_output, run_captured_process, CapturedProcessArgs};
-use crate::tools::command_policy::{
-    allow_destructive_enabled, evaluate_command_policy, format_policy_refusal,
 };
 
 pub const DEFAULT_SYNC_TIMEOUT_MS: u64 = 120_000;
@@ -36,10 +38,7 @@ pub struct BashToolResult {
 /// undefined → None; non-strings and whitespace-only strings reject with
 /// the shared "Expected … to be a non-empty string." error; otherwise the
 /// value is trimmed.
-pub fn get_optional_string_argument(
-    args: &BashToolInput,
-    key: &str,
-) -> Result<Option<String>> {
+pub fn get_optional_string_argument(args: &BashToolInput, key: &str) -> Result<Option<String>> {
     let Some(value) = args.get(key) else {
         return Ok(None);
     };
@@ -78,11 +77,7 @@ fn is_search_no_match(command: &str, result: &BashToolResult) -> bool {
 }
 
 /// Builds the model-facing status line for a finished run.
-pub fn build_status_line(
-    command: &str,
-    result: &BashToolResult,
-    timeout_ms: u64,
-) -> String {
+pub fn build_status_line(command: &str, result: &BashToolResult, timeout_ms: u64) -> String {
     if result.timed_out {
         return format!(
             "TIMED OUT after {timeout_ms}ms — the command was killed and output below is incomplete. Narrow the command (e.g. scope find/grep to a subdirectory) or move genuinely long-running work to BASH_ASYNC"
@@ -111,11 +106,7 @@ pub fn build_status_line(
 }
 
 /// Builds the one-line summary sentence for a finished run.
-pub fn build_sync_summary(
-    result: &BashToolResult,
-    display_cwd: &str,
-    timeout_ms: u64,
-) -> String {
+pub fn build_sync_summary(result: &BashToolResult, display_cwd: &str, timeout_ms: u64) -> String {
     if result.timed_out {
         return format!("Command timed out after {timeout_ms}ms in {display_cwd}.");
     }
@@ -233,7 +224,8 @@ pub struct BashToolExecution {
 /// build_combined_output.
 pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution> {
     let absolute_cwd = prepared.absolute_cwd.to_string_lossy().to_string();
-    let result = run_captured_process(&CapturedProcessArgs { stdin_payload: None,
+    let result = run_captured_process(&CapturedProcessArgs {
+        stdin_payload: None,
         command: "bash",
         cwd: Some(absolute_cwd.as_str()),
         // No env overrides here; run_captured_process builds the scrubbed
@@ -257,12 +249,13 @@ pub fn execute_prepared(prepared: &BashToolPrepared) -> Result<BashToolExecution
 
     // output_text is the summary sentence from build_sync_summary, not the
     // raw output.
-    let output_text = build_sync_summary(&data, &prepared.input.display_cwd, prepared.input.timeout_ms);
+    let output_text = build_sync_summary(
+        &data,
+        &prepared.input.display_cwd,
+        prepared.input.timeout_ms,
+    );
 
-    Ok(BashToolExecution {
-        data,
-        output_text,
-    })
+    Ok(BashToolExecution { data, output_text })
 }
 
 /// The complete stage: status line + summary + one completion block.
@@ -293,7 +286,9 @@ pub fn complete(prepared: &BashToolPrepared, execution: &BashToolExecution) -> T
 
 /// `<cwd>` then `<command>` on the next line.
 pub fn display_input(raw_input: &str, ctx: &ToolCtx) -> Option<String> {
-    prepare(raw_input, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(raw_input, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete. A failed stage
@@ -311,7 +306,8 @@ pub fn execute(raw_input: &str, ctx: &ToolCtx) -> ToolOutcome {
             let result = &execution.data;
             let failed = result.timed_out
                 || result.signal.is_some()
-                || (result.exit_code.unwrap_or(0) != 0 && !is_search_no_match(&result.command, result));
+                || (result.exit_code.unwrap_or(0) != 0
+                    && !is_search_no_match(&result.command, result));
             ToolOutcome {
                 text: completion.tool_content,
                 failed,
@@ -386,8 +382,7 @@ mod tests {
         let result = &execution.data;
         result.timed_out
             || result.signal.is_some()
-            || (result.exit_code.unwrap_or(0) != 0
-                && !is_search_no_match(&result.command, result))
+            || (result.exit_code.unwrap_or(0) != 0 && !is_search_no_match(&result.command, result))
     }
 
     /// prepare → execute → complete, the three stage calls each test makes.
@@ -404,11 +399,12 @@ mod tests {
         let ctx = stage_context(&temp);
         std::fs::write(temp.path().join("demo.txt"), "hello from bash\n").unwrap();
 
-        let (execution, completion) =
-            run_stages(&ctx, json!({"command": "pwd && cat demo.txt"}));
+        let (execution, completion) = run_stages(&ctx, json!({"command": "pwd && cat demo.txt"}));
 
         assert!(!ts_status(&execution));
-        assert!(execution.output_text.contains("Command completed successfully"));
+        assert!(execution
+            .output_text
+            .contains("Command completed successfully"));
         let block = &completion.blocks[0];
         assert_eq!(block.language, "text");
         assert!(block.description.contains("Bash output from"));
@@ -457,14 +453,14 @@ mod tests {
 
     #[test]
     fn timeout_status_line_includes_bash_async_suggestion() {
-        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let ctx = stage_context(&temp);
 
-        let (execution, completion) = run_stages(
-            &ctx,
-            json!({"command": "sleep 30", "timeoutMs": 300}),
-        );
+        let (execution, completion) =
+            run_stages(&ctx, json!({"command": "sleep 30", "timeoutMs": 300}));
 
         assert!(ts_status(&execution));
         assert!(
@@ -489,7 +485,9 @@ mod tests {
 
     #[test]
     fn reports_timeouts_as_incomplete_output_and_kills_the_whole_process_tree_fast() {
-        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let started_at = Instant::now();
         let temp = tempfile::tempdir().unwrap();
         let ctx = stage_context(&temp);
@@ -640,7 +638,8 @@ pub fn build_command_session_prefix(command: &str) -> String {
             raw_token.clone()
         };
 
-        let normalized_token = sanitize_tmux_session_name(&strip_command_extension(&candidate)).to_lowercase();
+        let normalized_token =
+            sanitize_tmux_session_name(&strip_command_extension(&candidate)).to_lowercase();
 
         if normalized_token.is_empty()
             || normalized_token == "run"
@@ -669,7 +668,12 @@ pub fn build_command_session_prefix(command: &str) -> String {
 }
 
 fn basename(value: &str) -> String {
-    value.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
+    value
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn generate_session_suffix() -> String {
@@ -770,7 +774,9 @@ pub fn tmux_session_exists(session_name: &str) -> bool {
 }
 
 pub fn run_tmux_command(process_args: &[&str], failure_message: &str) -> anyhow::Result<String> {
-    let output = std::process::Command::new("tmux").args(process_args).output()?;
+    let output = std::process::Command::new("tmux")
+        .args(process_args)
+        .output()?;
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -938,15 +944,16 @@ mod tmux_helper_tests {
     fn build_tmux_pane_command_wraps_in_bash_with_exit() {
         let pane = build_tmux_pane_command("echo hi");
 
-        assert!(pane.starts_with("bash -c 'echo hi'; exit"), "unexpected: {}", pane);
+        assert!(
+            pane.starts_with("bash -c 'echo hi'; exit"),
+            "unexpected: {}",
+            pane
+        );
     }
 
     #[test]
     fn quote_shell_argument_wraps_in_single_quotes() {
         assert_eq!(quote_shell_argument("hello"), "'hello'");
-        assert_eq!(
-            quote_shell_argument("it's here"),
-            "'it'\\''s here'"
-        );
+        assert_eq!(quote_shell_argument("it's here"), "'it'\\''s here'");
     }
 }

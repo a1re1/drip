@@ -6,8 +6,10 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::{tool_arguments, ToolCompletion, ToolCompletionBlock, ToolCtx, ToolOutcome};
-use crate::tools::helpers::{count_lines, format_tool_path, get_optional_number_argument,
-    get_required_string_argument, resolve_tool_path};
+use crate::tools::helpers::{
+    count_lines, format_tool_path, get_optional_number_argument, get_required_string_argument,
+    resolve_tool_path,
+};
 
 pub fn definition() -> Value {
     json!({
@@ -232,7 +234,11 @@ pub fn decode_literal_escapes(text: &str) -> Option<String> {
 /// A find that misses only because its escapes were sent as text: when the
 /// decoded find occurs in the file, returns it with the replacement decoded
 /// the same way.
-pub fn escape_tolerant_match(existing: &str, find: &str, replace: &str) -> Option<(String, String)> {
+pub fn escape_tolerant_match(
+    existing: &str,
+    find: &str,
+    replace: &str,
+) -> Option<(String, String)> {
     let decoded_find = decode_literal_escapes(find)?;
     if count_occurrences(existing, &decoded_find) == 0 {
         return None;
@@ -252,13 +258,18 @@ fn line_similarity(a: &str, b: &str) -> f64 {
     }
     let prefix = a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count();
     let shortest = a.len().min(b.len());
-    let suffix = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count().min(shortest - prefix);
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
+        .min(shortest - prefix);
     (prefix + suffix) as f64 / longest as f64
 }
 
 /// Minimum similarity for a file line to be named as the closest match.
 const NEAREST_LINE_MIN_SIMILARITY: f64 = 0.6;
-
 
 /// Splits a Python file into the text before its trailing `if __name__ ==
 /// "__main__":` guard and the guard itself, when that guard is the last
@@ -298,7 +309,9 @@ pub fn split_trailing_closers(text: &str) -> Option<(&str, &str)> {
         !trimmed.is_empty()
             && !trimmed.starts_with(' ')
             && !trimmed.starts_with('\t')
-            && trimmed.chars().all(|c| matches!(c, '}' | ')' | ']' | ';' | ','))
+            && trimmed
+                .chars()
+                .all(|c| matches!(c, '}' | ')' | ']' | ';' | ','))
     };
     let body = text.trim_end_matches('\n');
     let mut split = body.len();
@@ -328,13 +341,41 @@ pub const APPEND_BEFORE_CLOSERS_NOTE: &str = " before the file's closing brace(s
 
 /// Keywords that open a definition; the word after one is the name.
 const DEFINITION_KEYWORDS: &[&str] = &[
-    "fn", "def", "class", "struct", "enum", "impl", "trait", "mod", "function", "const", "static", "let", "var", "type",
-    "interface", "func", "macro_rules!",
+    "fn",
+    "def",
+    "class",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "mod",
+    "function",
+    "const",
+    "static",
+    "let",
+    "var",
+    "type",
+    "interface",
+    "func",
+    "macro_rules!",
 ];
 /// Modifiers that may precede a definition keyword.
 const DEFINITION_MODIFIERS: &[&str] = &[
-    "pub", "pub(crate)", "pub(super)", "export", "default", "async", "unsafe", "extern", "private", "public", "protected",
-    "abstract", "final", "override", "declare",
+    "pub",
+    "pub(crate)",
+    "pub(super)",
+    "export",
+    "default",
+    "async",
+    "unsafe",
+    "extern",
+    "private",
+    "public",
+    "protected",
+    "abstract",
+    "final",
+    "override",
+    "declare",
 ];
 
 /// The line (0-based) that defines `name` in `lines`: a definition keyword
@@ -349,7 +390,10 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
     // to the definition name. A recorded pwrde dogfood pasted a full function
     // as the `after` value and the append fell to the end of the file.
     let name: &str = if name.contains('\n') {
-        name.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(name)
+        name.lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or(name)
     } else {
         name
     };
@@ -359,7 +403,8 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
     // recorded dogfood sent `before: describe("readRegistry")` and the
     // strict lookup missed it, so the append fell to the end of the file and
     // cost three more edits to relocate.
-    let anchor_is_call_expr = !name.is_empty() && !name.chars().all(|c| is_ident(c)) && name.contains('(');
+    let anchor_is_call_expr =
+        !name.is_empty() && !name.chars().all(|c| is_ident(c)) && name.contains('(');
     let literal = name.trim_end().trim_end_matches(')').trim_end();
     let search = if anchor_is_call_expr { literal } else { name };
     let mut hits: Vec<usize> = Vec::new();
@@ -368,9 +413,13 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
         if !trimmed.contains(search) {
             continue;
         }
-        let literal_hit = anchor_is_call_expr && !literal.is_empty() && trimmed.starts_with(literal);
+        let literal_hit =
+            anchor_is_call_expr && !literal.is_empty() && trimmed.starts_with(literal);
         let mut words = trimmed.split_whitespace().peekable();
-        while words.peek().is_some_and(|word| DEFINITION_MODIFIERS.contains(word)) {
+        while words
+            .peek()
+            .is_some_and(|word| DEFINITION_MODIFIERS.contains(word))
+        {
             words.next();
         }
         let keyword_hit = match (words.next(), words.next()) {
@@ -380,14 +429,18 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
             }
             _ => false,
         };
-        let call_hit = ["it(", "test(", "describe(", "it.only(", "test.only("].iter().any(|opener| {
-            trimmed.starts_with(opener) && {
-                let rest = trimmed[opener.len()..].trim_start();
-                rest.get(1..1 + name.len()) == Some(name)
-                    && rest.starts_with(|c| c == '"' || c == '\'' || c == '`')
-                    && rest.get(1 + name.len()..).is_some_and(|tail| tail.starts_with(|c| c == '"' || c == '\'' || c == '`'))
-            }
-        });
+        let call_hit = ["it(", "test(", "describe(", "it.only(", "test.only("]
+            .iter()
+            .any(|opener| {
+                trimmed.starts_with(opener) && {
+                    let rest = trimmed[opener.len()..].trim_start();
+                    rest.get(1..1 + name.len()) == Some(name)
+                        && rest.starts_with(|c| c == '"' || c == '\'' || c == '`')
+                        && rest.get(1 + name.len()..).is_some_and(|tail| {
+                            tail.starts_with(|c| c == '"' || c == '\'' || c == '`')
+                        })
+                }
+            });
         if keyword_hit || call_hit || literal_hit {
             hits.push(index);
         }
@@ -406,17 +459,32 @@ pub fn find_definition_line(lines: &[&str], name: &str) -> Result<usize, String>
 /// unindented append joins an indented anchor at the anchor's indentation.
 /// Ok carries the new text and the line the text now starts on; Err the
 /// reason the anchor could not be used.
-pub fn anchored_insert(path: &str, text: &str, append: &str, anchor: &str, after: bool) -> Result<(String, usize), String> {
+pub fn anchored_insert(
+    path: &str,
+    text: &str,
+    append: &str,
+    anchor: &str,
+    after: bool,
+) -> Result<(String, usize), String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = find_definition_line(&lines, anchor)?;
-    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     let insert_at = if after {
         crate::harness::outline::definition_end(ext, &lines, start) + 1
     } else {
         let mut at = start;
         while at > 0 {
             let above = lines[at - 1].trim_start();
-            if above.starts_with("#[") || above.starts_with('@') || above.starts_with("///") || above.starts_with("/**") || above.starts_with("* ") || above.starts_with("*/") {
+            if above.starts_with("#[")
+                || above.starts_with('@')
+                || above.starts_with("///")
+                || above.starts_with("/**")
+                || above.starts_with("* ")
+                || above.starts_with("*/")
+            {
                 at -= 1;
             } else {
                 break;
@@ -424,15 +492,33 @@ pub fn anchored_insert(path: &str, text: &str, append: &str, anchor: &str, after
         }
         at
     };
-    let anchor_indent: String = lines[start].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let anchor_indent: String = lines[start]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
     let body = append.trim_matches('\n');
-    let body_indented = body.lines().find(|line| !line.trim().is_empty()).is_some_and(|line| line.starts_with(' ') || line.starts_with('\t'));
+    let body_indented = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.starts_with(' ') || line.starts_with('\t'));
     let body: String = if !anchor_indent.is_empty() && !body_indented {
-        body.lines().map(|line| if line.trim().is_empty() { String::new() } else { format!("{anchor_indent}{line}") }).collect::<Vec<_>>().join("\n")
+        body.lines()
+            .map(|line| {
+                if line.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("{anchor_indent}{line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         body.to_string()
     };
-    let mut out: Vec<String> = lines[..insert_at].iter().map(|line| line.to_string()).collect();
+    let mut out: Vec<String> = lines[..insert_at]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
     if after && !out.is_empty() && !out.last().is_some_and(|line| line.trim().is_empty()) {
         out.push(String::new());
     }
@@ -441,7 +527,10 @@ pub fn anchored_insert(path: &str, text: &str, append: &str, anchor: &str, after
     }
     let first_line = out.len() + 1;
     out.extend(body.lines().map(str::to_string));
-    if lines.get(insert_at).is_some_and(|line| !line.trim().is_empty()) {
+    if lines
+        .get(insert_at)
+        .is_some_and(|line| !line.trim().is_empty())
+    {
         out.push(String::new());
     }
     out.extend(lines[insert_at..].iter().map(|line| line.to_string()));
@@ -463,18 +552,35 @@ pub const APPEND_BEFORE_GUARD_NOTE: &str = " before the `if __name__ == \"__main
 /// blank line, an order change, or a hunk an earlier entry already edited).
 pub fn nearest_line_hint(existing: &str, find: &str) -> Option<String> {
     let file_lines: Vec<&str> = existing.lines().collect();
-    let find_lines: Vec<(usize, &str)> = find.lines().enumerate().filter(|(_, line)| line.trim().chars().count() >= 3).collect();
-    let (missing_index, probe) = match find_lines.iter().find(|(_, line)| !file_lines.iter().any(|held| held.trim() == line.trim())) {
+    let find_lines: Vec<(usize, &str)> = find
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim().chars().count() >= 3)
+        .collect();
+    let (missing_index, probe) = match find_lines
+        .iter()
+        .find(|(_, line)| !file_lines.iter().any(|held| held.trim() == line.trim()))
+    {
         Some(found) => *found,
         None => {
             let (_, first) = *find_lines.first()?;
-            let at = file_lines.iter().position(|held| held.trim() == first.trim())? + 1;
+            let at = file_lines
+                .iter()
+                .position(|held| held.trim() == first.trim())?
+                + 1;
             return Some(format!(
                 " Every line of the find text is in the file (its first line is line {at}), but not as one contiguous block: check the lines between, or whether an earlier entry in this call already changed that region."
             ));
         }
     };
-    let ordinal = if find_lines.len() > 1 { format!(" Line {} of the find text has no match in the file.", missing_index + 1) } else { String::new() };
+    let ordinal = if find_lines.len() > 1 {
+        format!(
+            " Line {} of the find text has no match in the file.",
+            missing_index + 1
+        )
+    } else {
+        String::new()
+    };
     let closest = file_lines
         .iter()
         .enumerate()
@@ -483,7 +589,11 @@ pub fn nearest_line_hint(existing: &str, find: &str) -> Option<String> {
         .filter(|(_, _, score)| *score >= NEAREST_LINE_MIN_SIMILARITY)
         .map(|(index, line, _)| {
             let shown: String = line.chars().take(160).collect();
-            format!(" The closest line in the file is line {}: `{}`", index + 1, shown.trim_end())
+            format!(
+                " The closest line in the file is line {}: `{}`",
+                index + 1,
+                shown.trim_end()
+            )
         })
         .unwrap_or_default();
     if ordinal.is_empty() && closest.is_empty() {
@@ -511,11 +621,22 @@ fn leading_ws(line: &str) -> &str {
 /// file's own text for that window and the replacement shifted by the same
 /// indentation delta (added when the file is deeper, stripped when it is
 /// shallower; a tab-vs-space mix leaves the replacement as sent).
-pub fn indentation_tolerant_match(existing: &str, find: &str, replace: &str) -> Option<(String, String)> {
+pub fn indentation_tolerant_match(
+    existing: &str,
+    find: &str,
+    replace: &str,
+) -> Option<(String, String)> {
     let trailing_newline = find.ends_with('\n');
-    let body = if trailing_newline { &find[..find.len() - 1] } else { find };
+    let body = if trailing_newline {
+        &find[..find.len() - 1]
+    } else {
+        find
+    };
     let find_lines: Vec<&str> = body.split('\n').collect();
-    if !find_lines.iter().any(|line| line.trim().chars().count() >= 3) {
+    if !find_lines
+        .iter()
+        .any(|line| line.trim().chars().count() >= 3)
+    {
         return None;
     }
     let file_lines: Vec<&str> = existing.split('\n').collect();
@@ -524,7 +645,12 @@ pub fn indentation_tolerant_match(existing: &str, find: &str, replace: &str) -> 
     }
     let same = |a: &str, b: &str| a.trim() == b.trim();
     let starts: Vec<usize> = (0..=file_lines.len() - find_lines.len())
-        .filter(|&start| find_lines.iter().enumerate().all(|(j, line)| same(file_lines[start + j], line)))
+        .filter(|&start| {
+            find_lines
+                .iter()
+                .enumerate()
+                .all(|(j, line)| same(file_lines[start + j], line))
+        })
         .collect();
     if starts.len() != 1 {
         return None;
@@ -537,8 +663,14 @@ pub fn indentation_tolerant_match(existing: &str, find: &str, replace: &str) -> 
     if actual == find || count_occurrences(existing, &actual) != 1 {
         return None;
     }
-    let anchor = find_lines.iter().position(|line| !line.trim().is_empty()).unwrap_or(0);
-    let (file_indent, find_indent) = (leading_ws(file_lines[start + anchor]), leading_ws(find_lines[anchor]));
+    let anchor = find_lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(0);
+    let (file_indent, find_indent) = (
+        leading_ws(file_lines[start + anchor]),
+        leading_ws(find_lines[anchor]),
+    );
     let reindent = |line: &str| -> String {
         if line.trim().is_empty() {
             return line.to_string();
@@ -546,7 +678,9 @@ pub fn indentation_tolerant_match(existing: &str, find: &str, replace: &str) -> 
         if let Some(extra) = file_indent.strip_prefix(find_indent) {
             format!("{extra}{line}")
         } else if let Some(surplus) = find_indent.strip_prefix(file_indent) {
-            line.strip_prefix(surplus).map(str::to_string).unwrap_or_else(|| line.to_string())
+            line.strip_prefix(surplus)
+                .map(str::to_string)
+                .unwrap_or_else(|| line.to_string())
         } else {
             line.to_string()
         }
@@ -605,7 +739,12 @@ pub fn find_incomplete_overwrite_error(old_text: &str, new_text: &str) -> Option
     // it; whole files essentially never start indented.
     if old_lines >= FRAGMENT_GUARD_MIN_LINES
         && new_line_count * FRAGMENT_GUARD_SHRINK_RATIO < old_line_count
-        && new_text.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'))
+        && new_text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map_or(false, |line| {
+                line.starts_with(' ') || line.starts_with('\t')
+            })
     {
         return Some(format!(
             "the new content starts with an indented line and has {} line(s) against the file's {} — that reads as a fragment meant for find + replace, not a whole file. Send find + replace for the region that changes, or the complete file.",
@@ -639,11 +778,19 @@ pub const REEMISSION_NOTE_MIN_LINES: usize = 20;
 /// multiset), i.e. the lines the model re-typed for nothing.
 pub fn reemitted_line_count(old_text: &str, new_text: &str) -> usize {
     let mut pool: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for line in old_text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()) {
+    for line in old_text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+    {
         *pool.entry(line).or_insert(0) += 1;
     }
     let mut count = 0usize;
-    for line in new_text.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()) {
+    for line in new_text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+    {
         if let Some(left) = pool.get_mut(line) {
             if *left > 0 {
                 *left -= 1;
@@ -658,7 +805,10 @@ pub fn reemitted_line_count(old_text: &str, new_text: &str) -> usize {
 /// file: 39 recorded overwrites re-emitted 59% of their lines unchanged,
 /// and one round re-sent a 44-line module four times.
 pub fn reemission_note(old_text: &str, new_text: &str) -> String {
-    let total = new_text.lines().filter(|line| !line.trim().is_empty()).count();
+    let total = new_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
     let unchanged = reemitted_line_count(old_text, new_text);
     if total >= REEMISSION_NOTE_MIN_LINES && unchanged * 2 >= total {
         format!(
@@ -690,14 +840,18 @@ pub fn find_duplicated_copy_error(old_text: &str, new_text: &str) -> Option<Stri
             .map(|line| line.to_string())
             .collect()
     };
-    let existing_lines: std::collections::HashSet<String> = distinctive(old_text).into_iter().collect();
+    let existing_lines: std::collections::HashSet<String> =
+        distinctive(old_text).into_iter().collect();
     let appended_lines = distinctive(&new_text[old_trimmed.len()..]);
 
     if appended_lines.len() < DUPLICATE_GUARD_MIN_APPENDED {
         return None;
     }
 
-    let duplicated = appended_lines.iter().filter(|line| existing_lines.contains(*line)).count();
+    let duplicated = appended_lines
+        .iter()
+        .filter(|line| existing_lines.contains(*line))
+        .count();
 
     if (duplicated as f64) < appended_lines.len() as f64 * DUPLICATE_GUARD_RATIO {
         return None;
@@ -730,7 +884,9 @@ fn elision_marker_pattern() -> &'static regex::Regex {
 
 /// Returns the matched elision-marker substring for use in the error text.
 fn find_elision_marker(text: &str) -> Option<String> {
-    elision_marker_pattern().find(text).map(|m| m.as_str().to_string())
+    elision_marker_pattern()
+        .find(text)
+        .map(|m| m.as_str().to_string())
 }
 
 /// Unified old→new diff for `display_path`.
@@ -777,18 +933,35 @@ pub fn build_unified_diff(display_path: &str, old_text: Option<&str>, new_text: 
 
     while suffix_length < old_lines.len() - prefix_length.min(old_lines.len())
         && suffix_length < new_lines.len().saturating_sub(prefix_length)
-        && old_lines[old_lines.len() - 1 - suffix_length] == new_lines[new_lines.len() - 1 - suffix_length]
+        && old_lines[old_lines.len() - 1 - suffix_length]
+            == new_lines[new_lines.len() - 1 - suffix_length]
     {
         suffix_length += 1;
     }
 
     let removed_lines = &old_lines[prefix_length..old_lines.len() - suffix_length];
     let added_lines = &new_lines[prefix_length..new_lines.len() - suffix_length];
-    let old_start = if removed_lines.is_empty() { prefix_length } else { prefix_length + 1 };
-    let new_start = if added_lines.is_empty() { prefix_length } else { prefix_length + 1 };
+    let old_start = if removed_lines.is_empty() {
+        prefix_length
+    } else {
+        prefix_length + 1
+    };
+    let new_start = if added_lines.is_empty() {
+        prefix_length
+    } else {
+        prefix_length + 1
+    };
 
     let mut out = String::new();
-    out.push_str(&format!("--- a/{}\n+++ b/{}\n@@ -{},{} +{},{} @@", display_path, display_path, old_start, removed_lines.len(), new_start, added_lines.len()));
+    out.push_str(&format!(
+        "--- a/{}\n+++ b/{}\n@@ -{},{} +{},{} @@",
+        display_path,
+        display_path,
+        old_start,
+        removed_lines.len(),
+        new_start,
+        added_lines.len()
+    ));
     for line in removed_lines {
         out.push_str(&format!("\n-{}", line));
     }
@@ -832,7 +1005,9 @@ pub struct PatchToolPrepared {
 pub fn append_restates_replace(append: &str, replace: &str) -> bool {
     let core = append
         .trim()
-        .trim_end_matches(|c: char| c == '}' || c == ')' || c == ']' || c == ';' || c == ',' || c.is_whitespace())
+        .trim_end_matches(|c: char| {
+            c == '}' || c == ')' || c == ']' || c == ';' || c == ',' || c.is_whitespace()
+        })
         .trim();
     core.chars().count() >= 12 && replace.contains(core)
 }
@@ -851,8 +1026,11 @@ fn decode_files_string(encoded: &str) -> Option<Value> {
     // which cost the whole call and a round to resend. Well-formed paths
     // re-quote to themselves; this runs before the structural-quote repair
     // because that repair damages quoted text inside find/replace.
-    let bare_path = regex::Regex::new(r#"("path"\s*:\s*)"?([^"\s,\}\]][^",\}\]]*)"?(\s*[,\}\]])"#).ok()?;
-    let path_fixed = bare_path.replace_all(encoded, "${1}\"${2}\"${3}").into_owned();
+    let bare_path =
+        regex::Regex::new(r#"("path"\s*:\s*)"?([^"\s,\}\]][^",\}\]]*)"?(\s*[,\}\]])"#).ok()?;
+    let path_fixed = bare_path
+        .replace_all(encoded, "${1}\"${2}\"${3}")
+        .into_owned();
     if let Ok(decoded @ Value::Array(_)) = serde_json::from_str::<Value>(&path_fixed) {
         return Some(decoded);
     }
@@ -870,8 +1048,15 @@ fn decode_files_string(encoded: &str) -> Option<Value> {
 /// call's own top-level fields): a missing path inherits `top_path`, else
 /// `previous_path`; a non-empty "content" beside a "replace" and no "find"
 /// becomes the "find" (the model named the old text "content").
-pub fn repair_patch_entry(entry: &mut serde_json::Map<String, Value>, top_path: Option<&str>, previous_path: Option<&str>) {
-    let path_missing = entry.get("path").and_then(Value::as_str).map_or(true, str::is_empty);
+pub fn repair_patch_entry(
+    entry: &mut serde_json::Map<String, Value>,
+    top_path: Option<&str>,
+    previous_path: Option<&str>,
+) {
+    let path_missing = entry
+        .get("path")
+        .and_then(Value::as_str)
+        .map_or(true, str::is_empty);
     if path_missing {
         if let Some(path) = top_path.or(previous_path) {
             entry.insert("path".to_string(), Value::String(path.to_string()));
@@ -879,9 +1064,15 @@ pub fn repair_patch_entry(entry: &mut serde_json::Map<String, Value>, top_path: 
     }
     // Only when no "find" key was sent at all: an empty find beside content
     // is a placeholder for a whole-file write, not a misnamed pair.
-    let content_nonempty = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+    let content_nonempty = entry
+        .get("content")
+        .and_then(Value::as_str)
+        .map_or(false, |text| !text.is_empty());
     let find_missing = entry.get("find").is_none();
-    let replace_present = entry.get("replace").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+    let replace_present = entry
+        .get("replace")
+        .and_then(Value::as_str)
+        .map_or(false, |text| !text.is_empty());
     if content_nonempty && find_missing && replace_present {
         // content echoed as replace (a recorded run sent a whole file under
         // both names) is a whole-file write, not a no-op pair.
@@ -907,7 +1098,10 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 args.insert("files".to_string(), decoded);
             }
             None if args.get("path").is_none() => {
-                let why = serde_json::from_str::<Value>(encoded).err().map(|e| e.to_string()).unwrap_or_else(|| "not a JSON array".to_string());
+                let why = serde_json::from_str::<Value>(encoded)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "not a JSON array".to_string());
                 return Err(anyhow!(
                     "\"files\" was sent as a string that is not a valid JSON array ({why}). Send \"files\" as a JSON array of objects, each with \"path\" and either \"content\" or \"find\"/\"replace\" — not as a string."
                 ));
@@ -958,13 +1152,20 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 _ => return Err(anyhow!("[entry {}] Missing or empty \"path\".", i)),
             };
 
-            if let Some(append) = entry.get("append").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+            if let Some(append) = entry
+                .get("append")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
                 // A real find + replace beside an append is two edits to the
                 // same file: apply the pair first, then the append (the
                 // transaction chains same-path entries). A replace or content
                 // with no find is a stray echo of where the model meant to
                 // insert; the append alone is what it asked for.
-                let find = entry.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
+                let find = entry
+                    .get("find")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty());
                 let replace = entry.get("replace").and_then(Value::as_str);
                 let mut redundant_append = false;
                 if let (Some(find), Some(replace)) = (find, replace) {
@@ -973,7 +1174,9 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                         path: path.clone(),
                         find: Some(find.to_string()),
                         replace: Some(replace.to_string()),
-                        expected_occurrences: entry.get("expectedOccurrences").and_then(Value::as_i64),
+                        expected_occurrences: entry
+                            .get("expectedOccurrences")
+                            .and_then(Value::as_i64),
                         content: None,
                         append: None,
                         after: None,
@@ -988,36 +1191,58 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                         expected_occurrences: None,
                         content: None,
                         append: Some(append.to_string()),
-                        after: entry.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-                        before: entry.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                        after: entry
+                            .get("after")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string),
+                        before: entry
+                            .get("before")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_string),
                     });
                 }
                 continue;
             }
-            let content_present = entry.get("content").and_then(Value::as_str).map_or(false, |text| !text.is_empty());
+            let content_present = entry
+                .get("content")
+                .and_then(Value::as_str)
+                .map_or(false, |text| !text.is_empty());
             let find_empty = entry.get("find").and_then(Value::as_str) == Some("");
             let replace_empty = entry.get("replace").and_then(Value::as_str) == Some("");
             // Empty-string find/replace beside a real content are placeholders
             // (recorded runs sent `find: "", replace: ""` with a whole file, and
             // `find: <text>, replace: ""` with the replacement in content); an
             // empty replace beside a real find and no content is a deletion.
-            let has_find = entry.get("find").map_or(false, Value::is_string) && !(content_present && find_empty);
-            let has_replace = entry.get("replace").map_or(false, Value::is_string) && !(content_present && replace_empty);
+            let has_find = entry.get("find").map_or(false, Value::is_string)
+                && !(content_present && find_empty);
+            let has_replace = entry.get("replace").map_or(false, Value::is_string)
+                && !(content_present && replace_empty);
             // Small models routinely send `content: ""` as a placeholder next to a
             // real find/replace pair; an empty content beside a find is noise, not
             // an overwrite request (an actual empty overwrite has no find).
-            let placeholder_content = has_find && entry.get("content").and_then(Value::as_str) == Some("");
-            let has_content = !placeholder_content && entry.get("content").map_or(false, Value::is_string);
+            let placeholder_content =
+                has_find && entry.get("content").and_then(Value::as_str) == Some("");
+            let has_content =
+                !placeholder_content && entry.get("content").map_or(false, Value::is_string);
 
             // A non-empty content beside a real find + replace pair is a stray
             // field (small models echo the snippet they are inserting); apply
             // the pair and say so rather than costing a round on the error.
             // Content beside an empty or missing find is still ambiguous.
-            let find_nonempty = !entry.get("find").and_then(Value::as_str).unwrap_or("").is_empty();
+            let find_nonempty = !entry
+                .get("find")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty();
             // {find, content} with no replace: content is the replacement text.
             let content_as_replace = has_content && has_find && !has_replace && find_nonempty;
             let has_replace = has_replace || content_as_replace;
-            let stray_content = has_content && has_find && has_replace && find_nonempty && !content_as_replace;
+            let stray_content =
+                has_content && has_find && has_replace && find_nonempty && !content_as_replace;
             let has_content = has_content && !stray_content && !content_as_replace;
 
             if has_content && (has_find || has_replace) {
@@ -1029,7 +1254,13 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
             }
 
             if !has_content {
-                if !has_find || entry.get("find").and_then(Value::as_str).unwrap_or("").is_empty() {
+                if !has_find
+                    || entry
+                        .get("find")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .is_empty()
+                {
                     return Err(anyhow!(
                         "[entry {} \"{}\"] Needs either content (full file write) or a non-empty \"find\" with \"replace\".",
                         i,
@@ -1069,11 +1300,24 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 
             files.push(FileEntry {
                 path: path.clone(),
-                find: if has_find { entry.get("find").and_then(Value::as_str).map(str::to_string) } else { None },
+                find: if has_find {
+                    entry
+                        .get("find")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                },
                 replace: if content_as_replace {
-                    entry.get("content").and_then(Value::as_str).map(str::to_string)
+                    entry
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
                 } else if has_replace {
-                    entry.get("replace").and_then(Value::as_str).map(str::to_string)
+                    entry
+                        .get("replace")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
                 } else {
                     None
                 },
@@ -1081,11 +1325,15 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                     .get("expectedOccurrences")
                     .and_then(Value::as_f64)
                     .map(|n| n as i64),
-                content: if content_as_replace { None } else { entry
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .filter(|text| !(text.is_empty() && has_find) && !stray_content)
-                    .map(str::to_string) },
+                content: if content_as_replace {
+                    None
+                } else {
+                    entry
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .filter(|text| !(text.is_empty() && has_find) && !stray_content)
+                        .map(str::to_string)
+                },
                 append: None,
                 after: None,
                 before: None,
@@ -1113,11 +1361,18 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
 
     let raw_path = get_required_string_argument(&args, "path")?;
     // A single-file append rides the transaction path as its one entry.
-    if let Some(append) = args.get("append").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+    if let Some(append) = args
+        .get("append")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
         // Same leniency as the files[] form: a real find + replace runs first
         // as its own chained entry; a stray replace or content is ignored.
         let mut files = Vec::with_capacity(2);
-        let find = args.get("find").and_then(Value::as_str).filter(|text| !text.is_empty());
+        let find = args
+            .get("find")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty());
         let replace = args.get("replace").and_then(Value::as_str);
         let mut redundant_append = false;
         if let (Some(find), Some(replace)) = (find, replace) {
@@ -1141,13 +1396,30 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
                 expected_occurrences: None,
                 content: None,
                 append: Some(append.to_string()),
-                after: args.get("after").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
-                before: args.get("before").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string),
+                after: args
+                    .get("after")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
+                before: args
+                    .get("before")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string),
             });
         }
-        let display_path = format_tool_path(&workspace_root, &resolve_tool_path(&workspace_root, &raw_path));
+        let display_path = format_tool_path(
+            &workspace_root,
+            &resolve_tool_path(&workspace_root, &raw_path),
+        );
         return Ok(PatchToolPrepared {
-            display_input: format!("{} (append {} line(s))", display_path, append.lines().count()),
+            display_input: format!(
+                "{} (append {} line(s))",
+                display_path,
+                append.lines().count()
+            ),
             input: PatchToolInput {
                 files,
                 verification: None,
@@ -1186,21 +1458,29 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     // content beside a replace and no find is the old text under the wrong
     // name ({content, replace} was 12 of 110 recorded PATCH failures).
     let (content, find, replace) = match (content, find, replace) {
-        (Some(text), None, Some(echo)) if echo == text && !text.is_empty() => (Some(text), None, None),
-        (Some(text), None, Some(new)) if !new.is_empty() && !text.is_empty() => (None, Some(text), Some(new)),
+        (Some(text), None, Some(echo)) if echo == text && !text.is_empty() => {
+            (Some(text), None, None)
+        }
+        (Some(text), None, Some(new)) if !new.is_empty() && !text.is_empty() => {
+            (None, Some(text), Some(new))
+        }
         triple => triple,
     };
     // content beside a non-empty find and no replace is the replacement text
     // under the wrong name (recorded runs sent {find, content} for a targeted
     // edit); read it as replace rather than costing a round on the error.
     let (content, replace) = match (content, replace) {
-        (Some(text), None) if find.as_deref().map_or(false, |f| !f.is_empty()) => (None, Some(text)),
+        (Some(text), None) if find.as_deref().map_or(false, |f| !f.is_empty()) => {
+            (None, Some(text))
+        }
         pair => pair,
     };
     // A non-empty find beside content is a targeted edit with a stray content
     // field (small models echo the snippet they are inserting); apply the
     // find + replace and say so rather than costing a round on the error.
-    let stray_content = content.is_some() && find.as_deref().map_or(false, |text| !text.is_empty()) && replace.is_some();
+    let stray_content = content.is_some()
+        && find.as_deref().map_or(false, |text| !text.is_empty())
+        && replace.is_some();
     let content = if stray_content { None } else { content };
     if content.is_some() && (find.is_some() || replace.is_some()) {
         return Err(anyhow!(
@@ -1231,11 +1511,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<PatchToolPrepared> {
     let absolute_path = resolve_tool_path(&workspace_root, &raw_path);
     let display_path = format_tool_path(&workspace_root, &absolute_path);
     let display_input = if let Some(content) = &content {
-        format!(
-            "{} (write {} line(s))",
-            display_path,
-            count_lines(content)
-        )
+        format!("{} (write {} line(s))", display_path, count_lines(content))
     } else if stray_content {
         format!("{} (replace; stray content ignored)", display_path)
     } else {
@@ -1272,9 +1548,8 @@ fn path_extension(file_path: &str) -> String {
         .unwrap_or_default()
 }
 
-pub const SYNTAX_CHECKED_EXTENSIONS: &[&str] = &[
-    ".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx",
-];
+pub const SYNTAX_CHECKED_EXTENSIONS: &[&str] =
+    &[".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"];
 
 // .json targets are validated with a small built-in JSON syntax scan below.
 // Returns the first syntax error in the text, or None when it parses (or when
@@ -1396,37 +1671,68 @@ pub fn resolve_file_entry(
     if let Some(append) = entry.append.as_deref() {
         // --- append mode: the pre-image (chained or on disk) plus the new
         // text at its end; a missing file is created.
-        let absolute_path_buf = crate::tools::helpers::resolve_tool_path(workspace_root, &entry.path);
-        let display_path = crate::tools::helpers::format_tool_path(workspace_root, &absolute_path_buf);
+        let absolute_path_buf =
+            crate::tools::helpers::resolve_tool_path(workspace_root, &entry.path);
+        let display_path =
+            crate::tools::helpers::format_tool_path(workspace_root, &absolute_path_buf);
         let absolute_path = absolute_path_buf.to_string_lossy().to_string();
-        let path_kind = match crate::tools::helpers::assert_patch_target_path(&absolute_path_buf, &display_path) {
+        let path_kind = match crate::tools::helpers::assert_patch_target_path(
+            &absolute_path_buf,
+            &display_path,
+        ) {
             Ok(kind) => kind,
             Err(error) => return Err(error.to_string()),
         };
         let existing_text: Option<String> = match base_text {
             Some(text) => Some(text.to_string()),
-            None if matches!(path_kind, crate::tools::helpers::ToolPathKind::File) => match std::fs::read_to_string(&absolute_path_buf) {
-                Ok(text) => Some(text),
-                Err(error) => return Err(format!("{} {}", tag, error)),
-            },
+            None if matches!(path_kind, crate::tools::helpers::ToolPathKind::File) => {
+                match std::fs::read_to_string(&absolute_path_buf) {
+                    Ok(text) => Some(text),
+                    Err(error) => return Err(format!("{} {}", tag, error)),
+                }
+            }
             None => None,
         };
-        let is_python = std::path::Path::new(&entry.path).extension().and_then(|ext| ext.to_str()) == Some("py");
-        let indented = append.lines().find(|line| !line.trim().is_empty()).map_or(false, |line| line.starts_with(' ') || line.starts_with('\t'));
-        let guard_split = if is_python { existing_text.as_deref().and_then(split_python_main_guard) } else { None };
-        let closers_split = if !is_python && indented { existing_text.as_deref().and_then(split_trailing_closers) } else { None };
+        let is_python = std::path::Path::new(&entry.path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            == Some("py");
+        let indented = append
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map_or(false, |line| {
+                line.starts_with(' ') || line.starts_with('\t')
+            });
+        let guard_split = if is_python {
+            existing_text.as_deref().and_then(split_python_main_guard)
+        } else {
+            None
+        };
+        let closers_split = if !is_python && indented {
+            existing_text.as_deref().and_then(split_trailing_closers)
+        } else {
+            None
+        };
         let mut placement_note = "";
         let mut anchor_note = String::new();
-        let anchored = match (entry.after.as_deref(), entry.before.as_deref(), existing_text.as_deref()) {
+        let anchored = match (
+            entry.after.as_deref(),
+            entry.before.as_deref(),
+            existing_text.as_deref(),
+        ) {
             (Some(name), _, Some(text)) | (None, Some(name), Some(text)) => {
                 let after = entry.after.is_some();
                 match anchored_insert(&entry.path, text, append, name, after) {
                     Ok((new_text, first_line)) => {
-                        anchor_note = format!(" {} `{name}` (the new text starts at line {first_line})", if after { "after" } else { "before" });
+                        anchor_note = format!(
+                            " {} `{name}` (the new text starts at line {first_line})",
+                            if after { "after" } else { "before" }
+                        );
                         Some(new_text)
                     }
                     Err(reason) => {
-                        anchor_note = format!(" (`{name}` {reason}, so the text went at the end instead)");
+                        anchor_note =
+                            format!(" (`{name}` {reason}, so the text went at the end instead)");
                         None
                     }
                 }
@@ -1472,11 +1778,20 @@ pub fn resolve_file_entry(
             new_text.push('\n');
         }
         if let Some(existing) = existing_text.as_deref() {
-            if let Err(error) = assert_patch_keeps_file_parseable(&display_path, &absolute_path, existing, &new_text) {
+            if let Err(error) = assert_patch_keeps_file_parseable(
+                &display_path,
+                &absolute_path,
+                existing,
+                &new_text,
+            ) {
                 return Err(error);
             }
         }
-        let appended = if placement_note.is_empty() { append.lines().count() } else { append.trim_matches('\n').lines().count() };
+        let appended = if placement_note.is_empty() {
+            append.lines().count()
+        } else {
+            append.trim_matches('\n').lines().count()
+        };
         return Ok(ResolvedEntry {
             absolute_path,
             display_path,
@@ -1485,7 +1800,8 @@ pub fn resolve_file_entry(
             effective_replace: None,
             occurrences: None,
             match_lines: None,
-            crlf_note: (!placement_note.is_empty() || !anchor_note.is_empty()).then(|| format!("{placement_note}{anchor_note}")),
+            crlf_note: (!placement_note.is_empty() || !anchor_note.is_empty())
+                .then(|| format!("{placement_note}{anchor_note}")),
             existing_text,
             new_text,
             appended: Some(appended),
@@ -1533,21 +1849,23 @@ pub fn resolve_file_entry(
     let absolute_path_buf = crate::tools::helpers::resolve_tool_path(workspace_root, &entry.path);
     let display_path = crate::tools::helpers::format_tool_path(workspace_root, &absolute_path_buf);
     let absolute_path = absolute_path_buf.to_string_lossy().to_string();
-    let path_kind = match crate::tools::helpers::assert_patch_target_path(&absolute_path_buf, &display_path) {
-        Ok(kind) => kind,
-        Err(error) => return Err(error.to_string()),
-    };
+    let path_kind =
+        match crate::tools::helpers::assert_patch_target_path(&absolute_path_buf, &display_path) {
+            Ok(kind) => kind,
+            Err(error) => return Err(error.to_string()),
+        };
 
     if let Some(content) = entry.content.clone() {
         // --- content mode ---
-        let existing_text: Option<String> = if matches!(path_kind, crate::tools::helpers::ToolPathKind::File) {
-            match std::fs::read_to_string(&absolute_path_buf) {
-                Ok(text) => Some(text),
-                Err(error) => return Err(format!("{} {}", tag, error)),
-            }
-        } else {
-            None
-        };
+        let existing_text: Option<String> =
+            if matches!(path_kind, crate::tools::helpers::ToolPathKind::File) {
+                match std::fs::read_to_string(&absolute_path_buf) {
+                    Ok(text) => Some(text),
+                    Err(error) => return Err(format!("{} {}", tag, error)),
+                }
+            } else {
+                None
+            };
 
         if existing_text.is_some() {
             let existing = existing_text.clone().unwrap_or_default();
@@ -1557,9 +1875,12 @@ pub fn resolve_file_entry(
                 return Err(format!("{} PATCH rejected: {}", tag, message));
             }
 
-            if let Err(error) =
-                assert_patch_keeps_file_parseable(&display_path, &absolute_path, &existing, &content)
-            {
+            if let Err(error) = assert_patch_keeps_file_parseable(
+                &display_path,
+                &absolute_path,
+                &existing,
+                &content,
+            ) {
                 return Err(error);
             }
         }
@@ -1611,10 +1932,10 @@ pub fn resolve_file_entry(
             effective_find = crlf_find;
             effective_replace = effective_replace.replace('\n', "\r\n");
             occurrences = count_occurrences(&existing_text, &effective_find);
-            crlf_note = " (the file uses CRLF line endings; the edit was applied with CRLF)".to_string();
+            crlf_note =
+                " (the file uses CRLF line endings; the edit was applied with CRLF)".to_string();
         }
     }
-
 
     if occurrences == 0 && find_has_line_number_prefix(&effective_find) {
         let stripped_find = strip_line_number_prefixes(&effective_find);
@@ -1629,7 +1950,9 @@ pub fn resolve_file_entry(
     }
 
     if occurrences == 0 {
-        if let Some((actual_find, reindented)) = indentation_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+        if let Some((actual_find, reindented)) =
+            indentation_tolerant_match(&existing_text, &effective_find, &effective_replace)
+        {
             effective_find = actual_find;
             effective_replace = reindented;
             occurrences = count_occurrences(&existing_text, &effective_find);
@@ -1638,7 +1961,9 @@ pub fn resolve_file_entry(
     }
 
     if occurrences == 0 {
-        if let Some((decoded_find, decoded_replace)) = escape_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+        if let Some((decoded_find, decoded_replace)) =
+            escape_tolerant_match(&existing_text, &effective_find, &effective_replace)
+        {
             effective_find = decoded_find;
             effective_replace = decoded_replace;
             occurrences = count_occurrences(&existing_text, &effective_find);
@@ -1700,7 +2025,9 @@ pub fn resolve_file_entry(
         .collect::<Vec<&str>>()
         .join(&effective_replace);
 
-    if let Err(error) = assert_patch_keeps_file_parseable(&display_path, &absolute_path, &existing_text, &new_text) {
+    if let Err(error) =
+        assert_patch_keeps_file_parseable(&display_path, &absolute_path, &existing_text, &new_text)
+    {
         return Err(error);
     }
 
@@ -1720,7 +2047,8 @@ pub fn resolve_file_entry(
 }
 
 fn find_has_line_number_prefix(text: &str) -> bool {
-    text.lines().any(|line| line_number_prefix_len(line).is_some())
+    text.lines()
+        .any(|line| line_number_prefix_len(line).is_some())
 }
 
 fn strip_line_number_prefixes(text: &str) -> String {
@@ -1773,8 +2101,10 @@ fn canonical_destination_identity(absolute_path: &str) -> std::path::PathBuf {
     let mut identity = std::path::PathBuf::new();
     for component in path.components() {
         match component {
-            std::path::Component::CurDir => {},
-            std::path::Component::ParentDir => { identity.pop(); },
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                identity.pop();
+            }
             _ => {
                 identity.push(component.as_os_str());
                 // Resolve existing symlinks before processing a later `..`.
@@ -1794,7 +2124,8 @@ fn canonical_destination_identity(absolute_path: &str) -> std::path::PathBuf {
 /// other, so the first edit would be silently lost; separate PATCH calls are
 /// the simplest correct contract for multiple edits to one file.
 fn reject_duplicate_destinations(resolved: &[ResolvedEntry]) -> Result<(), String> {
-    let mut identities: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut identities: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for entry in resolved {
         let identity = canonical_destination_identity(&entry.absolute_path);
         if !identities.insert(identity) {
@@ -1932,7 +2263,10 @@ pub struct PatchToolExecution {
     pub output_text: String,
 }
 
-pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<PatchToolExecution, String> {
+pub fn execute_prepared(
+    prepared: &PatchToolPrepared,
+    ctx: &ToolCtx,
+) -> Result<PatchToolExecution, String> {
     let workspace_root = ctx.cwd.display().to_string();
 
     if !prepared.input.files.is_empty() {
@@ -1944,7 +2278,10 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
             let chained = if file_entry.content.is_none() {
                 let absolute = resolve_tool_path(&workspace_root, &file_entry.path);
                 let identity = canonical_destination_identity(&absolute.to_string_lossy());
-                resolved.iter().position(|earlier| earlier.content.is_none() && canonical_destination_identity(&earlier.absolute_path) == identity)
+                resolved.iter().position(|earlier| {
+                    earlier.content.is_none()
+                        && canonical_destination_identity(&earlier.absolute_path) == identity
+                })
             } else {
                 None
             };
@@ -1954,7 +2291,8 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                     let next = resolve_file_entry(file_entry, index, &workspace_root, Some(&base))?;
                     let earlier = &mut resolved[earlier_index];
                     earlier.new_text = next.new_text;
-                    earlier.occurrences = Some(earlier.occurrences.unwrap_or(0) + next.occurrences.unwrap_or(0));
+                    earlier.occurrences =
+                        Some(earlier.occurrences.unwrap_or(0) + next.occurrences.unwrap_or(0));
                     if let Some(appended) = next.appended {
                         earlier.appended = Some(earlier.appended.unwrap_or(0) + appended);
                         if next.crlf_note.is_some() {
@@ -1962,7 +2300,10 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                         }
                     }
                     if let Some(lines) = next.match_lines {
-                        earlier.match_lines.get_or_insert_with(Vec::new).extend(lines);
+                        earlier
+                            .match_lines
+                            .get_or_insert_with(Vec::new)
+                            .extend(lines);
                     }
                 }
                 None => resolved.push(validate_file_entry(file_entry, index, &workspace_root)?),
@@ -1973,13 +2314,21 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         let mut diff_parts: Vec<String> = Vec::new();
         for entry in &resolved {
             let line_summary = if entry.content.is_some() {
-                let verb = if entry.existing_text.is_some() { "Overwrote" } else { "Created" };
+                let verb = if entry.existing_text.is_some() {
+                    "Overwrote"
+                } else {
+                    "Created"
+                };
                 format!(
                     "{}: {} {} line(s){}",
                     entry.display_path,
                     verb.to_lowercase(),
                     crate::tools::helpers::count_lines(&entry.new_text),
-                    entry.existing_text.as_deref().map(|existing| reemission_note(existing, &entry.new_text)).unwrap_or_default()
+                    entry
+                        .existing_text
+                        .as_deref()
+                        .map(|existing| reemission_note(existing, &entry.new_text))
+                        .unwrap_or_default()
                 )
             } else if let Some(appended) = entry.appended {
                 let replaced = entry.occurrences.unwrap_or(0);
@@ -1988,8 +2337,16 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                     entry.display_path,
                     appended,
                     entry.crlf_note.clone().unwrap_or_default(),
-                    if replaced > 0 { format!(" after replacing {} occurrence(s)", replaced) } else { String::new() },
-                    if entry.existing_text.is_none() { " (file created)" } else { "" }
+                    if replaced > 0 {
+                        format!(" after replacing {} occurrence(s)", replaced)
+                    } else {
+                        String::new()
+                    },
+                    if entry.existing_text.is_none() {
+                        " (file created)"
+                    } else {
+                        ""
+                    }
                 )
             } else {
                 format!(
@@ -2000,7 +2357,11 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
                 )
             };
             summary_lines.push(line_summary);
-            diff_parts.push(build_unified_diff(&entry.display_path, entry.existing_text.as_deref(), &entry.new_text));
+            diff_parts.push(build_unified_diff(
+                &entry.display_path,
+                entry.existing_text.as_deref(),
+                &entry.new_text,
+            ));
         }
         let summary = summary_lines.join("\n");
         return Ok(PatchToolExecution {
@@ -2020,7 +2381,9 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         let existing_text: Option<String> = if std::path::Path::new(&absolute_path).exists() {
             match std::fs::read_to_string(&absolute_path) {
                 Ok(text) => Some(text),
-                Err(error) => return Err(format!("Could not read \"{}\": {}", display_path, error)),
+                Err(error) => {
+                    return Err(format!("Could not read \"{}\": {}", display_path, error))
+                }
             }
         } else {
             None
@@ -2030,13 +2393,16 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         // not (deliberately broken fixtures are a legitimate thing to create).
         if let Some(existing) = existing_text.as_deref() {
             if let Some(incomplete_error) = find_incomplete_overwrite_error(existing, &content) {
-                return Err(format!("PATCH rejected: {incomplete_error} The file was left unchanged."));
+                return Err(format!(
+                    "PATCH rejected: {incomplete_error} The file was left unchanged."
+                ));
             }
 
             assert_patch_keeps_file_parseable(&display_path, &absolute_path, existing, &content)?;
         }
 
-        crate::lib_fs::write_file_atomic(std::path::Path::new(&absolute_path), &content, true).map_err(|error| error.to_string())?;
+        crate::lib_fs::write_file_atomic(std::path::Path::new(&absolute_path), &content, true)
+            .map_err(|error| error.to_string())?;
         let _ = crate::tools::patch_journal::append_patch_journal(
             std::path::Path::new(&workspace_root),
             &crate::tools::patch_journal::AppendPatchJournalEntry {
@@ -2047,7 +2413,11 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
         );
 
         let summary = if existing_text.is_none() {
-            format!("Created {} with {} line(s).", display_path, crate::tools::helpers::count_lines(&content))
+            format!(
+                "Created {} with {} line(s).",
+                display_path,
+                crate::tools::helpers::count_lines(&content)
+            )
         } else {
             format!(
                 "Overwrote {} with {} line(s).{}",
@@ -2072,7 +2442,8 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
             display_path
         ));
     }
-    let existing_text = std::fs::read_to_string(&absolute_path).map_err(|error| error.to_string())?;
+    let existing_text =
+        std::fs::read_to_string(&absolute_path).map_err(|error| error.to_string())?;
 
     let mut effective_find = prepared.input.find.clone().unwrap_or_default();
     let mut effective_replace = prepared.input.replace.clone().unwrap_or_default();
@@ -2081,14 +2452,19 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
 
     // LF find text against a CRLF file fails wholesale with a hint that
     // misses the cause; retry with converted line endings and say so.
-    if occurrences == 0 && existing_text.contains("\r\n") && effective_find.contains('\n') && !effective_find.contains('\r') {
+    if occurrences == 0
+        && existing_text.contains("\r\n")
+        && effective_find.contains('\n')
+        && !effective_find.contains('\r')
+    {
         let crlf_find = effective_find.replace('\n', "\r\n");
         let crlf_occurrences = existing_text.matches(&crlf_find).count();
         if crlf_occurrences > 0 {
             effective_find = crlf_find;
             effective_replace = effective_replace.replace('\n', "\r\n");
             occurrences = crlf_occurrences;
-            crlf_note = " (the file uses CRLF line endings; the edit was applied with CRLF)".to_string();
+            crlf_note =
+                " (the file uses CRLF line endings; the edit was applied with CRLF)".to_string();
         }
     }
 
@@ -2106,7 +2482,9 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     }
 
     if occurrences == 0 {
-        if let Some((actual_find, reindented)) = indentation_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+        if let Some((actual_find, reindented)) =
+            indentation_tolerant_match(&existing_text, &effective_find, &effective_replace)
+        {
             effective_find = actual_find;
             effective_replace = reindented;
             occurrences = existing_text.matches(&effective_find).count();
@@ -2115,7 +2493,9 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     }
 
     if occurrences == 0 {
-        if let Some((decoded_find, decoded_replace)) = escape_tolerant_match(&existing_text, &effective_find, &effective_replace) {
+        if let Some((decoded_find, decoded_replace)) =
+            escape_tolerant_match(&existing_text, &effective_find, &effective_replace)
+        {
             effective_find = decoded_find;
             effective_replace = decoded_replace;
             occurrences = existing_text.matches(&effective_find).count();
@@ -2159,7 +2539,8 @@ pub fn execute_prepared(prepared: &PatchToolPrepared, ctx: &ToolCtx) -> Result<P
     let new_text = existing_text.replace(&effective_find, &effective_replace);
 
     assert_patch_keeps_file_parseable(&display_path, &absolute_path, &existing_text, &new_text)?;
-    crate::lib_fs::write_file_atomic(std::path::Path::new(&absolute_path), &new_text, true).map_err(|error| error.to_string())?;
+    crate::lib_fs::write_file_atomic(std::path::Path::new(&absolute_path), &new_text, true)
+        .map_err(|error| error.to_string())?;
     let _ = crate::tools::patch_journal::append_patch_journal(
         std::path::Path::new(&workspace_root),
         &crate::tools::patch_journal::AppendPatchJournalEntry {
@@ -2202,7 +2583,12 @@ pub fn complete(prepared: &PatchToolPrepared, result: &PatchToolResult) -> ToolC
         format!("Applied change to {}.", prepared.input.display_path)
     };
     let primary_path = if !prepared.input.files.is_empty() {
-        prepared.input.files.first().map(|entry| entry.path.clone()).unwrap_or_default()
+        prepared
+            .input
+            .files
+            .first()
+            .map(|entry| entry.path.clone())
+            .unwrap_or_default()
     } else {
         prepared.input.absolute_path.clone()
     };
@@ -2222,7 +2608,9 @@ pub fn complete(prepared: &PatchToolPrepared, result: &PatchToolResult) -> ToolC
 /// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &serde_json::Value, ctx: &ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 pub fn execute(args: &serde_json::Value, ctx: &ToolCtx) -> ToolOutcome {
@@ -2255,10 +2643,11 @@ mod execute_tests {
         let dir = std::env::temp_dir().join(format!(
             "drip-patch-execute-tests-{}-{}",
             tag,
-            std::process::id() as u64 ^ std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0)
+            std::process::id() as u64
+                ^ std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).expect("create temp workspace");
         dir
@@ -2292,90 +2681,189 @@ mod execute_tests {
         let rewritten = std::fs::read_to_string(&file).unwrap();
         assert_eq!(rewritten, "alpha\ndelta\ngamma\n");
         assert!(
-            outcome.text.contains("--- a/notes.txt\n+++ b/notes.txt\n@@ -2,1 +2,1 @@\n-beta\n+delta"),
+            outcome
+                .text
+                .contains("--- a/notes.txt\n+++ b/notes.txt\n@@ -2,1 +2,1 @@\n-beta\n+delta"),
             "expected unified diff header in tool_content, got: {}",
             outcome.text
         );
-        assert!(outcome.text.contains("notes.txt"), "diff header must name the display path");
+        assert!(
+            outcome.text.contains("notes.txt"),
+            "diff header must name the display path"
+        );
     }
 
     #[test]
     fn append_adds_at_the_end_creates_missing_files_and_chains() {
         let dir = temp_workspace("append");
         let ctx = ctx_for(&dir);
-        std::fs::write(dir.join("tests.py"), "import unittest\n\nclass A(unittest.TestCase):\n    pass").unwrap();
-        let outcome = execute(&serde_json::json!({"path": "tests.py", "append": "\n\nclass B(unittest.TestCase):\n    pass\n"}), &ctx);
+        std::fs::write(
+            dir.join("tests.py"),
+            "import unittest\n\nclass A(unittest.TestCase):\n    pass",
+        )
+        .unwrap();
+        let outcome = execute(
+            &serde_json::json!({"path": "tests.py", "append": "\n\nclass B(unittest.TestCase):\n    pass\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.starts_with("tests.py: appended 4 line(s)"), "{}", outcome.text);
+        assert!(
+            outcome.text.starts_with("tests.py: appended 4 line(s)"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
-        assert!(text.starts_with("import unittest\n\nclass A(unittest.TestCase):\n    pass\n\n\nclass B"), "{text}");
+        assert!(
+            text.starts_with(
+                "import unittest\n\nclass A(unittest.TestCase):\n    pass\n\n\nclass B"
+            ),
+            "{text}"
+        );
         assert!(text.ends_with("    pass\n"), "{text}");
-        let outcome = execute(&serde_json::json!({"files": [{"path": "new/notes.txt", "append": "first line"}]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [{"path": "new/notes.txt", "append": "first line"}]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("appended 1 line(s) (file created)"), "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(dir.join("new/notes.txt")).unwrap(), "first line\n");
-        let outcome = execute(&serde_json::json!({"files": [
-            {"path": "tests.py", "find": "class A(", "replace": "class A0("},
-            {"path": "tests.py", "append": "class C:\n    pass\n"}
-        ]}), &ctx);
+        assert!(
+            outcome.text.contains("appended 1 line(s) (file created)"),
+            "{}",
+            outcome.text
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new/notes.txt")).unwrap(),
+            "first line\n"
+        );
+        let outcome = execute(
+            &serde_json::json!({"files": [
+                {"path": "tests.py", "find": "class A(", "replace": "class A0("},
+                {"path": "tests.py", "append": "class C:\n    pass\n"}
+            ]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"), "{}", outcome.text);
+        assert!(
+            outcome
+                .text
+                .contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
-        assert!(text.contains("class A0(") && text.ends_with("class C:\n    pass\n"), "{text}");
+        assert!(
+            text.contains("class A0(") && text.ends_with("class C:\n    pass\n"),
+            "{text}"
+        );
         // A stray replace (the model echoing where it meant to insert) beside
         // an append is ignored; a real find + replace runs first, then the append.
-        let outcome = execute(&serde_json::json!({"files": [
-            {"path": "tests.py", "append": "class D:\n    pass\n", "replace": "class C:\n    pass\n"}
-        ]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [
+                {"path": "tests.py", "append": "class D:\n    pass\n", "replace": "class C:\n    pass\n"}
+            ]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.starts_with("tests.py: appended 2 line(s)"), "{}", outcome.text);
-        let outcome = execute(&serde_json::json!({"path": "tests.py", "append": "class E:\n    pass\n", "find": "class D:", "replace": "class D0:"}), &ctx);
+        assert!(
+            outcome.text.starts_with("tests.py: appended 2 line(s)"),
+            "{}",
+            outcome.text
+        );
+        let outcome = execute(
+            &serde_json::json!({"path": "tests.py", "append": "class E:\n    pass\n", "find": "class D:", "replace": "class D0:"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"), "{}", outcome.text);
+        assert!(
+            outcome
+                .text
+                .contains("tests.py: appended 2 line(s) after replacing 1 occurrence(s)"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("tests.py")).unwrap();
-        assert!(text.contains("class D0:") && text.ends_with("class E:\n    pass\n"), "{text}");
+        assert!(
+            text.contains("class D0:") && text.ends_with("class E:\n    pass\n"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn escaped_find_text_is_decoded_and_a_near_miss_names_the_closest_line() {
-        assert_eq!(decode_literal_escapes("a \\u2026 b\\n"), Some("a … b\n".to_string()));
+        assert_eq!(
+            decode_literal_escapes("a \\u2026 b\\n"),
+            Some("a … b\n".to_string())
+        );
         assert_eq!(decode_literal_escapes("plain"), None);
         assert_eq!(decode_literal_escapes("bad \\u12"), None);
-        assert_eq!(decode_literal_escapes("\\ud83d\\ude00"), Some("😀".to_string()));
+        assert_eq!(
+            decode_literal_escapes("\\ud83d\\ude00"),
+            Some("😀".to_string())
+        );
         let dir = temp_workspace("escapes");
         let ctx = ctx_for(&dir);
-        std::fs::write(dir.join("t.py"), "def f(text):\n    return text[:left] + \"…\" + text[right:]\n").unwrap();
+        std::fs::write(
+            dir.join("t.py"),
+            "def f(text):\n    return text[:left] + \"…\" + text[right:]\n",
+        )
+        .unwrap();
         let outcome = execute(
             &serde_json::json!({"files": [{"path": "t.py", "find": "    return text[:left] + \"\\u2026\" + text[right:]", "replace": "    return text[:left] + \"\\u2026\" + tail"}]}),
             &ctx,
         );
         assert!(!outcome.failed, "{}", outcome.text);
         assert!(outcome.text.contains("JSON escapes"), "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(dir.join("t.py")).unwrap(), "def f(text):\n    return text[:left] + \"…\" + tail\n");
-        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "    return text[:left] + \"...\" + tail", "replace": "x"}), &ctx);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("t.py")).unwrap(),
+            "def f(text):\n    return text[:left] + \"…\" + tail\n"
+        );
+        let outcome = execute(
+            &serde_json::json!({"path": "t.py", "find": "    return text[:left] + \"...\" + tail", "replace": "x"}),
+            &ctx,
+        );
         assert!(outcome.failed, "{}", outcome.text);
         assert!(
-            outcome.text.contains("The closest line in the file is line 2: `    return text[:left] + \"…\" + tail`"),
+            outcome.text.contains(
+                "The closest line in the file is line 2: `    return text[:left] + \"…\" + tail`"
+            ),
             "{}",
             outcome.text
         );
-        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "nothing like this at all", "replace": "x"}), &ctx);
-        assert!(outcome.failed && !outcome.text.contains("closest line"), "{}", outcome.text);
+        let outcome = execute(
+            &serde_json::json!({"path": "t.py", "find": "nothing like this at all", "replace": "x"}),
+            &ctx,
+        );
+        assert!(
+            outcome.failed && !outcome.text.contains("closest line"),
+            "{}",
+            outcome.text
+        );
         // A later line of the find text is the one that misses.
-        let outcome = execute(&serde_json::json!({"path": "t.py", "find": "def f(text):\n    return text[:left] + \"...\" + tail", "replace": "x"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "t.py", "find": "def f(text):\n    return text[:left] + \"...\" + tail", "replace": "x"}),
+            &ctx,
+        );
         assert!(outcome.text.contains("Line 2 of the find text has no match in the file. The closest line in the file is line 2:"), "{}", outcome.text);
         // Every line present, but not contiguous.
         std::fs::write(dir.join("u.py"), "a = 1\n\nb = 2\nc = 3\n").unwrap();
-        let outcome = execute(&serde_json::json!({"path": "u.py", "find": "a = 1\nb = 2", "replace": "x"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "u.py", "find": "a = 1\nb = 2", "replace": "x"}),
+            &ctx,
+        );
         assert!(outcome.text.contains("Every line of the find text is in the file (its first line is line 1), but not as one contiguous block"), "{}", outcome.text);
         // A second entry whose find spans the hunk the first entry replaced.
-        let outcome = execute(&serde_json::json!({"files": [
-            {"path": "u.py", "find": "b = 2\nc = 3\n", "replace": "bc = 5\n"},
-            {"path": "u.py", "find": "c = 3\n", "replace": "c = 4\n"}
-        ]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [
+                {"path": "u.py", "find": "b = 2\nc = 3\n", "replace": "bc = 5\n"},
+                {"path": "u.py", "find": "c = 3\n", "replace": "c = 4\n"}
+            ]}),
+            &ctx,
+        );
         assert!(outcome.failed && outcome.text.contains("matches the file on disk but not the text after the earlier entries in this call"), "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(dir.join("u.py")).unwrap(), "a = 1\n\nb = 2\nc = 3\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("u.py")).unwrap(),
+            "a = 1\n\nb = 2\nc = 3\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2387,7 +2875,10 @@ mod execute_tests {
         std::fs::write(dir.join("tests/test_store.py"), original).ok();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("tests/test_store.py"), original).unwrap();
-        let outcome = execute(&serde_json::json!({"path": "tests/test_store.py", "append": "\n    def test_b(self):\n        pass\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "tests/test_store.py", "append": "\n    def test_b(self):\n        pass\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         assert!(outcome.text.starts_with("tests/test_store.py: appended 2 line(s) before the `if __name__ == \"__main__\":` block"), "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("tests/test_store.py")).unwrap();
@@ -2397,14 +2888,35 @@ mod execute_tests {
         );
         // A top-level definition gets two blank lines; a guard that is not
         // the last top-level statement is not a tail.
-        let outcome = execute(&serde_json::json!({"path": "tests/test_store.py", "append": "class More(unittest.TestCase):\n    pass\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "tests/test_store.py", "append": "class More(unittest.TestCase):\n    pass\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("tests/test_store.py")).unwrap();
-        assert!(text.contains("        pass\n\n\nclass More(unittest.TestCase):\n    pass\n\n\nif __name__"), "{text}");
-        assert!(split_python_main_guard("if __name__ == \"__main__\":\n    main()\n\nx = 1\n").is_none());
-        assert!(split_python_main_guard("def f():\n    if __name__ == \"__main__\":\n        pass\n").is_none());
-        let outcome = execute(&serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}), &ctx);
-        assert!(!outcome.failed && !outcome.text.contains("block"), "{}", outcome.text);
+        assert!(
+            text.contains(
+                "        pass\n\n\nclass More(unittest.TestCase):\n    pass\n\n\nif __name__"
+            ),
+            "{text}"
+        );
+        assert!(
+            split_python_main_guard("if __name__ == \"__main__\":\n    main()\n\nx = 1\n")
+                .is_none()
+        );
+        assert!(split_python_main_guard(
+            "def f():\n    if __name__ == \"__main__\":\n        pass\n"
+        )
+        .is_none());
+        let outcome = execute(
+            &serde_json::json!({"path": "notes.txt", "append": "if __name__ == x:\n"}),
+            &ctx,
+        );
+        assert!(
+            !outcome.failed && !outcome.text.contains("block"),
+            "{}",
+            outcome.text
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2413,24 +2925,47 @@ mod execute_tests {
         use super::append_restates_replace;
         let test = "    #[test]\n    fn t() {\n        assert!(true);\n    }\n";
         let replace = format!("        prev();\n    }}\n\n{test}}}");
-        assert!(append_restates_replace(&format!("{test}}}\n"), &replace), "the replace already inserts the test");
-        assert!(!append_restates_replace("    fn other() {}\n", &replace), "a different body is a real second edit");
-        assert!(!append_restates_replace("}\n", &replace), "a bare brace is too short to judge");
+        assert!(
+            append_restates_replace(&format!("{test}}}\n"), &replace),
+            "the replace already inserts the test"
+        );
+        assert!(
+            !append_restates_replace("    fn other() {}\n", &replace),
+            "a different body is a real second edit"
+        );
+        assert!(
+            !append_restates_replace("}\n", &replace),
+            "a bare brace is too short to judge"
+        );
         // End to end: one files[] entry carrying both applies the edit once.
         let dir = temp_workspace("append-dup");
         let ctx = ctx_for(&dir);
-        std::fs::write(dir.join("m.rs"), "mod tests {\n    #[test]\n    fn a() {\n        assert!(true);\n    }\n}\n").unwrap();
-        let outcome = execute(&serde_json::json!({"files": [{
-            "path": "m.rs",
-            "find": "    fn a() {\n        assert!(true);\n    }\n}",
-            "replace": "    fn a() {\n        assert!(true);\n    }\n\n    #[test]\n    fn b() {\n        assert!(true);\n    }\n}",
-            "append": "    #[test]\n    fn b() {\n        assert!(true);\n    }\n}\n"
-        }]}), &ctx);
+        std::fs::write(
+            dir.join("m.rs"),
+            "mod tests {\n    #[test]\n    fn a() {\n        assert!(true);\n    }\n}\n",
+        )
+        .unwrap();
+        let outcome = execute(
+            &serde_json::json!({"files": [{
+                "path": "m.rs",
+                "find": "    fn a() {\n        assert!(true);\n    }\n}",
+                "replace": "    fn a() {\n        assert!(true);\n    }\n\n    #[test]\n    fn b() {\n        assert!(true);\n    }\n}",
+                "append": "    #[test]\n    fn b() {\n        assert!(true);\n    }\n}\n"
+            }]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("m.rs")).unwrap();
-        assert_eq!(text.matches("fn b()").count(), 1, "the test is inserted once, not duplicated: {text}");
+        assert_eq!(
+            text.matches("fn b()").count(),
+            1,
+            "the test is inserted once, not duplicated: {text}"
+        );
         assert_eq!(text.matches("mod tests").count(), 1);
-        assert!(text.ends_with("    }\n}\n"), "no stray closing brace: {text}");
+        assert!(
+            text.ends_with("    }\n}\n"),
+            "no stray closing brace: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2440,43 +2975,97 @@ mod execute_tests {
         let ctx = ctx_for(&dir);
         let src = "mod tests {\n    use super::*;\n\n    #[test]\n    fn alpha() {\n        if true {\n            assert!(true);\n        }\n    }\n\n    #[test]\n    fn beta() {\n        assert!(true);\n    }\n}\n";
         std::fs::write(dir.join("lib.rs"), src).unwrap();
-        let outcome = execute(&serde_json::json!({"path": "lib.rs", "after": "alpha", "append": "#[test]\nfn gamma() {\n    assert!(true);\n}\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "lib.rs", "after": "alpha", "append": "#[test]\nfn gamma() {\n    assert!(true);\n}\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("after `alpha` (the new text starts at line 11)"), "{}", outcome.text);
+        assert!(
+            outcome
+                .text
+                .contains("after `alpha` (the new text starts at line 11)"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("lib.rs")).unwrap();
         let expected = "mod tests {\n    use super::*;\n\n    #[test]\n    fn alpha() {\n        if true {\n            assert!(true);\n        }\n    }\n\n    #[test]\n    fn gamma() {\n        assert!(true);\n    }\n\n    #[test]\n    fn beta() {\n        assert!(true);\n    }\n}\n";
         assert_eq!(text, expected);
         // before: above the attribute of the anchor.
-        let outcome = execute(&serde_json::json!({"files": [{"path": "lib.rs", "before": "beta", "append": "    fn delta() {}\n"}]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [{"path": "lib.rs", "before": "beta", "append": "    fn delta() {}\n"}]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("lib.rs")).unwrap();
-        assert!(text.contains("    }\n\n    fn delta() {}\n\n    #[test]\n    fn beta() {"), "{text}");
+        assert!(
+            text.contains("    }\n\n    fn delta() {}\n\n    #[test]\n    fn beta() {"),
+            "{text}"
+        );
         // Unknown or ambiguous anchor: plain append with the reason in the summary.
-        let outcome = execute(&serde_json::json!({"path": "lib.rs", "after": "omega", "append": "// tail\n"}), &ctx);
-        assert!(!outcome.failed && outcome.text.contains("`omega` is not defined in this file, so the text went at the end instead"), "{}", outcome.text);
-        assert!(std::fs::read_to_string(dir.join("lib.rs")).unwrap().ends_with("}\n// tail\n"));
+        let outcome = execute(
+            &serde_json::json!({"path": "lib.rs", "after": "omega", "append": "// tail\n"}),
+            &ctx,
+        );
+        assert!(
+            !outcome.failed
+                && outcome.text.contains(
+                    "`omega` is not defined in this file, so the text went at the end instead"
+                ),
+            "{}",
+            outcome.text
+        );
+        assert!(std::fs::read_to_string(dir.join("lib.rs"))
+            .unwrap()
+            .ends_with("}\n// tail\n"));
         // Python: indentation-delimited block, decorator stepped over for before.
         std::fs::write(dir.join("t.py"), "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n\n    @skip\n    def test_b(self):\n        pass\n").unwrap();
-        let outcome = execute(&serde_json::json!({"path": "t.py", "after": "test_a", "append": "def test_mid(self):\n    pass\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "t.py", "after": "test_a", "append": "def test_mid(self):\n    pass\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("t.py")).unwrap();
         assert!(text.contains("        self.assertTrue(True)\n\n    def test_mid(self):\n        pass\n\n    @skip\n    def test_b(self):"), "{text}");
         // A full multi-line definition as the anchor resolves by its first
         // line (the signature): a model pastes the whole function it read.
-        std::fs::write(dir.join("g.rs"), "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n\npub fn two(x: u8) -> u8 {\n    x + 2\n}\n").unwrap();
-        let outcome = execute(&serde_json::json!({"path": "g.rs", "after": "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n", "append": "pub fn oneb(x: u8) -> u8 { x }\n"}), &ctx);
+        std::fs::write(
+            dir.join("g.rs"),
+            "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n\npub fn two(x: u8) -> u8 {\n    x + 2\n}\n",
+        )
+        .unwrap();
+        let outcome = execute(
+            &serde_json::json!({"path": "g.rs", "after": "pub fn one(x: u8) -> u8 {\n    x + 1\n}\n", "append": "pub fn oneb(x: u8) -> u8 { x }\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("after `pub fn one(x: u8) -> u8 {"), "{}", outcome.text);
+        assert!(
+            outcome.text.contains("after `pub fn one(x: u8) -> u8 {"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("g.rs")).unwrap();
-        assert!(text.contains("    x + 1\n}\n\npub fn oneb(x: u8) -> u8 { x }\n\npub fn two"), "{text}");
+        assert!(
+            text.contains("    x + 1\n}\n\npub fn oneb(x: u8) -> u8 { x }\n\npub fn two"),
+            "{text}"
+        );
         // A call-expression anchor (a describe/test block named as the model
         // reads it) matches by its literal opening, not only a bare name.
         std::fs::write(dir.join("d.test.ts"), "describe(\"a\", () => {\n  test(\"x\", () => {});\n});\n\ndescribe(\"b\", () => {\n  test(\"y\", () => {});\n});\n").unwrap();
-        let outcome = execute(&serde_json::json!({"path": "d.test.ts", "before": "describe(\"b\")", "append": "  test(\"z\", () => {});\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "d.test.ts", "before": "describe(\"b\")", "append": "  test(\"z\", () => {});\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("before `describe(\"b\")`"), "{}", outcome.text);
+        assert!(
+            outcome.text.contains("before `describe(\"b\")`"),
+            "{}",
+            outcome.text
+        );
         let text = std::fs::read_to_string(dir.join("d.test.ts")).unwrap();
-        assert!(text.contains("});\n\n  test(\"z\", () => {});\n\ndescribe(\"b\", () => {"), "{text}");
+        assert!(
+            text.contains("});\n\n  test(\"z\", () => {});\n\ndescribe(\"b\", () => {"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2487,9 +3076,18 @@ mod execute_tests {
         std::fs::create_dir_all(dir.join("test")).unwrap();
         let ts = "import { test } from \"bun:test\";\n\ndescribe(\"bounds\", () => {\n  test(\"a\", () => {\n    expect(1).toBe(1);\n  });\n});\n";
         std::fs::write(dir.join("test/p.test.ts"), ts).unwrap();
-        let outcome = execute(&serde_json::json!({"path": "test/p.test.ts", "append": "\n  test(\"b\", () => {\n    expect(2).toBe(2);\n  });\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "test/p.test.ts", "append": "\n  test(\"b\", () => {\n    expect(2).toBe(2);\n  });\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.starts_with("test/p.test.ts: appended 3 line(s) before the file's closing brace(s)"), "{}", outcome.text);
+        assert!(
+            outcome.text.starts_with(
+                "test/p.test.ts: appended 3 line(s) before the file's closing brace(s)"
+            ),
+            "{}",
+            outcome.text
+        );
         assert_eq!(
             std::fs::read_to_string(dir.join("test/p.test.ts")).unwrap(),
             "import { test } from \"bun:test\";\n\ndescribe(\"bounds\", () => {\n  test(\"a\", () => {\n    expect(1).toBe(1);\n  });\n\n  test(\"b\", () => {\n    expect(2).toBe(2);\n  });\n});\n"
@@ -2497,15 +3095,35 @@ mod execute_tests {
         // Rust: a #[test] joins mod tests; a top-level (unindented) append stays at the end.
         let rs = "fn f() -> u8 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn a() {\n        assert_eq!(f(), 1);\n    }\n}\n";
         std::fs::write(dir.join("m.rs"), rs).unwrap();
-        let outcome = execute(&serde_json::json!({"path": "m.rs", "append": "    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n"}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": "m.rs", "append": "    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         let text = std::fs::read_to_string(dir.join("m.rs")).unwrap();
-        assert!(text.ends_with("    }\n\n    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n}\n"), "{text}");
-        let outcome = execute(&serde_json::json!({"path": "m.rs", "append": "fn g() -> u8 {\n    2\n}\n"}), &ctx);
-        assert!(!outcome.failed && !outcome.text.contains("closing brace"), "{}", outcome.text);
-        assert!(std::fs::read_to_string(dir.join("m.rs")).unwrap().ends_with("}\nfn g() -> u8 {\n    2\n}\n"));
+        assert!(
+            text.ends_with(
+                "    }\n\n    #[test]\n    fn b() {\n        assert_eq!(f(), 1);\n    }\n}\n"
+            ),
+            "{text}"
+        );
+        let outcome = execute(
+            &serde_json::json!({"path": "m.rs", "append": "fn g() -> u8 {\n    2\n}\n"}),
+            &ctx,
+        );
+        assert!(
+            !outcome.failed && !outcome.text.contains("closing brace"),
+            "{}",
+            outcome.text
+        );
+        assert!(std::fs::read_to_string(dir.join("m.rs"))
+            .unwrap()
+            .ends_with("}\nfn g() -> u8 {\n    2\n}\n"));
         assert!(split_trailing_closers("}\n").is_none());
-        assert_eq!(split_trailing_closers("a {\n  b\n});\n]\n"), Some(("a {\n  b", "});\n]")));
+        assert_eq!(
+            split_trailing_closers("a {\n  b\n});\n]\n"),
+            Some(("a {\n  b", "});\n]"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2516,15 +3134,31 @@ mod execute_tests {
         let mut new = old.clone();
         new.push_str("line 31\nline 32\n");
         assert_eq!(reemitted_line_count(&old, &new), 30);
-        assert!(reemission_note(&old, &new).contains("30 of 32 lines were already in the file"), "{}", reemission_note(&old, &new));
+        assert!(
+            reemission_note(&old, &new).contains("30 of 32 lines were already in the file"),
+            "{}",
+            reemission_note(&old, &new)
+        );
         let rewritten: String = (1..=30).map(|i| format!("new {i}\n")).collect();
-        assert_eq!(reemission_note(&old, &rewritten), "", "a real rewrite gets no note");
-        assert_eq!(reemission_note("a\nb\n", "a\nb\nc\n"), "", "short files get no note");
+        assert_eq!(
+            reemission_note(&old, &rewritten),
+            "",
+            "a real rewrite gets no note"
+        );
+        assert_eq!(
+            reemission_note("a\nb\n", "a\nb\nc\n"),
+            "",
+            "short files get no note"
+        );
         let dir = temp_workspace("reemit");
         let ctx = ctx_for(&dir);
         std::fs::write(dir.join("m.py"), &old).unwrap();
         let outcome = execute(&serde_json::json!({"path": "m.py", "content": new}), &ctx);
-        assert!(!outcome.failed && outcome.text.contains("were already in the file; append"), "{}", outcome.text);
+        assert!(
+            !outcome.failed && outcome.text.contains("were already in the file; append"),
+            "{}",
+            outcome.text
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2609,7 +3243,10 @@ mod execute_tests {
         );
 
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nbeta\nTHREE\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "ONE\nbeta\nTHREE\n"
+        );
     }
 
     #[test]
@@ -2618,10 +3255,13 @@ mod execute_tests {
         let ctx = ctx_for(&workspace);
         let first = workspace.join("a.txt");
         let alias = workspace.join("new/../a.txt");
-        let outcome = execute(&serde_json::json!({"files":[
-            {"path":first,"content":"first\n"},
-            {"path":alias,"content":"second\n"}
-        ]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files":[
+                {"path":first,"content":"first\n"},
+                {"path":alias,"content":"second\n"}
+            ]}),
+            &ctx,
+        );
         assert!(outcome.failed, "{}", outcome.text);
         assert!(outcome.text.contains("same file"));
         assert!(!first.exists());
@@ -2630,12 +3270,17 @@ mod execute_tests {
 
     #[test]
     fn an_indented_fragment_does_not_overwrite_a_module() {
-        let module: String = (1..=44).map(|i| format!("def f{i}():\n    return {i}\n")).collect();
+        let module: String = (1..=44)
+            .map(|i| format!("def f{i}():\n    return {i}\n"))
+            .collect();
         let fragment = "    p_set = sub.add_parser(\"set\")\n    p_set.add_argument(\"key\")\n    p_set.add_argument(\"value\")\n";
         let error = find_incomplete_overwrite_error(&module, fragment).expect("fragment rejected");
         assert!(error.contains("starts with an indented line"), "{error}");
         // A complete short rewrite (unindented first line) is still allowed.
-        assert!(find_incomplete_overwrite_error(&module, "import os\n\ndef f1():\n    return 1\n").is_none());
+        assert!(
+            find_incomplete_overwrite_error(&module, "import os\n\ndef f1():\n    return 1\n")
+                .is_none()
+        );
         // A short file rewritten with an indented first line is not guarded.
         assert!(find_incomplete_overwrite_error("a\nb\nc\n", "    x\n").is_none());
     }
@@ -2647,15 +3292,21 @@ mod execute_tests {
         let whole = workspace.join("whole.txt");
         let edited = workspace.join("edited.txt");
         std::fs::write(&edited, "alpha\nbeta\n").unwrap();
-        let outcome = execute(&serde_json::json!({"files": [
-            {"path": whole, "content": "new file\n", "find": "", "replace": ""},
-            {"path": edited, "find": "beta", "replace": "", "content": "gamma"}
-        ]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [
+                {"path": whole, "content": "new file\n", "find": "", "replace": ""},
+                {"path": edited, "find": "beta", "replace": "", "content": "gamma"}
+            ]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         assert_eq!(std::fs::read_to_string(&whole).unwrap(), "new file\n");
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), "alpha\ngamma\n");
         // A deletion (find + empty replace, no content) still deletes.
-        let outcome = execute(&serde_json::json!({"files": [{"path": edited, "find": "gamma\n", "replace": ""}]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"files": [{"path": edited, "find": "gamma\n", "replace": ""}]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), "alpha\n");
     }
@@ -2666,18 +3317,25 @@ mod execute_tests {
         let ctx = ctx_for(&workspace);
         let file = workspace.join("notes.txt");
         std::fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
-        let outcome = execute(&serde_json::json!({"path": file, "files": [
-            {"find": "alpha", "replace": "ALPHA"},
-            {"find": "gamma", "replace": "GAMMA"}
-        ]}), &ctx);
+        let outcome = execute(
+            &serde_json::json!({"path": file, "files": [
+                {"find": "alpha", "replace": "ALPHA"},
+                {"find": "gamma", "replace": "GAMMA"}
+            ]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ALPHA\nbeta\nGAMMA\n");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "ALPHA\nbeta\nGAMMA\n"
+        );
     }
 
     #[test]
     fn a_files_string_with_escaped_structural_quotes_is_repaired() {
         // Structural quotes doubled by the model; the find text keeps its own quoted `"x"`.
-        let encoded = r#"[{"find": "let a = \"x\";", \"path\": \"notes.rs\", \"replace\": \"let a = 1;\"}]"#;
+        let encoded =
+            r#"[{"find": "let a = \"x\";", \"path\": \"notes.rs\", \"replace\": \"let a = 1;\"}]"#;
         let decoded = decode_files_string(encoded).expect("repaired");
         let entry = &decoded.as_array().unwrap()[0];
         assert_eq!(entry["path"], "notes.rs");
@@ -2687,14 +3345,23 @@ mod execute_tests {
         // A bare path value in one entry (recorded run: `"path": src/harness/loop.rs}`).
         let bare = r#"[{"find": "a", "path": "src/a.rs", "replace": "b"}, {"find": "c", "path": src/harness/loop.rs, "replace": "d"}]"#;
         let decoded = decode_files_string(bare).expect("bare path quoted");
-        assert_eq!(decoded.as_array().unwrap()[1]["path"], "src/harness/loop.rs");
+        assert_eq!(
+            decoded.as_array().unwrap()[1]["path"],
+            "src/harness/loop.rs"
+        );
         assert_eq!(decoded.as_array().unwrap()[1]["replace"], "d");
         // The recorded shape: only the opening quote missing, and quoted text
         // (`, \"jest\"`) inside the find that the structural repair must not touch.
         let half = r#"[{"find": "(\"jest\", \"jest\"),", "path": "src/a.rs", "replace": "x"}, {"find": "c", "path": src/harness/loop.rs", "replace": "d"}]"#;
         let decoded = decode_files_string(half).expect("half-quoted path repaired");
-        assert_eq!(decoded.as_array().unwrap()[0]["find"], "(\"jest\", \"jest\"),");
-        assert_eq!(decoded.as_array().unwrap()[1]["path"], "src/harness/loop.rs");
+        assert_eq!(
+            decoded.as_array().unwrap()[0]["find"],
+            "(\"jest\", \"jest\"),"
+        );
+        assert_eq!(
+            decoded.as_array().unwrap()[1]["path"],
+            "src/harness/loop.rs"
+        );
     }
 
     #[test]
@@ -2703,8 +3370,16 @@ mod execute_tests {
         let ctx = ctx_for(&workspace);
         let outcome = execute(&serde_json::json!({"files": "[{oops"}), &ctx);
         assert!(outcome.failed);
-        assert!(outcome.text.contains("not a valid JSON array"), "{}", outcome.text);
-        assert!(outcome.text.contains("Send \"files\" as a JSON array"), "{}", outcome.text);
+        assert!(
+            outcome.text.contains("not a valid JSON array"),
+            "{}",
+            outcome.text
+        );
+        assert!(
+            outcome.text.contains("Send \"files\" as a JSON array"),
+            "{}",
+            outcome.text
+        );
     }
 
     #[test]
@@ -2713,7 +3388,8 @@ mod execute_tests {
         let ctx = ctx_for(&workspace);
         let file = workspace.join("notes.txt");
         std::fs::write(&file, "alpha\nbeta\n").unwrap();
-        let encoded = serde_json::json!([{"path": file, "find": "beta", "replace": "gamma"}]).to_string();
+        let encoded =
+            serde_json::json!([{"path": file, "find": "beta", "replace": "gamma"}]).to_string();
         let outcome = execute(&serde_json::json!({"files": encoded}), &ctx);
         assert!(!outcome.failed, "{}", outcome.text);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\ngamma\n");
@@ -2738,8 +3414,15 @@ mod execute_tests {
             &ctx,
         );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "ONE\nbeta\nTHREE\n");
-        assert!(outcome.text.contains("replaced 2 occurrence(s)"), "{}", outcome.text);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "ONE\nbeta\nTHREE\n"
+        );
+        assert!(
+            outcome.text.contains("replaced 2 occurrence(s)"),
+            "{}",
+            outcome.text
+        );
     }
 
     #[test]
@@ -2758,7 +3441,11 @@ mod execute_tests {
             &ctx,
         );
         assert!(outcome.failed, "{}", outcome.text);
-        assert!(outcome.text.contains("write content to the same file"), "{}", outcome.text);
+        assert!(
+            outcome.text.contains("write content to the same file"),
+            "{}",
+            outcome.text
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "alpha\n");
     }
 
@@ -2783,7 +3470,10 @@ mod execute_tests {
         );
 
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "ONE\nbeta\nTHREE\n");
+        assert_eq!(
+            std::fs::read_to_string(&real).unwrap(),
+            "ONE\nbeta\nTHREE\n"
+        );
     }
 
     #[cfg(unix)]
@@ -2930,7 +3620,10 @@ mod execute_tests {
                 appended: None,
             },
             ResolvedEntry {
-                absolute_path: workspace.join("doomed/child.txt").to_string_lossy().to_string(),
+                absolute_path: workspace
+                    .join("doomed/child.txt")
+                    .to_string_lossy()
+                    .to_string(),
                 display_path: "doomed/child.txt".to_string(),
                 content: Some(String::new()),
                 effective_find: None,
@@ -2990,7 +3683,10 @@ mod execute_tests {
                 appended: None,
             },
             ResolvedEntry {
-                absolute_path: workspace.join("blocker/doomed.txt").to_string_lossy().to_string(),
+                absolute_path: workspace
+                    .join("blocker/doomed.txt")
+                    .to_string_lossy()
+                    .to_string(),
                 display_path: "blocker/doomed.txt".to_string(),
                 content: Some(String::new()),
                 effective_find: None,
@@ -3026,7 +3722,10 @@ mod execute_tests {
     fn rollback_failure_is_reported_explicitly() {
         let workspace = temp_workspace("rollback-failure");
         let resolved = vec![ResolvedEntry {
-            absolute_path: workspace.join("gone/victim.txt").to_string_lossy().to_string(),
+            absolute_path: workspace
+                .join("gone/victim.txt")
+                .to_string_lossy()
+                .to_string(),
             display_path: "gone/victim.txt".to_string(),
             content: Some(String::new()),
             effective_find: None,
@@ -3067,7 +3766,9 @@ mod duplicate_guard_tests {
     use super::*;
 
     fn sixty_lines() -> String {
-        (0..60).map(|i| format!("export const value{i} = {i}; // keep this line\n")).collect()
+        (0..60)
+            .map(|i| format!("export const value{i} = {i}; // keep this line\n"))
+            .collect()
     }
 
     #[test]
@@ -3082,8 +3783,13 @@ mod duplicate_guard_tests {
     #[test]
     fn allows_an_overwrite_that_appends_new_lines() {
         let original = sixty_lines();
-        let additions: String = (0..30).map(|i| format!("export const extra{i} = value{i} * 2; // new\n")).collect();
-        assert_eq!(find_incomplete_overwrite_error(&original, &format!("{original}{additions}")), None);
+        let additions: String = (0..30)
+            .map(|i| format!("export const extra{i} = value{i} * 2; // new\n"))
+            .collect();
+        assert_eq!(
+            find_incomplete_overwrite_error(&original, &format!("{original}{additions}")),
+            None
+        );
     }
 }
 
@@ -3103,19 +3809,12 @@ mod prepare_tests {
     fn missing_files_array_falls_through_to_required_path() {
         let err = prepare(&json!({}), &test_ctx()).unwrap_err();
 
-        assert!(
-            err.to_string().contains("path"),
-            "unexpected error: {err}"
-        );
+        assert!(err.to_string().contains("path"), "unexpected error: {err}");
     }
 
     #[test]
     fn entry_without_find_replace_or_content_is_rejected() {
-        let err = prepare(
-            &json!({ "files": [{ "path": "a.txt" }] }),
-            &test_ctx(),
-        )
-        .unwrap_err();
+        let err = prepare(&json!({ "files": [{ "path": "a.txt" }] }), &test_ctx()).unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -3164,7 +3863,10 @@ mod prepare_tests {
         )
         .unwrap();
         assert_eq!(prepared.input.files.len(), 1);
-        assert_eq!(prepared.input.files[0].content, None, "the stray content is dropped");
+        assert_eq!(
+            prepared.input.files[0].content, None,
+            "the stray content is dropped"
+        );
         assert_eq!(prepared.input.files[0].find.as_deref(), Some("x"));
         assert_eq!(prepared.input.files[0].replace.as_deref(), Some("y"));
     }
@@ -3207,17 +3909,31 @@ mod prepare_tests {
         assert!(prepared.input.stray_content, "stray content is flagged");
         assert_eq!(prepared.input.content, None, "the stray content is dropped");
         assert_eq!(prepared.input.find.as_deref(), Some("x"));
-        assert!(prepared.display_input.ends_with("(replace; stray content ignored)"), "{}", prepared.display_input);
+        assert!(
+            prepared
+                .display_input
+                .ends_with("(replace; stray content ignored)"),
+            "{}",
+            prepared.display_input
+        );
     }
 
     #[test]
     fn content_beside_find_without_replace_is_the_replacement() {
-        let prepared = prepare(&json!({ "path": "a.txt", "find": "old", "content": "new" }), &test_ctx()).unwrap();
+        let prepared = prepare(
+            &json!({ "path": "a.txt", "find": "old", "content": "new" }),
+            &test_ctx(),
+        )
+        .unwrap();
         assert_eq!(prepared.input.content, None);
         assert_eq!(prepared.input.find.as_deref(), Some("old"));
         assert_eq!(prepared.input.replace.as_deref(), Some("new"));
         assert!(!prepared.input.stray_content);
-        let multi = prepare(&json!({ "files": [{ "path": "a.txt", "find": "old", "content": "new" }] }), &test_ctx()).unwrap();
+        let multi = prepare(
+            &json!({ "files": [{ "path": "a.txt", "find": "old", "content": "new" }] }),
+            &test_ctx(),
+        )
+        .unwrap();
         assert_eq!(multi.input.files[0].content, None);
         assert_eq!(multi.input.files[0].replace.as_deref(), Some("new"));
     }
@@ -3229,7 +3945,11 @@ mod prepare_tests {
             &test_ctx(),
         )
         .unwrap_err();
-        assert!(err.to_string().starts_with("Pass either content, or find + replace"), "{err}");
+        assert!(
+            err.to_string()
+                .starts_with("Pass either content, or find + replace"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3237,27 +3957,51 @@ mod prepare_tests {
         let workspace = super::execute_tests::temp_workspace("indent-tolerant");
         let ctx = super::execute_tests::ctx_for(&workspace);
         let file = workspace.join("mod.py");
-        std::fs::write(&file, "class A:\n    def f(self):\n        x = 1\n        return x\n").unwrap();
+        std::fs::write(
+            &file,
+            "class A:\n    def f(self):\n        x = 1\n        return x\n",
+        )
+        .unwrap();
         let outcome = execute(
             &json!({"path": "mod.py", "find": "    x = 1\n    return x\n", "replace": "    x = 2\n    return x\n"}),
             &ctx,
         );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "class A:\n    def f(self):\n        x = 2\n        return x\n");
-        assert!(outcome.text.contains("indentation ignored"), "{}", outcome.text);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "class A:\n    def f(self):\n        x = 2\n        return x\n"
+        );
+        assert!(
+            outcome.text.contains("indentation ignored"),
+            "{}",
+            outcome.text
+        );
         // Deeper find than file: the surplus is stripped from the replacement.
         let outcome = execute(
             &json!({"files": [{"path": "mod.py", "find": "            x = 2", "replace": "            x = 3"}]}),
             &ctx,
         );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert!(std::fs::read_to_string(&file).unwrap().contains("        x = 3\n"));
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("        x = 3\n"));
         // Ambiguous windows stay "not found".
         std::fs::write(&file, "a\n    b\nc\n        b\n").unwrap();
-        let outcome = execute(&json!({"path": "mod.py", "find": "  bbb", "replace": "z"}), &ctx);
+        let outcome = execute(
+            &json!({"path": "mod.py", "find": "  bbb", "replace": "z"}),
+            &ctx,
+        );
         assert!(outcome.failed);
-        assert!(indentation_tolerant_match("a\n    b\nc\n        b\n", "  b", "z").is_none(), "two windows and a too-short line");
-        assert!(indentation_tolerant_match("    let value = 1;\n", "let value = 1;", "let value = 2;").is_some());
+        assert!(
+            indentation_tolerant_match("a\n    b\nc\n        b\n", "  b", "z").is_none(),
+            "two windows and a too-short line"
+        );
+        assert!(indentation_tolerant_match(
+            "    let value = 1;\n",
+            "let value = 1;",
+            "let value = 2;"
+        )
+        .is_some());
     }
 
     #[test]
@@ -3266,16 +4010,34 @@ mod prepare_tests {
         let ctx = super::execute_tests::ctx_for(&workspace);
         std::fs::write(workspace.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(workspace.join("b.txt"), "three\n").unwrap();
-        let outcome = execute(&json!({"path": "a.txt", "content": "one", "replace": "uno"}), &ctx);
+        let outcome = execute(
+            &json!({"path": "a.txt", "content": "one", "replace": "uno"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "uno\ntwo\n");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "uno\ntwo\n"
+        );
         // The same text under both names is a whole-file write.
-        let outcome = execute(&json!({"path": "c.txt", "content": "whole\n", "replace": "whole\n"}), &ctx);
+        let outcome = execute(
+            &json!({"path": "c.txt", "content": "whole\n", "replace": "whole\n"}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(workspace.join("c.txt")).unwrap(), "whole\n");
-        let outcome = execute(&json!({"files": [{"path": "d.txt", "content": "whole\n", "replace": "whole\n"}]}), &ctx);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("c.txt")).unwrap(),
+            "whole\n"
+        );
+        let outcome = execute(
+            &json!({"files": [{"path": "d.txt", "content": "whole\n", "replace": "whole\n"}]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(workspace.join("d.txt")).unwrap(), "whole\n");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("d.txt")).unwrap(),
+            "whole\n"
+        );
         let outcome = execute(
             &json!({"files": [
                 {"path": "b.txt", "find": "three", "replace": "tres"},
@@ -3286,12 +4048,31 @@ mod prepare_tests {
             &ctx,
         );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "uno\n2\n");
-        assert_eq!(std::fs::read_to_string(workspace.join("b.txt")).unwrap(), "3\n");
-        let outcome = execute(&json!({"path": "a.txt", "files": [{"find": "uno", "replace": "1"}, {"path": "b.txt", "find": "3", "replace": "iii"}]}), &ctx);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "uno\n2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("b.txt")).unwrap(),
+            "3\n"
+        );
+        let outcome = execute(
+            &json!({"path": "a.txt", "files": [{"find": "uno", "replace": "1"}, {"path": "b.txt", "find": "3", "replace": "iii"}]}),
+            &ctx,
+        );
         assert!(!outcome.failed, "{}", outcome.text);
-        assert_eq!(std::fs::read_to_string(workspace.join("a.txt")).unwrap(), "1\n2\n");
-        let err = prepare(&json!({"files": [{"find": "x", "replace": "y"}]}), &test_ctx()).unwrap_err();
-        assert!(err.to_string().contains("Missing or empty \"path\""), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "1\n2\n"
+        );
+        let err = prepare(
+            &json!({"files": [{"find": "x", "replace": "y"}]}),
+            &test_ctx(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Missing or empty \"path\""),
+            "{err}"
+        );
     }
 }

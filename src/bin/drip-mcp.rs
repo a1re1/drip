@@ -133,7 +133,9 @@ async fn serve() -> Result<()> {
             } => {
                 in_flight.spawn(async move {
                     let result = run_drip_tool(&argv, cwd.as_deref(), timeout_secs).await;
-                    if let Err(error) = write_reply(&json!({"jsonrpc": "2.0", "id": id, "result": result})) {
+                    if let Err(error) =
+                        write_reply(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                    {
                         eprintln!("drip-mcp: {error:#}");
                     }
                 });
@@ -181,7 +183,13 @@ fn error_reply(id: Value, code: i64, message: &str) -> Value {
 fn parse_line(line: &str) -> Incoming {
     let request: Value = match serde_json::from_str(line) {
         Ok(request) => request,
-        Err(error) => return Incoming::Reply(error_reply(Value::Null, -32700, &format!("Parse error: {error}"))),
+        Err(error) => {
+            return Incoming::Reply(error_reply(
+                Value::Null,
+                -32700,
+                &format!("Parse error: {error}"),
+            ))
+        }
     };
 
     // Notifications (no id, or id null) are never answered.
@@ -202,7 +210,9 @@ fn parse_line(line: &str) -> Incoming {
             }
         })),
         "ping" => Incoming::Reply(json!({"jsonrpc": "2.0", "id": id, "result": {}})),
-        "tools/list" => Incoming::Reply(json!({"jsonrpc": "2.0", "id": id, "result": tools_list_result()})),
+        "tools/list" => {
+            Incoming::Reply(json!({"jsonrpc": "2.0", "id": id, "result": tools_list_result()}))
+        }
         "tools/call" => parse_tools_call(&request, id),
         _ => Incoming::Reply(error_reply(id, -32601, "Method not found")),
     }
@@ -239,31 +249,62 @@ fn tools_list_result() -> Value {
 
 fn parse_tools_call(request: &Value, id: Value) -> Incoming {
     let params = request.get("params");
-    let name = params.and_then(|p| p.get("name")).and_then(Value::as_str).unwrap_or("");
+    let name = params
+        .and_then(|p| p.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if name != "drip" {
         return Incoming::Reply(error_reply(id, -32602, &format!("Unknown tool: {name}")));
     }
     let arguments = params.and_then(|p| p.get("arguments"));
 
     let argv = match arguments.and_then(|a| a.get("args")) {
-        Some(Value::Array(items)) => match items.iter().map(|item| item.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>() {
+        Some(Value::Array(items)) => match items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+        {
             Some(argv) => argv,
-            None => return Incoming::Reply(error_reply(id, -32602, "Invalid params: `args` must be an array of strings")),
+            None => {
+                return Incoming::Reply(error_reply(
+                    id,
+                    -32602,
+                    "Invalid params: `args` must be an array of strings",
+                ))
+            }
         },
-        _ => return Incoming::Reply(error_reply(id, -32602, "Invalid params: `args` (array of strings) is required")),
+        _ => {
+            return Incoming::Reply(error_reply(
+                id,
+                -32602,
+                "Invalid params: `args` (array of strings) is required",
+            ))
+        }
     };
 
     let cwd = match arguments.and_then(|a| a.get("cwd")) {
         None | Some(Value::Null) => None,
         Some(Value::String(cwd)) => Some(cwd.clone()),
-        Some(_) => return Incoming::Reply(error_reply(id, -32602, "Invalid params: `cwd` must be a string")),
+        Some(_) => {
+            return Incoming::Reply(error_reply(
+                id,
+                -32602,
+                "Invalid params: `cwd` must be a string",
+            ))
+        }
     };
 
     let timeout_secs = match arguments.and_then(|a| a.get("timeout_secs")) {
         None | Some(Value::Null) => DEFAULT_TIMEOUT_SECS,
         Some(value) => match value.as_u64() {
             Some(secs) if secs >= 1 => secs,
-            _ => return Incoming::Reply(error_reply(id, -32602, "Invalid params: `timeout_secs` must be a positive integer")),
+            _ => {
+                return Incoming::Reply(error_reply(
+                    id,
+                    -32602,
+                    "Invalid params: `timeout_secs` must be a positive integer",
+                ))
+            }
         },
     };
 
@@ -369,7 +410,10 @@ async fn run_drip_tool(argv: &[String], cwd: Option<&str>, timeout_secs: u64) ->
 
             let mut content = vec![text_content(String::from_utf8_lossy(&stdout).into_owned())];
             if !stderr.is_empty() {
-                content.push(text_content(format!("stderr:\n{}", String::from_utf8_lossy(&stderr))));
+                content.push(text_content(format!(
+                    "stderr:\n{}",
+                    String::from_utf8_lossy(&stderr)
+                )));
             }
             match status.code() {
                 Some(code) => {
@@ -424,12 +468,17 @@ mod tests {
 
     #[test]
     fn initialize_returns_protocol_version_and_server_info() {
-        let reply = reply_of(parse_line(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#));
+        let reply = reply_of(parse_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        ));
         assert_eq!(reply["id"], 1);
         assert_eq!(reply["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(reply["result"]["capabilities"]["tools"], json!({}));
         assert_eq!(reply["result"]["serverInfo"]["name"], "drip-mcp");
-        assert_eq!(reply["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            reply["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
     }
 
     #[test]
@@ -441,11 +490,16 @@ mod tests {
 
     #[test]
     fn tools_list_has_one_drip_tool_with_required_args() {
-        let reply = reply_of(parse_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#));
+        let reply = reply_of(parse_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ));
         let tools = reply["result"]["tools"].as_array().expect("tools array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "drip");
-        assert!(tools[0]["description"].as_str().unwrap().contains("--detach"));
+        assert!(tools[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("--detach"));
         let schema = &tools[0]["inputSchema"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["required"], json!(["args"]));
@@ -458,7 +512,9 @@ mod tests {
 
     #[test]
     fn unknown_method_with_id_is_32601() {
-        let reply = reply_of(parse_line(r#"{"jsonrpc":"2.0","id":9,"method":"resources/list"}"#));
+        let reply = reply_of(parse_line(
+            r#"{"jsonrpc":"2.0","id":9,"method":"resources/list"}"#,
+        ));
         assert_eq!(error_code(&reply), -32601);
         assert_eq!(reply["error"]["message"], "Method not found");
     }
@@ -520,7 +576,11 @@ mod tests {
             let line = format!(
                 r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"drip","arguments":{{"args":[],"timeout_secs":{bad}}}}}}}"#
             );
-            assert_eq!(error_code(&reply_of(parse_line(&line))), -32602, "timeout_secs={bad}");
+            assert_eq!(
+                error_code(&reply_of(parse_line(&line))),
+                -32602,
+                "timeout_secs={bad}"
+            );
         }
     }
 
@@ -549,7 +609,9 @@ mod tests {
         match parse_line(
             r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"drip","arguments":{"args":["--detach","long goal"],"timeout_secs":30}}}"#,
         ) {
-            Incoming::Call { argv, timeout_secs, .. } => {
+            Incoming::Call {
+                argv, timeout_secs, ..
+            } => {
                 assert_eq!(argv, vec!["--detach".to_string(), "long goal".to_string()]);
                 assert_eq!(timeout_secs, 30);
             }

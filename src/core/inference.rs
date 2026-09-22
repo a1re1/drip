@@ -58,7 +58,10 @@ impl ResolvedModelRoute {
     /// same fields minus the profile id, chained fallback included.
     pub fn to_model_route(&self) -> ModelRoute {
         ModelRoute {
-            fallback_route: self.fallback_route.as_ref().map(|route| Box::new(route.to_model_route())),
+            fallback_route: self
+                .fallback_route
+                .as_ref()
+                .map(|route| Box::new(route.to_model_route())),
             headers: Some(self.headers.clone()),
             model: self.model.clone(),
             provider: Some(self.provider.clone()),
@@ -155,14 +158,19 @@ pub enum ReferenceKind {
 }
 
 /// Parses an API-key reference target for a profile.
-pub fn parse_reference_target(api_key_ref: &str, profile_id: &str) -> Result<(ReferenceKind, String)> {
+pub fn parse_reference_target(
+    api_key_ref: &str,
+    profile_id: &str,
+) -> Result<(ReferenceKind, String)> {
     let trimmed_ref = api_key_ref.trim();
 
     if let Some(rest) = trimmed_ref.strip_prefix("env:") {
         let env_name = rest.trim();
 
         if env_name.is_empty() {
-            return Err(anyhow!("Inference profile \"{profile_id}\" uses an empty env reference."));
+            return Err(anyhow!(
+                "Inference profile \"{profile_id}\" uses an empty env reference."
+            ));
         }
 
         return Ok((ReferenceKind::Env, env_name.to_string()));
@@ -172,23 +180,34 @@ pub fn parse_reference_target(api_key_ref: &str, profile_id: &str) -> Result<(Re
         let command = rest.trim();
 
         if command.is_empty() {
-            return Err(anyhow!("Inference profile \"{profile_id}\" uses an empty cmd reference."));
+            return Err(anyhow!(
+                "Inference profile \"{profile_id}\" uses an empty cmd reference."
+            ));
         }
 
         return Ok((ReferenceKind::Cmd, command.to_string()));
     }
 
-    let stored_key_id = trimmed_ref.strip_prefix("stored:").map(str::trim).unwrap_or(trimmed_ref);
+    let stored_key_id = trimmed_ref
+        .strip_prefix("stored:")
+        .map(str::trim)
+        .unwrap_or(trimmed_ref);
 
     if stored_key_id.is_empty() {
-        return Err(anyhow!("Inference profile \"{profile_id}\" uses an empty stored key reference."));
+        return Err(anyhow!(
+            "Inference profile \"{profile_id}\" uses an empty stored key reference."
+        ));
     }
 
     Ok((ReferenceKind::Stored, stored_key_id.to_string()))
 }
 
 /// Looks up a stored API key entry by id.
-fn resolve_stored_api_key(settings: &IndexMap<String, String>, key_id: &str, profile_id: &str) -> Result<String> {
+fn resolve_stored_api_key(
+    settings: &IndexMap<String, String>,
+    key_id: &str,
+    profile_id: &str,
+) -> Result<String> {
     let stored_keys = parse_stored_api_key_entries(settings)?;
     let matching_key = stored_keys
         .iter()
@@ -213,12 +232,18 @@ pub fn resolve_profile_api_key(
         return Ok(Some(api_key.to_string()));
     }
 
-    if let Some(api_key_ref) = profile.api_key_ref.as_deref().filter(|reference| !reference.is_empty()) {
+    if let Some(api_key_ref) = profile
+        .api_key_ref
+        .as_deref()
+        .filter(|reference| !reference.is_empty())
+    {
         let (kind, value) = parse_reference_target(api_key_ref, &profile.id)?;
 
         return match kind {
             ReferenceKind::Env => {
-                let env_value = env_lookup(env, &value).map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
+                let env_value = env_lookup(env, &value)
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty());
 
                 match env_value {
                     Some(text) => Ok(Some(text)),
@@ -228,11 +253,15 @@ pub fn resolve_profile_api_key(
                     )),
                 }
             }
-            ReferenceKind::Cmd => Ok(Some(crate::tools::command_policy::resolve_command_credential(
-                &value,
-                chrono::Utc::now().timestamp_millis(),
-            )?)),
-            ReferenceKind::Stored => Ok(Some(resolve_stored_api_key(settings, &value, &profile.id)?)),
+            ReferenceKind::Cmd => Ok(Some(
+                crate::tools::command_policy::resolve_command_credential(
+                    &value,
+                    chrono::Utc::now().timestamp_millis(),
+                )?,
+            )),
+            ReferenceKind::Stored => {
+                Ok(Some(resolve_stored_api_key(settings, &value, &profile.id)?))
+            }
         };
     }
 
@@ -247,7 +276,9 @@ pub fn resolve_profile_api_key(
 }
 
 /// Returns the currently active model profile.
-pub fn resolve_active_inference_profile(settings: &IndexMap<String, String>) -> Result<InferenceModelProfile> {
+pub fn resolve_active_inference_profile(
+    settings: &IndexMap<String, String>,
+) -> Result<InferenceModelProfile> {
     let baseline = baseline_setting_values();
     let active_profile_id = settings
         .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
@@ -272,13 +303,19 @@ pub fn resolve_active_inference_profile(settings: &IndexMap<String, String>) -> 
 }
 
 /// Returns the currently active system-prompt profile.
-pub fn resolve_active_system_prompt_profile(settings: &IndexMap<String, String>) -> Result<SystemPromptProfile> {
+pub fn resolve_active_system_prompt_profile(
+    settings: &IndexMap<String, String>,
+) -> Result<SystemPromptProfile> {
     let baseline = baseline_setting_values();
     let active_prompt_id = settings
         .get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| baseline.get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID).cloned())
+        .or_else(|| {
+            baseline
+                .get(ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID)
+                .cloned()
+        })
         .unwrap_or_default();
     let profiles = parse_system_prompt_profiles(settings)?;
 
@@ -302,7 +339,9 @@ pub fn resolve_active_system_prompt_profile(settings: &IndexMap<String, String>)
 // default tool profile falls back to the general model so settings saved
 // before routing existed keep working.
 /// Returns the currently active tool profile, if one is configured.
-pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Result<Option<InferenceModelProfile>> {
+pub fn resolve_active_tool_profile(
+    settings: &IndexMap<String, String>,
+) -> Result<Option<InferenceModelProfile>> {
     let raw_value = settings.get(ACTIVE_TOOL_PROFILE_SETTING_ID);
 
     if let Some(raw) = raw_value {
@@ -311,9 +350,14 @@ pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Resul
         }
     }
 
-    let explicit_id = raw_value.map(|value| value.trim().to_string()).unwrap_or_default();
+    let explicit_id = raw_value
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
     let tool_profile_id = if explicit_id.is_empty() {
-        baseline_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID).cloned().unwrap_or_default()
+        baseline_setting_values()
+            .get(ACTIVE_TOOL_PROFILE_SETTING_ID)
+            .cloned()
+            .unwrap_or_default()
     } else {
         explicit_id.clone()
     };
@@ -329,7 +373,9 @@ pub fn resolve_active_tool_profile(settings: &IndexMap<String, String>) -> Resul
 }
 
 /// The active profile's max context tokens, or the crate default.
-pub fn resolve_active_profile_max_context_tokens(settings: &IndexMap<String, String>) -> Result<i64> {
+pub fn resolve_active_profile_max_context_tokens(
+    settings: &IndexMap<String, String>,
+) -> Result<i64> {
     Ok(resolve_active_inference_profile(settings)?
         .max_context_tokens
         .unwrap_or(DEFAULT_MAX_CONTEXT_TOKENS))
@@ -350,20 +396,39 @@ fn resolve_fallback_route(
     profiles: Option<&[InferenceModelProfile]>,
     visited: &[String],
 ) -> Option<ResolvedModelRoute> {
-    let fallback_profile_id = profile.fallback_profile_id.as_deref().unwrap_or("").trim().to_string();
+    let fallback_profile_id = profile
+        .fallback_profile_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let profiles = profiles?;
 
     if fallback_profile_id.is_empty() || visited.iter().any(|id| *id == fallback_profile_id) {
         return None;
     }
 
-    let fallback_profile = profiles.iter().find(|candidate| candidate.id == fallback_profile_id)?;
+    let fallback_profile = profiles
+        .iter()
+        .find(|candidate| candidate.id == fallback_profile_id)?;
     let mut next_visited = visited.to_vec();
     next_visited.push(fallback_profile_id);
 
-    match resolve_profile_route_visited(fallback_profile, settings, env, Some(profiles), &next_visited) {
+    match resolve_profile_route_visited(
+        fallback_profile,
+        settings,
+        env,
+        Some(profiles),
+        &next_visited,
+    ) {
         Ok(route) => Some(route),
-        Err(_) => resolve_fallback_route(fallback_profile, settings, env, Some(profiles), &next_visited),
+        Err(_) => resolve_fallback_route(
+            fallback_profile,
+            settings,
+            env,
+            Some(profiles),
+            &next_visited,
+        ),
     }
 }
 
@@ -371,7 +436,11 @@ fn build_headers(profile: &InferenceModelProfile, token: Option<&str>) -> Header
     let mut headers: Headers = profile
         .headers
         .as_ref()
-        .map(|map| map.iter().map(|(key, value)| (key.clone(), value.clone())).collect())
+        .map(|map| {
+            map.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
         .unwrap_or_default();
 
     if let Some(token) = token {
@@ -403,36 +472,45 @@ fn resolve_profile_route_visited(
     );
 
     if reqwest::Url::parse(&base_url).is_err() {
-        return Err(anyhow!("Inference profile \"{}\" has an invalid baseUrl.", profile.id));
+        return Err(anyhow!(
+            "Inference profile \"{}\" has an invalid baseUrl.",
+            profile.id
+        ));
     }
 
     let api_key = resolve_profile_api_key(profile, settings, env)?;
     // A "cmd:" credential is re-resolved per request (hitting the TTL cache) so a
     // token that expires mid-run is transparently re-minted. Static credentials
     // keep their headers baked once, exactly as before.
-    let uses_dynamic_credential = match profile.api_key_ref.as_deref().filter(|reference| !reference.is_empty()) {
+    let uses_dynamic_credential = match profile
+        .api_key_ref
+        .as_deref()
+        .filter(|reference| !reference.is_empty())
+    {
         Some(reference) => parse_reference_target(reference, &profile.id)?.0 == ReferenceKind::Cmd,
         None => false,
     };
 
     let fallback_route = resolve_fallback_route(profile, settings, env, profiles, visited);
 
-    let refresh_headers: Option<Arc<dyn Fn() -> Result<Headers, String> + Send + Sync>> = if uses_dynamic_credential {
-        let profile = profile.clone();
-        let settings = settings.clone();
-        let env = env.cloned();
+    let refresh_headers: Option<Arc<dyn Fn() -> Result<Headers, String> + Send + Sync>> =
+        if uses_dynamic_credential {
+            let profile = profile.clone();
+            let settings = settings.clone();
+            let env = env.cloned();
 
-        // A failing command becomes the call's error, exactly as the closure raises it:
-        // a request silently sent without Authorization would surface as a 401
-        // with no hint of the real cause.
-        Some(Arc::new(move || {
-            let token = resolve_profile_api_key(&profile, &settings, env.as_ref()).map_err(|error| error.to_string())?;
+            // A failing command becomes the call's error, exactly as the closure raises it:
+            // a request silently sent without Authorization would surface as a 401
+            // with no hint of the real cause.
+            Some(Arc::new(move || {
+                let token = resolve_profile_api_key(&profile, &settings, env.as_ref())
+                    .map_err(|error| error.to_string())?;
 
-            Ok(build_headers(&profile, token.as_deref()))
-        }))
-    } else {
-        None
-    };
+                Ok(build_headers(&profile, token.as_deref()))
+            }))
+        } else {
+            None
+        };
 
     Ok(ResolvedModelRoute {
         fallback_route: fallback_route.map(Box::new),
@@ -442,7 +520,10 @@ fn resolve_profile_route_visited(
         provider: profile.provider.clone(),
         refresh_headers,
         reasoning_effort: if supports_openai_reasoning_effort(&profile.provider, &profile.model) {
-            profile.reasoning_effort.clone().filter(|effort| !effort.is_empty())
+            profile
+                .reasoning_effort
+                .clone()
+                .filter(|effort| !effort.is_empty())
         } else {
             None
         },
@@ -494,7 +575,10 @@ pub fn resolve_model_profile_route(
 }
 
 /// Resolves the full inference configuration from settings.
-pub fn resolve_inference_config(settings: &IndexMap<String, String>, env: EnvSource<'_>) -> Result<ResolvedInferenceConfig> {
+pub fn resolve_inference_config(
+    settings: &IndexMap<String, String>,
+    env: EnvSource<'_>,
+) -> Result<ResolvedInferenceConfig> {
     let profile = resolve_active_inference_profile(settings)?;
     let system_prompt_profile = resolve_active_system_prompt_profile(settings)?;
     let tool_profile = resolve_active_tool_profile(settings)?;
@@ -511,7 +595,8 @@ pub fn resolve_inference_config(settings: &IndexMap<String, String>, env: EnvSou
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
         let is_default_tool_selection = configured_tool_id.is_empty()
-            || Some(&configured_tool_id) == baseline_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID);
+            || Some(&configured_tool_id)
+                == baseline_setting_values().get(ACTIVE_TOOL_PROFILE_SETTING_ID);
 
         match resolve_profile_route(&tool_profile, settings, env, Some(&profiles)) {
             Ok(route) => tool_route = Some(route),
@@ -557,19 +642,42 @@ mod tests {
     #[test]
     fn default_base_urls_and_chat_completions_url() {
         assert_eq!(get_default_base_url("openai"), "https://api.openai.com/v1");
-        assert_eq!(get_default_base_url("openai-compatible"), "http://localhost:4100/v1");
-        assert_eq!(build_chat_completions_url("http://x/v1/"), "http://x/v1/chat/completions");
-        assert_eq!(build_chat_completions_url("http://x/v1/chat/completions"), "http://x/v1/chat/completions");
+        assert_eq!(
+            get_default_base_url("openai-compatible"),
+            "http://localhost:4100/v1"
+        );
+        assert_eq!(
+            build_chat_completions_url("http://x/v1/"),
+            "http://x/v1/chat/completions"
+        );
+        assert_eq!(
+            build_chat_completions_url("http://x/v1/chat/completions"),
+            "http://x/v1/chat/completions"
+        );
     }
 
     #[test]
     fn reference_targets() {
-        assert_eq!(parse_reference_target("env:FOO", "p").unwrap(), (ReferenceKind::Env, "FOO".to_string()));
-        assert_eq!(parse_reference_target(" cmd: op read x ", "p").unwrap(), (ReferenceKind::Cmd, "op read x".to_string()));
-        assert_eq!(parse_reference_target("stored:key", "p").unwrap(), (ReferenceKind::Stored, "key".to_string()));
-        assert_eq!(parse_reference_target("key", "p").unwrap(), (ReferenceKind::Stored, "key".to_string()));
         assert_eq!(
-            parse_reference_target("env: ", "p").unwrap_err().to_string(),
+            parse_reference_target("env:FOO", "p").unwrap(),
+            (ReferenceKind::Env, "FOO".to_string())
+        );
+        assert_eq!(
+            parse_reference_target(" cmd: op read x ", "p").unwrap(),
+            (ReferenceKind::Cmd, "op read x".to_string())
+        );
+        assert_eq!(
+            parse_reference_target("stored:key", "p").unwrap(),
+            (ReferenceKind::Stored, "key".to_string())
+        );
+        assert_eq!(
+            parse_reference_target("key", "p").unwrap(),
+            (ReferenceKind::Stored, "key".to_string())
+        );
+        assert_eq!(
+            parse_reference_target("env: ", "p")
+                .unwrap_err()
+                .to_string(),
             "Inference profile \"p\" uses an empty env reference."
         );
     }
@@ -628,8 +736,14 @@ mod tests {
             (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
         ]);
         let resolved = resolve_inference_config(&settings, Some(&HashMap::new())).unwrap();
-        let refresh = resolved.refresh_headers.clone().expect("cmd credentials refresh per request");
-        assert!(refresh().unwrap().contains(&("Authorization".to_string(), "Bearer refresh-ok-1".to_string())));
+        let refresh = resolved
+            .refresh_headers
+            .clone()
+            .expect("cmd credentials refresh per request");
+        assert!(refresh().unwrap().contains(&(
+            "Authorization".to_string(),
+            "Bearer refresh-ok-1".to_string()
+        )));
 
         let failing = r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai","apiKeyRef":"cmd:false"}]"#;
         let settings = settings_with(&[
@@ -637,8 +751,13 @@ mod tests {
             (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "mock"),
             (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
         ]);
-        let error = resolve_inference_config(&settings, Some(&HashMap::new())).unwrap_err().to_string();
-        assert!(error.contains("Failed to run credential command \"false\""), "{error}");
+        let error = resolve_inference_config(&settings, Some(&HashMap::new()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Failed to run credential command \"false\""),
+            "{error}"
+        );
     }
 
     #[test]
@@ -660,7 +779,10 @@ mod tests {
         let resolved = resolve_inference_config(&settings, Some(&env)).unwrap();
         let fallback = resolved.fallback_route.as_ref().expect("fallback");
         assert_eq!(fallback.profile_id, "c");
-        assert!(fallback.fallback_route.is_none(), "cycle back to a must stop");
+        assert!(
+            fallback.fallback_route.is_none(),
+            "cycle back to a must stop"
+        );
     }
 
     #[test]
@@ -714,7 +836,10 @@ mod tests {
     #[test]
     fn reasoning_effort_only_for_gpt_54_families() {
         assert!(supports_openai_reasoning_effort("openai", "gpt-5.4-mini"));
-        assert!(supports_openai_reasoning_effort("openrouter", "openai/gpt-5.4"));
+        assert!(supports_openai_reasoning_effort(
+            "openrouter",
+            "openai/gpt-5.4"
+        ));
         assert!(!supports_openai_reasoning_effort("openai", "gpt-4o"));
         assert!(!supports_openai_reasoning_effort("claude", "gpt-5.4"));
     }
@@ -729,13 +854,17 @@ mod tests {
             (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "gpt-5.6-luna-high"),
             (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
         ]);
-        let resolved = resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
+        let resolved =
+            resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
         assert_eq!(resolved.route.profile_id, "gpt-5.6-luna-high");
         assert_eq!(resolved.route.provider, "codex");
         assert_eq!(resolved.route.model, "gpt-5.6-luna");
         assert_eq!(resolved.route.url, "codex://local");
         assert_eq!(resolved.route.reasoning_effort.as_deref(), Some("high"));
-        assert!(resolved.route.headers.is_empty(), "codex never sends API headers");
+        assert!(
+            resolved.route.headers.is_empty(),
+            "codex never sends API headers"
+        );
         assert!(resolved.route.refresh_headers.is_none());
         assert!(resolved.route.fallback_route.is_none());
     }
@@ -748,7 +877,8 @@ mod tests {
             (ACTIVE_INFERENCE_PROFILE_SETTING_ID, "codex-hi"),
             (ACTIVE_TOOL_PROFILE_SETTING_ID, ""),
         ]);
-        let resolved = resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
+        let resolved =
+            resolve_inference_config(&settings, Some(&std::collections::HashMap::new())).unwrap();
         assert_eq!(get_default_base_url("codex"), "codex://local");
         assert_eq!(resolved.route.url, "codex://local");
         assert_eq!(resolved.route.model, "gpt-5.6-luna");
@@ -769,9 +899,15 @@ mod tests {
         let mut env = std::collections::HashMap::new();
         env.insert("OAI_KEY".to_string(), "k".to_string());
         let resolved = resolve_inference_config(&settings, Some(&env)).unwrap();
-        assert_eq!(resolved.route.url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            resolved.route.url,
+            "https://api.openai.com/v1/chat/completions"
+        );
         assert_eq!(resolved.route.reasoning_effort.as_deref(), Some("low"));
-        assert!(!resolved.route.headers.is_empty(), "openai still sends Authorization");
+        assert!(
+            !resolved.route.headers.is_empty(),
+            "openai still sends Authorization"
+        );
         assert!(!supports_openai_reasoning_effort("openai", "gpt-4o"));
     }
 
@@ -789,7 +925,11 @@ mod tests {
         let mut env = std::collections::HashMap::new();
         env.insert("OAI_KEY".to_string(), "k".to_string());
         let resolved = resolve_inference_config(&settings, Some(&env)).unwrap();
-        let fallback = resolved.route.fallback_route.as_ref().expect("codex fallback resolves");
+        let fallback = resolved
+            .route
+            .fallback_route
+            .as_ref()
+            .expect("codex fallback resolves");
         assert_eq!(fallback.profile_id, "cx");
         assert_eq!(fallback.url, "codex://local");
         assert_eq!(fallback.model, "gpt-5.6-luna");

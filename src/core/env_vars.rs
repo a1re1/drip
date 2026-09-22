@@ -15,10 +15,13 @@ fn is_env_var_name(key: &str) -> bool {
         return false;
     }
 
-    bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
-pub const ENV_VARS_TEMPLATE: &str = "# drip credential store — KEY=value lines, read before the process environment.\n\
+pub const ENV_VARS_TEMPLATE: &str =
+    "# drip credential store — KEY=value lines, read before the process environment.\n\
      # Model profiles reference these via \"apiKeyRef\": \"env:NAME\" in config.json,\n\
      # so tokens for every provider live here instead of shell profiles.\n\
      # Set values with /env KEY=value inside drip, or edit this file directly.\n\
@@ -107,7 +110,10 @@ pub fn load_env_vars(env_vars_path: &Path) -> Result<Vars> {
 // The names (never the values) of the credentials this drip home manages, used
 // to scrub them from tool subprocess environments via DRIP_SCRUB_ENV.
 pub fn list_env_var_names(env_vars_path: &Path) -> Result<Vec<String>> {
-    Ok(load_env_vars(env_vars_path)?.into_iter().map(|(k, _)| k).collect())
+    Ok(load_env_vars(env_vars_path)?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect())
 }
 
 // The env source used to resolve "env:NAME" credential references: values in
@@ -118,7 +124,9 @@ pub fn load_merged_env(
 ) -> BTreeMap<String, String> {
     // A missing process_env defaults to the live process environment: the
     // file overlays it, it does not replace it.
-    let mut merged = process_env.cloned().unwrap_or_else(|| std::env::vars().collect());
+    let mut merged = process_env
+        .cloned()
+        .unwrap_or_else(|| std::env::vars().collect());
 
     for (k, v) in load_env_vars(env_vars_path).unwrap_or_default() {
         merged.insert(k, v);
@@ -304,7 +312,13 @@ mod tests {
         let path = dir.path().join("env.vars");
         std::fs::write(&path, "OPENAI_API_KEY=from-file\n").unwrap();
 
-        let merged = load_merged_env(&path, Some(&env_map(&[("OPENAI_API_KEY", "from-env"), ("OTHER", "kept")])));
+        let merged = load_merged_env(
+            &path,
+            Some(&env_map(&[
+                ("OPENAI_API_KEY", "from-env"),
+                ("OTHER", "kept"),
+            ])),
+        );
         assert_eq!(merged.get("OPENAI_API_KEY").unwrap(), "from-file");
         assert_eq!(merged.get("OTHER").unwrap(), "kept");
     }

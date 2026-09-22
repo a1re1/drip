@@ -7,8 +7,8 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::tools::helpers::{
-    default_ignored_dirs, format_tool_path, get_optional_number_argument,
-    is_binary_buffer, resolve_tool_path,
+    default_ignored_dirs, format_tool_path, get_optional_number_argument, is_binary_buffer,
+    resolve_tool_path,
 };
 
 use super::{ToolCtx, ToolOutcome};
@@ -100,14 +100,23 @@ fn escape_regex(s: &str) -> String {
 }
 
 /// Render matches with context windows, `>` markers and `--` separators.
-fn render_with_context(lines: &[&str], match_indices: &[usize], context_lines: usize) -> Vec<String> {
+fn render_with_context(
+    lines: &[&str],
+    match_indices: &[usize],
+    context_lines: usize,
+) -> Vec<String> {
     render_with_context_in(lines, match_indices, context_lines, "")
 }
 
 /// Rendering with each match line suffixed by the definition it sits in
 /// (`[in merged_env]`), when the file's language has outlines. Recorded runs
 /// followed most GREPs with a READ just to learn which function a hit was in.
-fn render_with_context_in(lines: &[&str], match_indices: &[usize], context_lines: usize, ext: &str) -> Vec<String> {
+fn render_with_context_in(
+    lines: &[&str],
+    match_indices: &[usize],
+    context_lines: usize,
+    ext: &str,
+) -> Vec<String> {
     if match_indices.is_empty() {
         return vec![];
     }
@@ -134,7 +143,11 @@ fn render_with_context_in(lines: &[&str], match_indices: &[usize], context_lines
         }
         let mut ms = HashSet::new();
         ms.insert(idx);
-        groups.push(Group { start: win_start, end: win_end, match_set: ms });
+        groups.push(Group {
+            start: win_start,
+            end: win_end,
+            match_set: ms,
+        });
     }
 
     let mut rendered = vec![];
@@ -147,12 +160,20 @@ fn render_with_context_in(lines: &[&str], match_indices: &[usize], context_lines
             let line_num = i + 1;
             let is_match = group.match_set.contains(&i);
             let marker = if is_match { ">" } else { " " };
-            let enclosing = if is_match && !ext.is_empty() && !crate::harness::outline::is_definition(ext, lines[i]) {
-                crate::harness::outline::enclosing_definition(ext, lines, i).map(|name| format!("  [in {name}]")).unwrap_or_default()
+            let enclosing = if is_match
+                && !ext.is_empty()
+                && !crate::harness::outline::is_definition(ext, lines[i])
+            {
+                crate::harness::outline::enclosing_definition(ext, lines, i)
+                    .map(|name| format!("  [in {name}]"))
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
-            rendered.push(format!("{} {}: {}{}", marker, line_num, lines[i], enclosing));
+            rendered.push(format!(
+                "{} {}: {}{}",
+                marker, line_num, lines[i], enclosing
+            ));
         }
     }
 
@@ -198,8 +219,7 @@ fn prepare(args: &serde_json::Map<String, Value>, ctx: &ToolCtx) -> Result<GrepT
 
     // Validate regex early (only when not literal)
     if !literal {
-        build_regex(&pattern, &flags)
-            .map_err(|e| anyhow!("Invalid regex pattern: {e}"))?;
+        build_regex(&pattern, &flags).map_err(|e| anyhow!("Invalid regex pattern: {e}"))?;
     }
 
     // Path
@@ -320,7 +340,10 @@ fn grep_files(
             if total_matches >= max_results {
                 break;
             }
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             scan_file(
                 &path,
                 &name,
@@ -468,7 +491,10 @@ fn walk(
 
     let mut entries: Vec<_> = read_dir.flatten().collect();
     entries.sort_by(|a, b| {
-        crate::tools::helpers::locale_compare(&a.file_name().to_string_lossy(), &b.file_name().to_string_lossy())
+        crate::tools::helpers::locale_compare(
+            &a.file_name().to_string_lossy(),
+            &b.file_name().to_string_lossy(),
+        )
     });
 
     for entry in entries {
@@ -549,7 +575,9 @@ fn file_ext(path: &Path) -> &str {
 /// being one, so a hit is oriented without a READ around it.
 fn enclosing_note(path: &Path, lines: Option<&Vec<String>>, line_number: usize) -> String {
     let ext = file_ext(path);
-    let Some(lines) = lines else { return String::new() };
+    let Some(lines) = lines else {
+        return String::new();
+    };
     if ext.is_empty() || line_number == 0 || line_number > lines.len() {
         return String::new();
     }
@@ -563,8 +591,18 @@ fn enclosing_note(path: &Path, lines: Option<&Vec<String>>, line_number: usize) 
         .unwrap_or_default()
 }
 
-fn complete_output(input: &GrepToolInput, result: &GrepToolResult, files: &BTreeMap<PathBuf, Vec<String>>) -> String {
-    let GrepToolResult { matches, pattern, total_matches, file_count, context: context_lines } = result;
+fn complete_output(
+    input: &GrepToolInput,
+    result: &GrepToolResult,
+    files: &BTreeMap<PathBuf, Vec<String>>,
+) -> String {
+    let GrepToolResult {
+        matches,
+        pattern,
+        total_matches,
+        file_count,
+        context: context_lines,
+    } = result;
     let showing = matches.len();
 
     if *total_matches == 0 {
@@ -591,7 +629,12 @@ fn complete_output(input: &GrepToolInput, result: &GrepToolResult, files: &BTree
             match files.get(file_path) {
                 Some(lines) => {
                     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-                    parts.extend(render_with_context_in(&borrowed, match_indices, *context_lines, file_ext(file_path)));
+                    parts.extend(render_with_context_in(
+                        &borrowed,
+                        match_indices,
+                        *context_lines,
+                        file_ext(file_path),
+                    ));
                 }
                 None => {
                     for m in matches.iter().filter(|m| &m.path == file_path) {
@@ -607,7 +650,12 @@ fn complete_output(input: &GrepToolInput, result: &GrepToolResult, files: &BTree
 }
 
 /// `path:line: text  [in name]` per match under the header.
-fn compact_match_list(input: &GrepToolInput, matches: &[GrepMatch], files: &BTreeMap<PathBuf, Vec<String>>, header: String) -> String {
+fn compact_match_list(
+    input: &GrepToolInput,
+    matches: &[GrepMatch],
+    files: &BTreeMap<PathBuf, Vec<String>>,
+    header: String,
+) -> String {
     let lines: Vec<String> = matches
         .iter()
         .map(|m| {
@@ -628,16 +676,25 @@ fn compact_match_list(input: &GrepToolInput, matches: &[GrepMatch], files: &BTre
 /// the model edits from this result instead of spending the next round on
 /// the READ it would otherwise issue. None when the search matched more
 /// lines, or none of the matches is a definition.
-fn definition_bodies(cwd: &str, result: &GrepToolResult, files: &BTreeMap<PathBuf, Vec<String>>) -> Option<String> {
+fn definition_bodies(
+    cwd: &str,
+    result: &GrepToolResult,
+    files: &BTreeMap<PathBuf, Vec<String>>,
+) -> Option<String> {
     if result.total_matches == 0 || result.total_matches > GREP_BODY_MAX_MATCHES {
         return None;
     }
     let mut sections: Vec<String> = vec![];
     let mut chars = 0usize;
     for m in &result.matches {
-        let Some(lines) = files.get(&m.path) else { continue };
+        let Some(lines) = files.get(&m.path) else {
+            continue;
+        };
         let ext = file_ext(&m.path);
-        if m.line == 0 || m.line > lines.len() || !crate::harness::outline::is_definition(ext, &lines[m.line - 1]) {
+        if m.line == 0
+            || m.line > lines.len()
+            || !crate::harness::outline::is_definition(ext, &lines[m.line - 1])
+        {
             continue;
         }
         let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -646,7 +703,11 @@ fn definition_bodies(cwd: &str, result: &GrepToolResult, files: &BTreeMap<PathBu
         let shown_end = end.min(start + GREP_BODY_MAX_LINES - 1);
         let display_path = format_tool_path(cwd, &m.path);
         let name = crate::harness::outline::short_name(&lines[start]);
-        let mut section = format!("{display_path} lines {}-{} — {name}:\n", start + 1, shown_end + 1);
+        let mut section = format!(
+            "{display_path} lines {}-{} — {name}:\n",
+            start + 1,
+            shown_end + 1
+        );
         for (index, line) in borrowed.iter().enumerate().take(shown_end + 1).skip(start) {
             section.push_str(&format!("{}\t{}\n", index + 1, line));
         }
@@ -689,7 +750,13 @@ fn execute_prepared(input: &GrepToolInput) -> (GrepToolResult, String) {
     };
     // build_regex is infallible here because we validated in prepare
     let regex = build_regex(&final_pattern, &input.flags).expect("regex validated in prepare");
-    let grep_result = grep_files(&input.absolute_path, &regex, input.glob.as_deref(), input.max_results, input.context);
+    let grep_result = grep_files(
+        &input.absolute_path,
+        &regex,
+        input.glob.as_deref(),
+        input.max_results,
+        input.context,
+    );
 
     let total_matches = grep_result.total_matches;
     let file_count = grep_result.file_count;
@@ -713,8 +780,12 @@ fn execute_prepared(input: &GrepToolInput) -> (GrepToolResult, String) {
             if let Ok(buf) = fs::read(file_path) {
                 let text = String::from_utf8_lossy(&buf).into_owned();
                 let file_lines: Vec<&str> = text.split('\n').collect();
-                let ext = std::path::Path::new(file_path).extension().and_then(|ext| ext.to_str()).unwrap_or("");
-                let rendered = render_with_context_in(&file_lines, match_indices, input.context, ext);
+                let ext = std::path::Path::new(file_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("");
+                let rendered =
+                    render_with_context_in(&file_lines, match_indices, input.context, ext);
                 let display_path = format_tool_path(&input.cwd, file_path);
                 parts.push(format!("{display_path}:"));
                 parts.extend(rendered);
@@ -783,9 +854,16 @@ pub fn definition() -> Value {
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
     let map = super::tool_arguments(args).ok()?;
     let input = prepare(&map, ctx).ok()?;
-    let glob = input.glob.as_deref().map(|glob| format!(" glob={glob}")).unwrap_or_default();
+    let glob = input
+        .glob
+        .as_deref()
+        .map(|glob| format!(" glob={glob}"))
+        .unwrap_or_default();
 
-    Some(format!("pattern={} path={}{glob}", input.pattern, input.display_path))
+    Some(format!(
+        "pattern={} path={}{glob}",
+        input.pattern, input.display_path
+    ))
 }
 
 /// Full pipeline: parse args → prepare → execute → complete → ToolOutcome.
@@ -833,7 +911,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_ctx(cwd: &str) -> ToolCtx {
-        ToolCtx { cwd: cwd.to_string().into(), allow_net: false, reference_roots: Vec::new() }
+        ToolCtx {
+            cwd: cwd.to_string().into(),
+            allow_net: false,
+            reference_roots: Vec::new(),
+        }
     }
 
     fn run_grep(cwd: &str, json: serde_json::Value) -> (String, String) {
@@ -865,14 +947,16 @@ mod tests {
             "const hello = 'world';\nconst bye = 'earth';\n",
         )
         .unwrap();
-        let (output_text, tool_content) = run_grep(
-            cwd,
-            serde_json::json!({ "pattern": "hello" }),
+        let (output_text, tool_content) = run_grep(cwd, serde_json::json!({ "pattern": "hello" }));
+        assert!(
+            output_text.contains("1 match(es) in 1 file(s)")
+                || tool_content.contains("1 match(es) in 1 file(s)"),
+            "output_text={output_text} tool_content={tool_content}"
         );
-        assert!(output_text.contains("1 match(es) in 1 file(s)") || tool_content.contains("1 match(es) in 1 file(s)"),
-            "output_text={output_text} tool_content={tool_content}");
-        assert!(tool_content.contains("foo.ts:1: const hello = 'world';"),
-            "tool_content={tool_content}");
+        assert!(
+            tool_content.contains("foo.ts:1: const hello = 'world';"),
+            "tool_content={tool_content}"
+        );
     }
 
     #[test]
@@ -880,10 +964,23 @@ mod tests {
         let text = "fn alpha() {\n    let x = 1;\n}\n\nfn beta() {\n    let x = 2;\n}\n";
         let lines: Vec<&str> = text.split('\n').collect();
         let rendered = render_with_context_in(&lines, &[1, 5], 1, "rs");
-        assert!(rendered.iter().any(|line| line == "> 2:     let x = 1;  [in alpha]"), "{rendered:?}");
-        assert!(rendered.iter().any(|line| line == "> 6:     let x = 2;  [in beta]"), "{rendered:?}");
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "> 2:     let x = 1;  [in alpha]"),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line == "> 6:     let x = 2;  [in beta]"),
+            "{rendered:?}"
+        );
         // Context lines and definition lines themselves carry no suffix.
-        assert!(rendered.iter().any(|line| line == "  1: fn alpha() {"), "{rendered:?}");
+        assert!(
+            rendered.iter().any(|line| line == "  1: fn alpha() {"),
+            "{rendered:?}"
+        );
         let on_definition = render_with_context_in(&lines, &[4], 0, "rs");
         assert_eq!(on_definition, vec!["> 5: fn beta() {".to_string()]);
         // Unknown extension: plain rendering.
@@ -901,10 +998,22 @@ mod tests {
         )
         .unwrap();
         let (_, tool_content) = run_grep(cwd, serde_json::json!({ "pattern": "const" }));
-        assert!(tool_content.contains("data.ts:2: const foo = 1;"), "tc={tool_content}");
-        assert!(tool_content.contains("data.ts:3: const bar = 2;"), "tc={tool_content}");
-        assert!(tool_content.contains("data.ts:4: const foo2 = 3;"), "tc={tool_content}");
-        assert!(tool_content.contains("3 match(es) in 1 file(s)"), "tc={tool_content}");
+        assert!(
+            tool_content.contains("data.ts:2: const foo = 1;"),
+            "tc={tool_content}"
+        );
+        assert!(
+            tool_content.contains("data.ts:3: const bar = 2;"),
+            "tc={tool_content}"
+        );
+        assert!(
+            tool_content.contains("data.ts:4: const foo2 = 3;"),
+            "tc={tool_content}"
+        );
+        assert!(
+            tool_content.contains("3 match(es) in 1 file(s)"),
+            "tc={tool_content}"
+        );
     }
 
     #[test]
@@ -913,7 +1022,10 @@ mod tests {
         let cwd = tmp.path().to_str().unwrap();
         fs::write(tmp.path().join("a.ts"), "needle\n").unwrap();
         fs::write(tmp.path().join("b.md"), "needle\n").unwrap();
-        let (_, tc) = run_grep(cwd, serde_json::json!({ "pattern": "needle", "glob": "*.ts" }));
+        let (_, tc) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "needle", "glob": "*.ts" }),
+        );
         assert!(tc.contains("a.ts"), "tc={tc}");
         assert!(!tc.contains("b.md"), "tc={tc}");
     }
@@ -923,9 +1035,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap();
         fs::write(tmp.path().join("a.ts"), "hello world\n").unwrap();
-        let (output_text, tool_content) = run_grep(cwd, serde_json::json!({ "pattern": "xyzzy_not_found" }));
-        assert!(output_text.contains("No matches for") || tool_content.contains("No matches for"),
-            "output={output_text}");
+        let (output_text, tool_content) =
+            run_grep(cwd, serde_json::json!({ "pattern": "xyzzy_not_found" }));
+        assert!(
+            output_text.contains("No matches for") || tool_content.contains("No matches for"),
+            "output={output_text}"
+        );
         // execute() should not set failed=true
         let ctx = make_ctx(cwd);
         let outcome = execute(&serde_json::json!({ "pattern": "xyzzy_not_found" }), &ctx);
@@ -949,7 +1064,10 @@ mod tests {
         let cwd = tmp.path().to_str().unwrap();
         let content: String = (1..=10).map(|i| format!("match line {i}\n")).collect();
         fs::write(tmp.path().join("big.ts"), content).unwrap();
-        let (_, tc) = run_grep(cwd, serde_json::json!({ "pattern": "match", "maxResults": 3 }));
+        let (_, tc) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "match", "maxResults": 3 }),
+        );
         assert!(tc.contains("3 match(es)"), "tc={tc}");
     }
 
@@ -970,7 +1088,11 @@ mod tests {
     fn case_insensitive_search_with_flags_i() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap();
-        fs::write(tmp.path().join("hello.ts"), "Hello World\nhello world\nHELLO WORLD\n").unwrap();
+        fs::write(
+            tmp.path().join("hello.ts"),
+            "Hello World\nhello world\nHELLO WORLD\n",
+        )
+        .unwrap();
         let (_, tc) = run_grep(cwd, serde_json::json!({ "pattern": "hello", "flags": "i" }));
         assert!(tc.contains("3 match(es)"), "tc={tc}");
         assert!(tc.contains("hello.ts:1:"), "tc={tc}");
@@ -983,7 +1105,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap();
         fs::write(tmp.path().join("data.ts"), "axb(c)\na.b(c)\nfoo\n").unwrap();
-        let (_, tc) = run_grep(cwd, serde_json::json!({ "pattern": "a.b(c)", "literal": true }));
+        let (_, tc) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "a.b(c)", "literal": true }),
+        );
         assert!(tc.contains("1 match(es)"), "tc={tc}");
         assert!(tc.contains("data.ts:2:"), "tc={tc}");
         assert!(!tc.contains("data.ts:1:"), "tc={tc}");
@@ -1064,14 +1189,23 @@ mod tests {
         fs::write(tmp.path().join("src").join("alpha.md"), "needle here\n").unwrap();
         fs::write(tmp.path().join("turn1.ndjson"), "needle here\n").unwrap();
 
-        let (_, tc_ts) = run_grep(cwd, serde_json::json!({ "pattern": "needle", "glob": "**/*.ts" }));
+        let (_, tc_ts) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "needle", "glob": "**/*.ts" }),
+        );
         assert!(tc_ts.contains("alpha.ts"), "ts tc={tc_ts}");
         assert!(!tc_ts.contains("alpha.md"), "ts tc={tc_ts}");
 
-        let (_, tc_ndjson) = run_grep(cwd, serde_json::json!({ "pattern": "needle", "glob": "turn*.ndjson" }));
+        let (_, tc_ndjson) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "needle", "glob": "turn*.ndjson" }),
+        );
         assert!(tc_ndjson.contains("turn1.ndjson"), "ndjson tc={tc_ndjson}");
 
-        let (_, tc_alpha) = run_grep(cwd, serde_json::json!({ "pattern": "needle", "glob": "alpha.*" }));
+        let (_, tc_alpha) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "needle", "glob": "alpha.*" }),
+        );
         assert!(tc_alpha.contains("alpha.md"), "alpha tc={tc_alpha}");
     }
 
@@ -1112,9 +1246,16 @@ mod tests {
     fn searches_specific_file_when_path_points_to_file() {
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path().to_str().unwrap();
-        fs::write(tmp.path().join("target.ts"), "const needle = 1;\nconst haystack = 2;\n").unwrap();
+        fs::write(
+            tmp.path().join("target.ts"),
+            "const needle = 1;\nconst haystack = 2;\n",
+        )
+        .unwrap();
         fs::write(tmp.path().join("other.ts"), "const needle = 99;\n").unwrap();
-        let (_, tc) = run_grep(cwd, serde_json::json!({ "pattern": "needle", "path": "target.ts" }));
+        let (_, tc) = run_grep(
+            cwd,
+            serde_json::json!({ "pattern": "needle", "path": "target.ts" }),
+        );
         assert!(tc.contains("target.ts"), "tc={tc}");
         assert!(!tc.contains("other.ts"), "tc={tc}");
         assert!(tc.contains("1 match(es) in 1 file(s)"), "tc={tc}");
@@ -1126,26 +1267,50 @@ mod tests {
         let src = "pub fn alpha(a: u32) -> u32 {\n    if a > 1 {\n        return 2;\n    }\n    a\n}\n\nfn beta() {\n    let inner = alpha(3);\n    inner\n}\n";
         fs::write(dir.path().join("lib.rs"), src).unwrap();
         let cwd = dir.path().to_string_lossy().to_string();
-        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "fn alpha", "path": "lib.rs"}));
+        let (_, tc) = run_grep(
+            &cwd,
+            serde_json::json!({"pattern": "fn alpha", "path": "lib.rs"}),
+        );
         assert!(tc.contains("1 match(es) in 1 file(s)"), "tc={tc}");
         assert!(tc.contains("Definition bodies"), "tc={tc}");
-        assert!(tc.contains("lib.rs lines 1-6 — alpha:\n1\tpub fn alpha(a: u32) -> u32 {\n"), "tc={tc}");
+        assert!(
+            tc.contains("lib.rs lines 1-6 — alpha:\n1\tpub fn alpha(a: u32) -> u32 {\n"),
+            "tc={tc}"
+        );
         assert!(tc.contains("6\t}"), "tc={tc}");
         assert!(!tc.contains("fn beta"), "tc={tc}");
         // A hit inside a function names it; a hit that is a definition does not.
-        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "alpha\\(3\\)", "path": "lib.rs"}));
-        assert!(tc.contains("lib.rs:9: let inner = alpha(3);  [in beta]"), "tc={tc}");
+        let (_, tc) = run_grep(
+            &cwd,
+            serde_json::json!({"pattern": "alpha\\(3\\)", "path": "lib.rs"}),
+        );
+        assert!(
+            tc.contains("lib.rs:9: let inner = alpha(3);  [in beta]"),
+            "tc={tc}"
+        );
         assert!(!tc.contains("Definition bodies"), "tc={tc}");
         // More matches than the body limit: hits only.
         let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "a", "path": "lib.rs"}));
         assert!(!tc.contains("Definition bodies"), "tc={tc}");
         // Context requested: the rendered window reaches the tool content.
-        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "inner = alpha", "path": "lib.rs", "context": 1}));
-        assert!(tc.contains("> 9:     let inner = alpha(3);  [in beta]"), "tc={tc}");
+        let (_, tc) = run_grep(
+            &cwd,
+            serde_json::json!({"pattern": "inner = alpha", "path": "lib.rs", "context": 1}),
+        );
+        assert!(
+            tc.contains("> 9:     let inner = alpha(3);  [in beta]"),
+            "tc={tc}"
+        );
         assert!(tc.contains("  8: fn beta() {"), "tc={tc}");
         // Context on a broad search is dropped for the compact list.
-        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": ".", "path": "lib.rs", "context": 3}));
-        assert!(tc.contains("(context of 3 omitted: more than 5 matches"), "tc={tc}");
+        let (_, tc) = run_grep(
+            &cwd,
+            serde_json::json!({"pattern": ".", "path": "lib.rs", "context": 3}),
+        );
+        assert!(
+            tc.contains("(context of 3 omitted: more than 5 matches"),
+            "tc={tc}"
+        );
         assert!(tc.contains("let inner = alpha(3);  [in beta]"), "tc={tc}");
         assert!(!tc.contains("> 9:"), "tc={tc}");
     }
@@ -1160,10 +1325,19 @@ mod tests {
         src.push_str("    return x0\n\ndef small():\n    return 1\n");
         fs::write(dir.path().join("mod.py"), &src).unwrap();
         let cwd = dir.path().to_string_lossy().to_string();
-        let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "^def ", "path": "mod.py"}));
+        let (_, tc) = run_grep(
+            &cwd,
+            serde_json::json!({"pattern": "^def ", "path": "mod.py"}),
+        );
         assert!(tc.contains("mod.py lines 1-80 — big:\n"), "tc={tc}");
-        assert!(tc.contains("[body continues to line 122: READ offset 81 limit 42 for the rest]"), "tc={tc}");
-        assert!(tc.contains("mod.py lines 124-125 — small:\n124\tdef small():\n125\t    return 1"), "tc={tc}");
+        assert!(
+            tc.contains("[body continues to line 122: READ offset 81 limit 42 for the rest]"),
+            "tc={tc}"
+        );
+        assert!(
+            tc.contains("mod.py lines 124-125 — small:\n124\tdef small():\n125\t    return 1"),
+            "tc={tc}"
+        );
     }
 
     #[test]
@@ -1171,32 +1345,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").arg("-C").arg(root).args(args).output().expect("git runs")
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .expect("git runs")
         };
         assert!(git(&["init", "-q"]).status.success());
         fs::write(root.join(".gitignore"), "target/\n").unwrap();
         fs::write(root.join("tracked.rs"), "fn needle_tracked() {}\n").unwrap();
         fs::create_dir_all(root.join("target/debug")).unwrap();
-        fs::write(root.join("target/debug/junk.rs"), "fn needle_ignored() {}\n").unwrap();
+        fs::write(
+            root.join("target/debug/junk.rs"),
+            "fn needle_ignored() {}\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         fs::write(root.join("node_modules/pkg/index.js"), "needle_modules\n").unwrap();
         assert!(git(&["add", ".gitignore", "tracked.rs"]).status.success());
         fs::write(root.join("untracked.rs"), "fn needle_untracked() {}\n").unwrap();
         let listed = git_index_files(root).expect("inside a work tree");
-        assert!(listed.iter().any(|p| p.ends_with("tracked.rs")), "{listed:?}");
-        assert!(listed.iter().any(|p| p.ends_with("untracked.rs")), "{listed:?}");
-        assert!(!listed.iter().any(|p| p.to_string_lossy().contains("target")), "{listed:?}");
-        assert!(!listed.iter().any(|p| p.to_string_lossy().contains("node_modules")), "{listed:?}");
+        assert!(
+            listed.iter().any(|p| p.ends_with("tracked.rs")),
+            "{listed:?}"
+        );
+        assert!(
+            listed.iter().any(|p| p.ends_with("untracked.rs")),
+            "{listed:?}"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|p| p.to_string_lossy().contains("target")),
+            "{listed:?}"
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|p| p.to_string_lossy().contains("node_modules")),
+            "{listed:?}"
+        );
         let cwd = root.to_string_lossy().to_string();
         let (_, tc) = run_grep(&cwd, serde_json::json!({"pattern": "needle_"}));
         assert!(tc.contains("2 match(es) in 2 file(s)"), "tc={tc}");
-        assert!(tc.contains("tracked.rs:1:") && tc.contains("untracked.rs:1:"), "tc={tc}");
-        assert!(!tc.contains("junk.rs") && !tc.contains("index.js"), "tc={tc}");
+        assert!(
+            tc.contains("tracked.rs:1:") && tc.contains("untracked.rs:1:"),
+            "tc={tc}"
+        );
+        assert!(
+            !tc.contains("junk.rs") && !tc.contains("index.js"),
+            "tc={tc}"
+        );
         // Outside a work tree the walker still answers.
         let plain = tempfile::tempdir().unwrap();
         fs::write(plain.path().join("a.rs"), "fn needle_plain() {}\n").unwrap();
         assert!(git_index_files(plain.path()).is_none());
-        let (_, tc) = run_grep(&plain.path().to_string_lossy(), serde_json::json!({"pattern": "needle_"}));
+        let (_, tc) = run_grep(
+            &plain.path().to_string_lossy(),
+            serde_json::json!({"pattern": "needle_"}),
+        );
         assert!(tc.contains("a.rs:1:"), "tc={tc}");
     }
 }

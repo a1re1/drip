@@ -11,7 +11,6 @@ fn harness_tool_definitions_match_the_fixture() {
 
     let rust: Vec<serde_json::Value> = harness_tool_definitions();
 
-
     // Serialized, so key order inside each definition is compared too.
     assert_eq!(
         serde_json::to_string(&rust).unwrap(),
@@ -28,7 +27,11 @@ fn fixture_covers_exactly_the_eleven_harness_tools_in_declaration_order() {
 
     let names: Vec<&str> = fixture
         .iter()
-        .map(|entry| entry["function"]["name"].as_str().expect("entry missing function.name"))
+        .map(|entry| {
+            entry["function"]["name"]
+                .as_str()
+                .expect("entry missing function.name")
+        })
         .collect();
 
     assert_eq!(

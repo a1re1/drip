@@ -49,7 +49,10 @@ pub fn write_lease(lease_path: &Path, now: &dyn Fn() -> DateTime<Utc>) -> std::i
     // A plain file write — no atomic rename.
     fs::write(
         lease_path,
-        format!("{}\n", serde_json::to_string(&lease).expect("SessionLease serializes")),
+        format!(
+            "{}\n",
+            serde_json::to_string(&lease).expect("SessionLease serializes")
+        ),
     )
 }
 
@@ -116,7 +119,8 @@ pub fn check_lease(lease_path: &Path, now: &dyn Fn() -> DateTime<Utc>) -> LeaseS
         // new Date(garbage).getTime() is NaN and NaN < LEASE_STALE_MS is
         // false, so an unparseable heartbeat reads as stale.
         Ok(heartbeat) => {
-            now().timestamp_millis() - heartbeat.with_timezone(&Utc).timestamp_millis() < LEASE_STALE_MS
+            now().timestamp_millis() - heartbeat.with_timezone(&Utc).timestamp_millis()
+                < LEASE_STALE_MS
         }
         Err(_) => false,
     };
@@ -141,7 +145,10 @@ mod tests {
     }
 
     fn fixed_now(secs: (i32, u32, u32, u32, u32, u32)) -> impl Fn() -> DateTime<Utc> {
-        move || Utc.with_ymd_and_hms(secs.0, secs.1, secs.2, secs.3, secs.4, secs.5).unwrap()
+        move || {
+            Utc.with_ymd_and_hms(secs.0, secs.1, secs.2, secs.3, secs.4, secs.5)
+                .unwrap()
+        }
     }
 
     #[test]
@@ -153,14 +160,20 @@ mod tests {
         let first = read_lease(&lease_path).unwrap();
 
         assert_eq!(first.pid, std::process::id() as i32);
-        assert_eq!(first.started_at.as_deref(), Some("2026-07-08T10:00:00.000Z"));
+        assert_eq!(
+            first.started_at.as_deref(),
+            Some("2026-07-08T10:00:00.000Z")
+        );
 
         // A heartbeat refresh keeps the original startedAt.
         write_lease(&lease_path, &fixed_now((2026, 7, 8, 10, 0, 30))).unwrap();
 
         let second = read_lease(&lease_path).unwrap();
 
-        assert_eq!(second.started_at.as_deref(), Some("2026-07-08T10:00:00.000Z"));
+        assert_eq!(
+            second.started_at.as_deref(),
+            Some("2026-07-08T10:00:00.000Z")
+        );
         assert_eq!(second.heartbeat_at, "2026-07-08T10:00:30.000Z");
 
         // Byte-exact expectation: the lease serialized with camelCase keys in

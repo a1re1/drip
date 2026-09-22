@@ -139,7 +139,12 @@ fn find_worktree_prefix(cwd: &str) -> Option<String> {
 // directory lost its metadata cannot be placed. The directory is only moved
 // when its metadata id matches the directory name; the target is the
 // session's own worktree slug.
-fn plan_from_meta(moves: &mut Vec<BackfillMove>, from_slug: &str, from_dir: &Path, projects_dir: &Path) {
+fn plan_from_meta(
+    moves: &mut Vec<BackfillMove>,
+    from_slug: &str,
+    from_dir: &Path,
+    projects_dir: &Path,
+) {
     let meta_text = match fs::read_to_string(from_dir.join("session.json")) {
         Ok(text) => text,
         Err(_) => return,
@@ -339,7 +344,10 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
     let mut indexes: HashMap<String, SessionIndex> = HashMap::new();
 
     for move_ in moves {
-        let to_sessions_dir = home_root.join("projects").join(&move_.to_slug).join("sessions");
+        let to_sessions_dir = home_root
+            .join("projects")
+            .join(&move_.to_slug)
+            .join("sessions");
 
         if !to_sessions_dir.exists() {
             fs::create_dir_all(&to_sessions_dir).expect("create target sessions dir");
@@ -358,22 +366,28 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
             );
         }
 
-        let meta_dir = if renamed { &move_.to_dir } else { &move_.from_dir };
+        let meta_dir = if renamed {
+            &move_.to_dir
+        } else {
+            &move_.from_dir
+        };
         let meta_path = Path::new(meta_dir).join("session.json");
         let meta_text = fs::read_to_string(&meta_path).expect("read session.json");
-        let mut meta: serde_json::Value = serde_json::from_str(&meta_text).expect("parse session.json");
-        let source_index_path = home_root.join("projects").join(&move_.from_slug).join("index.sqlite");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&meta_text).expect("parse session.json");
+        let source_index_path = home_root
+            .join("projects")
+            .join(&move_.from_slug)
+            .join("index.sqlite");
         let source_existed = source_index_path.exists();
         // Open (or reuse) the source index, then copy the row out as owned data
         // so the borrow of `indexes` ends before the target insert below.
         let (row, memories): (Option<IndexSessionRow>, Vec<(String, String, i64, String)>) =
             if source_existed {
                 let key = move_.from_slug.clone();
-                let index = indexes
-                    .entry(key)
-                    .or_insert_with(|| {
-                        open_session_index(source_index_path.to_string_lossy().as_ref())
-                    });
+                let index = indexes.entry(key).or_insert_with(|| {
+                    open_session_index(source_index_path.to_string_lossy().as_ref())
+                });
                 (
                     load_session_row(&index.conn, &move_.id),
                     list_source_memories(&index.conn, &move_.id),
@@ -428,7 +442,11 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
                 // session.json is the only provenance a row-less session has
                 // left, and it has carried parentId since the parent link
                 // existed; a pre-link meta file simply reads as a root.
-                let parent_id = meta.get("parentId").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+                let parent_id = meta
+                    .get("parentId")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
 
                 target
                     .conn
@@ -461,9 +479,9 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
         if let Some(map) = meta.as_object_mut() {
             map.insert("projectSlug".to_string(), serde_json::json!(move_.to_slug));
         }
-        let written = serde_json::to_string_pretty(&meta).expect("serialize session.json")
-            + "\n";
-        fs::write(Path::new(&move_.to_dir).join("session.json"), written).expect("write session.json");
+        let written = serde_json::to_string_pretty(&meta).expect("serialize session.json") + "\n";
+        fs::write(Path::new(&move_.to_dir).join("session.json"), written)
+            .expect("write session.json");
 
         // Source rows go last: everything above is idempotent, so a throw before
         // this point leaves a state the next run simply re-applies.
@@ -471,7 +489,10 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
             let source = indexes.get(&move_.from_slug).expect("source index");
             source
                 .conn
-                .execute("DELETE FROM session_memories WHERE session_id = ?", [&move_.id])
+                .execute(
+                    "DELETE FROM session_memories WHERE session_id = ?",
+                    [&move_.id],
+                )
                 .expect("delete source memories");
             source
                 .conn
@@ -516,8 +537,8 @@ fn mtime_iso_string(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::core::sessions::{
-        create_session, get_session, list_session_memories, sync_session_memories,
-        touch_session, CreateSessionArgs, HarnessMemoryNote, ProjectPaths,
+        create_session, get_session, list_session_memories, sync_session_memories, touch_session,
+        CreateSessionArgs, HarnessMemoryNote, ProjectPaths,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -544,7 +565,10 @@ mod tests {
         assert_eq!(target_root, repo);
 
         // …and the slug it derives is exactly the canonical one.
-        assert_eq!(project_slug(&target_root), crate::core::home::project_slug(&target_root));
+        assert_eq!(
+            project_slug(&target_root),
+            crate::core::home::project_slug(&target_root)
+        );
 
         // The cwd 'my--repo/a  b' slugs identically from either path, with each
         // non-alphanumeric RUN ('--' in my--repo, the two spaces in 'a  b')
@@ -583,7 +607,11 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(join!(&linked, "src")).unwrap();
-        fs::write(join!(&linked, ".git"), format!("gitdir: {}\n", join!(&main, ".git", "worktrees", "abc123"))).unwrap();
+        fs::write(
+            join!(&linked, ".git"),
+            format!("gitdir: {}\n", join!(&main, ".git", "worktrees", "abc123")),
+        )
+        .unwrap();
 
         let repo_slug = project_slug(&main);
         let stale_project = ProjectPaths {
@@ -653,8 +681,16 @@ mod tests {
         // createSession stamps session.json with the (stale) project it was given;
         // rewrite the three to exactly the pre-move shape the backfill reads.
         for (session, cwd, at) in [
-            (&linked_session, join!(&linked, "src"), "2026-07-01T00:00:00.000Z"),
-            (&gone_session, join!(&main, ".worktrees", "gone1234", "src"), "2026-07-01T01:00:00.000Z"),
+            (
+                &linked_session,
+                join!(&linked, "src"),
+                "2026-07-01T00:00:00.000Z",
+            ),
+            (
+                &gone_session,
+                join!(&main, ".worktrees", "gone1234", "src"),
+                "2026-07-01T01:00:00.000Z",
+            ),
             (&home_session, main.clone(), "2026-07-01T02:00:00.000Z"),
         ] {
             fs::write(
@@ -683,9 +719,21 @@ mod tests {
         // Ids are random, so the plan's fromSlug-then-id order is asserted by
         // sorting the expectation the same way.
         let mut expected = vec![
-            (join!(&linked, "src"), linked_session.id.clone(), linked_slug.clone()),
-            (join!(&main, ".worktrees", "gone1234", "src"), gone_session.id.clone(), gone_slug.clone()),
-            (join!(&main, ".worktrees", "outer", ".worktrees", "inner", "src"), nested_session.id.clone(), nested_slug.clone()),
+            (
+                join!(&linked, "src"),
+                linked_session.id.clone(),
+                linked_slug.clone(),
+            ),
+            (
+                join!(&main, ".worktrees", "gone1234", "src"),
+                gone_session.id.clone(),
+                gone_slug.clone(),
+            ),
+            (
+                join!(&main, ".worktrees", "outer", ".worktrees", "inner", "src"),
+                nested_session.id.clone(),
+                nested_slug.clone(),
+            ),
         ];
         expected.sort_by(|a, b| a.1.cmp(&b.1));
 
@@ -700,31 +748,96 @@ mod tests {
 
         // The directories moved, and the moved session.json now names its new home.
         let moved_meta: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(join!(&home_root, "projects", &linked_slug, "sessions", &linked_session.id, "session.json")).unwrap(),
+            &fs::read_to_string(join!(
+                &home_root,
+                "projects",
+                &linked_slug,
+                "sessions",
+                &linked_session.id,
+                "session.json"
+            ))
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(moved_meta["projectSlug"], linked_slug);
-        assert!(Path::new(&join!(&home_root, "projects", &linked_slug, "sessions", &linked_session.id)).exists());
-        assert!(Path::new(&join!(&home_root, "projects", &gone_slug, "sessions", &gone_session.id)).exists());
-        assert!(!Path::new(&join!(&home_root, "projects", &repo_slug, "sessions", &linked_session.id)).exists());
-        assert!(Path::new(&join!(&home_root, "projects", &repo_slug, "sessions", &home_session.id)).exists());
+        assert!(Path::new(&join!(
+            &home_root,
+            "projects",
+            &linked_slug,
+            "sessions",
+            &linked_session.id
+        ))
+        .exists());
+        assert!(Path::new(&join!(
+            &home_root,
+            "projects",
+            &gone_slug,
+            "sessions",
+            &gone_session.id
+        ))
+        .exists());
+        assert!(!Path::new(&join!(
+            &home_root,
+            "projects",
+            &repo_slug,
+            "sessions",
+            &linked_session.id
+        ))
+        .exists());
+        assert!(Path::new(&join!(
+            &home_root,
+            "projects",
+            &repo_slug,
+            "sessions",
+            &home_session.id
+        ))
+        .exists());
         assert!(Path::new(&join!(&stale_project.sessions_dir, "not-a-session")).exists());
-        assert!(Path::new(&join!(&home_root, "projects", &nested_slug, "sessions", &nested_session.id)).exists());
+        assert!(Path::new(&join!(
+            &home_root,
+            "projects",
+            &nested_slug,
+            "sessions",
+            &nested_session.id
+        ))
+        .exists());
 
         // The index rows followed the files: gone from the repo home, present
         // under the checkout's slug in the checkout's own index.
-        let repo_index = open_session_index(&join!(&home_root, "projects", &repo_slug, "index.sqlite"));
-        let linked_index = open_session_index(&join!(&home_root, "projects", &linked_slug, "index.sqlite"));
-        let gone_index = open_session_index(&join!(&home_root, "projects", &gone_slug, "index.sqlite"));
+        let repo_index =
+            open_session_index(&join!(&home_root, "projects", &repo_slug, "index.sqlite"));
+        let linked_index =
+            open_session_index(&join!(&home_root, "projects", &linked_slug, "index.sqlite"));
+        let gone_index =
+            open_session_index(&join!(&home_root, "projects", &gone_slug, "index.sqlite"));
 
         assert!(get_session(&repo_index, &linked_session.id).is_none());
         assert!(get_session(&repo_index, &gone_session.id).is_none());
-        assert_eq!(get_session(&repo_index, &home_session.id).unwrap().cwd, main);
-        assert_eq!(get_session(&linked_index, &linked_session.id).unwrap().project_slug, linked_slug);
-        assert_eq!(get_session(&gone_index, &gone_session.id).unwrap().project_slug, gone_slug);
+        assert_eq!(
+            get_session(&repo_index, &home_session.id).unwrap().cwd,
+            main
+        );
+        assert_eq!(
+            get_session(&linked_index, &linked_session.id)
+                .unwrap()
+                .project_slug,
+            linked_slug
+        );
+        assert_eq!(
+            get_session(&gone_index, &gone_session.id)
+                .unwrap()
+                .project_slug,
+            gone_slug
+        );
         // Memory notes cross with their session and leave nothing behind.
-        assert_eq!(list_session_memories(&linked_index, &linked_session.id), notes);
-        assert_eq!(list_session_memories(&repo_index, &linked_session.id), vec![]);
+        assert_eq!(
+            list_session_memories(&linked_index, &linked_session.id),
+            notes
+        );
+        assert_eq!(
+            list_session_memories(&repo_index, &linked_session.id),
+            vec![]
+        );
 
         linked_index.close();
         gone_index.close();
@@ -786,7 +899,12 @@ mod tests {
         assert!(get_session(&source, &session.id).is_none());
         source.close();
 
-        let target = open_session_index(&join!(&home_root, "projects", &move_.to_slug, "index.sqlite"));
+        let target = open_session_index(&join!(
+            &home_root,
+            "projects",
+            &move_.to_slug,
+            "index.sqlite"
+        ));
         let relocated = get_session(&target, &session.id);
         target.close();
 
@@ -796,7 +914,11 @@ mod tests {
         assert_eq!(relocated.goal_count, 1);
         assert_eq!(relocated.last_goal.as_deref(), Some("ship it"));
         assert_eq!(relocated.status, "completed");
-        assert_eq!(relocated.parent_id.as_deref(), Some("spawning-session"), "the move must keep the parent link");
+        assert_eq!(
+            relocated.parent_id.as_deref(),
+            Some("spawning-session"),
+            "the move must keep the parent link"
+        );
         assert!(plan_session_backfill(&home_root).is_empty());
     }
 
@@ -834,14 +956,22 @@ mod tests {
             },
         );
         // The row is lost (a wiped or rebuilt index); only session.json remains.
-        index.conn.execute("DELETE FROM sessions WHERE id = ?1", [&session.id]).unwrap();
+        index
+            .conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [&session.id])
+            .unwrap();
         index.close();
 
         let moves = plan_session_backfill(&home_root);
         assert_eq!(moves.len(), 1);
         apply_session_backfill(&moves);
 
-        let target = open_session_index(&join!(&home_root, "projects", &moves[0].to_slug, "index.sqlite"));
+        let target = open_session_index(&join!(
+            &home_root,
+            "projects",
+            &moves[0].to_slug,
+            "index.sqlite"
+        ));
         let rebuilt = get_session(&target, &session.id).expect("rebuilt row");
         target.close();
         assert_eq!(rebuilt.status, "idle");
@@ -892,5 +1022,4 @@ mod tests {
             .to_string_lossy()
             .into_owned()
     }
-
 }

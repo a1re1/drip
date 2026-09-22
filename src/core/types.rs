@@ -20,106 +20,112 @@ use serde::{Deserialize, Serialize};
 /// JSON.stringify prints an integral number without a fraction (`0`, not
 /// `0.0`); serde_json prints every f64 with one. Seconds fields go through
 /// this so the wire text stays in the JavaScript form.
-pub fn serialize_js_number<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
-	if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
-		serializer.serialize_i64(*value as i64)
-	} else {
-		serializer.serialize_f64(*value)
-	}
+pub fn serialize_js_number<S: serde::Serializer>(
+    value: &f64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
 }
 
-pub fn serialize_js_number_option<S: serde::Serializer>(value: &Option<f64>, serializer: S) -> Result<S::Ok, S::Error> {
-	match value {
-		Some(number) => serialize_js_number(number, serializer),
-		None => serializer.serialize_none(),
-	}
+pub fn serialize_js_number_option<S: serde::Serializer>(
+    value: &Option<f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(number) => serialize_js_number(number, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HarnessTaskStatus {
-	#[serde(rename = "blocked")]
-	Blocked,
-	#[serde(rename = "completed")]
-	Completed,
-	#[serde(rename = "dropped")]
-	Dropped,
-	#[serde(rename = "in_progress")]
-	InProgress,
-	#[serde(rename = "pending")]
-	Pending,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "dropped")]
+    Dropped,
+    #[serde(rename = "in_progress")]
+    InProgress,
+    #[serde(rename = "pending")]
+    Pending,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessTask {
-	pub activations: Option<i64>,
-	pub created_at_iteration: i64,
-	/// Task ids that must reach a terminal state before this task is workable.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub depends_on: Option<Vec<String>>,
-	/// Harness-recorded evidence trail (files patched, verifications run) handed to review tasks.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub footprint: Option<Vec<String>>,
-	/// Set when the harness dropped this task after it exhausted its reopen budget (as opposed to the model pruning it as unnecessary).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub dropped_exhausted: Option<bool>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub finished_at_iteration: Option<i64>,
-	pub id: String,
-	pub notes: Vec<String>,
-	/// How many times stall recovery has force-reopened this task after it auto-blocked.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub reopen_count: Option<i64>,
-	/// Id of the task this one reviews: set by the verify gate when a role's completed work needs confirmation by its verifiedBy role.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub review_of: Option<String>,
-	/// Every task this review covers: set by spawn_deferred_review when one
-	/// deferred review task verifies multiple finished tasks as one change.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub reviews: Option<Vec<String>>,
-	/// How many review rejections this task has absorbed; at the cap a further rejection blocks it instead of reopening it.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub review_round: Option<i64>,
-	/// Set when this task completed under a role with a verified_by
-	/// reviewer but the review was deferred: one review task covers every
-	/// task awaiting review once no other work remains. Holds the reviewer
-	/// role name; cleared when the review task is spawned.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub awaiting_review_by: Option<String>,
-	/// Role (capability profile) whose loop works this task; unset tasks use the run's task binding.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub role: Option<String>,
-	/// Task loops this task has consumed (every pickup, finished or not).
-	/// At DEFAULT_TASK_LOOP_LIMIT without finish_task the harness blocks it.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub loops_run: Option<i64>,
-	pub stall_count: i64,
-	pub status: HarnessTaskStatus,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub summary: Option<String>,
-	pub title: String,
-	/// The finished task's `confidence` self-report (low|medium|high), as
-	/// supplied on the accepted finish_task call.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub confidence: Option<ClaimedConfidence>,
-	/// Records that completion was refused for weak verification. Kept for
-	/// session compatibility; it never exempts later completion attempts.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub verify_nudged: Option<bool>,
-	/// The finish gate already bounced this task once for completing a build-shaped task without any workspace edit.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub edit_nudged: Option<bool>,
-	/// What a blocked task is waiting on when no amount of replanning can
-	/// supply it. Set by finish_task(blocked, blockedOn); such tasks are never
-	/// auto-reopened, and once nothing else is workable the run ends with
-	/// reason "blocked-on-input" instead of replanning around the gap.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub blocked_on: Option<HarnessTaskBlocker>,
-	/// Bounded history of recovery events (blocked/dropped/exhausted/
-	/// reopened) recorded by the harness. Old state files without this field
-	/// deserialize to None (no history); serialization omits it when empty.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub recovery_history: Option<Vec<HarnessRecoveryEvent>>,
+    pub activations: Option<i64>,
+    pub created_at_iteration: i64,
+    /// Task ids that must reach a terminal state before this task is workable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
+    /// Harness-recorded evidence trail (files patched, verifications run) handed to review tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footprint: Option<Vec<String>>,
+    /// Set when the harness dropped this task after it exhausted its reopen budget (as opposed to the model pruning it as unnecessary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_exhausted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_iteration: Option<i64>,
+    pub id: String,
+    pub notes: Vec<String>,
+    /// How many times stall recovery has force-reopened this task after it auto-blocked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reopen_count: Option<i64>,
+    /// Id of the task this one reviews: set by the verify gate when a role's completed work needs confirmation by its verifiedBy role.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<String>,
+    /// Every task this review covers: set by spawn_deferred_review when one
+    /// deferred review task verifies multiple finished tasks as one change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviews: Option<Vec<String>>,
+    /// How many review rejections this task has absorbed; at the cap a further rejection blocks it instead of reopening it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_round: Option<i64>,
+    /// Set when this task completed under a role with a verified_by
+    /// reviewer but the review was deferred: one review task covers every
+    /// task awaiting review once no other work remains. Holds the reviewer
+    /// role name; cleared when the review task is spawned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting_review_by: Option<String>,
+    /// Role (capability profile) whose loop works this task; unset tasks use the run's task binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Task loops this task has consumed (every pickup, finished or not).
+    /// At DEFAULT_TASK_LOOP_LIMIT without finish_task the harness blocks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loops_run: Option<i64>,
+    pub stall_count: i64,
+    pub status: HarnessTaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub title: String,
+    /// The finished task's `confidence` self-report (low|medium|high), as
+    /// supplied on the accepted finish_task call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<ClaimedConfidence>,
+    /// Records that completion was refused for weak verification. Kept for
+    /// session compatibility; it never exempts later completion attempts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_nudged: Option<bool>,
+    /// The finish gate already bounced this task once for completing a build-shaped task without any workspace edit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit_nudged: Option<bool>,
+    /// What a blocked task is waiting on when no amount of replanning can
+    /// supply it. Set by finish_task(blocked, blockedOn); such tasks are never
+    /// auto-reopened, and once nothing else is workable the run ends with
+    /// reason "blocked-on-input" instead of replanning around the gap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_on: Option<HarnessTaskBlocker>,
+    /// Bounded history of recovery events (blocked/dropped/exhausted/
+    /// reopened) recorded by the harness. Old state files without this field
+    /// deserialize to None (no history); serialization omits it when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_history: Option<Vec<HarnessRecoveryEvent>>,
 }
 
 /// Who must act before a blocked task can move again. "operator": material
@@ -128,7 +134,7 @@ pub struct HarnessTask {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessTaskBlocker {
-	Operator,
+    Operator,
 }
 
 /// Bounded per-task memory of how recovery attempts went, so replanning can
@@ -151,68 +157,77 @@ pub const MAX_RECOVERY_TEXT_CHARS: usize = 200;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessRecoveryAction {
-	Blocked,
-	Dropped,
-	Exhausted,
-	Reopened,
-	OperatorReply,
+    Blocked,
+    Dropped,
+    Exhausted,
+    Reopened,
+    OperatorReply,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRecoveryEvent {
-	pub action: HarnessRecoveryAction,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub blocked_on: Option<String>,
-	pub at_iteration: i64,
-	/// The task's title when the event was recorded (the id is the task's
-	/// own id; history lives on the task). Clamped.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub task_title: Option<String>,
-	/// Why the task was blocked/dropped, or the note accompanying a reopen.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub detail: Option<String>,
-	/// Available failure evidence (e.g. the attempt digest of what tools ran
-	/// before the failure). Clamped.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub evidence: Option<String>,
+    pub action: HarnessRecoveryAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_on: Option<String>,
+    pub at_iteration: i64,
+    /// The task's title when the event was recorded (the id is the task's
+    /// own id; history lives on the task). Clamped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    /// Why the task was blocked/dropped, or the note accompanying a reopen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Available failure evidence (e.g. the attempt digest of what tools ran
+    /// before the failure). Clamped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 impl HarnessRecoveryEvent {
-	/// Truncate a string to at most `max` chars without splitting a Unicode
-	/// scalar value (emoji, CJK safe).
-	pub fn clamp_text(text: &str, max: usize) -> String {
-		text.chars().take(max).collect()
-	}
+    /// Truncate a string to at most `max` chars without splitting a Unicode
+    /// scalar value (emoji, CJK safe).
+    pub fn clamp_text(text: &str, max: usize) -> String {
+        text.chars().take(max).collect()
+    }
 }
 
 /// Append a recovery event to a task's bounded history, clamping text fields
 /// and evicting the oldest entry past MAX_RECOVERY_EVENTS.
 pub fn push_recovery_event(task: &mut HarnessTask, event: HarnessRecoveryEvent) {
-	let mut event = event;
-	if let Some(detail) = event.detail {
-		event.detail = Some(HarnessRecoveryEvent::clamp_text(detail.trim(), MAX_RECOVERY_TEXT_CHARS));
-	}
-	if let Some(evidence) = event.evidence {
-		event.evidence = Some(HarnessRecoveryEvent::clamp_text(evidence.trim(), MAX_RECOVERY_TEXT_CHARS));
-	}
-	if let Some(title) = event.task_title {
-		event.task_title = Some(HarnessRecoveryEvent::clamp_text(title.trim(), MAX_RECOVERY_TEXT_CHARS));
-	}
-	let history = task.recovery_history.get_or_insert_with(Vec::new);
-	if history.len() >= MAX_RECOVERY_EVENTS {
-		let remove = history.len() + 1 - MAX_RECOVERY_EVENTS;
-		history.drain(0..remove);
-	}
-	history.push(event);
+    let mut event = event;
+    if let Some(detail) = event.detail {
+        event.detail = Some(HarnessRecoveryEvent::clamp_text(
+            detail.trim(),
+            MAX_RECOVERY_TEXT_CHARS,
+        ));
+    }
+    if let Some(evidence) = event.evidence {
+        event.evidence = Some(HarnessRecoveryEvent::clamp_text(
+            evidence.trim(),
+            MAX_RECOVERY_TEXT_CHARS,
+        ));
+    }
+    if let Some(title) = event.task_title {
+        event.task_title = Some(HarnessRecoveryEvent::clamp_text(
+            title.trim(),
+            MAX_RECOVERY_TEXT_CHARS,
+        ));
+    }
+    let history = task.recovery_history.get_or_insert_with(Vec::new);
+    if history.len() >= MAX_RECOVERY_EVENTS {
+        let remove = history.len() + 1 - MAX_RECOVERY_EVENTS;
+        history.drain(0..remove);
+    }
+    history.push(event);
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessMemoryNote {
-	pub created_at_iteration: i64,
-	pub id: String,
-	pub text: String,
+    pub created_at_iteration: i64,
+    pub id: String,
+    pub text: String,
 }
 
 /// Middle-term memory: findings that matter for the next few activations (a
@@ -222,10 +237,10 @@ pub struct HarnessMemoryNote {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessObservation {
-	pub created_at_iteration: i64,
-	pub id: String,
-	pub text: String,
-	pub ttl: i64,
+    pub created_at_iteration: i64,
+    pub id: String,
+    pub text: String,
+    pub ttl: i64,
 }
 
 /// Where a verification check came from. `external` means the check compares
@@ -237,9 +252,9 @@ pub struct HarnessObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VerificationAnchorKind {
-	External,
-	SelfAuthored,
-	Undeclared,
+    External,
+    SelfAuthored,
+    Undeclared,
 }
 
 /// What a verification's evidence covers, as declared by the producer: does
@@ -251,7 +266,7 @@ pub enum VerificationAnchorKind {
 #[serde(rename_all = "camelCase")]
 pub enum CoverageGranularity {
     ReportedClaim,
-	InputOrComponent,
+    InputOrComponent,
 }
 
 /// Provenance of one verification: the anchor kind plus where the check came
@@ -260,21 +275,21 @@ pub enum CoverageGranularity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationAnchor {
-	pub kind: VerificationAnchorKind,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub source: Option<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub downgraded_reason: Option<String>,
-	/// Declared evidence coverage. Absent = producer declared nothing (legacy
-	/// records remain loadable but do not establish reported-claim coverage);
-	/// an explicit inputOrComponent declaration never supports a reported claim.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub coverage: Option<CoverageGranularity>,
-	/// The expectation (id or subject) this verification's evidence is bound
-	/// to, when declared. The harness enforces the record reference, not the
-	/// semantic truth of the binding.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub expectation_subject: Option<String>,
+    pub kind: VerificationAnchorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downgraded_reason: Option<String>,
+    /// Declared evidence coverage. Absent = producer declared nothing (legacy
+    /// records remain loadable but do not establish reported-claim coverage);
+    /// an explicit inputOrComponent declaration never supports a reported claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageGranularity>,
+    /// The expectation (id or subject) this verification's evidence is bound
+    /// to, when declared. The harness enforces the record reference, not the
+    /// semantic truth of the binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expectation_subject: Option<String>,
 }
 
 /// One recorded answer to a pre-registered expectation: what was observed at
@@ -283,22 +298,22 @@ pub struct VerificationAnchor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessExpectationObservation {
-	pub at_iteration: u64,
-	pub observed: String,
-	pub matches: bool,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub evidence: Option<String>,
-	/// How many verification records already existed when this observation
-	/// was recorded — the observation-time watermark. Freshness of later
-	/// evidence is judged against records minted after this point, so a
-	/// record created in the same iteration but before the observation
-	/// cannot qualify as new support for revising it. Legacy observations
-	/// deserialize with 0.
-	/// None for legacy observations whose watermark was never recorded (the
-	/// freshness gate then allows only strictly later iterations); Some(0)
-	/// means the observation is known to have had no records available.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub observed_after_records: Option<u64>,
+    pub at_iteration: u64,
+    pub observed: String,
+    pub matches: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// How many verification records already existed when this observation
+    /// was recorded — the observation-time watermark. Freshness of later
+    /// evidence is judged against records minted after this point, so a
+    /// record created in the same iteration but before the observation
+    /// cannot qualify as new support for revising it. Legacy observations
+    /// deserialize with 0.
+    /// None for legacy observations whose watermark was never recorded (the
+    /// freshness gate then allows only strictly later iterations); Some(0)
+    /// means the observation is known to have had no records available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_after_records: Option<u64>,
 }
 
 /// A value expected from the work, registered before the result exists.
@@ -308,12 +323,12 @@ pub struct HarnessExpectationObservation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessExpectation {
-	pub id: String,
-	pub subject: String,
-	pub expected: String,
-	pub registered_at_iteration: u64,
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub observations: Vec<HarnessExpectationObservation>,
+    pub id: String,
+    pub subject: String,
+    pub expected: String,
+    pub registered_at_iteration: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<HarnessExpectationObservation>,
 }
 
 /// A terminal unresolved mismatch: the run finished with at least one
@@ -321,19 +336,19 @@ pub struct HarnessExpectation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessAnomaly {
-	pub subject: String,
-	pub expected: String,
-	pub observed: String,
-	pub note: String,
+    pub subject: String,
+    pub expected: String,
+    pub observed: String,
+    pub note: String,
 }
 
 /// The agent's own claimed confidence in a finished task's reported values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ClaimedConfidence {
-	Low,
-	Medium,
-	High,
+    Low,
+    Medium,
+    High,
 }
 
 /// How a task's completion is anchored. `external` requires at least one
@@ -343,117 +358,117 @@ pub enum ClaimedConfidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionAnchor {
-	pub kind: CompletionAnchorKind,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub note: Option<String>,
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub claimed_confidence: Option<ClaimedConfidence>,
+    pub kind: CompletionAnchorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_confidence: Option<ClaimedConfidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CompletionAnchorKind {
-	External,
-	#[serde(rename = "none")]
-	None,
+    External,
+    #[serde(rename = "none")]
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTelemetryRecord {
-	pub call_count: i64,
-	pub input_preview: String,
-	/// Distinct task-loop indexes this call was reached for in (field name kept for state-file compatibility; unit is loops since the loop clock landed).
-	pub iterations_used: Vec<i64>,
-	pub key: String,
-	/// True when the most recent execution of this call failed.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub last_failed: Option<bool>,
-	pub last_output: String,
-	/// Task-loop index of the most recent use (field name kept for state-file compatibility).
-	pub last_used_iteration: i64,
-	pub raw_input: String,
-	pub reinforcements: i64,
-	pub tool_name: String,
+    pub call_count: i64,
+    pub input_preview: String,
+    /// Distinct task-loop indexes this call was reached for in (field name kept for state-file compatibility; unit is loops since the loop clock landed).
+    pub iterations_used: Vec<i64>,
+    pub key: String,
+    /// True when the most recent execution of this call failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failed: Option<bool>,
+    pub last_output: String,
+    /// Task-loop index of the most recent use (field name kept for state-file compatibility).
+    pub last_used_iteration: i64,
+    pub raw_input: String,
+    pub reinforcements: i64,
+    pub tool_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromotedContextEntry {
-	pub dynamic: bool,
-	pub input_preview: String,
-	pub key: String,
-	/// True when the most recent execution of this call failed.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub last_failed: Option<bool>,
-	pub output: String,
-	/// Task-loop index of the promotion (field name kept for state-file compatibility).
-	pub promoted_at_iteration: i64,
-	pub raw_input: String,
-	pub reinforcements: i64,
-	pub tool_name: String,
-	pub ttl: i64,
+    pub dynamic: bool,
+    pub input_preview: String,
+    pub key: String,
+    /// True when the most recent execution of this call failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failed: Option<bool>,
+    pub output: String,
+    /// Task-loop index of the promotion (field name kept for state-file compatibility).
+    pub promoted_at_iteration: i64,
+    pub raw_input: String,
+    pub reinforcements: i64,
+    pub tool_name: String,
+    pub ttl: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessGoalRecord {
-	pub archived_at_iteration: i64,
-	pub goal: String,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub summary: Option<String>,
-	pub tasks: Vec<HarnessTask>,
+    pub archived_at_iteration: i64,
+    pub goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub tasks: Vec<HarnessTask>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessActivationDigest {
-	pub actions: Vec<String>,
-	/// How many cycles the loop that produced this digest ran.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cycles: Option<i64>,
-	pub iteration: i64,
-	/// The task-loop index that produced this digest.
-	#[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
-	pub r#loop: Option<i64>,
-	pub outcome: String,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub task_id: Option<String>,
+    pub actions: Vec<String>,
+    /// How many cycles the loop that produced this digest ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycles: Option<i64>,
+    pub iteration: i64,
+    /// The task-loop index that produced this digest.
+    #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub r#loop: Option<i64>,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRunSummaryNote {
-	pub created_at_iteration: i64,
-	pub reason: HarnessRunReason,
-	pub text: String,
+    pub created_at_iteration: i64,
+    pub reason: HarnessRunReason,
+    pub text: String,
 }
 
 /// The most recent verification-shaped command this goal ran (tests, typecheck, build).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessVerificationRecord {
-	pub at_iteration: i64,
-	pub command: String,
-	pub failed: bool,
-	/// Ends-kept tail of the command output — enough to cite the actual counts.
-	pub output_tail: String,
-	/// Set when a test-shaped command exited green without executing a single
-	/// test (e.g. `cargo test` printing only "running 0 tests"): a pass that
-	/// proves nothing. Absent otherwise.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub ran_no_tests: Option<bool>,
-	/// Structured evidence for what the command actually executed. Legacy
-	/// records without it deserialize fine and remain weak/unverified.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub evidence: Option<VerificationEvidence>,
-	/// Stable, goal-unique identity for this record (e.g. "v7"), assigned when
-	/// the record is pushed. Expectation revisions cite this id — never command
-	/// text, which is not an identity: re-running the same command produces a
-	/// new record with a new id. Legacy records deserialize without it and
-	/// carry no citable identity.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub id: Option<String>,
+    pub at_iteration: i64,
+    pub command: String,
+    pub failed: bool,
+    /// Ends-kept tail of the command output — enough to cite the actual counts.
+    pub output_tail: String,
+    /// Set when a test-shaped command exited green without executing a single
+    /// test (e.g. `cargo test` printing only "running 0 tests"): a pass that
+    /// proves nothing. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_no_tests: Option<bool>,
+    /// Structured evidence for what the command actually executed. Legacy
+    /// records without it deserialize fine and remain weak/unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<VerificationEvidence>,
+    /// Stable, goal-unique identity for this record (e.g. "v7"), assigned when
+    /// the record is pushed. Expectation revisions cite this id — never command
+    /// text, which is not an identity: re-running the same command produces a
+    /// new record with a new id. Legacy records deserialize without it and
+    /// carry no citable identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// The driver-facing view of the latest verification: the record fields plus
@@ -462,20 +477,20 @@ pub struct HarnessVerificationRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationSummary {
-	pub at_iteration: i64,
-	pub command: String,
-	pub failed: bool,
-	pub mutations_after: i64,
-	/// Present (true) only when the run passed without executing any test.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub ran_no_tests: Option<bool>,
-	/// Structured evidence (see VerificationEvidence). Legacy summaries without
-	/// it deserialize fine and remain weak.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub evidence: Option<VerificationEvidence>,
-	/// How the latest check is anchored (external / self-authored / undeclared).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub anchor: Option<VerificationAnchor>,
+    pub at_iteration: i64,
+    pub command: String,
+    pub failed: bool,
+    pub mutations_after: i64,
+    /// Present (true) only when the run passed without executing any test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_no_tests: Option<bool>,
+    /// Structured evidence (see VerificationEvidence). Legacy summaries without
+    /// it deserialize fine and remain weak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<VerificationEvidence>,
+    /// How the latest check is anchored (external / self-authored / undeclared).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<VerificationAnchor>,
 }
 
 /// What kind of evidence a verification command produced. `build` and
@@ -486,11 +501,11 @@ pub struct VerificationSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VerificationEvidenceKind {
-	Tests,
-	Custom,
-	Build,
-	Typecheck,
-	Unverified,
+    Tests,
+    Custom,
+    Build,
+    Typecheck,
+    Unverified,
 }
 
 /// Reported assertion counts from a verification command. These are evidence
@@ -501,44 +516,51 @@ pub enum VerificationEvidenceKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationEvidence {
-	pub kind: VerificationEvidenceKind,
-	/// Assertions/tests the command reported executing (0 for build/typecheck).
-	pub executed: i64,
-	pub passed: i64,
-	pub failed: i64,
-	/// Skipped/ignored assertions, when the runner distinguishes them.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub skipped: Option<i64>,
-	/// Why the evidence is weak/unverified, when it is.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub detail: Option<String>,
-	/// Where the check came from. Absent (legacy) means undeclared.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub anchor: Option<VerificationAnchor>,
+    pub kind: VerificationEvidenceKind,
+    /// Assertions/tests the command reported executing (0 for build/typecheck).
+    pub executed: i64,
+    pub passed: i64,
+    pub failed: i64,
+    /// Skipped/ignored assertions, when the runner distinguishes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<i64>,
+    /// Why the evidence is weak/unverified, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Where the check came from. Absent (legacy) means undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<VerificationAnchor>,
 }
 
 impl VerificationEvidence {
-	pub fn verifies_work(&self) -> bool {
-		if self.failed != 0 || self.passed < 0 || self.executed < 0 || self.skipped.is_some_and(|count| count < 0) {
-			return false;
-		}
-		match self.kind {
-			VerificationEvidenceKind::Tests | VerificationEvidenceKind::Custom =>
-				self.executed > 0 && self.passed.checked_add(self.failed) == Some(self.executed),
-			VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => self.executed == 0 && self.passed == 0,
-			VerificationEvidenceKind::Unverified => false,
-		}
-	}
+    pub fn verifies_work(&self) -> bool {
+        if self.failed != 0
+            || self.passed < 0
+            || self.executed < 0
+            || self.skipped.is_some_and(|count| count < 0)
+        {
+            return false;
+        }
+        match self.kind {
+            VerificationEvidenceKind::Tests | VerificationEvidenceKind::Custom => {
+                self.executed > 0 && self.passed.checked_add(self.failed) == Some(self.executed)
+            }
+            VerificationEvidenceKind::Build | VerificationEvidenceKind::Typecheck => {
+                self.executed == 0 && self.passed == 0
+            }
+            VerificationEvidenceKind::Unverified => false,
+        }
+    }
 }
 
 /// Task-ledger tally in the vocabulary every payload shares.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskStats {
-	pub blocked: i64,
-	pub completed: i64,
-	pub dropped: i64,
-	pub pending: i64,
+    pub blocked: i64,
+    pub completed: i64,
+    pub dropped: i64,
+    pub pending: i64,
 }
 
 /// Consecutive identical failures of one verification command — the signal
@@ -546,153 +568,153 @@ pub struct TaskStats {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessVerificationStreak {
-	pub command: String,
-	pub consecutive_failures: i64,
-	/// Hash of the failing output tail; a changed failure resets the streak.
-	pub output_tail_hash: String,
+    pub command: String,
+    pub consecutive_failures: i64,
+    /// Hash of the failing output tail; a changed failure resets the streak.
+    pub output_tail_hash: String,
 }
 
 /// A steering message injected into a running session (drip --send).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessOperatorMessage {
-	pub id: String,
-	pub received_at_iteration: i64,
-	pub text: String,
+    pub id: String,
+    pub received_at_iteration: i64,
+    pub text: String,
 }
 
 /// A direct answer to a question-shaped goal, recorded by the respond op.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessDirectResponse {
-	pub created_at_iteration: i64,
-	pub text: String,
+    pub created_at_iteration: i64,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessState {
-	pub created_at: String,
-	/// Set when the model answered the goal directly instead of planning tasks.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub direct_response: Option<HarnessDirectResponse>,
-	pub goal: String,
-	pub history: Vec<HarnessGoalRecord>,
-	/// Count of inbox lines already consumed from the session's inbox.jsonl.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub inbox_cursor: Option<i64>,
-	/// Recent operator steering messages, rendered to every activation prompt.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub operator_messages: Option<Vec<HarnessOperatorMessage>>,
-	/// Harness-recorded outcome of the goal's most recent verification command.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub last_verification: Option<HarnessVerificationRecord>,
-	/// Successful workspace mutations since the last verification ran — when > 0 the lastVerification result is stale.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub mutations_since_verification: Option<i64>,
-	/// Workspace mutations over the whole run (never reset), conservatively
-	/// including failed mutating calls whose side effects are unknown.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub workspace_edits: Option<i64>,
-	/// Bounded timeline (newest last) of the goal's verification runs.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub verifications: Option<Vec<HarnessVerificationRecord>>,
-	/// Live streak of identical verification failures; cleared by a pass or a changed failure.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub verification_streak: Option<HarnessVerificationStreak>,
-	/// Operator disabled the review/verify lane for this run: set explicitly
-	/// by --no-review/--lite or auto-detected from opt-out phrases in the
-	/// goal/operator messages. Sticky: persisted and restored with the state.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub review_opt_out: Option<bool>,
-	/// First matched opt-out phrase; keeps the run-warning one-shot per run.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub opt_out_warning_emitted: Option<String>,
-	/// Values expected from the work, registered before results exist. Immutable
-	/// once written; revisions append observations instead of rewriting these.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub expectations: Vec<HarnessExpectation>,
-	/// Terminal unresolved mismatches recorded by finishes with status
-	/// `unreconciled`.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub anomalies: Vec<HarnessAnomaly>,
-	/// How the most recent task completion was anchored.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub completion_anchor: Option<CompletionAnchor>,
-	/// Workspace paths the run has edited (PATCH targets), deduplicated. An
-	/// "external" verification anchor that names one of these is downgraded
-	/// to self-authored: a check the agent wrote is consistency, not
-	/// correctness.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub edited_paths: Vec<String>,
-	/// Survey awaiting operator answers (an ask_user timeout or run end while
-	/// the question was open) — resumed runs re-emit it instead of losing it.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub pending_questions: Option<QuestionSurvey>,
-	pub iteration: i64,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub last_activation: Option<HarnessActivationDigest>,
-	/// Task-loop counter: one loop = the consecutive cycles a subagent spends on one task (or on planning) with a shared transcript.
-	#[serde(rename = "loop")]
-	pub r#loop: i64,
-	pub memory: Vec<HarnessMemoryNote>,
-	pub observations: Vec<HarnessObservation>,
-	pub promoted_context: Vec<PromotedContextEntry>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub run_summary: Option<HarnessRunSummaryNote>,
-	pub tasks: Vec<HarnessTask>,
-	pub telemetry: IndexMap<String, ToolTelemetryRecord>,
-	pub version: u8,
+    pub created_at: String,
+    /// Set when the model answered the goal directly instead of planning tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_response: Option<HarnessDirectResponse>,
+    pub goal: String,
+    pub history: Vec<HarnessGoalRecord>,
+    /// Count of inbox lines already consumed from the session's inbox.jsonl.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_cursor: Option<i64>,
+    /// Recent operator steering messages, rendered to every activation prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_messages: Option<Vec<HarnessOperatorMessage>>,
+    /// Harness-recorded outcome of the goal's most recent verification command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_verification: Option<HarnessVerificationRecord>,
+    /// Successful workspace mutations since the last verification ran — when > 0 the lastVerification result is stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutations_since_verification: Option<i64>,
+    /// Workspace mutations over the whole run (never reset), conservatively
+    /// including failed mutating calls whose side effects are unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_edits: Option<i64>,
+    /// Bounded timeline (newest last) of the goal's verification runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verifications: Option<Vec<HarnessVerificationRecord>>,
+    /// Live streak of identical verification failures; cleared by a pass or a changed failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_streak: Option<HarnessVerificationStreak>,
+    /// Operator disabled the review/verify lane for this run: set explicitly
+    /// by --no-review/--lite or auto-detected from opt-out phrases in the
+    /// goal/operator messages. Sticky: persisted and restored with the state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_opt_out: Option<bool>,
+    /// First matched opt-out phrase; keeps the run-warning one-shot per run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opt_out_warning_emitted: Option<String>,
+    /// Values expected from the work, registered before results exist. Immutable
+    /// once written; revisions append observations instead of rewriting these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expectations: Vec<HarnessExpectation>,
+    /// Terminal unresolved mismatches recorded by finishes with status
+    /// `unreconciled`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anomalies: Vec<HarnessAnomaly>,
+    /// How the most recent task completion was anchored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_anchor: Option<CompletionAnchor>,
+    /// Workspace paths the run has edited (PATCH targets), deduplicated. An
+    /// "external" verification anchor that names one of these is downgraded
+    /// to self-authored: a check the agent wrote is consistency, not
+    /// correctness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited_paths: Vec<String>,
+    /// Survey awaiting operator answers (an ask_user timeout or run end while
+    /// the question was open) — resumed runs re-emit it instead of losing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_questions: Option<QuestionSurvey>,
+    pub iteration: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activation: Option<HarnessActivationDigest>,
+    /// Task-loop counter: one loop = the consecutive cycles a subagent spends on one task (or on planning) with a shared transcript.
+    #[serde(rename = "loop")]
+    pub r#loop: i64,
+    pub memory: Vec<HarnessMemoryNote>,
+    pub observations: Vec<HarnessObservation>,
+    pub promoted_context: Vec<PromotedContextEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_summary: Option<HarnessRunSummaryNote>,
+    pub tasks: Vec<HarnessTask>,
+    pub telemetry: IndexMap<String, ToolTelemetryRecord>,
+    pub version: u8,
 }
 
 impl Default for HarnessState {
-	fn default() -> Self {
-		HarnessState {
-			created_at: String::new(),
-			direct_response: None,
-			goal: String::new(),
-			history: Vec::new(),
-			inbox_cursor: None,
-			operator_messages: None,
-			last_verification: None,
-			mutations_since_verification: None,
-			workspace_edits: None,
-			verifications: None,
-			verification_streak: None,
-			review_opt_out: None,
-			opt_out_warning_emitted: None,
-			expectations: Vec::new(),
-			anomalies: Vec::new(),
-			completion_anchor: None,
-			edited_paths: Vec::new(),
-			pending_questions: None,
-			iteration: 0,
-			last_activation: None,
-			r#loop: 0,
-			memory: Vec::new(),
-			observations: Vec::new(),
-			promoted_context: Vec::new(),
-			run_summary: None,
-			tasks: Vec::new(),
-			telemetry: IndexMap::new(),
-			version: 1,
-		}
-	}
+    fn default() -> Self {
+        HarnessState {
+            created_at: String::new(),
+            direct_response: None,
+            goal: String::new(),
+            history: Vec::new(),
+            inbox_cursor: None,
+            operator_messages: None,
+            last_verification: None,
+            mutations_since_verification: None,
+            workspace_edits: None,
+            verifications: None,
+            verification_streak: None,
+            review_opt_out: None,
+            opt_out_warning_emitted: None,
+            expectations: Vec::new(),
+            anomalies: Vec::new(),
+            completion_anchor: None,
+            edited_paths: Vec::new(),
+            pending_questions: None,
+            iteration: 0,
+            last_activation: None,
+            r#loop: 0,
+            memory: Vec::new(),
+            observations: Vec::new(),
+            promoted_context: Vec::new(),
+            run_summary: None,
+            tasks: Vec::new(),
+            telemetry: IndexMap::new(),
+            version: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessTelemetryConfig {
-	pub base_ttl: i64,
-	pub max_observations: i64,
-	pub max_observation_ttl: i64,
-	pub max_promoted_entries: i64,
-	pub max_promoted_output_chars: i64,
-	pub max_ttl: i64,
-	pub observation_base_ttl: i64,
-	pub promote_threshold: i64,
-	pub recency_window: i64,
-	pub telemetry_retention: i64,
+    pub base_ttl: i64,
+    pub max_observations: i64,
+    pub max_observation_ttl: i64,
+    pub max_promoted_entries: i64,
+    pub max_promoted_output_chars: i64,
+    pub max_ttl: i64,
+    pub observation_base_ttl: i64,
+    pub promote_threshold: i64,
+    pub recency_window: i64,
+    pub telemetry_retention: i64,
 }
 
 /// How a task loop spends its context window: a loop is a few short cycles
@@ -702,14 +724,14 @@ pub struct HarnessTelemetryConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessLoopConfig {
-	/// Most recent tool results kept verbatim in the loop transcript; older ones are folded to one-line digests.
-	pub hot_tool_results: i64,
-	/// Cycles a task loop may run before it yields the task back to the queue.
-	pub max_cycles: i64,
-	/// Per tool result character cap in the live loop transcript (ends kept).
-	pub max_tool_result_chars: i64,
-	/// Tool rounds within a single cycle.
-	pub max_tool_rounds_per_cycle: i64,
+    /// Most recent tool results kept verbatim in the loop transcript; older ones are folded to one-line digests.
+    pub hot_tool_results: i64,
+    /// Cycles a task loop may run before it yields the task back to the queue.
+    pub max_cycles: i64,
+    /// Per tool result character cap in the live loop transcript (ends kept).
+    pub max_tool_result_chars: i64,
+    /// Tool rounds within a single cycle.
+    pub max_tool_rounds_per_cycle: i64,
 }
 
 /// Loop budget defaults. Across ~2,300 recorded sessions 68% of cycles hit
@@ -725,78 +747,78 @@ pub struct HarnessLoopConfig {
 pub const DEFAULT_TASK_LOOP_LIMIT: i64 = 6;
 
 pub const DEFAULT_LOOP_CONFIG: HarnessLoopConfig = HarnessLoopConfig {
-	hot_tool_results: 10,
-	max_cycles: 3,
-	max_tool_result_chars: 8000,
-	max_tool_rounds_per_cycle: 16,
+    hot_tool_results: 10,
+    max_cycles: 3,
+    max_tool_result_chars: 8000,
+    max_tool_rounds_per_cycle: 16,
 };
 
 pub const DEFAULT_TELEMETRY_CONFIG: HarnessTelemetryConfig = HarnessTelemetryConfig {
-	base_ttl: 3,
-	max_observations: 8,
-	max_observation_ttl: 12,
-	max_promoted_entries: 8,
-	max_promoted_output_chars: 2000,
-	max_ttl: 48,
-	observation_base_ttl: 4,
-	promote_threshold: 2,
-	recency_window: 6,
-	telemetry_retention: 50,
+    base_ttl: 3,
+    max_observations: 8,
+    max_observation_ttl: 12,
+    max_promoted_entries: 8,
+    max_promoted_output_chars: 2000,
+    max_ttl: 48,
+    observation_base_ttl: 4,
+    promote_threshold: 2,
+    recency_window: 6,
+    telemetry_retention: 50,
 };
 
 impl Default for HarnessTelemetryConfig {
-	fn default() -> Self {
-		DEFAULT_TELEMETRY_CONFIG
-	}
+    fn default() -> Self {
+        DEFAULT_TELEMETRY_CONFIG
+    }
 }
 
 impl Default for HarnessLoopConfig {
-	fn default() -> Self {
-		DEFAULT_LOOP_CONFIG
-	}
+    fn default() -> Self {
+        DEFAULT_LOOP_CONFIG
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HarnessEventType {
-	#[serde(rename = "context-expired")]
-	ContextExpired,
-	#[serde(rename = "context-promoted")]
-	ContextPromoted,
-	#[serde(rename = "context-refreshed")]
-	ContextRefreshed,
-	/// A blind role's loop started without the previous loop's tool exchanges.
-	#[serde(rename = "context-withheld")]
-	ContextWithheld,
-	#[serde(rename = "harness-op")]
-	HarnessOp,
-	#[serde(rename = "inference")]
-	Inference,
-	#[serde(rename = "iteration-start")]
-	IterationStart,
-	#[serde(rename = "loop-start")]
-	LoopStart,
-	#[serde(rename = "model-text")]
-	ModelText,
-	#[serde(rename = "question")]
-	Question,
-	#[serde(rename = "operator-message")]
-	OperatorMessage,
-	#[serde(rename = "rate-limited")]
-	RateLimited,
-	#[serde(rename = "run-complete")]
-	RunComplete,
-	#[serde(rename = "run-summary")]
-	RunSummary,
-	#[serde(rename = "run-warning")]
-	RunWarning,
-	#[serde(rename = "stall-recovery")]
-	StallRecovery,
-	#[serde(rename = "task-finished")]
-	TaskFinished,
-	#[serde(rename = "tool-call")]
-	ToolCall,
-	#[serde(rename = "tool-result")]
-	ToolResult,
+    #[serde(rename = "context-expired")]
+    ContextExpired,
+    #[serde(rename = "context-promoted")]
+    ContextPromoted,
+    #[serde(rename = "context-refreshed")]
+    ContextRefreshed,
+    /// A blind role's loop started without the previous loop's tool exchanges.
+    #[serde(rename = "context-withheld")]
+    ContextWithheld,
+    #[serde(rename = "harness-op")]
+    HarnessOp,
+    #[serde(rename = "inference")]
+    Inference,
+    #[serde(rename = "iteration-start")]
+    IterationStart,
+    #[serde(rename = "loop-start")]
+    LoopStart,
+    #[serde(rename = "model-text")]
+    ModelText,
+    #[serde(rename = "question")]
+    Question,
+    #[serde(rename = "operator-message")]
+    OperatorMessage,
+    #[serde(rename = "rate-limited")]
+    RateLimited,
+    #[serde(rename = "run-complete")]
+    RunComplete,
+    #[serde(rename = "run-summary")]
+    RunSummary,
+    #[serde(rename = "run-warning")]
+    RunWarning,
+    #[serde(rename = "stall-recovery")]
+    StallRecovery,
+    #[serde(rename = "task-finished")]
+    TaskFinished,
+    #[serde(rename = "tool-call")]
+    ToolCall,
+    #[serde(rename = "tool-result")]
+    ToolResult,
 }
 
 /// One staged multiple-choice clarification question the model asks the
@@ -804,28 +826,28 @@ pub enum HarnessEventType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessSurveyOption {
-	/// Short choice label — what answers.jsonl records back as `choice`.
-	pub label: String,
-	/// One-line explanation of what choosing this option means.
-	pub description: String,
+    /// Short choice label — what answers.jsonl records back as `choice`.
+    pub label: String,
+    /// One-line explanation of what choosing this option means.
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessSurveyQuestion {
-	/// Short label shown above the question.
-	pub header: String,
-	/// The question itself.
-	pub question: String,
-	/// 2-4 choices; the model's best guess goes first.
-	pub options: Vec<HarnessSurveyOption>,
-	/// When true (the default) the operator may answer with free text instead of a listed option.
-	#[serde(default = "default_allow_other")]
-	pub allow_other: bool,
+    /// Short label shown above the question.
+    pub header: String,
+    /// The question itself.
+    pub question: String,
+    /// 2-4 choices; the model's best guess goes first.
+    pub options: Vec<HarnessSurveyOption>,
+    /// When true (the default) the operator may answer with free text instead of a listed option.
+    #[serde(default = "default_allow_other")]
+    pub allow_other: bool,
 }
 
 fn default_allow_other() -> bool {
-	true
+    true
 }
 
 /// The full survey carried by a question event and by
@@ -833,42 +855,42 @@ fn default_allow_other() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionSurvey {
-	pub questions: Vec<HarnessSurveyQuestion>,
-	/// 0-based next-unconsumed answers.jsonl line (stale-line replay guard).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub answers_cursor: Option<usize>,
+    pub questions: Vec<HarnessSurveyQuestion>,
+    /// 0-based next-unconsumed answers.jsonl line (stale-line replay guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers_cursor: Option<usize>,
 }
 
 /// One recorded answer to the question at `index` (0-based within the survey).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessSurveyAnswer {
-	pub index: i64,
-	/// Chosen option label, or null when the operator answered with free text.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub choice: Option<String>,
-	/// Free-text answer (the "Other..." path), or null when a listed option was chosen.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub other: Option<String>,
+    pub index: i64,
+    /// Chosen option label, or null when the operator answered with free text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+    /// Free-text answer (the "Other..." path), or null when a listed option was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
 }
 
 /// One answers.jsonl record: a batch of answers plus when they arrived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessSurveyAnswers {
-	pub at: String,
-	pub answers: Vec<HarnessSurveyAnswer>,
-	/// The operator chose "chat about this": one free-form message standing as
-	/// the answer to the whole survey (per-question answers stay empty).
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub chat: Option<String>,
+    pub at: String,
+    pub answers: Vec<HarnessSurveyAnswer>,
+    /// The operator chose "chat about this": one free-form message standing as
+    /// the answer to the whole survey (per-question answers stay empty).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
 }
 
 impl HarnessSurveyAnswers {
-	/// RFC3339 UTC timestamp with millisecond precision — drip's transcript convention.
-	pub fn now_iso() -> String {
-		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-	}
+    /// RFC3339 UTC timestamp with millisecond precision — drip's transcript convention.
+    pub fn now_iso() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
 }
 
 /// Structured payload carried by events so consumers (transcript analytics,
@@ -879,114 +901,117 @@ impl HarnessSurveyAnswers {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessEventData {
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub call_id: Option<String>,
-	/// "inference" events: prompt tokens written to the provider's cache this call.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cache_creation_tokens: Option<i64>,
-	/// "inference" events: prompt tokens served from the provider's cache this call (counted inside promptTokens).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cache_read_tokens: Option<i64>,
-	/// "inference" events: completion tokens returned by this call.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub completion_tokens: Option<i64>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cycle: Option<i64>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub duration_ms: Option<i64>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub failed: Option<bool>,
-	/// Steering adoption latency: sentAt → consumed at a cycle boundary.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub latency_ms: Option<i64>,
-	#[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
-	pub r#loop: Option<i64>,
-	/// "inference" events: the model that served this individual call.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub model: Option<String>,
-	/// "inference" events: prompt tokens sent on this call (cache reads included).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub prompt_tokens: Option<i64>,
-	/// "inference" events: the inference provider that served this individual call.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub provider: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub reason: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub sent_at: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub status: Option<String>,
-	// toolName before taskId: NDJSON field order is the contract (taskId
-	// last when both are present).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub tool_name: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub task_id: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_js_number_option")]
-	pub wait_seconds: Option<f64>,
-	// question events carry the survey; survey-answer harness-ops carry the
-	// recorded batch. NDJSON field order is the contract: surveyAnswers
-	// before questionSurvey, like toolName before taskId.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub survey_answers: Option<HarnessSurveyAnswers>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub question_survey: Option<QuestionSurvey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// "inference" events: prompt tokens written to the provider's cache this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i64>,
+    /// "inference" events: prompt tokens served from the provider's cache this call (counted inside promptTokens).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    /// "inference" events: completion tokens returned by this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
+    /// Steering adoption latency: sentAt → consumed at a cycle boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<i64>,
+    #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub r#loop: Option<i64>,
+    /// "inference" events: the model that served this individual call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// "inference" events: prompt tokens sent on this call (cache reads included).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+    /// "inference" events: the inference provider that served this individual call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    // toolName before taskId: NDJSON field order is the contract (taskId
+    // last when both are present).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_js_number_option"
+    )]
+    pub wait_seconds: Option<f64>,
+    // question events carry the survey; survey-answer harness-ops carry the
+    // recorded batch. NDJSON field order is the contract: surveyAnswers
+    // before questionSurvey, like toolName before taskId.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub survey_answers: Option<HarnessSurveyAnswers>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_survey: Option<QuestionSurvey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessEvent {
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub data: Option<HarnessEventData>,
-	pub detail: String,
-	pub iteration: i64,
-	#[serde(rename = "type")]
-	pub r#type: HarnessEventType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<HarnessEventData>,
+    pub detail: String,
+    pub iteration: i64,
+    #[serde(rename = "type")]
+    pub r#type: HarnessEventType,
 }
 
 /// "partial": every task reached a terminal state, but some were dropped along
 /// the way — the goal was not fully accomplished and should not read as done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HarnessRunReason {
-	#[serde(rename = "awaiting-input")]
-	AwaitingInput,
-	#[serde(rename = "aborted")]
-	Aborted,
-	#[serde(rename = "completed")]
-	Completed,
-	/// Draft mode (--lite): every task finished, but the run is a draft for
-	/// the operator to review and harden rather than a shipped result.
-	#[serde(rename = "draft")]
-	Draft,
-	#[serde(rename = "error")]
-	Error,
-	#[serde(rename = "futile")]
-	Futile,
-	#[serde(rename = "max-iterations")]
-	MaxIterations,
-	/// The --max-loops task-loop cap was reached before the goal completed.
-	#[serde(rename = "max-loops")]
-	MaxLoops,
-	/// Nothing workable remains and at least one task is blocked on input only
-	/// the operator can supply: the run stops here instead of replanning
-	/// around the gap. Resume with the missing input as the prompt.
-	#[serde(rename = "blocked-on-input")]
-	BlockedOnInput,
-	#[serde(rename = "partial")]
-	Partial,
-	#[serde(rename = "planned")]
-	Planned,
-	#[serde(rename = "unreconciled")]
-	Unreconciled,
+    #[serde(rename = "awaiting-input")]
+    AwaitingInput,
+    #[serde(rename = "aborted")]
+    Aborted,
+    #[serde(rename = "completed")]
+    Completed,
+    /// Draft mode (--lite): every task finished, but the run is a draft for
+    /// the operator to review and harden rather than a shipped result.
+    #[serde(rename = "draft")]
+    Draft,
+    #[serde(rename = "error")]
+    Error,
+    #[serde(rename = "futile")]
+    Futile,
+    #[serde(rename = "max-iterations")]
+    MaxIterations,
+    /// The --max-loops task-loop cap was reached before the goal completed.
+    #[serde(rename = "max-loops")]
+    MaxLoops,
+    /// Nothing workable remains and at least one task is blocked on input only
+    /// the operator can supply: the run stops here instead of replanning
+    /// around the gap. Resume with the missing input as the prompt.
+    #[serde(rename = "blocked-on-input")]
+    BlockedOnInput,
+    #[serde(rename = "partial")]
+    Partial,
+    #[serde(rename = "planned")]
+    Planned,
+    #[serde(rename = "unreconciled")]
+    Unreconciled,
 }
 
 /// Per-call token economics attributed to one task (the byTask record value).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessUsageByTask {
-	pub calls: i64,
-	pub completion_tokens: i64,
-	pub prompt_tokens: i64,
+    pub calls: i64,
+    pub completion_tokens: i64,
+    pub prompt_tokens: i64,
 }
 
 /// Per-run token/latency economics — what a delegating agent needs to decide
@@ -994,22 +1019,22 @@ pub struct HarnessUsageByTask {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRunUsage {
-	/// Prompt/completion tokens attributed to the task the model call worked.
-	pub by_task: IndexMap<String, HarnessUsageByTask>,
-	/// Prompt tokens written to the provider's cache (billed at that provider's write premium). Optional: absent on records from pre-caching versions.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cache_creation_tokens: Option<i64>,
-	/// Prompt tokens served from the provider's prompt cache (billed at the discounted cache-read rate). Counted inside promptTokens.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub cache_read_tokens: Option<i64>,
-	pub calls: i64,
-	pub completion_tokens: i64,
-	pub prompt_tokens: i64,
-	/// Seconds spent sleeping out 429s/5xx/network outages.
-	#[serde(serialize_with = "serialize_js_number")]
-	pub rate_limit_wait_seconds: f64,
-	pub retries: i64,
-	pub wall_ms: i64,
+    /// Prompt/completion tokens attributed to the task the model call worked.
+    pub by_task: IndexMap<String, HarnessUsageByTask>,
+    /// Prompt tokens written to the provider's cache (billed at that provider's write premium). Optional: absent on records from pre-caching versions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i64>,
+    /// Prompt tokens served from the provider's prompt cache (billed at the discounted cache-read rate). Counted inside promptTokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    pub calls: i64,
+    pub completion_tokens: i64,
+    pub prompt_tokens: i64,
+    /// Seconds spent sleeping out 429s/5xx/network outages.
+    #[serde(serialize_with = "serialize_js_number")]
+    pub rate_limit_wait_seconds: f64,
+    pub retries: i64,
+    pub wall_ms: i64,
 }
 
 /// Background jobs (BASH_ASYNC tmux sessions) still alive at run end —
@@ -1017,10 +1042,10 @@ pub struct HarnessRunUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessLeakedJob {
-	pub command: String,
-	pub kill_command: String,
-	pub session_name: String,
-	pub started_at: String,
+    pub command: String,
+    pub kill_command: String,
+    pub session_name: String,
+    pub started_at: String,
 }
 
 /// Per-role inference accounting: one bucket per loop role ("default" when
@@ -1028,265 +1053,312 @@ pub struct HarnessLeakedJob {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleInferenceTotals {
-	pub calls: u64,
-	pub latency_ms: u64,
-	pub completion_tokens: u64,
-	pub prompt_tokens: u64,
-	pub cache_read_tokens: u64,
-	/// Calls that raced a second (hedged) request.
-	pub hedges_fired: u64,
-	/// Hedged calls where the second request answered first.
-	pub hedges_won: u64,
+    pub calls: u64,
+    pub latency_ms: u64,
+    pub completion_tokens: u64,
+    pub prompt_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// Calls that raced a second (hedged) request.
+    pub hedges_fired: u64,
+    /// Hedged calls where the second request answered first.
+    pub hedges_won: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessRunResult {
-	/// Set when the run ended awaiting operator input (drip --resume picks it up).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub continue_command: Option<String>,
-	/// Set when reason is "error": what killed the run (endpoint/network/harness).
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub error_message: Option<String>,
-	/// Cycles run by this invocation (per-run, like loops).
-	pub iterations: i64,
-	/// Task loops run by this invocation.
-	pub r#loops: i64,
-	/// Background jobs (BASH_ASYNC tmux sessions) still alive at run end.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub leaked_jobs: Option<Vec<HarnessLeakedJob>>,
-	pub reason: HarnessRunReason,
-	pub state: HarnessState,
-	/// Milliseconds from stop request (abort signal) to run end; only present when a stop was requested.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub stop_latency_ms: Option<i64>,
-	pub usage: HarnessRunUsage,
-	/// Per-role model-call totals (calls / latencyMs / completionTokens),
-	/// keyed by loop role name; omitted when empty.
-	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-	pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
+    /// Set when the run ended awaiting operator input (drip --resume picks it up).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_command: Option<String>,
+    /// Set when reason is "error": what killed the run (endpoint/network/harness).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// Cycles run by this invocation (per-run, like loops).
+    pub iterations: i64,
+    /// Task loops run by this invocation.
+    pub r#loops: i64,
+    /// Background jobs (BASH_ASYNC tmux sessions) still alive at run end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaked_jobs: Option<Vec<HarnessLeakedJob>>,
+    pub reason: HarnessRunReason,
+    pub state: HarnessState,
+    /// Milliseconds from stop request (abort signal) to run end; only present when a stop was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_latency_ms: Option<i64>,
+    pub usage: HarnessRunUsage,
+    /// Per-role model-call totals (calls / latencyMs / completionTokens),
+    /// keyed by loop role name; omitted when empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	/// Optional fields must drop out of the JSON entirely (JSON.stringify
-	/// drops `undefined`), and required ones must serialize camelCase.
-	#[test]
-	fn task_serializes_camel_case_and_drops_none_options() {
-		let task = HarnessTask {
-			activations: Some(2),
-			created_at_iteration: 3,
-			depends_on: Some(vec!["task-1".into()]),
-			footprint: None,
-			dropped_exhausted: None,
-			finished_at_iteration: None,
-			id: "task-2".into(),
-			notes: vec![],
-			reopen_count: None,
-			review_of: None,
-			reviews: None,
-			review_round: None,
-			awaiting_review_by: None,
-			role: None,
-			loops_run: None,
-			stall_count: 0,
-			status: HarnessTaskStatus::InProgress,
-			summary: None,
-			title: "Port types".into(),
-			verify_nudged: None,
-			edit_nudged: None,
-			confidence: None,
-			blocked_on: None,
-			recovery_history: None,
-		};
-		let json = serde_json::to_value(&task).unwrap();
-		let obj = json.as_object().unwrap();
-		assert!(obj.contains_key("createdAtIteration"));
-		assert!(obj.contains_key("in_progress") == false);
-		assert_eq!(obj["status"], "in_progress");
-		assert_eq!(obj["activations"], 2);
-		// None options must be dropped, not null.
-		assert!(!obj.contains_key("footprint"));
-		assert!(!obj.contains_key("blockedOn"));
-		assert!(!obj.contains_key("summary"));
-		// Round-trip.
-		let back: HarnessTask = serde_json::from_value(json).unwrap();
-		assert_eq!(back, task);
-	}
+    /// Optional fields must drop out of the JSON entirely (JSON.stringify
+    /// drops `undefined`), and required ones must serialize camelCase.
+    #[test]
+    fn task_serializes_camel_case_and_drops_none_options() {
+        let task = HarnessTask {
+            activations: Some(2),
+            created_at_iteration: 3,
+            depends_on: Some(vec!["task-1".into()]),
+            footprint: None,
+            dropped_exhausted: None,
+            finished_at_iteration: None,
+            id: "task-2".into(),
+            notes: vec![],
+            reopen_count: None,
+            review_of: None,
+            reviews: None,
+            review_round: None,
+            awaiting_review_by: None,
+            role: None,
+            loops_run: None,
+            stall_count: 0,
+            status: HarnessTaskStatus::InProgress,
+            summary: None,
+            title: "Port types".into(),
+            verify_nudged: None,
+            edit_nudged: None,
+            confidence: None,
+            blocked_on: None,
+            recovery_history: None,
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("createdAtIteration"));
+        assert!(obj.contains_key("in_progress") == false);
+        assert_eq!(obj["status"], "in_progress");
+        assert_eq!(obj["activations"], 2);
+        // None options must be dropped, not null.
+        assert!(!obj.contains_key("footprint"));
+        assert!(!obj.contains_key("blockedOn"));
+        assert!(!obj.contains_key("summary"));
+        // Round-trip.
+        let back: HarnessTask = serde_json::from_value(json).unwrap();
+        assert_eq!(back, task);
+    }
 
-	/// String-literal unions must round-trip their exact spellings.
-	#[test]
-	fn union_enums_round_trip_exact_strings() {
-		assert_eq!(
-			serde_json::to_value(HarnessRunReason::MaxIterations).unwrap(),
-			"max-iterations"
-		);
-		assert_eq!(serde_json::to_value(HarnessRunReason::MaxLoops).unwrap(), "max-loops");
-		assert_eq!(serde_json::to_value(HarnessRunReason::BlockedOnInput).unwrap(), "blocked-on-input");
-		assert_eq!(serde_json::to_value(HarnessTaskBlocker::Operator).unwrap(), "operator");
-		assert_eq!(
-			serde_json::from_value::<HarnessTaskBlocker>(serde_json::json!("operator")).unwrap(),
-			HarnessTaskBlocker::Operator
-		);
-		assert_eq!(
-			serde_json::to_value(HarnessEventType::IterationStart).unwrap(),
-			"iteration-start"
-		);
-		assert_eq!(
-			serde_json::to_value(HarnessEventType::Question).unwrap(),
-			"question"
-		);
-		assert_eq!(
-			serde_json::to_value(HarnessTaskStatus::Dropped).unwrap(),
-			"dropped"
-		);
-		assert_eq!(
-			serde_json::from_value::<HarnessRunReason>("futile".into()).unwrap(),
-			HarnessRunReason::Futile
-		);
-	}
+    /// String-literal unions must round-trip their exact spellings.
+    #[test]
+    fn union_enums_round_trip_exact_strings() {
+        assert_eq!(
+            serde_json::to_value(HarnessRunReason::MaxIterations).unwrap(),
+            "max-iterations"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessRunReason::MaxLoops).unwrap(),
+            "max-loops"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessRunReason::BlockedOnInput).unwrap(),
+            "blocked-on-input"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessTaskBlocker::Operator).unwrap(),
+            "operator"
+        );
+        assert_eq!(
+            serde_json::from_value::<HarnessTaskBlocker>(serde_json::json!("operator")).unwrap(),
+            HarnessTaskBlocker::Operator
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessEventType::IterationStart).unwrap(),
+            "iteration-start"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessEventType::Question).unwrap(),
+            "question"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessTaskStatus::Dropped).unwrap(),
+            "dropped"
+        );
+        assert_eq!(
+            serde_json::from_value::<HarnessRunReason>("futile".into()).unwrap(),
+            HarnessRunReason::Futile
+        );
+    }
 
-	/// The state contract: `type`/`loop` reserved-word renames, the version
-	/// literal, and the default values.
-	#[test]
-	fn state_serializes_type_loop_and_version_one() {
-		let state = HarnessState {
-			goal: "ship the feature".into(),
-			..Default::default()
-		};
-		let json = serde_json::to_value(&state).unwrap();
-		let obj = json.as_object().unwrap();
-		assert_eq!(obj["version"], 1);
-		assert_eq!(obj["loop"], 0);
-		assert!(obj.contains_key("type") == false);
-		assert!(obj.contains_key("tasks"));
-		assert!(obj.contains_key("telemetry"));
+    /// The state contract: `type`/`loop` reserved-word renames, the version
+    /// literal, and the default values.
+    #[test]
+    fn state_serializes_type_loop_and_version_one() {
+        let state = HarnessState {
+            goal: "ship the feature".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj["version"], 1);
+        assert_eq!(obj["loop"], 0);
+        assert!(obj.contains_key("type") == false);
+        assert!(obj.contains_key("tasks"));
+        assert!(obj.contains_key("telemetry"));
 
-		let loop_config = DEFAULT_LOOP_CONFIG;
-		let telemetry_config = DEFAULT_TELEMETRY_CONFIG;
-		assert_eq!(loop_config.max_cycles, 3);
-		assert_eq!(loop_config.hot_tool_results, 10);
-		assert_eq!(loop_config.max_tool_result_chars, 8000);
-		assert_eq!(loop_config.max_tool_rounds_per_cycle, 16);
-		assert_eq!(telemetry_config.base_ttl, 3);
-		assert_eq!(telemetry_config.max_observations, 8);
-		assert_eq!(telemetry_config.max_observation_ttl, 12);
-		assert_eq!(telemetry_config.max_promoted_entries, 8);
-		assert_eq!(telemetry_config.max_promoted_output_chars, 2000);
-		assert_eq!(telemetry_config.max_ttl, 48);
-		assert_eq!(telemetry_config.observation_base_ttl, 4);
-		assert_eq!(telemetry_config.promote_threshold, 2);
-		assert_eq!(telemetry_config.recency_window, 6);
-		assert_eq!(telemetry_config.telemetry_retention, 50);
-	}
+        let loop_config = DEFAULT_LOOP_CONFIG;
+        let telemetry_config = DEFAULT_TELEMETRY_CONFIG;
+        assert_eq!(loop_config.max_cycles, 3);
+        assert_eq!(loop_config.hot_tool_results, 10);
+        assert_eq!(loop_config.max_tool_result_chars, 8000);
+        assert_eq!(loop_config.max_tool_rounds_per_cycle, 16);
+        assert_eq!(telemetry_config.base_ttl, 3);
+        assert_eq!(telemetry_config.max_observations, 8);
+        assert_eq!(telemetry_config.max_observation_ttl, 12);
+        assert_eq!(telemetry_config.max_promoted_entries, 8);
+        assert_eq!(telemetry_config.max_promoted_output_chars, 2000);
+        assert_eq!(telemetry_config.max_ttl, 48);
+        assert_eq!(telemetry_config.observation_base_ttl, 4);
+        assert_eq!(telemetry_config.promote_threshold, 2);
+        assert_eq!(telemetry_config.recency_window, 6);
+        assert_eq!(telemetry_config.telemetry_retention, 50);
+    }
 
-	/// Run-result shape: reserved-word `loops` field, skipped options, and
-	/// nested state round-trip.
-	#[test]
-	fn run_result_round_trips() {
-		let result = HarnessRunResult {
-			continue_command: None,
-			error_message: None,
-			iterations: 9,
-			r#loops: 4,
-			leaked_jobs: Some(vec![HarnessLeakedJob {
-				command: "sleep 100".into(),
-				kill_command: "tmux kill-session -t x".into(),
-				session_name: "job-1".into(),
-				started_at: "2026-01-01T00:00:00.000Z".into(),
-			}]),
-			reason: HarnessRunReason::Completed,
-			state: HarnessState::default(),
-			stop_latency_ms: None,
-			usage: HarnessRunUsage {
-				by_task: IndexMap::new(),
-				cache_creation_tokens: Some(10),
-				cache_read_tokens: None,
-				calls: 3,
-				completion_tokens: 100,
-				prompt_tokens: 200,
-				rate_limit_wait_seconds: 2.5,
-				retries: 1,
-				wall_ms: 4567,
-			},
-			role_inference: std::collections::BTreeMap::new(),
-		};
-		let json = serde_json::to_value(&result).unwrap();
-		let obj = json.as_object().unwrap();
-		assert!(obj.contains_key("loops"));
-		assert!(!obj.contains_key("errorMessage"));
-		assert!(!obj.contains_key("stopLatencyMs"));
-		assert_eq!(obj["usage"]["rateLimitWaitSeconds"], 2.5);
-		assert!(!obj["usage"].as_object().unwrap().contains_key("cacheReadTokens"));
-		assert!(obj["usage"].as_object().unwrap().contains_key("cacheCreationTokens"));
-		let back: HarnessRunResult = serde_json::from_value(json).unwrap();
-		assert_eq!(back, result);
-	}
+    /// Run-result shape: reserved-word `loops` field, skipped options, and
+    /// nested state round-trip.
+    #[test]
+    fn run_result_round_trips() {
+        let result = HarnessRunResult {
+            continue_command: None,
+            error_message: None,
+            iterations: 9,
+            r#loops: 4,
+            leaked_jobs: Some(vec![HarnessLeakedJob {
+                command: "sleep 100".into(),
+                kill_command: "tmux kill-session -t x".into(),
+                session_name: "job-1".into(),
+                started_at: "2026-01-01T00:00:00.000Z".into(),
+            }]),
+            reason: HarnessRunReason::Completed,
+            state: HarnessState::default(),
+            stop_latency_ms: None,
+            usage: HarnessRunUsage {
+                by_task: IndexMap::new(),
+                cache_creation_tokens: Some(10),
+                cache_read_tokens: None,
+                calls: 3,
+                completion_tokens: 100,
+                prompt_tokens: 200,
+                rate_limit_wait_seconds: 2.5,
+                retries: 1,
+                wall_ms: 4567,
+            },
+            role_inference: std::collections::BTreeMap::new(),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.contains_key("loops"));
+        assert!(!obj.contains_key("errorMessage"));
+        assert!(!obj.contains_key("stopLatencyMs"));
+        assert_eq!(obj["usage"]["rateLimitWaitSeconds"], 2.5);
+        assert!(!obj["usage"]
+            .as_object()
+            .unwrap()
+            .contains_key("cacheReadTokens"));
+        assert!(obj["usage"]
+            .as_object()
+            .unwrap()
+            .contains_key("cacheCreationTokens"));
+        let back: HarnessRunResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, result);
+    }
 
-	// Anchor/expectation/confidence vocabulary: serialized spellings are part
-	// of the persisted state contract.
-	#[test]
-	fn anchor_and_confidence_enums_serialize_with_requested_spellings() {
-		use crate::core::types::{ClaimedConfidence, CompletionAnchorKind, HarnessRunReason, VerificationAnchorKind};
-		assert_eq!(serde_json::to_value(VerificationAnchorKind::External).unwrap(), "external");
-		assert_eq!(serde_json::to_value(VerificationAnchorKind::SelfAuthored).unwrap(), "selfAuthored");
-		assert_eq!(serde_json::to_value(VerificationAnchorKind::Undeclared).unwrap(), "undeclared");
-		assert_eq!(serde_json::to_value(ClaimedConfidence::Low).unwrap(), "low");
-		assert_eq!(serde_json::to_value(ClaimedConfidence::Medium).unwrap(), "medium");
-		assert_eq!(serde_json::to_value(ClaimedConfidence::High).unwrap(), "high");
-		assert_eq!(serde_json::to_value(CompletionAnchorKind::External).unwrap(), "external");
-		assert_eq!(serde_json::to_value(CompletionAnchorKind::None).unwrap(), "none");
-		assert_eq!(serde_json::to_value(HarnessRunReason::Unreconciled).unwrap(), "unreconciled");
-	}
+    // Anchor/expectation/confidence vocabulary: serialized spellings are part
+    // of the persisted state contract.
+    #[test]
+    fn anchor_and_confidence_enums_serialize_with_requested_spellings() {
+        use crate::core::types::{
+            ClaimedConfidence, CompletionAnchorKind, HarnessRunReason, VerificationAnchorKind,
+        };
+        assert_eq!(
+            serde_json::to_value(VerificationAnchorKind::External).unwrap(),
+            "external"
+        );
+        assert_eq!(
+            serde_json::to_value(VerificationAnchorKind::SelfAuthored).unwrap(),
+            "selfAuthored"
+        );
+        assert_eq!(
+            serde_json::to_value(VerificationAnchorKind::Undeclared).unwrap(),
+            "undeclared"
+        );
+        assert_eq!(serde_json::to_value(ClaimedConfidence::Low).unwrap(), "low");
+        assert_eq!(
+            serde_json::to_value(ClaimedConfidence::Medium).unwrap(),
+            "medium"
+        );
+        assert_eq!(
+            serde_json::to_value(ClaimedConfidence::High).unwrap(),
+            "high"
+        );
+        assert_eq!(
+            serde_json::to_value(CompletionAnchorKind::External).unwrap(),
+            "external"
+        );
+        assert_eq!(
+            serde_json::to_value(CompletionAnchorKind::None).unwrap(),
+            "none"
+        );
+        assert_eq!(
+            serde_json::to_value(HarnessRunReason::Unreconciled).unwrap(),
+            "unreconciled"
+        );
+    }
 
-	// Optional anchor fields drop out of the JSON when absent and roundtrip
-	// when present.
-	#[test]
-	fn verification_anchor_roundtrips_and_omits_absent_optionals() {
-		let full = VerificationAnchor {
-			kind: VerificationAnchorKind::SelfAuthored,
-			source: Some("repo test suite".into()),
-			downgraded_reason: Some("command names edited file src/lib.rs".into()),
-			coverage: Some(CoverageGranularity::ReportedClaim),
-			expectation_subject: Some("e1".into()),
-		};
-		let json = serde_json::to_value(&full).unwrap();
-		assert_eq!(json["kind"], "selfAuthored");
-		assert_eq!(json["source"], "repo test suite");
-		assert_eq!(json["downgradedReason"], "command names edited file src/lib.rs");
-		assert_eq!(json["coverage"], "reportedClaim");
-		assert_eq!(json["expectationSubject"], "e1");
-		assert_eq!(serde_json::from_value::<VerificationAnchor>(json).unwrap(), full);
+    // Optional anchor fields drop out of the JSON when absent and roundtrip
+    // when present.
+    #[test]
+    fn verification_anchor_roundtrips_and_omits_absent_optionals() {
+        let full = VerificationAnchor {
+            kind: VerificationAnchorKind::SelfAuthored,
+            source: Some("repo test suite".into()),
+            downgraded_reason: Some("command names edited file src/lib.rs".into()),
+            coverage: Some(CoverageGranularity::ReportedClaim),
+            expectation_subject: Some("e1".into()),
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["kind"], "selfAuthored");
+        assert_eq!(json["source"], "repo test suite");
+        assert_eq!(
+            json["downgradedReason"],
+            "command names edited file src/lib.rs"
+        );
+        assert_eq!(json["coverage"], "reportedClaim");
+        assert_eq!(json["expectationSubject"], "e1");
+        assert_eq!(
+            serde_json::from_value::<VerificationAnchor>(json).unwrap(),
+            full
+        );
 
-		let bare = VerificationAnchor {
-			kind: VerificationAnchorKind::External,
-			source: None,
-			downgraded_reason: None,
-			coverage: None,
-			expectation_subject: None,
-		};
-		let bare_json = serde_json::to_value(&bare).unwrap();
-		let bare_obj = bare_json.as_object().unwrap();
-		assert!(!bare_obj.contains_key("source"));
-		assert!(!bare_obj.contains_key("downgradedReason"));
-		assert!(!bare_obj.contains_key("coverage"));
-		assert!(!bare_obj.contains_key("expectationSubject"));
-	}
+        let bare = VerificationAnchor {
+            kind: VerificationAnchorKind::External,
+            source: None,
+            downgraded_reason: None,
+            coverage: None,
+            expectation_subject: None,
+        };
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        let bare_obj = bare_json.as_object().unwrap();
+        assert!(!bare_obj.contains_key("source"));
+        assert!(!bare_obj.contains_key("downgradedReason"));
+        assert!(!bare_obj.contains_key("coverage"));
+        assert!(!bare_obj.contains_key("expectationSubject"));
+    }
 
-	// Evidence written before anchors existed (no anchor key) still loads as
-	// the undeclared case.
-	#[test]
-	fn legacy_verification_evidence_without_anchor_deserializes_undeclared() {
-		let legacy = serde_json::json!({
-			"kind": "tests",
-			"executed": 3,
-			"passed": 3,
-			"failed": 0,
-		});
-		let evidence: VerificationEvidence = serde_json::from_value(legacy).unwrap();
-		assert_eq!(evidence.anchor, None);
-		assert!(evidence.verifies_work());
-	}
+    // Evidence written before anchors existed (no anchor key) still loads as
+    // the undeclared case.
+    #[test]
+    fn legacy_verification_evidence_without_anchor_deserializes_undeclared() {
+        let legacy = serde_json::json!({
+            "kind": "tests",
+            "executed": 3,
+            "passed": 3,
+            "failed": 0,
+        });
+        let evidence: VerificationEvidence = serde_json::from_value(legacy).unwrap();
+        assert_eq!(evidence.anchor, None);
+        assert!(evidence.verifies_work());
+    }
 }

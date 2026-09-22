@@ -152,13 +152,21 @@ pub fn composer_cursor_position(text: &str, text_width: usize, cursor: usize) ->
         }
     }
     let last = lines.len() - 1;
-    (last, display_columns(text, lines[last].start, lines[last].end))
+    (
+        last,
+        display_columns(text, lines[last].start, lines[last].end),
+    )
 }
 
 /// Inverse of `composer_cursor_position`: the char index sitting `column`
 /// display columns into visual line `line_index`. The column is clamped to the
 /// line's end, and to the nearest char boundary when a wide char straddles it.
-pub fn composer_cursor_at(text: &str, text_width: usize, line_index: usize, column: usize) -> usize {
+pub fn composer_cursor_at(
+    text: &str,
+    text_width: usize,
+    line_index: usize,
+    column: usize,
+) -> usize {
     let lines = composer_lines(text, text_width);
     let line = match lines.get(line_index) {
         Some(line) => line.clone(),
@@ -279,7 +287,11 @@ fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
     let dim = paint(DIM_COLOR);
     let line_width = width.max(6).saturating_sub(4).max(1);
     let mut rows = Vec::with_capacity(queued.len() + 1);
-    let noun = if queued.len() == 1 { "message" } else { "messages" };
+    let noun = if queued.len() == 1 {
+        "message"
+    } else {
+        "messages"
+    };
     rows.push(dim(&fit(
         &format!("{} queued {noun} for the next run", queued.len()),
         width.max(1),
@@ -288,7 +300,11 @@ fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
     for (index, text) in queued.iter().enumerate() {
         let first_line = text.lines().next().unwrap_or("").trim();
         let more = if text.lines().count() > 1 { " …" } else { "" };
-        let line = fit(&format!("{}. {first_line}{more}", index + 1), line_width, true);
+        let line = fit(
+            &format!("{}. {first_line}{more}", index + 1),
+            line_width,
+            true,
+        );
         rows.push(dim(&format!("  {line}")));
     }
     rows
@@ -331,7 +347,11 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
         }
     }
 
-    let border_color = if props.disabled { DIM_COLOR } else { ACCENT_COLOR };
+    let border_color = if props.disabled {
+        DIM_COLOR
+    } else {
+        ACCENT_COLOR
+    };
     let prefix_paint = paint(border_color);
     let dim = paint(DIM_COLOR);
     // A disabled composer with empty text shows the run placeholder instead.
@@ -418,10 +438,7 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
                 Some(args) => format!(" {args}"),
                 None => String::new(),
             };
-            let line = format!(
-                "/{}{} — {}",
-                command.name, args, command.description
-            );
+            let line = format!("/{}{} — {}", command.name, args, command.description);
             // ink: <Box paddingLeft={2}> around the menu.
             if index == props.selected_suggestion_index {
                 rows.push(format!("  {}{}", accent("▸ "), accent(&line)));
@@ -472,7 +489,12 @@ pub struct PickerItem {
 }
 
 /// Port of the Ink `Picker` component (render only; state is passed in).
-pub fn render_picker(title: &str, items: &[PickerItem], selected_index: usize, width: usize) -> Vec<String> {
+pub fn render_picker(
+    title: &str,
+    items: &[PickerItem],
+    selected_index: usize,
+    width: usize,
+) -> Vec<String> {
     let accent = paint(ACCENT_COLOR);
     let dim = paint(DIM_COLOR);
     let mut rows: Vec<String> = Vec::new();
@@ -482,11 +504,7 @@ pub fn render_picker(title: &str, items: &[PickerItem], selected_index: usize, w
     }
     for (index, item) in items.iter().enumerate() {
         let selected = index == selected_index;
-        let prefix = if selected {
-            accent("▸ ")
-        } else {
-            dim("  ")
-        };
+        let prefix = if selected { accent("▸ ") } else { dim("  ") };
         let label = if selected {
             accent(&item.label)
         } else {
@@ -535,8 +553,16 @@ pub fn render_survey(
     rows.push(String::new());
     for (index, item) in options.iter().enumerate() {
         let selected = index == selected_index;
-        let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
-        let label = if selected { accent(&item.label) } else { item.label.clone() };
+        let prefix = if selected {
+            accent("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let label = if selected {
+            accent(&item.label)
+        } else {
+            item.label.clone()
+        };
         rows.push(format!("{prefix}{}. {label}", index + 1));
         if let Some(description) = &item.detail {
             rows.push(format!("   {}", dim(description)));
@@ -546,7 +572,11 @@ pub fn render_survey(
     if allow_other {
         number += 1;
         let selected = selected_index == number - 1;
-        let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
+        let prefix = if selected {
+            accent("❯ ")
+        } else {
+            "  ".to_string()
+        };
         let label = if selected {
             accent("Type something.")
         } else {
@@ -556,7 +586,11 @@ pub fn render_survey(
     }
     number += 1;
     let selected = selected_index == number - 1;
-    let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
+    let prefix = if selected {
+        accent("❯ ")
+    } else {
+        "  ".to_string()
+    };
     let label = if selected {
         accent("Chat about this")
     } else {
@@ -564,7 +598,9 @@ pub fn render_survey(
     };
     rows.push(format!("{prefix}{number}. {label}"));
     rows.push(String::new());
-    rows.push(dim("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel"));
+    rows.push(dim(
+        "Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel",
+    ));
     boxed(rows, width, ACCENT_COLOR)
 }
 
@@ -699,7 +735,10 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
         props.session_id.chars().take(8).collect::<String>()
     );
     if !props.active_skill_names.is_empty() {
-        line.push_str(&format!(" · skills: {}", props.active_skill_names.join(", ")));
+        line.push_str(&format!(
+            " · skills: {}",
+            props.active_skill_names.join(", ")
+        ));
     }
     line.push_str(&format!(" · {}", props.cwd));
     rows.push(dim(&fit(&line, width, true)));
@@ -735,7 +774,12 @@ mod tests {
         // Blank captions draw the plain rule; long ones clip to the interior.
         let blank = plain(&boxed_titled(vec![], 16, DIM_COLOR, Some("   ")));
         assert_eq!(blank[0], "╭──────────────╮");
-        let long = plain(&boxed_titled(vec![], 16, DIM_COLOR, Some("a much longer session name")));
+        let long = plain(&boxed_titled(
+            vec![],
+            16,
+            DIM_COLOR,
+            Some("a much longer session name"),
+        ));
         assert_eq!(long[0].chars().count(), 16);
         assert!(long[0].starts_with("╭─ a much"), "{}", long[0]);
         assert!(long[0].ends_with("… ─╮"), "{}", long[0]);
@@ -760,7 +804,10 @@ mod tests {
         assert_eq!(rows[0], format!("{} test ─", "─".repeat(33)));
         assert_eq!(rows[0].chars().count(), 40, "the rule stays terminal-wide");
         // While a run owns the composer the caption stays on the top rule.
-        let running = ComposerProps { disabled: true, ..props };
+        let running = ComposerProps {
+            disabled: true,
+            ..props
+        };
         let rows = plain(&render_composer(&running, 40));
         assert!(rows[0].ends_with(" test ─"), "{}", rows[0]);
     }
@@ -1039,7 +1086,10 @@ mod tests {
         };
         let rows = render_composer(&props, 60);
         let body = rows.iter().find(|row| row.contains("ed draft")).unwrap();
-        assert!(body.contains(&format!("que{INVERSE_ON}u{INVERSE_OFF}ed")), "{body:?}");
+        assert!(
+            body.contains(&format!("que{INVERSE_ON}u{INVERSE_OFF}ed")),
+            "{body:?}"
+        );
     }
 
     #[test]
@@ -1063,8 +1113,7 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            rows.iter()
-                .any(|row| row.contains("ctrl+s steers the run")),
+            rows.iter().any(|row| row.contains("ctrl+s steers the run")),
             "{rows:?}"
         );
     }
@@ -1089,7 +1138,11 @@ mod tests {
             text: "",
         };
         let rows = plain(&render_composer(&props, 60));
-        assert_eq!(rows[0].trim_end(), "2 queued messages for the next run", "{rows:?}");
+        assert_eq!(
+            rows[0].trim_end(),
+            "2 queued messages for the next run",
+            "{rows:?}"
+        );
         assert_eq!(rows[1].trim_end(), "  1. first queued", "{rows:?}");
         assert_eq!(rows[2].trim_end(), "  2. second line one …", "{rows:?}");
         assert_eq!(rows[3], "─".repeat(60), "the rule follows the queue");
@@ -1100,7 +1153,9 @@ mod tests {
             "{rows:?}"
         );
         assert!(
-            !rows.iter().any(|row| row.contains("steers the running goal with it now")),
+            !rows
+                .iter()
+                .any(|row| row.contains("steers the running goal with it now")),
             "{rows:?}"
         );
     }
@@ -1124,8 +1179,14 @@ mod tests {
         let rows = render_composer(&props, 60);
         let gray = paint(DIM_COLOR)("draft");
         let body = rows.iter().find(|row| row.contains("draft")).unwrap();
-        assert!(!body.contains(&gray), "typed text must not be dimmed: {body:?}");
-        assert!(body.contains(&format!("draft{INVERSE_ON} {INVERSE_OFF}")), "{body:?}");
+        assert!(
+            !body.contains(&gray),
+            "typed text must not be dimmed: {body:?}"
+        );
+        assert!(
+            body.contains(&format!("draft{INVERSE_ON} {INVERSE_OFF}")),
+            "{body:?}"
+        );
     }
 
     #[test]
@@ -1167,7 +1228,16 @@ mod tests {
                 label: "Channel".to_string(),
             },
         ];
-        let rows = plain(&render_survey("Approach", "Poll or channel?", &items, true, 0, 1, 2, 72));
+        let rows = plain(&render_survey(
+            "Approach",
+            "Poll or channel?",
+            &items,
+            true,
+            0,
+            1,
+            2,
+            72,
+        ));
         assert!(rows
             .iter()
             .any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
@@ -1180,7 +1250,8 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("4. Chat about this")));
         assert!(rows
             .iter()
-            .any(|row| row.contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+            .any(|row| row
+                .contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
         assert!(rows.first().unwrap().starts_with('╭'));
         assert!(rows.last().unwrap().starts_with('╰'));
     }
@@ -1192,7 +1263,16 @@ mod tests {
             id: "yes".to_string(),
             label: "Yes".to_string(),
         }];
-        let rows = plain(&render_survey("Scope", "Include tests?", &items, false, 1, 2, 2, 72));
+        let rows = plain(&render_survey(
+            "Scope",
+            "Include tests?",
+            &items,
+            false,
+            1,
+            2,
+            2,
+            72,
+        ));
         assert!(rows.iter().any(|row| row.contains("❯ 2. Chat about this")));
         assert!(!rows.iter().any(|row| row.contains("Type something.")));
     }

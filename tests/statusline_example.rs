@@ -45,7 +45,11 @@ fn run_script(payload: &str) -> String {
         .write_all(payload.as_bytes())
         .expect("write payload");
     let out = child.wait_with_output().expect("run example script");
-    assert!(out.status.success(), "example script failed: {:?}", out.status);
+    assert!(
+        out.status.success(),
+        "example script failed: {:?}",
+        out.status
+    );
 
     let line = String::from_utf8_lossy(&out.stdout);
     let line = line.trim_end_matches('\n');
@@ -66,7 +70,10 @@ fn documented_payload_keys_match_implementation() {
         r#""context_usage":0.35"#,
     ];
     for key in documented_keys {
-        assert!(json.contains(key), "payload missing documented key {key}: {json}");
+        assert!(
+            json.contains(key),
+            "payload missing documented key {key}: {json}"
+        );
     }
 }
 
@@ -75,11 +82,20 @@ fn example_script_renders_representative_payload() {
     let payload = StatusLinePayload::from_request(&representative_request()).to_json();
     let line = run_script(&payload);
 
-    assert!(!line.contains("\x1b]"), "OSC sequences must be absent: {line:?}");
-    assert!(line.contains("Opus 5 (1M context)"), "missing model name: {line:?}");
+    assert!(
+        !line.contains("\x1b]"),
+        "OSC sequences must be absent: {line:?}"
+    );
+    assert!(
+        line.contains("Opus 5 (1M context)"),
+        "missing model name: {line:?}"
+    );
     assert!(line.contains("drip-demo"), "missing cwd basename: {line:?}");
     assert!(line.contains("\x1b[36m"), "SGR color was dropped: {line:?}");
-    assert!(line.ends_with("\x1b[0m"), "missing trailing SGR reset: {line:?}");
+    assert!(
+        line.ends_with("\x1b[0m"),
+        "missing trailing SGR reset: {line:?}"
+    );
 }
 
 /// A payload with no recognizable fields (the script's documented graceful
@@ -88,7 +104,10 @@ fn example_script_renders_representative_payload() {
 fn empty_payload_falls_back_to_literal_drip() {
     let line = run_script("{}");
     assert_eq!(line, "drip");
-    assert!(!line.contains('\x1b'), "plain fallback must be unstyled: {line:?}");
+    assert!(
+        !line.contains('\x1b'),
+        "plain fallback must be unstyled: {line:?}"
+    );
 }
 
 /// The script's model-only branch: a styled model name with no separator
@@ -108,13 +127,19 @@ fn model_only_payload_renders_styled_model_without_cwd() {
     let payload = StatusLinePayload::from_request(&request).to_json();
     let line = run_script(&payload);
 
-    assert!(line.contains("Opus 5 (1M context)"), "missing model name: {line:?}");
+    assert!(
+        line.contains("Opus 5 (1M context)"),
+        "missing model name: {line:?}"
+    );
     assert!(
         !line.contains('·'),
         "cwd-less row must omit the separator: {line:?}"
     );
     assert!(line.contains("\x1b[36m"), "SGR color was dropped: {line:?}");
-    assert!(line.ends_with("\x1b[0m"), "missing trailing SGR reset: {line:?}");
+    assert!(
+        line.ends_with("\x1b[0m"),
+        "missing trailing SGR reset: {line:?}"
+    );
 }
 
 /// The script styles a row only when BOTH model and cwd are present; a
@@ -135,5 +160,8 @@ fn workspace_only_payload_falls_back_to_literal_drip() {
     let line = run_script(&payload);
 
     assert_eq!(line, "drip");
-    assert!(!line.contains('\x1b'), "plain fallback must be unstyled: {line:?}");
+    assert!(
+        !line.contains('\x1b'),
+        "plain fallback must be unstyled: {line:?}"
+    );
 }

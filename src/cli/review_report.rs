@@ -79,7 +79,9 @@ fn section_start_re() -> &'static Regex {
 // Counts a string the way a UTF-16 length would: the 200-char hasReport threshold
 // is compared against that count, so astral-plane chars count as 2.
 fn js_length(s: &str) -> usize {
-    s.chars().map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 }).sum()
+    s.chars()
+        .map(|c| if (c as u32) > 0xFFFF { 2 } else { 1 })
+        .sum()
 }
 
 // Extracts the rating line and per-priority counts from one child's report
@@ -91,7 +93,9 @@ pub fn parse_file_report(report: &str) -> FileReport {
     // would inflate the confidence score computed from these counts.
     let count = |level: &str| -> u32 {
         let pattern = format!(r"(?m)^\s*[-*]\s*\**{}\**\b", level);
-        Regex::new(&pattern).map(|re| re.find_iter(report).count() as u32).unwrap_or(0)
+        Regex::new(&pattern)
+            .map(|re| re.find_iter(report).count() as u32)
+            .unwrap_or(0)
     };
     let p0 = count("P0");
     let p1 = count("P1");
@@ -106,7 +110,9 @@ pub fn parse_file_report(report: &str) -> FileReport {
     let trimmed = report.trim();
     let has_report = issues_re().is_match(report)
         || file_header_re().is_match(report)
-        || (js_length(trimmed) >= 200 && !trimmed.starts_with('(') && !trimmed.starts_with("errored:"));
+        || (js_length(trimmed) >= 200
+            && !trimmed.starts_with('(')
+            && !trimmed.starts_with("errored:"));
     let derived = if p0 > 0 {
         "❌"
     } else if p1 + p2 > 0 {
@@ -261,10 +267,14 @@ where
     F: Fn(&str) -> bool,
 {
     let clean = |list: &[&'a str]| -> Vec<&'a str> {
-        list.iter().map(|text| text.trim()).filter(|text| !text.is_empty()).collect()
+        list.iter()
+            .map(|text| text.trim())
+            .filter(|text| !text.is_empty())
+            .collect()
     };
     let longest = |list: Vec<&'a str>| -> Option<&'a str> {
-        list.into_iter().reduce(|best, text| if text.len() > best.len() { text } else { best })
+        list.into_iter()
+            .reduce(|best, text| if text.len() > best.len() { text } else { best })
     };
     let texts = clean(sources.model_texts);
     let task_summaries = clean(sources.task_summaries);
@@ -272,7 +282,12 @@ where
         .iter()
         .rev()
         .find(|text| (sources.looks_like_report)(text))
-        .or_else(|| task_summaries.iter().rev().find(|text| (sources.looks_like_report)(text)))
+        .or_else(|| {
+            task_summaries
+                .iter()
+                .rev()
+                .find(|text| (sources.looks_like_report)(text))
+        })
         .copied();
 
     if let Some(marked) = marked {
@@ -283,7 +298,10 @@ where
         return longest(texts);
     }
 
-    let direct = sources.direct_response.map(str::trim).filter(|text| !text.is_empty());
+    let direct = sources
+        .direct_response
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
 
     if direct.is_some() {
         return direct;
@@ -293,7 +311,10 @@ where
         return longest(task_summaries);
     }
 
-    let summary = sources.summary.map(str::trim).filter(|text| !text.is_empty());
+    let summary = sources
+        .summary
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
 
     summary
 }
@@ -324,7 +345,9 @@ pub fn format_file_report(path: &str, body: &str, part: Option<&str>) -> String 
     // A chunk's block is re-headed with its part label: three "### File: big.rs"
     // blocks in a row would read as duplicates to the synthesis pass.
     if let Some(part) = part {
-        let body = Regex::new(r"^###\s*File:[^\n]*\n?").unwrap().replace(trimmed, "");
+        let body = Regex::new(r"^###\s*File:[^\n]*\n?")
+            .unwrap()
+            .replace(trimmed, "");
         return format!("### File: {path} [{part}]\n{body}");
     }
 
@@ -381,13 +404,19 @@ pub const CHUNK_FILE_DIFF_LINES: u32 = 2 * MAX_UNIT_DIFF_LINES;
 
 /// `"2/4"` for a chunked unit, else None.
 pub fn unit_part_label(unit: &ReviewUnit) -> Option<String> {
-    unit.part.as_ref().map(|part| format!("{}/{}", part.index, part.total))
+    unit.part
+        .as_ref()
+        .map(|part| format!("{}/{}", part.index, part.total))
 }
 
 /// Splits a unified diff into its header (everything before the first "@@")
 /// and one entry per hunk.
 pub fn split_diff_hunks(diff: &str) -> (String, Vec<String>) {
-    let lines: Vec<&str> = diff.strip_suffix('\n').unwrap_or(diff).split('\n').collect();
+    let lines: Vec<&str> = diff
+        .strip_suffix('\n')
+        .unwrap_or(diff)
+        .split('\n')
+        .collect();
     let Some(first_hunk) = lines.iter().position(|line| line.starts_with("@@")) else {
         return (diff.to_string(), Vec::new());
     };
@@ -410,7 +439,10 @@ pub fn split_diff_hunks(diff: &str) -> (String, Vec<String>) {
 /// with consecutive-hunk chunks of at most MAX_UNIT_DIFF_LINES (a lone hunk
 /// bigger than that stays whole). Units that do not qualify pass through
 /// untouched, in order.
-pub fn chunk_oversized_units(units: Vec<ReviewUnit>, diff_of: impl Fn(&str) -> String) -> Vec<ReviewUnit> {
+pub fn chunk_oversized_units(
+    units: Vec<ReviewUnit>,
+    diff_of: impl Fn(&str) -> String,
+) -> Vec<ReviewUnit> {
     let mut out: Vec<ReviewUnit> = Vec::new();
 
     for unit in units {
@@ -419,7 +451,10 @@ pub fn chunk_oversized_units(units: Vec<ReviewUnit>, diff_of: impl Fn(&str) -> S
             continue;
         };
 
-        if unit.kind != ReviewUnitKind::Code || unit.paths.len() != 1 || unit.diff_lines <= CHUNK_FILE_DIFF_LINES {
+        if unit.kind != ReviewUnitKind::Code
+            || unit.paths.len() != 1
+            || unit.diff_lines <= CHUNK_FILE_DIFF_LINES
+        {
             out.push(unit);
             continue;
         }
@@ -463,7 +498,11 @@ pub fn chunk_oversized_units(units: Vec<ReviewUnit>, diff_of: impl Fn(&str) -> S
                 diff_lines: diff.split('\n').count() as u32,
                 kind: ReviewUnitKind::Code,
                 label: format!("{path} [{}/{total}]", i + 1),
-                part: Some(ReviewUnitPart { diff, index: i + 1, total }),
+                part: Some(ReviewUnitPart {
+                    diff,
+                    index: i + 1,
+                    total,
+                }),
                 paths: vec![path.clone()],
             });
         }
@@ -504,11 +543,12 @@ pub fn is_docs_path(path: &str) -> bool {
 // "src/cli/roles.rs" and its test file both reduce to "cli-roles".
 pub fn review_unit_key(path: &str) -> String {
     let segments: Vec<&str> = path.split('/').collect();
-    let stripped: Vec<&str> = if segments[0] == "src" || segments[0] == "test" || segments[0] == "tests" {
-        segments[1..].to_vec()
-    } else {
-        segments
-    };
+    let stripped: Vec<&str> =
+        if segments[0] == "src" || segments[0] == "test" || segments[0] == "tests" {
+            segments[1..].to_vec()
+        } else {
+            segments
+        };
     let basename = stripped.last().copied().unwrap_or("");
     let dot = basename.rfind('.');
     let stem = if let Some(dot) = dot {
@@ -568,7 +608,10 @@ pub fn unit_label(paths: &[String]) -> String {
     let mut common: Vec<&str> = Vec::new();
     for index in 0..first.len().saturating_sub(1) {
         let segment = first[index];
-        if segments.iter().all(|parts| parts.get(index) == Some(&segment)) {
+        if segments
+            .iter()
+            .all(|parts| parts.get(index) == Some(&segment))
+        {
             common.push(segment);
         } else {
             break;
@@ -591,7 +634,15 @@ pub fn unit_label(paths: &[String]) -> String {
         source.split('/').collect::<Vec<&str>>()[..source.split('/').count() - 1].join("/")
     });
     let source_directory = source_directory.unwrap_or_default();
-    format!("{} + tests ({} files)", if source_directory.is_empty() { "mixed" } else { &source_directory }, paths.len())
+    format!(
+        "{} + tests ({} files)",
+        if source_directory.is_empty() {
+            "mixed"
+        } else {
+            &source_directory
+        },
+        paths.len()
+    )
 }
 
 // planReviewUnits (tail — the docs bucket was built above the marker; the
@@ -606,7 +657,10 @@ pub fn unit_label(paths: &[String]) -> String {
 // (docs/review-mode.md, Results).
 pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
     let mut docs_units: Vec<ReviewUnit> = Vec::new();
-    let docs: Vec<&DiffFile<'_>> = files.iter().filter(|file| is_docs_path(file.path)).collect();
+    let docs: Vec<&DiffFile<'_>> = files
+        .iter()
+        .filter(|file| is_docs_path(file.path))
+        .collect();
 
     if !docs.is_empty() {
         docs_units.push(ReviewUnit {
@@ -620,7 +674,8 @@ pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
 
     let emitted: std::collections::HashSet<&str> = docs.iter().map(|file| file.path).collect();
     let mut groups: Vec<Vec<&DiffFile<'_>>> = Vec::new();
-    let mut group_by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut group_by_key: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for file in files {
         if emitted.contains(file.path) {
@@ -658,7 +713,9 @@ pub fn plan_review_units(files: &[DiffFile<'_>]) -> Vec<ReviewUnit> {
         if fits_current_unit {
             let current = code_units.last_mut().expect("unit exists");
             if fits_current_unit {
-                current.paths.extend(group.iter().map(|file| file.path.to_string()));
+                current
+                    .paths
+                    .extend(group.iter().map(|file| file.path.to_string()));
                 current.diff_lines += group_diff_lines;
                 current.label = unit_label(&current.paths);
                 continue;
@@ -715,8 +772,14 @@ pub struct ReviewChildBudget {
     pub tool_calls: u32,
 }
 
-pub const REVIEW_CHILD_BUDGET: ReviewChildBudget = ReviewChildBudget { cycles: 4, tool_calls: 12 };
-pub const REVIEW_CHILD_BUDGET_OVERSIZED: ReviewChildBudget = ReviewChildBudget { cycles: 6, tool_calls: 18 };
+pub const REVIEW_CHILD_BUDGET: ReviewChildBudget = ReviewChildBudget {
+    cycles: 4,
+    tool_calls: 12,
+};
+pub const REVIEW_CHILD_BUDGET_OVERSIZED: ReviewChildBudget = ReviewChildBudget {
+    cycles: 6,
+    tool_calls: 18,
+};
 
 pub fn review_child_budget(unit: &ReviewUnit) -> ReviewChildBudget {
     if unit.kind == ReviewUnitKind::Code && unit.diff_lines > MAX_UNIT_DIFF_LINES {
@@ -768,7 +831,9 @@ pub struct ExcerptWindow {
 
 fn hunk_header_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@").expect("hunk header regex"))
+    RE.get_or_init(|| {
+        Regex::new(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@").expect("hunk header regex")
+    })
 }
 
 /// Post-image line ranges (1-based, inclusive) of a unified diff's hunks.
@@ -779,9 +844,15 @@ pub fn hunk_post_image_ranges(diff: &str) -> Vec<ExcerptWindow> {
         .filter_map(|hunk| {
             let caps = hunk_header_re().captures(hunk)?;
             let start: usize = caps.get(1)?.as_str().parse().ok()?;
-            let count: usize = caps.get(2).map(|m| m.as_str().parse().unwrap_or(0)).unwrap_or(1);
+            let count: usize = caps
+                .get(2)
+                .map(|m| m.as_str().parse().unwrap_or(0))
+                .unwrap_or(1);
             let start = start.max(1);
-            Some(ExcerptWindow { start, end: (start + count).saturating_sub(1).max(start) })
+            Some(ExcerptWindow {
+                start,
+                end: (start + count).saturating_sub(1).max(start),
+            })
         })
         .collect()
 }
@@ -799,7 +870,10 @@ pub fn excerpt_windows(total_lines: usize, diff: &str) -> Vec<ExcerptWindow> {
     let widen = |context: usize| -> Vec<ExcerptWindow> {
         let mut merged: Vec<ExcerptWindow> = Vec::new();
         for range in &ranges {
-            let window = ExcerptWindow { start: range.start.saturating_sub(context).max(1), end: (range.end + context).min(total_lines) };
+            let window = ExcerptWindow {
+                start: range.start.saturating_sub(context).max(1),
+                end: (range.end + context).min(total_lines),
+            };
             match merged.last_mut() {
                 Some(last) if window.start <= last.end + 1 => last.end = last.end.max(window.end),
                 _ => merged.push(window),
@@ -817,7 +891,9 @@ pub fn excerpt_windows(total_lines: usize, diff: &str) -> Vec<ExcerptWindow> {
     // front until the cap would be crossed (at least one).
     let mut kept: Vec<ExcerptWindow> = Vec::new();
     for window in widen(EXCERPT_CONTEXT_FALLBACKS[EXCERPT_CONTEXT_FALLBACKS.len() - 1]) {
-        if !kept.is_empty() && windows_size(&kept) + window.end - window.start + 1 > MAX_EXCERPT_LINES {
+        if !kept.is_empty()
+            && windows_size(&kept) + window.end - window.start + 1 > MAX_EXCERPT_LINES
+        {
             break;
         }
         kept.push(window);
@@ -827,12 +903,19 @@ pub fn excerpt_windows(total_lines: usize, diff: &str) -> Vec<ExcerptWindow> {
 
 /// Renders the excerpt windows of `content` numbered like READ output.
 pub fn render_excerpts(content: &str, windows: &[ExcerptWindow]) -> String {
-    let lines: Vec<&str> = content.strip_suffix('\n').unwrap_or(content).split('\n').collect();
+    let lines: Vec<&str> = content
+        .strip_suffix('\n')
+        .unwrap_or(content)
+        .split('\n')
+        .collect();
     windows
         .iter()
         .map(|window| {
             let mut block = vec![format!("Lines {}-{}:", window.start, window.end)];
-            for (offset, line) in lines[window.start - 1..window.end.min(lines.len())].iter().enumerate() {
+            for (offset, line) in lines[window.start - 1..window.end.min(lines.len())]
+                .iter()
+                .enumerate()
+            {
                 block.push(format!("{}\t{}", window.start + offset, line));
             }
             block.join("\n")
@@ -852,10 +935,19 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
     let mut diffs: Vec<String> = Vec::new();
 
     for file in args.files {
-        let mut block = vec![format!("### {}", file.path), "```diff".to_string(), file.diff.to_string(), "```".to_string()];
+        let mut block = vec![
+            format!("### {}", file.path),
+            "```diff".to_string(),
+            file.diff.to_string(),
+            "```".to_string(),
+        ];
 
         if let Some(content) = file.content {
-            let line_count = content.strip_suffix('\n').unwrap_or(content).split('\n').count();
+            let line_count = content
+                .strip_suffix('\n')
+                .unwrap_or(content)
+                .split('\n')
+                .count();
             if line_count <= MAX_INLINE_FILE_LINES {
                 presented += 1;
                 block.push(format!(
@@ -969,7 +1061,10 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
 
     lines.push(String::new());
     lines.push("## What counts as a finding".to_string());
-    lines.push("- P0 blocks the change: a bug that breaks the stated intent, a security hole, data loss.".to_string());
+    lines.push(
+        "- P0 blocks the change: a bug that breaks the stated intent, a security hole, data loss."
+            .to_string(),
+    );
     lines.push("- P1 important: a logic error, missing error handling on a path that will be hit, a real performance risk, a test that no longer pins the behaviour it names.".to_string());
     lines.push("- P1 over-fit: the change hard-codes or assumes the specific instance in the workspace when the stated intent quantifies over an input space.".to_string());
     lines.push("- P2 worth fixing before merge: a missing test for new behaviour, a misleading contract or comment, a pattern the codebase avoids.".to_string());
@@ -992,7 +1087,11 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
         REVIEW_TASK_ID, REVIEW_TASK_ID
     ));
     if many {
-        let paths: Vec<String> = args.files.iter().map(|file| file.path.to_string()).collect();
+        let paths: Vec<String> = args
+            .files
+            .iter()
+            .map(|file| file.path.to_string())
+            .collect();
         lines.push(delivery_checklist(&paths));
     }
 
@@ -1005,7 +1104,10 @@ pub fn build_unit_review_prompt(args: UnitReviewPromptArgs<'_>) -> String {
 // clean — and each skip costs a full retry child (11–215 s); the rule near
 // the top of the prompt was not enough on its own.
 pub fn delivery_checklist(paths: &[String]) -> String {
-    let headings: Vec<String> = paths.iter().map(|path| format!("\"### File: {path}\"")).collect();
+    let headings: Vec<String> = paths
+        .iter()
+        .map(|path| format!("\"### File: {path}\""))
+        .collect();
     format!(
         "Before calling finish_task, check the summary contains all {} of these headings, in this order — a missing one is re-reviewed from scratch: {}. A clean file still gets its block (Rating ✅, Issues (none)).",
         paths.len(),
@@ -1015,7 +1117,14 @@ pub fn delivery_checklist(paths: &[String]) -> String {
 
 pub fn unit_review_task_title(unit: &ReviewUnit) -> String {
     if unit.paths.len() == 1 {
-        file_review_task_title(if unit.part.is_some() { &unit.label } else { unit.paths.first().map(String::as_str).unwrap_or(&unit.label) })
+        file_review_task_title(if unit.part.is_some() {
+            &unit.label
+        } else {
+            unit.paths
+                .first()
+                .map(String::as_str)
+                .unwrap_or(&unit.label)
+        })
     } else {
         format!(
             "Review {}: {} — read them in full, grep their callers and tests, then finish_task completed with one \"### File:\" block per file as the summary",
@@ -1029,30 +1138,51 @@ pub fn unit_review_task_title(unit: &ReviewUnit) -> String {
 // JSON contract stays per file. A path the model skipped (or misnamed) maps
 // to null — the caller decides how to represent the gap.
 pub fn split_unit_report(report: &str, paths: &[String]) -> Vec<(String, Option<String>)> {
-    let mut sections: Vec<(String, Option<String>)> = paths.iter().map(|path| (path.clone(), None)).collect();
+    let mut sections: Vec<(String, Option<String>)> =
+        paths.iter().map(|path| (path.clone(), None)).collect();
     let matches: Vec<(usize, String)> = file_header_path_re()
         .captures_iter(report)
         .map(|caps| {
             let whole = caps.get(0).expect("header match");
-            let named = caps.get(1).map(|g| g.as_str().trim().trim_start_matches('`').trim_end_matches('`')).unwrap_or("");
+            let named = caps
+                .get(1)
+                .map(|g| {
+                    g.as_str()
+                        .trim()
+                        .trim_start_matches('`')
+                        .trim_end_matches('`')
+                })
+                .unwrap_or("");
             (whole.start(), named.to_string())
         })
         .collect();
 
     for (i, (start, named)) in matches.iter().enumerate() {
         let start = *start;
-        let end = matches.get(i + 1).map_or(report.len(), |(next_start, _)| *next_start);
+        let end = matches
+            .get(i + 1)
+            .map_or(report.len(), |(next_start, _)| *next_start);
         // Exact first; otherwise a suffix match at a path-segment boundary, and
         // only when exactly one candidate matches — "a" against a bundled
         // src/a + test/a pair is ambiguous and must not bind to either.
         let by_suffix: Vec<&String> = paths
             .iter()
-            .filter(|candidate| candidate.as_str() != named && (candidate.ends_with(&format!("/{named}")) || named.ends_with(&format!("/{}", candidate))))
+            .filter(|candidate| {
+                candidate.as_str() != named
+                    && (candidate.ends_with(&format!("/{named}"))
+                        || named.ends_with(&format!("/{}", candidate)))
+            })
             .collect();
         let path = paths
             .iter()
             .find(|candidate| candidate.as_str() == named)
-            .or_else(|| if by_suffix.len() == 1 { by_suffix.first().copied() } else { None });
+            .or_else(|| {
+                if by_suffix.len() == 1 {
+                    by_suffix.first().copied()
+                } else {
+                    None
+                }
+            });
 
         if let Some(path) = path {
             if let Some(slot) = sections.iter_mut().find(|(bound, _)| bound == path) {
@@ -1100,9 +1230,12 @@ pub fn should_skip_synthesis(mode: ReviewSynthesisMode, files: &[SynthesisSkipFi
 
     // A derived rating means the reviewer never wrote its Rating line — a
     // truncated answer looks the same — so it is a gap here, not a clean bill.
-    files
-        .iter()
-        .all(|file| !file.errored && file.rating.is_some() && !file.rating_derived && file.p0 + file.p1 + file.p2 == 0)
+    files.iter().all(|file| {
+        !file.errored
+            && file.rating.is_some()
+            && !file.rating_derived
+            && file.p0 + file.p1 + file.p2 == 0
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1142,7 +1275,10 @@ pub fn extract_findings(report: &str) -> Vec<ExtractedFinding> {
             "P1" => FindingLevel::P1,
             _ => FindingLevel::P2,
         };
-        let text = caps.get(2).map(|g| g.as_str().trim().replace('|', "\\|")).unwrap_or_default();
+        let text = caps
+            .get(2)
+            .map(|g| g.as_str().trim().replace('|', "\\|"))
+            .unwrap_or_default();
         findings.push(ExtractedFinding { level, text });
     }
 
@@ -1178,7 +1314,9 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
     // findings" beside a 1/5 confidence stamp. A file whose section never
     // bound carries the whole unit report as its body; its
     // findings belong to sibling files and are not re-attributed here.
-    let bound = |file: &SkippedSynthesisFile<'_>| file.rating.is_some() && !file.report.unwrap_or("").starts_with('(');
+    let bound = |file: &SkippedSynthesisFile<'_>| {
+        file.rating.is_some() && !file.report.unwrap_or("").starts_with('(')
+    };
     let mut table_rows: Vec<String> = Vec::new();
     let mut index = 0usize;
 
@@ -1194,7 +1332,10 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
                 FindingLevel::P1 => "P1",
                 FindingLevel::P2 => "P2",
             };
-            table_rows.push(format!("| {} | {} | {} | {} |", index, level, file.path, finding.text));
+            table_rows.push(format!(
+                "| {} | {} | {} | {} |",
+                index, level, file.path, finding.text
+            ));
         }
     }
 
@@ -1221,7 +1362,10 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
             if table_rows.is_empty() {
                 "No P0/P1/P2 findings.".to_string()
             } else {
-                format!("{} finding(s) from the per-file reviewers, undeduplicated.", table_rows.len())
+                format!(
+                    "{} finding(s) from the per-file reviewers, undeduplicated.",
+                    table_rows.len()
+                )
             },
             if gaps.is_empty() {
                 String::new()
@@ -1245,7 +1389,8 @@ pub fn build_skipped_synthesis_report(args: SkippedSynthesisArgs<'_>) -> String 
         if empty {
             "None.".to_string()
         } else {
-            "See the per-file reports below — no synthesis pass ran to deduplicate or rank them.".to_string()
+            "See the per-file reports below — no synthesis pass ran to deduplicate or rank them."
+                .to_string()
         },
     ])
     .collect::<Vec<_>>()
@@ -1268,7 +1413,10 @@ pub struct RetryRun<'a> {
 // Which units the retry pass runs: an errored unit whole; a unit whose
 // reviewer skipped some files' blocks for just those files. Pure so the
 // policy is testable apart from the pool that executes it.
-pub fn plan_retry_units(runs: &[RetryRun<'_>], diff_lines_of: &dyn Fn(&str) -> u32) -> Vec<RetryUnit> {
+pub fn plan_retry_units(
+    runs: &[RetryRun<'_>],
+    diff_lines_of: &dyn Fn(&str) -> u32,
+) -> Vec<RetryUnit> {
     let mut retries: Vec<RetryUnit> = Vec::new();
 
     // originalIndex, not the label, identifies the run a retry replaces:
@@ -1295,7 +1443,10 @@ pub fn plan_retry_units(runs: &[RetryRun<'_>], diff_lines_of: &dyn Fn(&str) -> u
                         diff_lines: run.missing.iter().map(|path| diff_lines_of(path)).sum(),
                         kind: run.unit.kind,
                         label: if run.missing.len() == 1 {
-                            run.missing.first().cloned().unwrap_or_else(|| run.unit.label.clone())
+                            run.missing
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| run.unit.label.clone())
                         } else {
                             format!("{} — {} skipped files", run.unit.label, run.missing.len())
                         },
@@ -1335,15 +1486,31 @@ mod tests {
 
     #[test]
     fn unit_review_prompt_flags_overfit_as_a_p1_finding() {
-        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/lib.rs".into(), paths: vec!["src/lib.rs".into()], diff_lines: 2, part: None };
-        let files = [UnitPromptFile { path: "src/lib.rs", diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n x\n+y\n", content: None }];
-        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "handle every config file", files: &files, unit: &unit });
+        let unit = ReviewUnit {
+            kind: ReviewUnitKind::Code,
+            label: "src/lib.rs".into(),
+            paths: vec!["src/lib.rs".into()],
+            diff_lines: 2,
+            part: None,
+        };
+        let files = [UnitPromptFile {
+            path: "src/lib.rs",
+            diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n x\n+y\n",
+            content: None,
+        }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs {
+            base_ref: "main",
+            context: "handle every config file",
+            files: &files,
+            unit: &unit,
+        });
         assert!(prompt.contains("- P1 over-fit: the change hard-codes or assumes the specific instance in the workspace when the stated intent quantifies over an input space."));
     }
 
     #[test]
     fn extract_findings_reads_levels_without_look_around() {
-        let findings = extract_findings("- **P1** — missing handler\n- P3: nit\n- P10: not a level");
+        let findings =
+            extract_findings("- **P1** — missing handler\n- P3: nit\n- P10: not a level");
         assert_eq!(findings.len(), 1);
         assert!(matches!(findings[0].level, FindingLevel::P1));
         assert_eq!(findings[0].text, "missing handler");
@@ -1352,7 +1519,8 @@ mod tests {
     #[test]
     fn parses_a_well_formed_two_file_report() {
         let file_a = "### File: src/cli/roles.ts\n\n**Rating**: ⚠️\n\n## Issues\n\n- P1 (line 42): unchecked unwrap can panic\n- P2: missing doc comment\n";
-        let file_b = "### File: src/core/state.rs\n\n**Rating**: ✅\n\n- P2: consider a stronger type\n";
+        let file_b =
+            "### File: src/core/state.rs\n\n**Rating**: ✅\n\n- P2: consider a stronger type\n";
 
         let a = parse_file_report(file_a);
         assert_eq!(a.rating.as_deref(), Some("⚠️"));
@@ -1416,10 +1584,18 @@ mod tests {
     }
 
     fn fake_diff(hunks: usize, lines_per_hunk: usize) -> String {
-        let mut lines = vec!["diff --git a/src/big.rs b/src/big.rs".to_string(), "--- a/src/big.rs".to_string(), "+++ b/src/big.rs".to_string()];
+        let mut lines = vec![
+            "diff --git a/src/big.rs b/src/big.rs".to_string(),
+            "--- a/src/big.rs".to_string(),
+            "+++ b/src/big.rs".to_string(),
+        ];
 
         for h in 0..hunks {
-            lines.push(format!("@@ -{},{lines_per_hunk} +{},{lines_per_hunk} @@", h * 100 + 1, h * 100 + 1));
+            lines.push(format!(
+                "@@ -{},{lines_per_hunk} +{},{lines_per_hunk} @@",
+                h * 100 + 1,
+                h * 100 + 1
+            ));
             for i in 1..lines_per_hunk {
                 lines.push(format!("+hunk {h} line {i}"));
             }
@@ -1454,17 +1630,24 @@ mod tests {
     }
 
     fn section<'a>(sections: &'a [(String, Option<String>)], path: &str) -> Option<&'a str> {
-        sections.iter().find(|(bound, _)| bound == path).and_then(|(_, section)| section.as_deref())
+        sections
+            .iter()
+            .find(|(bound, _)| bound == path)
+            .and_then(|(_, section)| section.as_deref())
     }
 
     #[test]
     fn split_unit_report_returns_each_paths_own_section_tolerating_backticks() {
-        let paths = ["src/cli/roles.ts".to_string(), "test/cli-roles.test.ts".to_string()];
+        let paths = [
+            "src/cli/roles.ts".to_string(),
+            "test/cli-roles.test.ts".to_string(),
+        ];
         let sections = split_unit_report(&two_file_report(), &paths);
 
         let roles = section(&sections, "src/cli/roles.ts").expect("roles section");
         assert!(roles.contains("**Rating**: ✅") && !roles.contains("P2"));
-        let parsed = parse_file_report(section(&sections, "test/cli-roles.test.ts").expect("test section"));
+        let parsed =
+            parse_file_report(section(&sections, "test/cli-roles.test.ts").expect("test section"));
         assert_eq!((parsed.p2, parsed.rating.as_deref()), (1, Some("⚠️")));
     }
 
@@ -1472,18 +1655,33 @@ mod tests {
     fn split_unit_report_refuses_an_ambiguous_bare_basename_heading() {
         let paths = ["src/a.ts".to_string(), "test/a.ts".to_string()];
         let sections = split_unit_report("### File: a.ts\n**Rating**: ✅", &paths);
-        assert!(section(&sections, "src/a.ts").is_none() && section(&sections, "test/a.ts").is_none());
+        assert!(
+            section(&sections, "src/a.ts").is_none() && section(&sections, "test/a.ts").is_none()
+        );
 
         // Unambiguous suffix matches still bind, and only at a segment boundary.
         let paths = ["src/cli/a.ts".to_string(), "test/a.test.ts".to_string()];
-        assert!(section(&split_unit_report("### File: cli/a.ts\n**Rating**: ✅", &paths), "src/cli/a.ts").unwrap().contains("✅"));
+        assert!(section(
+            &split_unit_report("### File: cli/a.ts\n**Rating**: ✅", &paths),
+            "src/cli/a.ts"
+        )
+        .unwrap()
+        .contains("✅"));
         let paths = ["src/ba.ts".to_string(), "src/a.ts".to_string()];
-        assert!(section(&split_unit_report("### File: ba.ts\n**Rating**: ✅", &paths), "src/a.ts").is_none());
+        assert!(section(
+            &split_unit_report("### File: ba.ts\n**Rating**: ✅", &paths),
+            "src/a.ts"
+        )
+        .is_none());
     }
 
     #[test]
     fn split_unit_report_maps_a_skipped_path_to_none() {
-        let paths = ["src/cli/roles.ts".to_string(), "test/cli-roles.test.ts".to_string(), "src/cli/config.ts".to_string()];
+        let paths = [
+            "src/cli/roles.ts".to_string(),
+            "test/cli-roles.test.ts".to_string(),
+            "src/cli/config.ts".to_string(),
+        ];
         let sections = split_unit_report(&two_file_report(), &paths);
         assert!(section(&sections, "src/cli/config.ts").is_none());
         assert!(section(&sections, "src/cli/roles.ts").is_some());
@@ -1493,10 +1691,19 @@ mod tests {
     fn split_diff_hunks_keeps_the_header_and_one_entry_per_hunk() {
         let (header, hunks) = split_diff_hunks(&fake_diff(3, 4));
 
-        assert_eq!(header, "diff --git a/src/big.rs b/src/big.rs\n--- a/src/big.rs\n+++ b/src/big.rs");
+        assert_eq!(
+            header,
+            "diff --git a/src/big.rs b/src/big.rs\n--- a/src/big.rs\n+++ b/src/big.rs"
+        );
         assert_eq!(hunks.len(), 3);
-        assert_eq!(hunks[1], "@@ -101,4 +101,4 @@\n+hunk 1 line 1\n+hunk 1 line 2\n+hunk 1 line 3");
-        assert_eq!(split_diff_hunks("no hunks here"), ("no hunks here".to_string(), Vec::new()));
+        assert_eq!(
+            hunks[1],
+            "@@ -101,4 +101,4 @@\n+hunk 1 line 1\n+hunk 1 line 2\n+hunk 1 line 3"
+        );
+        assert_eq!(
+            split_diff_hunks("no hunks here"),
+            ("no hunks here".to_string(), Vec::new())
+        );
     }
 
     #[test]
@@ -1509,11 +1716,24 @@ mod tests {
         let parts = chunk_oversized_units(vec![unit], |_| diff.clone());
 
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts.iter().map(|part| part.label.as_str()).collect::<Vec<_>>(), ["src/big.rs [1/3]", "src/big.rs [2/3]", "src/big.rs [3/3]"]);
-        assert_eq!(parts.iter().map(unit_part_label).collect::<Vec<_>>(), [Some("1/3".into()), Some("2/3".into()), Some("3/3".into())]);
-        assert!(parts.iter().all(|part| part.diff_lines <= MAX_UNIT_DIFF_LINES + 4));
+        assert_eq!(
+            parts
+                .iter()
+                .map(|part| part.label.as_str())
+                .collect::<Vec<_>>(),
+            ["src/big.rs [1/3]", "src/big.rs [2/3]", "src/big.rs [3/3]"]
+        );
+        assert_eq!(
+            parts.iter().map(unit_part_label).collect::<Vec<_>>(),
+            [Some("1/3".into()), Some("2/3".into()), Some("3/3".into())]
+        );
+        assert!(parts
+            .iter()
+            .all(|part| part.diff_lines <= MAX_UNIT_DIFF_LINES + 4));
         let first = parts[0].part.as_ref().expect("part");
-        assert!(first.diff.starts_with("diff --git a/src/big.rs b/src/big.rs\n"));
+        assert!(first
+            .diff
+            .starts_with("diff --git a/src/big.rs b/src/big.rs\n"));
         assert!(first.diff.contains("+hunk 3 line 99"));
         assert!(!first.diff.contains("+hunk 4 line 1"));
         let last = parts[2].part.as_ref().expect("part");
@@ -1523,65 +1743,164 @@ mod tests {
 
     #[test]
     fn leaves_small_grouped_docs_and_single_hunk_units_untouched() {
-        let small = ReviewUnit { diff_lines: 30, kind: ReviewUnitKind::Code, label: "src/small.rs".into(), paths: vec!["src/small.rs".into()], part: None };
-        let group = ReviewUnit { diff_lines: 1000, kind: ReviewUnitKind::Code, label: "src (2 files)".into(), paths: vec!["src/a.rs".into(), "src/b.rs".into()], part: None };
-        let docs = ReviewUnit { diff_lines: 1000, kind: ReviewUnitKind::Docs, label: "docs & manifests".into(), paths: vec!["README.md".into()], part: None };
+        let small = ReviewUnit {
+            diff_lines: 30,
+            kind: ReviewUnitKind::Code,
+            label: "src/small.rs".into(),
+            paths: vec!["src/small.rs".into()],
+            part: None,
+        };
+        let group = ReviewUnit {
+            diff_lines: 1000,
+            kind: ReviewUnitKind::Code,
+            label: "src (2 files)".into(),
+            paths: vec!["src/a.rs".into(), "src/b.rs".into()],
+            part: None,
+        };
+        let docs = ReviewUnit {
+            diff_lines: 1000,
+            kind: ReviewUnitKind::Docs,
+            label: "docs & manifests".into(),
+            paths: vec!["README.md".into()],
+            part: None,
+        };
         let one_hunk = fake_diff(1, 1000);
         let units = vec![small, group, docs, big_unit(&one_hunk)];
         let labels: Vec<String> = units.iter().map(|unit| unit.label.clone()).collect();
 
         let out = chunk_oversized_units(units, |_| one_hunk.clone());
 
-        assert_eq!(out.iter().map(|unit| unit.label.clone()).collect::<Vec<_>>(), labels);
+        assert_eq!(
+            out.iter()
+                .map(|unit| unit.label.clone())
+                .collect::<Vec<_>>(),
+            labels
+        );
         assert!(out.iter().all(|unit| unit.part.is_none()));
     }
 
     // Inlines a big file as numbered excerpts around its hunks instead of whole.
     #[test]
     fn inlines_a_big_file_as_numbered_excerpts_around_its_hunks() {
-        let content = (1..=1000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n") + "\n";
+        let content = (1..=1000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         let diff = "diff --git a/src/big.ts b/src/big.ts\n--- a/src/big.ts\n+++ b/src/big.ts\n@@ -100,3 +100,4 @@\n line 100\n+added\n line 101\n@@ -900,2 +901,2 @@\n-old\n+new\n";
 
-        assert_eq!(hunk_post_image_ranges(diff), vec![ExcerptWindow { start: 100, end: 103 }, ExcerptWindow { start: 901, end: 902 }]);
-        assert_eq!(excerpt_windows(1000, diff), vec![ExcerptWindow { start: 60, end: 143 }, ExcerptWindow { start: 861, end: 942 }]);
+        assert_eq!(
+            hunk_post_image_ranges(diff),
+            vec![
+                ExcerptWindow {
+                    start: 100,
+                    end: 103
+                },
+                ExcerptWindow {
+                    start: 901,
+                    end: 902
+                }
+            ]
+        );
+        assert_eq!(
+            excerpt_windows(1000, diff),
+            vec![
+                ExcerptWindow {
+                    start: 60,
+                    end: 143
+                },
+                ExcerptWindow {
+                    start: 861,
+                    end: 942
+                }
+            ]
+        );
 
-        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/big.ts".into(), paths: vec!["src/big.ts".into()], diff_lines: 9, part: None };
-        let files = [UnitPromptFile { path: "src/big.ts", diff, content: Some(&content) }];
-        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "widen the parser", files: &files, unit: &unit });
+        let unit = ReviewUnit {
+            kind: ReviewUnitKind::Code,
+            label: "src/big.ts".into(),
+            paths: vec!["src/big.ts".into()],
+            diff_lines: 9,
+            part: None,
+        };
+        let files = [UnitPromptFile {
+            path: "src/big.ts",
+            diff,
+            content: Some(&content),
+        }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs {
+            base_ref: "main",
+            context: "widen the parser",
+            files: &files,
+            unit: &unit,
+        });
 
         assert!(prompt.contains("Around the change (file is 1000 lines; these 2 excerpt(s) after the change are numbered like READ output — READ beyond them only when a finding depends on it):"));
         assert!(prompt.contains("Lines 60-143:\n60\tline 60\n"));
         assert!(prompt.contains("143\tline 143\n…\nLines 861-942:\n861\tline 861"));
         assert!(!prompt.contains("Full file after the change"));
         assert!(prompt.contains("1. Every file is above — in full, or as numbered excerpts around each hunk for files over 300 lines."));
-        assert_eq!(render_excerpts("a\nb\nc\n", &[ExcerptWindow { start: 2, end: 2 }]), "Lines 2-2:\n2\tb");
+        assert_eq!(
+            render_excerpts("a\nb\nc\n", &[ExcerptWindow { start: 2, end: 2 }]),
+            "Lines 2-2:\n2\tb"
+        );
     }
 
     // Excerpt context shrinks first, then tail windows drop, to stay under the cap.
     #[test]
     fn shrinks_excerpt_context_then_drops_tail_windows() {
-        let hunks = (0..10).map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 100 + 1, i * 100 + 1)).collect::<Vec<_>>().join("\n");
+        let hunks = (0..10)
+            .map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 100 + 1, i * 100 + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
         let diff = format!("--- a/f\n+++ b/f\n{hunks}\n");
         let windows = excerpt_windows(2000, &diff);
         assert_eq!(windows.len(), 10);
         assert_eq!(windows[0], ExcerptWindow { start: 1, end: 21 });
-        assert_eq!(windows[1], ExcerptWindow { start: 81, end: 121 });
+        assert_eq!(
+            windows[1],
+            ExcerptWindow {
+                start: 81,
+                end: 121
+            }
+        );
 
-        let dense = (0..200).map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 20 + 1, i * 20 + 1)).collect::<Vec<_>>().join("\n");
+        let dense = (0..200)
+            .map(|i| format!("@@ -{},1 +{},1 @@\n-x\n+y", i * 20 + 1, i * 20 + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
         let kept = excerpt_windows(4000, &format!("--- a/f\n+++ b/f\n{dense}\n"));
         assert!(windows_size(&kept) <= 600);
         assert_eq!(kept[0], ExcerptWindow { start: 1, end: 6 });
         assert!(excerpt_windows(0, &diff).is_empty());
         assert!(excerpt_windows(100, "no hunks here").is_empty());
         // One hunk wider than the cap is still presented whole.
-        assert_eq!(excerpt_windows(2000, "--- a/f\n+++ b/f\n@@ -1,900 +1,900 @@\n x\n"), vec![ExcerptWindow { start: 1, end: 905 }]);
+        assert_eq!(
+            excerpt_windows(2000, "--- a/f\n+++ b/f\n@@ -1,900 +1,900 @@\n x\n"),
+            vec![ExcerptWindow { start: 1, end: 905 }]
+        );
 
         // A big file whose diff carries no hunk presents nothing, so the method
         // tells the reviewer to READ it instead of claiming it is above.
         let big = vec!["x"; 400].join("\n");
-        let unit = ReviewUnit { kind: ReviewUnitKind::Code, label: "src/big.ts".into(), paths: vec!["src/big.ts".into()], diff_lines: 1, part: None };
-        let files = [UnitPromptFile { path: "src/big.ts", diff: "Binary files differ", content: Some(&big) }];
-        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "widen the parser", files: &files, unit: &unit });
+        let unit = ReviewUnit {
+            kind: ReviewUnitKind::Code,
+            label: "src/big.ts".into(),
+            paths: vec!["src/big.ts".into()],
+            diff_lines: 1,
+            part: None,
+        };
+        let files = [UnitPromptFile {
+            path: "src/big.ts",
+            diff: "Binary files differ",
+            content: Some(&big),
+        }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs {
+            base_ref: "main",
+            context: "widen the parser",
+            files: &files,
+            unit: &unit,
+        });
         assert!(prompt.contains("1. READ each full file that is not included above"));
         assert!(!prompt.contains("Around the change"));
     }
@@ -1592,8 +1911,17 @@ mod tests {
         let parts = chunk_oversized_units(vec![big_unit(&diff)], |_| diff.clone());
         let first = &parts[0];
         let slice = first.part.as_ref().expect("part").diff.clone();
-        let files = [UnitPromptFile { path: "src/big.rs", diff: &slice, content: None }];
-        let prompt = build_unit_review_prompt(UnitReviewPromptArgs { base_ref: "main", context: "make the big file bigger", files: &files, unit: first });
+        let files = [UnitPromptFile {
+            path: "src/big.rs",
+            diff: &slice,
+            content: None,
+        }];
+        let prompt = build_unit_review_prompt(UnitReviewPromptArgs {
+            base_ref: "main",
+            context: "make the big file bigger",
+            files: &files,
+            unit: first,
+        });
 
         assert!(prompt.contains("part 1 of 3"));
         assert!(prompt.contains("Only the hunks below are yours"));
@@ -1607,7 +1935,11 @@ mod tests {
         let diff = fake_diff(10, 100);
         let parts = chunk_oversized_units(vec![big_unit(&diff)], |_| diff.clone());
         let missing = vec!["src/big.rs".to_string()];
-        let runs = [RetryRun { errored: false, missing: &missing, unit: &parts[1] }];
+        let runs = [RetryRun {
+            errored: false,
+            missing: &missing,
+            unit: &parts[1],
+        }];
         let retries = plan_retry_units(&runs, &|_| 1000);
 
         assert_eq!(retries.len(), 1);

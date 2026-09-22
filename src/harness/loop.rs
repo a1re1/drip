@@ -15,8 +15,8 @@ use crate::core::types::{
     HarnessEvent, HarnessEventData, HarnessEventType, HarnessRunReason, HarnessRunResult,
     HarnessRunUsage, HarnessTaskStatus,
 };
-use crate::harness::telemetry::truncate_text;
 use crate::harness::chat_types::ChatRoleTag;
+use crate::harness::telemetry::truncate_text;
 use crate::harness::transport::{TransportContent, TransportRequestMessage};
 
 // Placeholder marker so the append below lands after the existing helpers.
@@ -69,7 +69,9 @@ fn read_result_path(text: &str) -> Option<String> {
     let first_line = text.lines().next()?;
     let rest = first_line.strip_prefix("Read lines ")?;
     let from = rest.rfind(" from ")?;
-    let path = rest[from + " from ".len()..].trim_end().trim_end_matches('.');
+    let path = rest[from + " from ".len()..]
+        .trim_end()
+        .trim_end_matches('.');
     (!path.is_empty()).then(|| path.to_string())
 }
 
@@ -89,9 +91,13 @@ fn patch_result_paths(text: &str) -> Vec<String> {
 fn mutating_shell_commands(messages: &[TransportRequestMessage]) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        let Some(calls) = &message.tool_calls else { continue };
+        let Some(calls) = &message.tool_calls else {
+            continue;
+        };
         for call in calls {
-            let Some(function) = &call.function else { continue };
+            let Some(function) = &call.function else {
+                continue;
+            };
             if function.name.as_deref() != Some("BASH") {
                 continue;
             }
@@ -99,7 +105,12 @@ fn mutating_shell_commands(messages: &[TransportRequestMessage]) -> Vec<(usize, 
                 .arguments
                 .as_deref()
                 .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
-                .and_then(|value| value.get("command").and_then(|c| c.as_str()).map(str::to_string));
+                .and_then(|value| {
+                    value
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .map(str::to_string)
+                });
             if let Some(command) = command {
                 if !is_read_only_shell_command(&command) {
                     out.push((index, command));
@@ -142,9 +153,7 @@ pub fn fold_cold_tool_results(
         }
     }
 
-    let fold_count = unfolded_tool_indexes
-        .len()
-        .saturating_sub(hot_tool_results);
+    let fold_count = unfolded_tool_indexes.len().saturating_sub(hot_tool_results);
     let mut indexes_to_fold: Vec<usize> = unfolded_tool_indexes[..fold_count].to_vec();
 
     if max_pinned_reads > 0 {
@@ -168,7 +177,10 @@ pub fn fold_cold_tool_results(
                 continue;
             }
             if let Some(path) = read_result_path(text) {
-                if patched_at.get(&path).is_some_and(|&patch_index| patch_index > index) {
+                if patched_at
+                    .get(&path)
+                    .is_some_and(|&patch_index| patch_index > index)
+                {
                     continue; // the file moved on after this read
                 }
                 freshest_read.insert(path, index); // ascending scan keeps the latest
@@ -179,9 +191,9 @@ pub fn fold_cold_tool_results(
         // read would now be stale.
         let shell_edits = mutating_shell_commands(messages);
         freshest_read.retain(|path, read_index| {
-            !shell_edits
-                .iter()
-                .any(|(command_index, command)| *command_index > *read_index && command.contains(path.as_str()))
+            !shell_edits.iter().any(|(command_index, command)| {
+                *command_index > *read_index && command.contains(path.as_str())
+            })
         });
         let mut pins: Vec<usize> = freshest_read.into_values().collect();
         pins.sort_unstable_by(|a, b| b.cmp(a)); // most-recently-read first
@@ -196,7 +208,10 @@ pub fn fold_cold_tool_results(
             _ => continue,
         };
         // Collapse whitespace runs to single spaces, then trim the preview.
-        let preview = truncate_text(&raw.split_whitespace().collect::<Vec<_>>().join(" "), MAX_FOLDED_PREVIEW_CHARS);
+        let preview = truncate_text(
+            &raw.split_whitespace().collect::<Vec<_>>().join(" "),
+            MAX_FOLDED_PREVIEW_CHARS,
+        );
         let name = messages[index]
             .name
             .clone()
@@ -237,9 +252,13 @@ fn message_chars(message: &TransportRequestMessage) -> usize {
         Some(TransportContent::Text(text)) => text.chars().count(),
         // JSON.stringify(content ?? "").length + JSON.stringify(tool_calls ?? []).length
         other => {
-            serde_json::to_string(&other.clone().unwrap_or(TransportContent::Text(String::new())))
-                .map(|t| t.chars().count())
-                .unwrap_or(0)
+            serde_json::to_string(
+                &other
+                    .clone()
+                    .unwrap_or(TransportContent::Text(String::new())),
+            )
+            .map(|t| t.chars().count())
+            .unwrap_or(0)
                 + serde_json::to_string(&message.tool_calls.clone().unwrap_or_default())
                     .map(|t| t.chars().count())
                     .unwrap_or(0)
@@ -290,7 +309,10 @@ mod cycle_progress_tests {
 
 #[cfg(test)]
 mod goal_check_tests {
-    use super::{expand_patch_finishes, explicit_finish_check, finish_after_failed_call, finish_recheck_reason, goal_declared_check_commands, FinishRecheck, NormalizedCall};
+    use super::{
+        expand_patch_finishes, explicit_finish_check, finish_after_failed_call,
+        finish_recheck_reason, goal_declared_check_commands, FinishRecheck, NormalizedCall,
+    };
 
     #[test]
     fn a_failed_check_is_rechecked_only_after_an_edit() {
@@ -301,8 +323,14 @@ mod goal_check_tests {
         assert_eq!(finish_recheck_reason(stale, 2), Some(FinishRecheck::Stale));
         assert_eq!(finish_recheck_reason(stale, 0), None);
         let unchecked = "harness: not accepted yet — this task edited the workspace but no verification command (test/build/typecheck) has run at any point in this run.";
-        assert_eq!(finish_recheck_reason(unchecked, 0), Some(FinishRecheck::Unchecked));
-        assert_eq!(finish_recheck_reason("Task task-1 marked completed.", 3), None);
+        assert_eq!(
+            finish_recheck_reason(unchecked, 0),
+            Some(FinishRecheck::Unchecked)
+        );
+        assert_eq!(
+            finish_recheck_reason("Task task-1 marked completed.", 3),
+            None
+        );
         let zero = "harness: not accepted yet — this task edited the workspace but the most recent verification (cargo test rect::tests 2>&1) exited green but executed zero tests — run the suite that actually covers this change.";
         assert_eq!(finish_recheck_reason(zero, 1), Some(FinishRecheck::Stale));
         assert_eq!(finish_recheck_reason(zero, 0), None);
@@ -315,22 +343,52 @@ mod goal_check_tests {
             normalized: crate::harness::transport::OpenAICompatibleToolCall {
                 id: Some(id.to_string()),
                 tool_type: Some("function".to_string()),
-                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction { name: Some(name.to_string()), arguments: Some(raw.to_string()) }),
+                function: Some(
+                    crate::harness::transport::OpenAICompatibleToolCallFunction {
+                        name: Some(name.to_string()),
+                        arguments: Some(raw.to_string()),
+                    },
+                ),
             },
             raw_input: raw.to_string(),
             tool_name: name.to_string(),
         };
-        let mut used: std::collections::HashSet<String> = ["c1".to_string(), "c1-finish".to_string()].into_iter().collect();
+        let mut used: std::collections::HashSet<String> =
+            ["c1".to_string(), "c1-finish".to_string()]
+                .into_iter()
+                .collect();
         let calls = vec![
             call("c0", "READ", r#"{"path":"a.py"}"#),
-            call("c1", "PATCH", r#"{"path":"a.py","find":"x","replace":"y","finish":{"summary":"Renamed x.","check":"python3 -m unittest"}}"#),
+            call(
+                "c1",
+                "PATCH",
+                r#"{"path":"a.py","find":"x","replace":"y","finish":{"summary":"Renamed x.","check":"python3 -m unittest"}}"#,
+            ),
         ];
         let (calls, expanded) = expand_patch_finishes(calls, &mut used);
         assert_eq!(expanded, 1);
-        assert_eq!(calls.iter().map(|c| c.tool_name.as_str()).collect::<Vec<_>>(), ["READ", "PATCH", "finish_task"]);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| c.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            ["READ", "PATCH", "finish_task"]
+        );
         let patch: serde_json::Value = serde_json::from_str(&calls[1].raw_input).unwrap();
-        assert!(patch.get("finish").is_none(), "the PATCH runs without the key");
-        assert_eq!(calls[1].normalized.function.as_ref().unwrap().arguments.as_deref(), Some(calls[1].raw_input.as_str()));
+        assert!(
+            patch.get("finish").is_none(),
+            "the PATCH runs without the key"
+        );
+        assert_eq!(
+            calls[1]
+                .normalized
+                .function
+                .as_ref()
+                .unwrap()
+                .arguments
+                .as_deref(),
+            Some(calls[1].raw_input.as_str())
+        );
         let finish: serde_json::Value = serde_json::from_str(&calls[2].raw_input).unwrap();
         assert_eq!(finish["status"], "completed");
         assert_eq!(finish["summary"], "Renamed x.");
@@ -338,7 +396,14 @@ mod goal_check_tests {
         assert_eq!(calls[2].call_id, "c1-finishx", "a taken id is extended");
         assert!(used.contains("c1-finishx"));
 
-        let (calls, expanded) = expand_patch_finishes(vec![call("c2", "PATCH", r#"{"path":"a.py","content":"z","finish":{"summary":"  "}}"#)], &mut used);
+        let (calls, expanded) = expand_patch_finishes(
+            vec![call(
+                "c2",
+                "PATCH",
+                r#"{"path":"a.py","content":"z","finish":{"summary":"  "}}"#,
+            )],
+            &mut used,
+        );
         assert_eq!(expanded, 0, "an empty finish is dropped, not expanded");
         assert_eq!(calls.len(), 1);
         assert!(!calls[0].raw_input.contains("finish"));
@@ -346,46 +411,110 @@ mod goal_check_tests {
         // A finish nested in files[] beside a no-op entry, and an identical
         // find/replace at the top level: both are the finish alone.
         let (calls, expanded) = expand_patch_finishes(
-            vec![call("c4", "PATCH", r#"{"files":[{"path":"a.py","find":"same","replace":"same","finish":{"summary":"Done.","check":"cargo test -q"}}]}"#)],
+            vec![call(
+                "c4",
+                "PATCH",
+                r#"{"files":[{"path":"a.py","find":"same","replace":"same","finish":{"summary":"Done.","check":"cargo test -q"}}]}"#,
+            )],
             &mut used,
         );
         assert_eq!(expanded, 1);
-        assert_eq!(calls.iter().map(|c| (c.tool_name.as_str(), c.call_id.as_str())).collect::<Vec<_>>(), [("finish_task", "c4")]);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| (c.tool_name.as_str(), c.call_id.as_str()))
+                .collect::<Vec<_>>(),
+            [("finish_task", "c4")]
+        );
         let (calls, _) = expand_patch_finishes(
-            vec![call("c5", "PATCH", r#"{"path":"a.py","find":"x","replace":"x","finish":{"summary":"Done."}}"#)],
+            vec![call(
+                "c5",
+                "PATCH",
+                r#"{"path":"a.py","find":"x","replace":"x","finish":{"summary":"Done."}}"#,
+            )],
             &mut used,
         );
         assert_eq!(calls[0].tool_name, "finish_task");
         // A real edit beside a no-op entry keeps the edit and the finish.
         let (calls, _) = expand_patch_finishes(
-            vec![call("c6", "PATCH", r#"{"files":[{"path":"__noop__","content":"summary text"},{"path":"a.py","find":"x","replace":"y"}],"finish":{"summary":"Done."}}"#)],
+            vec![call(
+                "c6",
+                "PATCH",
+                r#"{"files":[{"path":"__noop__","content":"summary text"},{"path":"a.py","find":"x","replace":"y"}],"finish":{"summary":"Done."}}"#,
+            )],
             &mut used,
         );
-        assert_eq!(calls.iter().map(|c| c.tool_name.as_str()).collect::<Vec<_>>(), ["PATCH", "finish_task"]);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| c.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            ["PATCH", "finish_task"]
+        );
         let files: serde_json::Value = serde_json::from_str(&calls[0].raw_input).unwrap();
         assert_eq!(files["files"].as_array().unwrap().len(), 1);
 
         // Nothing to edit: the PATCH is the finish, under its own id.
-        let (calls, expanded) = expand_patch_finishes(vec![call("c3", "PATCH", r#"{"path":"a.py","files":[],"finish":{"summary":"Done.","check":"cargo test -q"}}"#)], &mut used);
+        let (calls, expanded) = expand_patch_finishes(
+            vec![call(
+                "c3",
+                "PATCH",
+                r#"{"path":"a.py","files":[],"finish":{"summary":"Done.","check":"cargo test -q"}}"#,
+            )],
+            &mut used,
+        );
         assert_eq!(expanded, 1);
-        assert_eq!(calls.iter().map(|c| (c.tool_name.as_str(), c.call_id.as_str())).collect::<Vec<_>>(), [("finish_task", "c3")]);
-        assert_eq!(calls[0].normalized.function.as_ref().unwrap().name.as_deref(), Some("finish_task"));
+        assert_eq!(
+            calls
+                .iter()
+                .map(|c| (c.tool_name.as_str(), c.call_id.as_str()))
+                .collect::<Vec<_>>(),
+            [("finish_task", "c3")]
+        );
+        assert_eq!(
+            calls[0]
+                .normalized
+                .function
+                .as_ref()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("finish_task")
+        );
         assert!(!used.contains("c3-finish"));
     }
 
     #[test]
     fn a_completed_finish_after_a_failed_call_in_the_same_response_is_bounced() {
         let failed = vec!["PATCH".to_string(), "PATCH".to_string()];
-        let bounce = finish_after_failed_call(r#"{"status":"completed","summary":"done"}"#, &failed).expect("bounced");
-        assert!(bounce.starts_with("harness: not accepted — PATCH failed earlier in this same response"), "{bounce}");
-        assert!(finish_after_failed_call(r#"{"summary":"done"}"#, &failed).is_some(), "a missing status means completed");
-        assert_eq!(finish_after_failed_call(r#"{"status":"blocked","summary":"stuck"}"#, &failed), None);
-        assert_eq!(finish_after_failed_call(r#"{"status":"completed"}"#, &[]), None);
+        let bounce =
+            finish_after_failed_call(r#"{"status":"completed","summary":"done"}"#, &failed)
+                .expect("bounced");
+        assert!(
+            bounce
+                .starts_with("harness: not accepted — PATCH failed earlier in this same response"),
+            "{bounce}"
+        );
+        assert!(
+            finish_after_failed_call(r#"{"summary":"done"}"#, &failed).is_some(),
+            "a missing status means completed"
+        );
+        assert_eq!(
+            finish_after_failed_call(r#"{"status":"blocked","summary":"stuck"}"#, &failed),
+            None
+        );
+        assert_eq!(
+            finish_after_failed_call(r#"{"status":"completed"}"#, &[]),
+            None
+        );
     }
 
     #[test]
     fn a_finish_names_its_check_only_with_a_short_non_blank_string() {
-        assert_eq!(explicit_finish_check(r#"{"status":"completed","check":" cargo test -q "}"#).as_deref(), Some("cargo test -q"));
+        assert_eq!(
+            explicit_finish_check(r#"{"status":"completed","check":" cargo test -q "}"#).as_deref(),
+            Some("cargo test -q")
+        );
         assert!(explicit_finish_check(r#"{"status":"completed","check":"   "}"#).is_none());
         assert!(explicit_finish_check(r#"{"status":"completed","check":3}"#).is_none());
         assert!(explicit_finish_check(r#"{"status":"completed"}"#).is_none());
@@ -398,17 +527,30 @@ mod goal_check_tests {
     fn narration_completes_only_a_verified_workspace() {
         use super::{narration_reads_as_completion, verified_after_last_edit};
         use crate::core::types::{HarnessState, HarnessVerificationRecord};
-        assert!(narration_reads_as_completion("The `count` subcommand is added with `--prefix` and the unit tests pass."));
+        assert!(narration_reads_as_completion(
+            "The `count` subcommand is added with `--prefix` and the unit tests pass."
+        ));
         assert!(!narration_reads_as_completion("Done?"));
-        assert!(!narration_reads_as_completion("Next I will add the tests for the prefix path."));
-        assert!(!narration_reads_as_completion("The server starts but the suite is still failing on port reuse."));
+        assert!(!narration_reads_as_completion(
+            "Next I will add the tests for the prefix path."
+        ));
+        assert!(!narration_reads_as_completion(
+            "The server starts but the suite is still failing on port reuse."
+        ));
         assert!(!narration_reads_as_completion("ok"));
         let edited = vec!["kvstore/cli.py".to_string()];
-        let goal = "Add a `count` subcommand to kvstore/cli.py and a unit test in tests/test_cli.py.";
+        let goal =
+            "Add a `count` subcommand to kvstore/cli.py and a unit test in tests/test_cli.py.";
         assert!(!super::goal_named_paths_all_edited(goal, &edited));
-        let edited = vec!["kvstore/cli.py".to_string(), "tests/test_cli.py".to_string()];
+        let edited = vec![
+            "kvstore/cli.py".to_string(),
+            "tests/test_cli.py".to_string(),
+        ];
         assert!(super::goal_named_paths_all_edited(goal, &edited));
-        assert!(super::goal_named_paths_all_edited("Make the suite pass.", &[]));
+        assert!(super::goal_named_paths_all_edited(
+            "Make the suite pass.",
+            &[]
+        ));
         let mut state = HarnessState::default();
         assert!(!verified_after_last_edit(&state), "no edits");
         state.workspace_edits = Some(1);
@@ -423,13 +565,20 @@ mod goal_check_tests {
             evidence: Some(crate::core::types::VerificationEvidence {
                 anchor: Some(crate::core::types::VerificationAnchor {
                     kind: crate::core::types::VerificationAnchorKind::External,
-                    source: Some("goal-declared acceptance check, run by the harness after an edit".to_string()),
+                    source: Some(
+                        "goal-declared acceptance check, run by the harness after an edit"
+                            .to_string(),
+                    ),
                     downgraded_reason: None,
                     coverage: None,
                     expectation_subject: None,
                 }),
                 kind: crate::core::types::VerificationEvidenceKind::Tests,
-                executed: 3, passed: 3, failed: 0, skipped: None, detail: None,
+                executed: 3,
+                passed: 3,
+                failed: 0,
+                skipped: None,
+                detail: None,
             }),
             id: None,
         };
@@ -442,31 +591,87 @@ mod goal_check_tests {
         state.last_verification = Some(record.clone());
         assert!(!verified_after_last_edit(&state), "failed check");
         record.failed = false;
-        record.evidence.as_mut().unwrap().anchor.as_mut().unwrap().kind = crate::core::types::VerificationAnchorKind::SelfAuthored;
+        record
+            .evidence
+            .as_mut()
+            .unwrap()
+            .anchor
+            .as_mut()
+            .unwrap()
+            .kind = crate::core::types::VerificationAnchorKind::SelfAuthored;
         state.last_verification = Some(record);
-        assert!(!verified_after_last_edit(&state), "self-authored probe is not the goal's check");
+        assert!(
+            !verified_after_last_edit(&state),
+            "self-authored probe is not the goal's check"
+        );
     }
 
     #[test]
     fn edit_check_runs_for_fast_or_interpreted_checks_only() {
         use super::{edit_check_allowed, edit_check_note};
-        assert!(edit_check_allowed("python3 -m unittest discover -s tests -q", None, false));
+        assert!(edit_check_allowed(
+            "python3 -m unittest discover -s tests -q",
+            None,
+            false
+        ));
         assert!(edit_check_allowed("npm test", None, false));
-        assert!(!edit_check_allowed("cargo test -q", None, false), "compile-first runner, unmeasured");
-        assert!(edit_check_allowed("cargo test -q", None, true), "unmeasured, but the warm-up build is done");
-        assert!(!edit_check_allowed("cargo test -q", Some(super::EDIT_CHECK_MAX_KNOWN_MS + 1), true), "a measured slow check stays skipped");
+        assert!(
+            !edit_check_allowed("cargo test -q", None, false),
+            "compile-first runner, unmeasured"
+        );
+        assert!(
+            edit_check_allowed("cargo test -q", None, true),
+            "unmeasured, but the warm-up build is done"
+        );
+        assert!(
+            !edit_check_allowed(
+                "cargo test -q",
+                Some(super::EDIT_CHECK_MAX_KNOWN_MS + 1),
+                true
+            ),
+            "a measured slow check stays skipped"
+        );
         use super::check_duration_measurable;
-        assert!(!check_duration_measurable(Some("cargo test features --no-run --quiet"), false, "cargo test features::"), "compiling: not a measure of the check");
-        assert!(check_duration_measurable(Some("cargo test features --no-run --quiet"), true, "cargo test features::"));
-        assert!(check_duration_measurable(Some("cargo test --no-run"), false, "python3 -m unittest"), "another runner is unaffected");
+        assert!(
+            !check_duration_measurable(
+                Some("cargo test features --no-run --quiet"),
+                false,
+                "cargo test features::"
+            ),
+            "compiling: not a measure of the check"
+        );
+        assert!(check_duration_measurable(
+            Some("cargo test features --no-run --quiet"),
+            true,
+            "cargo test features::"
+        ));
+        assert!(
+            check_duration_measurable(Some("cargo test --no-run"), false, "python3 -m unittest"),
+            "another runner is unaffected"
+        );
         assert!(check_duration_measurable(None, false, "cargo test"));
-        assert!(edit_check_allowed("cargo test -q", Some(3_000), false), "measured fast");
-        assert!(!edit_check_allowed("python3 -m pytest", Some(9_000), false), "measured slow");
+        assert!(
+            edit_check_allowed("cargo test -q", Some(3_000), false),
+            "measured fast"
+        );
+        assert!(
+            !edit_check_allowed("python3 -m pytest", Some(9_000), false),
+            "measured slow"
+        );
         let passed = edit_check_note("pytest -q", true, "passed", "");
-        assert!(passed.starts_with("\n\n[harness] ran the goal-declared check after this edit: pytest -q -> passed."), "{passed}");
+        assert!(
+            passed.starts_with(
+                "\n\n[harness] ran the goal-declared check after this edit: pytest -q -> passed."
+            ),
+            "{passed}"
+        );
         assert!(passed.contains("finish_task now"), "{passed}");
         let failed = edit_check_note("pytest -q", false, "FAILED", "E  assert 1 == 2");
-        assert!(failed.contains("Fix it in the next PATCH and put finish") && failed.ends_with("E  assert 1 == 2"), "{failed}");
+        assert!(
+            failed.contains("Fix it in the next PATCH and put finish")
+                && failed.ends_with("E  assert 1 == 2"),
+            "{failed}"
+        );
     }
 
     #[test]
@@ -474,57 +679,125 @@ mod goal_check_tests {
         let goal = "Add a `--count` flag to `kvstore`. Acceptance: `python3 -m unittest discover -s tests -q` must pass and `cargo test` too. Do not touch `README.md`.";
         assert_eq!(
             goal_declared_check_commands(goal),
-            vec!["python3 -m unittest discover -s tests -q".to_string(), "cargo test".to_string()]
+            vec![
+                "python3 -m unittest discover -s tests -q".to_string(),
+                "cargo test".to_string()
+            ]
         );
-        assert!(goal_declared_check_commands("Fix the bug in `page`; run `ls -la` first").is_empty());
-        assert_eq!(goal_declared_check_commands("no backticks: python3 -m unittest"), vec!["python3 -m unittest".to_string()]);
+        assert!(
+            goal_declared_check_commands("Fix the bug in `page`; run `ls -la` first").is_empty()
+        );
+        assert_eq!(
+            goal_declared_check_commands("no backticks: python3 -m unittest"),
+            vec!["python3 -m unittest".to_string()]
+        );
     }
 
     #[test]
     fn every_declared_check_runs_as_one_chain() {
         use super::{command_is_goal_declared, goal_declared_check_chain};
         let goal = "Fix the parser. `cargo test --lib harness` and `cargo test --test loop_smoke` must pass.";
-        assert_eq!(goal_declared_check_chain(goal).as_deref(), Some("cargo test --lib harness && cargo test --test loop_smoke"));
-        assert!(command_is_goal_declared(goal, "cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"));
-        assert!(command_is_goal_declared(goal, "cargo test --test loop_smoke"));
+        assert_eq!(
+            goal_declared_check_chain(goal).as_deref(),
+            Some("cargo test --lib harness && cargo test --test loop_smoke")
+        );
+        assert!(command_is_goal_declared(
+            goal,
+            "cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"
+        ));
+        assert!(command_is_goal_declared(
+            goal,
+            "cargo test --test loop_smoke"
+        ));
         assert!(!command_is_goal_declared(goal, "cargo test"));
         // A chain the goal spells out subsumes its own parts.
-        let spelled = "Verify with `bun run typecheck && bun test hub` (the tests alone are not enough).";
-        assert_eq!(goal_declared_check_chain(spelled).as_deref(), Some("bun run typecheck && bun test hub"));
+        let spelled =
+            "Verify with `bun run typecheck && bun test hub` (the tests alone are not enough).";
+        assert_eq!(
+            goal_declared_check_chain(spelled).as_deref(),
+            Some("bun run typecheck && bun test hub")
+        );
         assert_eq!(goal_declared_check_chain("Fix the bug in `page`."), None);
     }
 
     #[test]
     fn an_overlapping_reread_of_an_unedited_file_is_flagged() {
         use super::{overlapping_read_note, patched_paths, read_range_of};
-        assert_eq!(read_range_of(r#"{"path":"a.rs","offset":100,"limit":40}"#), Some(("a.rs".to_string(), (100, 140))));
-        assert_eq!(read_range_of(r#"{"path":"a.rs"}"#), Some(("a.rs".to_string(), (0, i64::MAX))));
+        assert_eq!(
+            read_range_of(r#"{"path":"a.rs","offset":100,"limit":40}"#),
+            Some(("a.rs".to_string(), (100, 140)))
+        );
+        assert_eq!(
+            read_range_of(r#"{"path":"a.rs"}"#),
+            Some(("a.rs".to_string(), (0, i64::MAX)))
+        );
         assert_eq!(read_range_of(r#"{"command":"ls"}"#), None);
         // A shifted window that overlaps an earlier read is flagged.
         let note = overlapping_read_note(&[(100, 140)], (120, 160));
-        assert!(note.as_deref().is_some_and(|note| note.contains("lines 121-160 of this file overlaps your earlier READ of lines 101-140")), "{note:?}");
+        assert!(
+            note.as_deref().is_some_and(|note| note.contains(
+                "lines 121-160 of this file overlaps your earlier READ of lines 101-140"
+            )),
+            "{note:?}"
+        );
         // Disjoint windows are not.
         assert_eq!(overlapping_read_note(&[(100, 140)], (200, 240)), None);
         // A whole-file read overlaps any prior range.
         assert!(overlapping_read_note(&[(100, 140)], (0, i64::MAX)).is_some());
-        assert_eq!(patched_paths(r#"{"files":[{"path":"a.rs","find":"x","replace":"y"},{"path":"b.rs","content":"z"}]}"#), vec!["a.rs".to_string(), "b.rs".to_string()]);
-        assert_eq!(patched_paths(r#"{"path":"c.rs","append":"t"}"#), vec!["c.rs".to_string()]);
+        assert_eq!(
+            patched_paths(
+                r#"{"files":[{"path":"a.rs","find":"x","replace":"y"},{"path":"b.rs","content":"z"}]}"#
+            ),
+            vec!["a.rs".to_string(), "b.rs".to_string()]
+        );
+        assert_eq!(
+            patched_paths(r#"{"path":"c.rs","append":"t"}"#),
+            vec!["c.rs".to_string()]
+        );
     }
 
     #[test]
     fn an_append_takes_the_placement_the_goal_names() {
         use super::{anchor_append_to_goal, goal_placement_anchor};
-        assert_eq!(goal_placement_anchor("Add a unit test named new_case right after `old_case` in src/x.rs."), Some((true, "old_case".to_string())));
-        assert_eq!(goal_placement_anchor("Insert the helper below the test parse_flags."), Some((true, "parse_flags".to_string())));
-        assert_eq!(goal_placement_anchor("Put it before fn runCommand."), Some((false, "runCommand".to_string())));
-        assert_eq!(goal_placement_anchor("Run it after the tests pass and before merging."), None);
-        let (input, note) = anchor_append_to_goal(r#"{"path":"src/x.rs","append":"fn new_case() {}"}"#, "Add new_case right after `old_case`.");
+        assert_eq!(
+            goal_placement_anchor(
+                "Add a unit test named new_case right after `old_case` in src/x.rs."
+            ),
+            Some((true, "old_case".to_string()))
+        );
+        assert_eq!(
+            goal_placement_anchor("Insert the helper below the test parse_flags."),
+            Some((true, "parse_flags".to_string()))
+        );
+        assert_eq!(
+            goal_placement_anchor("Put it before fn runCommand."),
+            Some((false, "runCommand".to_string()))
+        );
+        assert_eq!(
+            goal_placement_anchor("Run it after the tests pass and before merging."),
+            None
+        );
+        let (input, note) = anchor_append_to_goal(
+            r#"{"path":"src/x.rs","append":"fn new_case() {}"}"#,
+            "Add new_case right after `old_case`.",
+        );
         assert!(input.contains(r#""after":"old_case""#), "{input}");
         assert!(note.is_some_and(|note| note.contains("after `old_case`")));
-        let (input, note) = anchor_append_to_goal(r#"{"files":[{"path":"a.rs","append":"x","before":"z"},{"path":"b.rs","append":"y"},{"path":"c.rs","find":"1","replace":"2"}]}"#, "before `old_case`");
-        assert!(note.is_some() && input.contains(r#""before":"z""#) && input.matches("old_case").count() == 1, "{input}");
+        let (input, note) = anchor_append_to_goal(
+            r#"{"files":[{"path":"a.rs","append":"x","before":"z"},{"path":"b.rs","append":"y"},{"path":"c.rs","find":"1","replace":"2"}]}"#,
+            "before `old_case`",
+        );
+        assert!(
+            note.is_some()
+                && input.contains(r#""before":"z""#)
+                && input.matches("old_case").count() == 1,
+            "{input}"
+        );
         let raw = r#"{"path":"src/x.rs","find":"a","replace":"b"}"#;
-        assert_eq!(anchor_append_to_goal(raw, "right after `old_case`"), (raw.to_string(), None));
+        assert_eq!(
+            anchor_append_to_goal(raw, "right after `old_case`"),
+            (raw.to_string(), None)
+        );
     }
 
     #[test]
@@ -541,37 +814,100 @@ mod goal_check_tests {
             evidence: None,
             id: None,
         };
-        assert!(!rerun_keeps_goal_standing(goal, &record("cargo test --lib harness::r#loop::one_test -- --nocapture"), &[]));
-        assert!(rerun_keeps_goal_standing(goal, &record("cargo test --lib harness"), &[]));
-        assert!(rerun_keeps_goal_standing(goal, &record("cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"), &[]));
-        assert!(rerun_keeps_goal_standing(goal, &record("pytest -q"), &["cargo test --lib harness && cargo test --test loop_smoke".to_string()]));
-        assert!(rerun_keeps_goal_standing("Fix the bug in `page`.", &record("pytest -q"), &[]));
+        assert!(!rerun_keeps_goal_standing(
+            goal,
+            &record("cargo test --lib harness::r#loop::one_test -- --nocapture"),
+            &[]
+        ));
+        assert!(rerun_keeps_goal_standing(
+            goal,
+            &record("cargo test --lib harness"),
+            &[]
+        ));
+        assert!(rerun_keeps_goal_standing(
+            goal,
+            &record("cargo test --lib harness && cargo test --test loop_smoke 2>&1 | tail -20"),
+            &[]
+        ));
+        assert!(rerun_keeps_goal_standing(
+            goal,
+            &record("pytest -q"),
+            &["cargo test --lib harness && cargo test --test loop_smoke".to_string()]
+        ));
+        assert!(rerun_keeps_goal_standing(
+            "Fix the bug in `page`.",
+            &record("pytest -q"),
+            &[]
+        ));
     }
 
     #[test]
     fn plain_prose_check_commands_read_to_the_end_of_the_clause() {
         use super::plain_prose_check_commands;
         let goal = "Add the helper. Verify with cargo test --release --lib tools::builtin::patch. Do not commit, push, or open PRs.";
-        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --release --lib tools::builtin::patch".to_string()]);
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec!["cargo test --release --lib tools::builtin::patch".to_string()]
+        );
         let goal = "Run python3 -m unittest discover -s tests -q and make sure it passes; then bun test, typecheck and the UI drift test stay green.";
-        assert_eq!(plain_prose_check_commands(goal), vec!["python3 -m unittest discover -s tests -q".to_string(), "bun test".to_string()]);
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec![
+                "python3 -m unittest discover -s tests -q".to_string(),
+                "bun test".to_string()
+            ]
+        );
         let goal = "every command must exit 0: cargo check --all-targets; cargo test --lib github; cargo test --lib roles";
         assert_eq!(
             plain_prose_check_commands(goal),
-            vec!["cargo check --all-targets".to_string(), "cargo test --lib github".to_string(), "cargo test --lib roles".to_string()]
+            vec![
+                "cargo check --all-targets".to_string(),
+                "cargo test --lib github".to_string(),
+                "cargo test --lib roles".to_string()
+            ]
         );
         let goal = "Verify with bun run typecheck && bun test hub/test/discovery.test.ts. Do not commit, push, or open PRs.";
-        assert_eq!(plain_prose_check_commands(goal), vec!["bun run typecheck && bun test hub/test/discovery.test.ts".to_string()]);
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec!["bun run typecheck && bun test hub/test/discovery.test.ts".to_string()]
+        );
         let goal = "run cargo build && cargo test --lib harness and then stop";
-        assert_eq!(plain_prose_check_commands(goal), vec!["cargo build && cargo test --lib harness".to_string()]);
-        assert_eq!(plain_prose_check_commands("cargo test --lib alpha && echo done"), vec!["cargo test --lib alpha".to_string()], "a chain onto a non-runner ends the command");
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec!["cargo build && cargo test --lib harness".to_string()]
+        );
+        assert_eq!(
+            plain_prose_check_commands("cargo test --lib alpha && echo done"),
+            vec!["cargo test --lib alpha".to_string()],
+            "a chain onto a non-runner ends the command"
+        );
         let goal = "add a test: check_duration_measurable(Some(\"cargo test --no-run\"), false, \"cargo test --lib\") must be true. Verify with cargo test --release --lib. Do not commit.";
-        assert_eq!(plain_prose_check_commands(goal), vec!["cargo test --release --lib".to_string()], "quoted code samples are not commands");
-        assert_eq!(plain_prose_check_commands("run cargo test --lib\" now"), vec!["cargo test".to_string()], "a quote inside an argument ends the command before it");
-        assert_eq!(plain_prose_check_commands("then (cd drip && cargo test) green and finish_task"), vec!["cargo test".to_string()]);
-        assert!(plain_prose_check_commands("Acceptance: `cargo test -q` must pass.").is_empty(), "backticked spans belong to the other scan");
-        assert!(plain_prose_check_commands("a pytest-style fixture and the mycargo tester").is_empty(), "word boundaries");
-        assert_eq!(plain_prose_check_commands("run pytest tests/test_cli.py -q when done"), vec!["pytest tests/test_cli.py -q".to_string()]);
+        assert_eq!(
+            plain_prose_check_commands(goal),
+            vec!["cargo test --release --lib".to_string()],
+            "quoted code samples are not commands"
+        );
+        assert_eq!(
+            plain_prose_check_commands("run cargo test --lib\" now"),
+            vec!["cargo test".to_string()],
+            "a quote inside an argument ends the command before it"
+        );
+        assert_eq!(
+            plain_prose_check_commands("then (cd drip && cargo test) green and finish_task"),
+            vec!["cargo test".to_string()]
+        );
+        assert!(
+            plain_prose_check_commands("Acceptance: `cargo test -q` must pass.").is_empty(),
+            "backticked spans belong to the other scan"
+        );
+        assert!(
+            plain_prose_check_commands("a pytest-style fixture and the mycargo tester").is_empty(),
+            "word boundaries"
+        );
+        assert_eq!(
+            plain_prose_check_commands("run pytest tests/test_cli.py -q when done"),
+            vec!["pytest tests/test_cli.py -q".to_string()]
+        );
     }
 
     #[test]
@@ -579,14 +915,27 @@ mod goal_check_tests {
         use super::{direct_task_title, PlanMode};
         let small = "Add a `count` subcommand to kvstore/cli.py. Run `python3 -m unittest discover -s tests -q`.";
         assert_eq!(direct_task_title(small, PlanMode::Always, false), None);
-        assert_eq!(direct_task_title(small, PlanMode::Auto, false).as_deref(), Some(small));
+        assert_eq!(
+            direct_task_title(small, PlanMode::Auto, false).as_deref(),
+            Some(small)
+        );
         assert!(direct_task_title(small, PlanMode::Direct, false).is_some());
         // No declared check: direct only when the workspace has a detectable project suite.
         let unchecked = "Rename the helper in kvstore/cli.py and update its callers.";
         assert_eq!(direct_task_title(unchecked, PlanMode::Auto, false), None);
-        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, true).as_deref(), Some(unchecked));
+        assert_eq!(
+            direct_task_title(unchecked, PlanMode::Auto, true).as_deref(),
+            Some(unchecked)
+        );
         // No declared check: auto plans.
-        assert_eq!(direct_task_title("Add a `count` subcommand to kvstore/cli.py.", PlanMode::Auto, false), None);
+        assert_eq!(
+            direct_task_title(
+                "Add a `count` subcommand to kvstore/cli.py.",
+                PlanMode::Auto,
+                false
+            ),
+            None
+        );
         // Too long: auto plans.
         let long = format!("{} {}", small, "and more ".repeat(300));
         assert_eq!(direct_task_title(&long, PlanMode::Auto, true), None);
@@ -596,10 +945,21 @@ mod goal_check_tests {
 
     #[test]
     fn compact_tool_input_names_what_the_call_touched() {
-        assert_eq!(super::compact_tool_input(r#"{"command":"grep -n   foo\n src/ | head"}"#, 90), "grep -n foo src/ | head");
-        assert_eq!(super::compact_tool_input(r#"{"path":"src/a.rs","content":"..."}"#, 90), "src/a.rs");
+        assert_eq!(
+            super::compact_tool_input(r#"{"command":"grep -n   foo\n src/ | head"}"#, 90),
+            "grep -n foo src/ | head"
+        );
+        assert_eq!(
+            super::compact_tool_input(r#"{"path":"src/a.rs","content":"..."}"#, 90),
+            "src/a.rs"
+        );
         assert_eq!(super::compact_tool_input("not json", 90), "not json");
-        assert!(super::compact_tool_input(&format!(r#"{{"command":"{}"}}"#, "x".repeat(300)), 90).chars().count() <= 91);
+        assert!(
+            super::compact_tool_input(&format!(r#"{{"command":"{}"}}"#, "x".repeat(300)), 90)
+                .chars()
+                .count()
+                <= 91
+        );
     }
 
     #[test]
@@ -608,10 +968,25 @@ mod goal_check_tests {
         use crate::core::types::VerificationAnchorKind;
         let goal = "Add scopeLabel. Verify with bun run typecheck && bun test hub/test/discovery.test.ts. Do not commit.";
         let raw = r#"{"command":"cd /w/tw-df80 && bun run typecheck && bun test hub/test/discovery.test.ts 2>&1"}"#;
-        let anchor = declared_verification_anchor_for_goal(raw, &["hub/src/discovery.ts".to_string()], goal).expect("anchored");
+        let anchor =
+            declared_verification_anchor_for_goal(raw, &["hub/src/discovery.ts".to_string()], goal)
+                .expect("anchored");
         assert_eq!(anchor.kind, VerificationAnchorKind::External);
-        assert!(anchor.source.as_deref().unwrap_or("").contains("run by the agent"), "{:?}", anchor.source);
-        assert!(declared_verification_anchor_for_goal(r#"{"command":"bun test hub/test/other.test.ts"}"#, &[], goal).is_none());
+        assert!(
+            anchor
+                .source
+                .as_deref()
+                .unwrap_or("")
+                .contains("run by the agent"),
+            "{:?}",
+            anchor.source
+        );
+        assert!(declared_verification_anchor_for_goal(
+            r#"{"command":"bun test hub/test/other.test.ts"}"#,
+            &[],
+            goal
+        )
+        .is_none());
     }
 
     #[test]
@@ -619,10 +994,16 @@ mod goal_check_tests {
         let edited = vec!["tests/test_new.py".to_string()];
         let plain = r#"{"command":"python3 -m unittest tests/test_new.py","anchor":{"kind":"external","source":"suite"}}"#;
         let downgraded = super::declared_verification_anchor(plain, &edited).unwrap();
-        assert_eq!(downgraded.kind, crate::core::types::VerificationAnchorKind::SelfAuthored);
+        assert_eq!(
+            downgraded.kind,
+            crate::core::types::VerificationAnchorKind::SelfAuthored
+        );
         let marked = r#"{"command":"python3 -m unittest tests/test_new.py","anchor":{"kind":"external","source":"goal"},"harnessGoalDeclaredCheck":true}"#;
         let kept = super::declared_verification_anchor(marked, &edited).unwrap();
-        assert_eq!(kept.kind, crate::core::types::VerificationAnchorKind::External);
+        assert_eq!(
+            kept.kind,
+            crate::core::types::VerificationAnchorKind::External
+        );
         assert!(kept.downgraded_reason.is_none());
     }
 }
@@ -635,7 +1016,10 @@ mod review_brief_tests {
         let status = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
-            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@e").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@e")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
             .status()
             .unwrap();
         assert!(status.success(), "git {args:?}");
@@ -652,7 +1036,10 @@ mod review_brief_tests {
         std::fs::write(dir.join("a.rs"), &text).unwrap();
         let input = r#"{"path":"a.rs","offset":41,"limit":40}"#;
         // Under the threshold: untouched.
-        assert_eq!(promote_read_to_whole_file(input, 2, &dir), (input.to_string(), None));
+        assert_eq!(
+            promote_read_to_whole_file(input, 2, &dir),
+            (input.to_string(), None)
+        );
         // At the threshold: the whole file, with a note.
         let (promoted, note) = promote_read_to_whole_file(input, 3, &dir);
         let value: serde_json::Value = serde_json::from_str(&promoted).unwrap();
@@ -661,18 +1048,34 @@ mod review_brief_tests {
         assert!(note.unwrap().contains("window 4 of a.rs"));
         // Already a whole-file read, a missing file, or a huge file: untouched.
         let whole = r#"{"path":"a.rs","offset":1,"limit":400}"#;
-        assert_eq!(promote_read_to_whole_file(whole, 5, &dir), (whole.to_string(), None));
+        assert_eq!(
+            promote_read_to_whole_file(whole, 5, &dir),
+            (whole.to_string(), None)
+        );
         let missing = r#"{"path":"nope.rs","offset":41,"limit":40}"#;
-        assert_eq!(promote_read_to_whole_file(missing, 5, &dir), (missing.to_string(), None));
-        let big: String = (1..=READ_WHOLE_FILE_MAX_LINES + 1).map(|n| format!("{n}\n")).collect();
+        assert_eq!(
+            promote_read_to_whole_file(missing, 5, &dir),
+            (missing.to_string(), None)
+        );
+        let big: String = (1..=READ_WHOLE_FILE_MAX_LINES + 1)
+            .map(|n| format!("{n}\n"))
+            .collect();
         std::fs::write(dir.join("big.rs"), big).unwrap();
         let big_input = r#"{"path":"big.rs","offset":41,"limit":40}"#;
-        assert_eq!(promote_read_to_whole_file(big_input, 5, &dir), (big_input.to_string(), None));
+        assert_eq!(
+            promote_read_to_whole_file(big_input, 5, &dir),
+            (big_input.to_string(), None)
+        );
         // Few lines but too many chars: untouched.
-        let wide: String = (1..=200).map(|_| format!("{}\n", "x".repeat(300))).collect();
+        let wide: String = (1..=200)
+            .map(|_| format!("{}\n", "x".repeat(300)))
+            .collect();
         std::fs::write(dir.join("wide.rs"), wide).unwrap();
         let wide_input = r#"{"path":"wide.rs","offset":41,"limit":40}"#;
-        assert_eq!(promote_read_to_whole_file(wide_input, 5, &dir), (wide_input.to_string(), None));
+        assert_eq!(
+            promote_read_to_whole_file(wide_input, 5, &dir),
+            (wide_input.to_string(), None)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -681,12 +1084,17 @@ mod review_brief_tests {
         assert!(long_bash_command_note("cargo test -q").is_none());
         let script = "x".repeat(LONG_BASH_COMMAND_CHARS + 1);
         let note = long_bash_command_note(&script).expect("note");
-        assert!(note.contains("1201 chars") && note.contains("separate calls"), "{note}");
+        assert!(
+            note.contains("1201 chars") && note.contains("separate calls"),
+            "{note}"
+        );
     }
 
     #[test]
     fn a_runner_bash_call_loses_its_trailing_tail_filter() {
-        let (input, dropped) = drop_runner_tail_filter(r#"{"command":"cargo test --lib shape 2>&1 | tail -3","timeoutMs":300000}"#);
+        let (input, dropped) = drop_runner_tail_filter(
+            r#"{"command":"cargo test --lib shape 2>&1 | tail -3","timeoutMs":300000}"#,
+        );
         assert_eq!(dropped.as_deref(), Some("| tail -3"));
         let value: serde_json::Value = serde_json::from_str(&input).unwrap();
         assert_eq!(value["command"], "cargo test --lib shape 2>&1");
@@ -700,44 +1108,139 @@ mod review_brief_tests {
 
     #[test]
     fn a_repeated_verify_reuses_a_current_passing_record_only() {
-        use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
-        let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 1, passed: 1, failed: 0, skipped: None, detail: None };
-        let record = HarnessVerificationRecord { at_iteration: 3, command: "cargo test --lib native_runner 2>&1 | tail -20".into(), failed: false, output_tail: String::new(), ran_no_tests: None, evidence: Some(tests.clone()), id: Some("v2".into()) };
+        use crate::core::types::{
+            HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind,
+        };
+        let tests = VerificationEvidence {
+            anchor: None,
+            kind: VerificationEvidenceKind::Tests,
+            executed: 1,
+            passed: 1,
+            failed: 0,
+            skipped: None,
+            detail: None,
+        };
+        let record = HarnessVerificationRecord {
+            at_iteration: 3,
+            command: "cargo test --lib native_runner 2>&1 | tail -20".into(),
+            failed: false,
+            output_tail: String::new(),
+            ran_no_tests: None,
+            evidence: Some(tests.clone()),
+            id: Some("v2".into()),
+        };
         // Same shape (tail filter and verbosity ignored), nothing edited: reused, citing the record.
-        let text = repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 0).expect("reused");
-        assert!(text.contains("record v2") && text.contains("iteration 3"), "{text}");
+        let text = repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 0)
+            .expect("reused");
+        assert!(
+            text.contains("record v2") && text.contains("iteration 3"),
+            "{text}"
+        );
         // An edit since, a different command, a failed run, or no executed evidence: runs again.
-        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 1).is_none());
+        assert!(
+            repeated_verify_reuse("cargo test --lib native_runner", Some(&record), 1).is_none()
+        );
         assert!(repeated_verify_reuse("cargo test --lib other", Some(&record), 0).is_none());
-        let failed = HarnessVerificationRecord { failed: true, ..record.clone() };
-        assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&failed), 0).is_none());
-        let empty = HarnessVerificationRecord { evidence: Some(VerificationEvidence { executed: 0, passed: 0, ..tests }), ..record.clone() };
+        let failed = HarnessVerificationRecord {
+            failed: true,
+            ..record.clone()
+        };
+        assert!(
+            repeated_verify_reuse("cargo test --lib native_runner", Some(&failed), 0).is_none()
+        );
+        let empty = HarnessVerificationRecord {
+            evidence: Some(VerificationEvidence {
+                executed: 0,
+                passed: 0,
+                ..tests
+            }),
+            ..record.clone()
+        };
         assert!(repeated_verify_reuse("cargo test --lib native_runner", Some(&empty), 0).is_none());
         assert!(repeated_verify_reuse("cargo test", None, 0).is_none());
     }
 
     #[test]
     fn a_native_runner_suite_naming_no_edited_file_is_promoted_to_external() {
-        use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
-        let tests = VerificationEvidence { anchor: None, kind: VerificationEvidenceKind::Tests, executed: 12, passed: 12, failed: 0, skipped: None, detail: None };
+        use crate::core::types::{
+            VerificationAnchor, VerificationAnchorKind, VerificationEvidence,
+            VerificationEvidenceKind,
+        };
+        let tests = VerificationEvidence {
+            anchor: None,
+            kind: VerificationEvidenceKind::Tests,
+            executed: 12,
+            passed: 12,
+            failed: 0,
+            skipped: None,
+            detail: None,
+        };
         let edited = vec!["src/lib.rs".to_string(), "tests/test_store.py".to_string()];
         // Undeclared anchor on a plain suite run: promoted.
-        let promoted = promote_native_runner_anchor(None, "cargo test --release -q", &tests, &edited).expect("promoted");
+        let promoted =
+            promote_native_runner_anchor(None, "cargo test --release -q", &tests, &edited)
+                .expect("promoted");
         assert_eq!(promoted.kind, VerificationAnchorKind::External);
-        assert!(promoted.source.as_deref().unwrap_or("").contains("cargo test"), "{:?}", promoted.source);
+        assert!(
+            promoted
+                .source
+                .as_deref()
+                .unwrap_or("")
+                .contains("cargo test"),
+            "{:?}",
+            promoted.source
+        );
         // A "self" label without a harness downgrade: promoted, label kept in the source.
-        let declared = VerificationAnchor { kind: VerificationAnchorKind::SelfAuthored, source: Some("I added a test".into()), downgraded_reason: None, coverage: None, expectation_subject: None };
-        let promoted = promote_native_runner_anchor(Some(declared), "python3 -m unittest discover -s tests -q", &tests, &edited).expect("promoted");
+        let declared = VerificationAnchor {
+            kind: VerificationAnchorKind::SelfAuthored,
+            source: Some("I added a test".into()),
+            downgraded_reason: None,
+            coverage: None,
+            expectation_subject: None,
+        };
+        let promoted = promote_native_runner_anchor(
+            Some(declared),
+            "python3 -m unittest discover -s tests -q",
+            &tests,
+            &edited,
+        )
+        .expect("promoted");
         assert_eq!(promoted.kind, VerificationAnchorKind::External);
-        assert!(promoted.source.as_deref().unwrap_or("").contains("I added a test"));
+        assert!(promoted
+            .source
+            .as_deref()
+            .unwrap_or("")
+            .contains("I added a test"));
         // Names an edited file: stays as it was.
-        assert!(promote_native_runner_anchor(None, "python3 -m pytest tests/test_store.py -q", &tests, &edited).is_none());
+        assert!(promote_native_runner_anchor(
+            None,
+            "python3 -m pytest tests/test_store.py -q",
+            &tests,
+            &edited
+        )
+        .is_none());
         // A harness downgrade is never undone.
-        let downgraded = VerificationAnchor { kind: VerificationAnchorKind::SelfAuthored, source: None, downgraded_reason: Some("names an edited file".into()), coverage: None, expectation_subject: None };
-        assert_eq!(promote_native_runner_anchor(Some(downgraded), "cargo test", &tests, &[]).unwrap().kind, VerificationAnchorKind::SelfAuthored);
+        let downgraded = VerificationAnchor {
+            kind: VerificationAnchorKind::SelfAuthored,
+            source: None,
+            downgraded_reason: Some("names an edited file".into()),
+            coverage: None,
+            expectation_subject: None,
+        };
+        assert_eq!(
+            promote_native_runner_anchor(Some(downgraded), "cargo test", &tests, &[])
+                .unwrap()
+                .kind,
+            VerificationAnchorKind::SelfAuthored
+        );
         // Not a native runner, or nothing executed: unchanged.
         assert!(promote_native_runner_anchor(None, "python3 probe.py", &tests, &[]).is_none());
-        let none_ran = VerificationEvidence { executed: 0, passed: 0, kind: VerificationEvidenceKind::Unverified, ..tests.clone() };
+        let none_ran = VerificationEvidence {
+            executed: 0,
+            passed: 0,
+            kind: VerificationEvidenceKind::Unverified,
+            ..tests.clone()
+        };
         assert!(promote_native_runner_anchor(None, "cargo test", &none_ran, &[]).is_none());
         // Newer runners map through native_runner_name to their short names.
         for (command, name) in [
@@ -747,9 +1250,14 @@ mod review_brief_tests {
             ("gradle test", "gradle test"),
             ("./gradlew test --tests core.*", "gradle test"),
         ] {
-            let promoted = promote_native_runner_anchor(None, command, &tests, &edited).expect("promoted");
+            let promoted =
+                promote_native_runner_anchor(None, command, &tests, &edited).expect("promoted");
             assert_eq!(promoted.kind, VerificationAnchorKind::External);
-            assert!(promoted.source.as_deref().unwrap_or("").contains(name), "{:?}", promoted.source);
+            assert!(
+                promoted.source.as_deref().unwrap_or("").contains(name),
+                "{:?}",
+                promoted.source
+            );
         }
     }
 
@@ -765,21 +1273,32 @@ mod review_brief_tests {
         )
         .unwrap();
         assert_eq!(upgraded.kind, VerificationAnchorKind::External);
-        assert!(upgraded.source.unwrap().starts_with("goal-declared acceptance check: python3 -m unittest"));
+        assert!(upgraded
+            .source
+            .unwrap()
+            .starts_with("goal-declared acceptance check: python3 -m unittest"));
         let other = declared_verification_anchor_for_goal(
             r#"{"command":"python3 -m unittest tests.test_store","anchor":{"kind":"self","source":"my test"}}"#,
             &edited,
             goal,
         )
         .unwrap();
-        assert_eq!(other.kind, VerificationAnchorKind::SelfAuthored, "a different command stays self");
+        assert_eq!(
+            other.kind,
+            VerificationAnchorKind::SelfAuthored,
+            "a different command stays self"
+        );
         let no_check = declared_verification_anchor_for_goal(
             r#"{"command":"python3 -m unittest discover -s tests -q","anchor":{"kind":"self"}}"#,
             &edited,
             "Fix the bug.",
         )
         .unwrap();
-        assert_eq!(no_check.kind, VerificationAnchorKind::SelfAuthored, "no declared check, no upgrade");
+        assert_eq!(
+            no_check.kind,
+            VerificationAnchorKind::SelfAuthored,
+            "no declared check, no upgrade"
+        );
     }
 
     #[test]
@@ -796,13 +1315,28 @@ mod review_brief_tests {
         std::fs::write(dir.path().join("new.txt"), "x\ny\n").unwrap();
         std::fs::write(dir.path().join("blob.bin"), [0u8, 159, 146, 150, 255]).unwrap();
         std::fs::create_dir_all(dir.path().join(".dripdata/sessions")).unwrap();
-        std::fs::write(dir.path().join(".dripdata/sessions/state.json"), "{}\n".repeat(500)).unwrap();
+        std::fs::write(
+            dir.path().join(".dripdata/sessions/state.json"),
+            "{}\n".repeat(500),
+        )
+        .unwrap();
         assert_eq!(workspace_changed_lines(&cwd, &head), Some(1 + 2 + 2), "one deleted, two added, two untracked; the binary blob and the dot-directory count nothing");
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-        std::fs::write(dir.path().join("tests/test_a.py"), "import unittest\n".repeat(30)).unwrap();
-        assert_eq!(workspace_changed_lines_split(&cwd, &head), Some((1 + 2 + 2, 30)), "test files count on their own side");
+        std::fs::write(
+            dir.path().join("tests/test_a.py"),
+            "import unittest\n".repeat(30),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_changed_lines_split(&cwd, &head),
+            Some((1 + 2 + 2, 30)),
+            "test files count on their own side"
+        );
         assert_eq!(workspace_changed_lines(&cwd, &head), Some(1 + 2 + 2 + 30));
-        assert_eq!(workspace_changed_lines(&std::env::temp_dir().to_string_lossy(), "HEAD"), None);
+        assert_eq!(
+            workspace_changed_lines(&std::env::temp_dir().to_string_lossy(), "HEAD"),
+            None
+        );
     }
 
     #[test]
@@ -838,7 +1372,11 @@ mod review_brief_tests {
         std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
         git(dir.path(), &["commit", "-q", "-am", "during the run"]);
         std::fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
-        std::fs::write(dir.path().join("big.txt"), "line\n".repeat(REVIEW_BRIEF_MAX_INLINE_LINES + 1)).unwrap();
+        std::fs::write(
+            dir.path().join("big.txt"),
+            "line\n".repeat(REVIEW_BRIEF_MAX_INLINE_LINES + 1),
+        )
+        .unwrap();
         let mut state = crate::core::state::create_harness_state("goal");
         state.verifications = Some(vec![crate::core::types::HarnessVerificationRecord {
             at_iteration: 2,
@@ -846,22 +1384,62 @@ mod review_brief_tests {
             failed: false,
             output_tail: "".into(),
             ran_no_tests: None,
-            evidence: Some(crate::tools::builtin::verify::verification_evidence("python3 -m unittest -q", "Ran 5 tests\n\nOK")),
+            evidence: Some(crate::tools::builtin::verify::verification_evidence(
+                "python3 -m unittest -q",
+                "Ran 5 tests\n\nOK",
+            )),
             id: Some("v1".into()),
         }]);
         let brief = build_review_brief(&cwd, Some(&head), &state);
         assert!(brief.starts_with(REVIEW_BRIEF_PREFIX), "{brief}");
-        assert!(brief.contains("+two"), "committed change is in the diff: {brief}");
-        assert!(brief.contains("new file new.txt (1 lines, in full — do not READ it again):\n```\nfresh\n```"), "small new files ride along: {brief}");
-        assert!(brief.contains("new file big.txt (READ it; not in the diff)"), "big new files are only listed: {brief}");
-        assert!(brief.contains(&format!("{REVIEW_BRIEF_EDITED_HEADER}\n== a.txt (2 lines)\n1\tone\n2\ttwo")), "edited tracked files ride along whole: {brief}");
-        assert!(brief.contains("do not READ a file that appears there"), "{brief}");
-        assert!(brief.contains("v1 passed — python3 -m unittest -q"), "{brief}");
-        let settled = build_review_brief_with(&cwd, Some(&head), &state, Some("the harness ran the goal-declared check (cargo test --lib harness)"));
+        assert!(
+            brief.contains("+two"),
+            "committed change is in the diff: {brief}"
+        );
+        assert!(
+            brief.contains(
+                "new file new.txt (1 lines, in full — do not READ it again):\n```\nfresh\n```"
+            ),
+            "small new files ride along: {brief}"
+        );
+        assert!(
+            brief.contains("new file big.txt (READ it; not in the diff)"),
+            "big new files are only listed: {brief}"
+        );
+        assert!(
+            brief.contains(&format!(
+                "{REVIEW_BRIEF_EDITED_HEADER}\n== a.txt (2 lines)\n1\tone\n2\ttwo"
+            )),
+            "edited tracked files ride along whole: {brief}"
+        );
+        assert!(
+            brief.contains("do not READ a file that appears there"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("v1 passed — python3 -m unittest -q"),
+            "{brief}"
+        );
+        let settled = build_review_brief_with(
+            &cwd,
+            Some(&head),
+            &state,
+            Some("the harness ran the goal-declared check (cargo test --lib harness)"),
+        );
         assert!(settled.contains("verification settled: the harness ran the goal-declared check (cargo test --lib harness) after the last edit"), "{settled}");
-        assert!(settled.contains("already settle verification; finish_task once the diff reads correct"), "{settled}");
-        assert!(!settled.contains("One VERIFY of the project's own check is enough"), "{settled}");
-        assert!(brief.contains("One VERIFY of the project's own check is enough"), "{brief}");
+        assert!(
+            settled
+                .contains("already settle verification; finish_task once the diff reads correct"),
+            "{settled}"
+        );
+        assert!(
+            !settled.contains("One VERIFY of the project's own check is enough"),
+            "{settled}"
+        );
+        assert!(
+            brief.contains("One VERIFY of the project's own check is enough"),
+            "{brief}"
+        );
         let outside = build_review_brief(&std::env::temp_dir().to_string_lossy(), None, &state);
         assert!(outside.contains("diff: none"), "{outside}");
     }
@@ -881,7 +1459,11 @@ pub const REVIEW_BRIEF_MAX_INLINE_CHARS: usize = 16_000;
 pub const REVIEW_BRIEF_EDITED_HEADER: &str = "edited files, full current text (line-numbered exactly as a READ returns it — the diff above shows what changed, this is the context; do not READ these again):";
 
 fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -896,15 +1478,25 @@ fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
 pub const CHANGES_SO_FAR_MAX_LINES: usize = 20;
 
 pub fn changes_so_far(cwd: &str, base: &str) -> Option<(String, Vec<String>)> {
-    let stat = git_output(cwd, &["diff", "--stat", base]).map(|text| text.trim().to_string()).unwrap_or_default();
+    let stat = git_output(cwd, &["diff", "--stat", base])
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
     let mut files: Vec<String> = git_output(cwd, &["diff", "--name-only", base])
-        .map(|text| text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect())
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     let untracked: Vec<String> = git_output(cwd, &["ls-files", "--others", "--exclude-standard"])
         .map(|text| {
             text.lines()
                 .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.split('/').any(|part| part.starts_with('.')))
+                .filter(|line| {
+                    !line.is_empty() && !line.split('/').any(|part| part.starts_with('.'))
+                })
                 .map(str::to_string)
                 .collect()
         })
@@ -923,7 +1515,10 @@ pub fn changes_so_far(cwd: &str, base: &str) -> Option<(String, Vec<String>)> {
         lines.push(line.to_string());
     }
     if stat_lines.len() > CHANGES_SO_FAR_MAX_LINES {
-        lines.push(format!("… +{} more", stat_lines.len() - CHANGES_SO_FAR_MAX_LINES));
+        lines.push(format!(
+            "… +{} more",
+            stat_lines.len() - CHANGES_SO_FAR_MAX_LINES
+        ));
     }
     if !untracked.is_empty() {
         lines.push(format!("new files: {}", untracked.join(", ")));
@@ -962,7 +1557,11 @@ pub fn workspace_changed_lines_split(cwd: &str, base: &str) -> Option<(usize, us
         }
     }
     if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]) {
-        for path in untracked.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for path in untracked
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             // Dot-directories and dotfiles (a `.dripdata/` project dir inside
             // the workspace, a `.venv`) are tooling state, not the change.
             if path.split('/').any(|component| component.starts_with('.')) {
@@ -979,7 +1578,9 @@ pub fn workspace_changed_lines_split(cwd: &str, base: &str) -> Option<(usize, us
 }
 
 pub fn git_head(cwd: &str) -> Option<String> {
-    git_output(cwd, &["rev-parse", "HEAD"]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty())
+    git_output(cwd, &["rev-parse", "HEAD"])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 /// The reviewer's opening note: the run's change set (diff against the
@@ -991,19 +1592,37 @@ pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &Harne
 /// `settled` names the goal-declared check that already passed after the last
 /// edit (see HarnessRun::verified_after_last_edit); the brief then tells the
 /// reviewer not to spend a round re-running it.
-pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &HarnessState, settled: Option<&str>) -> String {
+pub fn build_review_brief_with(
+    cwd: &str,
+    run_start_head: Option<&str>,
+    state: &HarnessState,
+    settled: Option<&str>,
+) -> String {
     let mut sections = vec![REVIEW_BRIEF_PREFIX.to_string()];
     let base = run_start_head.unwrap_or("HEAD");
-    if let Some(stat) = git_output(cwd, &["diff", "--stat", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
-        sections.push(format!("changed since run start ({}):\n{stat}", &base[..base.len().min(12)]));
+    if let Some(stat) = git_output(cwd, &["diff", "--stat", base])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    {
+        sections.push(format!(
+            "changed since run start ({}):\n{stat}",
+            &base[..base.len().min(12)]
+        ));
     }
-    if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
+    if let Some(untracked) = git_output(cwd, &["ls-files", "--others", "--exclude-standard"])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    {
         // New files are not in the diff; small ones ride along in full so the
         // reviewer does not spend a round per file re-reading what it was
         // handed (bench reviewers READ every changed file before VERIFY).
         let mut listed: Vec<String> = Vec::new();
         let mut inlined = 0usize;
-        for path in untracked.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for path in untracked
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let full = std::path::Path::new(cwd).join(path);
             let text = std::fs::read_to_string(&full).ok();
             match text {
@@ -1013,20 +1632,32 @@ pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &
                         && text.chars().count() <= REVIEW_BRIEF_MAX_INLINE_CHARS =>
                 {
                     inlined += 1;
-                    listed.push(format!("new file {path} ({} lines, in full — do not READ it again):\n```\n{}\n```", text.lines().count(), text.trim_end()));
+                    listed.push(format!(
+                        "new file {path} ({} lines, in full — do not READ it again):\n```\n{}\n```",
+                        text.lines().count(),
+                        text.trim_end()
+                    ));
                 }
                 _ => listed.push(format!("new file {path} (READ it; not in the diff)")),
             }
         }
         sections.push(format!("untracked files:\n{}", listed.join("\n")));
     }
-    match git_output(cwd, &["diff", base]).map(|text| text.trim().to_string()).filter(|text| !text.is_empty()) {
-        Some(diff) if diff.chars().count() <= REVIEW_BRIEF_MAX_DIFF_CHARS => sections.push(format!("diff:\n{diff}")),
-        Some(diff) => sections.push(format!(
+    match git_output(cwd, &["diff", base])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    {
+        Some(diff) if diff.chars().count() <= REVIEW_BRIEF_MAX_DIFF_CHARS => {
+            sections.push(format!("diff:\n{diff}"))
+        }
+        Some(diff) => {
+            sections.push(format!(
             "diff (first {REVIEW_BRIEF_MAX_DIFF_CHARS} chars; READ the files for the rest):\n{}",
             diff.chars().take(REVIEW_BRIEF_MAX_DIFF_CHARS).collect::<String>()
-        )),
-        None => sections.push("diff: none (no git repository, or nothing changed since run start)".to_string()),
+        ))
+        }
+        None => sections
+            .push("diff: none (no git repository, or nothing changed since run start)".to_string()),
     }
     // The edited tracked files ride along whole (the same caps as the
     // author's named-file carry) so the reviewer starts from the text
@@ -1035,10 +1666,14 @@ pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &
         let paths: Vec<String> = edited
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.split('/').any(|segment| segment.starts_with('.')))
+            .filter(|line| {
+                !line.is_empty() && !line.split('/').any(|segment| segment.starts_with('.'))
+            })
             .map(str::to_string)
             .collect();
-        if let (Some(bodies), _) = crate::harness::outline::file_bodies_for_paths(cwd, &paths, REVIEW_BRIEF_EDITED_HEADER) {
+        if let (Some(bodies), _) =
+            crate::harness::outline::file_bodies_for_paths(cwd, &paths, REVIEW_BRIEF_EDITED_HEADER)
+        {
             sections.push(bodies);
         }
     }
@@ -1059,7 +1694,10 @@ pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &
         })
         .collect();
     if !records.is_empty() {
-        sections.push(format!("verification records this run (newest first):\n{}", records.join("\n")));
+        sections.push(format!(
+            "verification records this run (newest first):\n{}",
+            records.join("\n")
+        ));
     }
     if let Some(settled) = settled {
         sections.push(format!("verification settled: {settled} after the last edit and it passed. Do not re-run it — it costs a round and the same minutes again and answers nothing new. Spend the rounds on the diff; run a check only for something the records above do not cover."));
@@ -1073,7 +1711,10 @@ pub fn build_review_brief_with(cwd: &str, run_start_head: Option<&str>, state: &
     sections.join("\n\n")
 }
 
-pub fn extract_loop_carryover(messages: &[TransportRequestMessage], hot_tool_results: usize) -> Vec<TransportRequestMessage> {
+pub fn extract_loop_carryover(
+    messages: &[TransportRequestMessage],
+    hot_tool_results: usize,
+) -> Vec<TransportRequestMessage> {
     extract_loop_carryover_excluding(messages, hot_tool_results, &[])
 }
 
@@ -1095,7 +1736,11 @@ pub fn extract_loop_carryover_excluding(
                     .tool_calls
                     .iter()
                     .flatten()
-                    .filter_map(|call| call.function.as_ref().and_then(|function| function.name.as_deref()))
+                    .filter_map(|call| {
+                        call.function
+                            .as_ref()
+                            .and_then(|function| function.name.as_deref())
+                    })
                     .any(|name| exclude_tools.contains(&name));
                 if !excluded {
                     blocks.push(vec![message]);
@@ -1116,10 +1761,16 @@ pub fn extract_loop_carryover_excluding(
     for block in blocks.iter().rev() {
         let block_results = block
             .iter()
-            .filter(|message| message.role == ChatRoleTag::Tool && !message_text(message).starts_with(FOLDED_RESULT_MARKER))
+            .filter(|message| {
+                message.role == ChatRoleTag::Tool
+                    && !message_text(message).starts_with(FOLDED_RESULT_MARKER)
+            })
             .count();
         let block_chars: usize = block.iter().map(|message| message_chars(message)).sum();
-        if !kept.is_empty() && (tool_results + block_results > hot_tool_results || chars + block_chars > MAX_CARRYOVER_CHARS) {
+        if !kept.is_empty()
+            && (tool_results + block_results > hot_tool_results
+                || chars + block_chars > MAX_CARRYOVER_CHARS)
+        {
             break;
         }
         kept.insert(0, block);
@@ -1137,9 +1788,13 @@ pub fn extract_loop_carryover_excluding(
     // Harness ops (plan_tasks, finish_task, observe, …) already live in the
     // state store the next loop is prompted from; a tail holding nothing but
     // those is not worth replaying.
-    let has_workspace_result = carried
-        .iter()
-        .any(|message| message.role == ChatRoleTag::Tool && message.name.as_deref().is_some_and(|name| !crate::harness::harness_tools::is_harness_tool(name)));
+    let has_workspace_result = carried.iter().any(|message| {
+        message.role == ChatRoleTag::Tool
+            && message
+                .name
+                .as_deref()
+                .is_some_and(|name| !crate::harness::harness_tools::is_harness_tool(name))
+    });
     if has_workspace_result {
         carried
     } else {
@@ -1148,7 +1803,11 @@ pub fn extract_loop_carryover_excluding(
 }
 
 /// The user note that follows replayed exchanges.
-pub fn build_carryover_note(carryover: &LoopCarryover, next_task_id: &str, exchanges: usize) -> String {
+pub fn build_carryover_note(
+    carryover: &LoopCarryover,
+    next_task_id: &str,
+    exchanges: usize,
+) -> String {
     let replayed = format!("its last {exchanges} tool exchange(s) are replayed above, verbatim");
     if carryover.task_id.as_deref() == Some(next_task_id) {
         return format!(
@@ -1157,7 +1816,10 @@ pub fn build_carryover_note(carryover: &LoopCarryover, next_task_id: &str, excha
         );
     }
     let previous = match &carryover.task_id {
-        Some(task_id) => format!("{task_id} (\"{}\")", truncate_text(carryover.task_title.as_deref().unwrap_or(""), 80)),
+        Some(task_id) => format!(
+            "{task_id} (\"{}\")",
+            truncate_text(carryover.task_title.as_deref().unwrap_or(""), 80)
+        ),
         None => "the planning step".to_string(),
     };
     format!(
@@ -1201,11 +1863,22 @@ pub const READ_ONLY_NUDGE_EVERY: i64 = 8;
 // on this list and nothing is redirected to a file; anything unrecognized is
 // treated as a write (no nudge).
 const READ_ONLY_SHELL_PROGRAMS: [&str; 33] = [
-    "[", "awk", "basename", "cat", "command", "cut", "diff", "dirname", "du", "echo", "file", "find", "grep", "head", "jq", "ls", "nl", "printf", "pwd",
-    "realpath", "rg", "sed", "sort", "stat", "tail", "test", "tr", "tree", "true", "type", "uniq", "wc", "which",
+    "[", "awk", "basename", "cat", "command", "cut", "diff", "dirname", "du", "echo", "file",
+    "find", "grep", "head", "jq", "ls", "nl", "printf", "pwd", "realpath", "rg", "sed", "sort",
+    "stat", "tail", "test", "tr", "tree", "true", "type", "uniq", "wc", "which",
 ];
-const READ_ONLY_GIT_SUBCOMMANDS: [&str; 8] = ["blame", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"];
-const SHELL_KEYWORD_SEGMENTS: [&str; 10] = ["", "do", "done", "else", "fi", "then", "{", "}", "(", ")"];
+const READ_ONLY_GIT_SUBCOMMANDS: [&str; 8] = [
+    "blame",
+    "diff",
+    "grep",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status",
+];
+const SHELL_KEYWORD_SEGMENTS: [&str; 10] =
+    ["", "do", "done", "else", "fi", "then", "{", "}", "(", ")"];
 
 fn shell_res() -> &'static [regex::Regex; 6] {
     static RE: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
@@ -1213,7 +1886,8 @@ fn shell_res() -> &'static [regex::Regex; 6] {
         [
             // Redirects that never touch a file: fd merges (`2>&1`, `1>&2`) and
             // /dev/null sinks in either direction.
-            regex::Regex::new(r"[12&]?>&[12]|[12&]?>\s*/dev/null|<\s*/dev/null").expect("redirect regex"),
+            regex::Regex::new(r"[12&]?>&[12]|[12&]?>\s*/dev/null|<\s*/dev/null")
+                .expect("redirect regex"),
             regex::Regex::new(r"\|\|?|&&|;|\n").expect("segment regex"),
             regex::Regex::new(r"^for\s+\w+\s+in\b").expect("for regex"),
             regex::Regex::new(r"^[({\s]+").expect("wrapper regex"),
@@ -1270,10 +1944,18 @@ pub fn is_read_only_shell_command(command: &str) -> bool {
         if !READ_ONLY_SHELL_PROGRAMS.contains(&program) {
             return false;
         }
-        if program == "sed" && words.iter().any(|word| sed_i_re.is_match(word) || *word == "--in-place") {
+        if program == "sed"
+            && words
+                .iter()
+                .any(|word| sed_i_re.is_match(word) || *word == "--in-place")
+        {
             return false;
         }
-        if program == "find" && words.iter().any(|word| matches!(*word, "-delete" | "-exec" | "-execdir" | "-ok")) {
+        if program == "find"
+            && words
+                .iter()
+                .any(|word| matches!(*word, "-delete" | "-exec" | "-execdir" | "-ok"))
+        {
             return false;
         }
     }
@@ -1284,10 +1966,26 @@ pub fn is_read_only_shell_command(command: &str) -> bool {
 // heredoc, an in-place sed, or a program whose job is to create/move/remove
 // files. Flash writes whole files through `cat > f <<'EOF'`, and such a loop
 // has persisted something even though no PATCH ran (see WRITING_SHELL_PROGRAMS).
-const WRITING_SHELL_PROGRAMS: [&str; 14] =
-    ["chmod", "chown", "cp", "dd", "install", "ln", "mkdir", "mv", "patch", "rm", "rmdir", "tee", "touch", "truncate"];
+const WRITING_SHELL_PROGRAMS: [&str; 14] = [
+    "chmod", "chown", "cp", "dd", "install", "ln", "mkdir", "mv", "patch", "rm", "rmdir", "tee",
+    "touch", "truncate",
+];
 const WRITING_GIT_SUBCOMMANDS: [&str; 15] = [
-    "add", "am", "apply", "checkout", "cherry-pick", "commit", "merge", "mv", "rebase", "reset", "restore", "revert", "rm", "stash", "switch",
+    "add",
+    "am",
+    "apply",
+    "checkout",
+    "cherry-pick",
+    "commit",
+    "merge",
+    "mv",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "switch",
 ];
 
 /// True when a BASH command plainly writes to the workspace (see WRITING_SHELL_PROGRAMS).
@@ -1309,10 +2007,16 @@ pub fn is_writing_shell_command(command: &str) -> bool {
         if WRITING_SHELL_PROGRAMS.contains(&program) {
             return true;
         }
-        if program == "git" && WRITING_GIT_SUBCOMMANDS.contains(&words.get(1).copied().unwrap_or("")) {
+        if program == "git"
+            && WRITING_GIT_SUBCOMMANDS.contains(&words.get(1).copied().unwrap_or(""))
+        {
             return true;
         }
-        if program == "sed" && words.iter().any(|word| sed_i_re.is_match(word) || *word == "--in-place") {
+        if program == "sed"
+            && words
+                .iter()
+                .any(|word| sed_i_re.is_match(word) || *word == "--in-place")
+        {
             return true;
         }
     }
@@ -1346,7 +2050,12 @@ pub fn finish_bounce_family(text: &str) -> Option<&'static str> {
 /// status flips, the summary carries the harness note, and the anomalies
 /// list is filled from the state's recorded anomalies plus every expectation
 /// whose latest observation mismatched or that was never observed.
-pub fn unreconciled_finish_input(raw_input: &str, state: &HarnessState, count: u32, bounce: &str) -> Option<String> {
+pub fn unreconciled_finish_input(
+    raw_input: &str,
+    state: &HarnessState,
+    count: u32,
+    bounce: &str,
+) -> Option<String> {
     let mut input: serde_json::Value = serde_json::from_str(raw_input).ok()?;
     let object = input.as_object_mut()?;
     let mut anomalies: Vec<serde_json::Value> = state
@@ -1357,7 +2066,12 @@ pub fn unreconciled_finish_input(raw_input: &str, state: &HarnessState, count: u
     for expectation in &state.expectations {
         let latest = expectation.observations.last();
         let unresolved = latest.map_or(true, |observation| !observation.matches);
-        if unresolved && !anomalies.iter().any(|item| item.get("subject").and_then(|value| value.as_str()) == Some(expectation.subject.as_str())) {
+        if unresolved
+            && !anomalies.iter().any(|item| {
+                item.get("subject").and_then(|value| value.as_str())
+                    == Some(expectation.subject.as_str())
+            })
+        {
             anomalies.push(serde_json::json!({
                 "subject": expectation.subject,
                 "expected": expectation.expected,
@@ -1369,12 +2083,21 @@ pub fn unreconciled_finish_input(raw_input: &str, state: &HarnessState, count: u
     if anomalies.is_empty() {
         return None;
     }
-    let summary = object.get("summary").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    let summary = object
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
     object.insert("status".to_string(), serde_json::json!("unreconciled"));
     object.insert("anomalies".to_string(), serde_json::json!(anomalies));
     object.insert(
         "summary".to_string(),
-        serde_json::json!(format!("{summary} [harness: finished unreconciled after {count} identical bounces — {}]", truncate_text(bounce, 160)).trim().to_string()),
+        serde_json::json!(format!(
+            "{summary} [harness: finished unreconciled after {count} identical bounces — {}]",
+            truncate_text(bounce, 160)
+        )
+        .trim()
+        .to_string()),
     );
     Some(input.to_string())
 }
@@ -1384,19 +2107,27 @@ pub fn unreconciled_finish_input(raw_input: &str, state: &HarnessState, count: u
 /// bounced for missing evidence, and re-ran the same suite as VERIFY. The
 /// command must name a runner and its output must parse as an executed test
 /// result; the record's anchor is then promoted like any native-runner suite.
-pub fn bash_native_runner_verification(tool_name: &str, raw_input: &str, output: &str) -> Option<String> {
+pub fn bash_native_runner_verification(
+    tool_name: &str,
+    raw_input: &str,
+    output: &str,
+) -> Option<String> {
     if tool_name != "BASH" {
         return None;
     }
     let command = extract_bash_command(raw_input)?;
     native_runner_name(&command)?;
     let evidence = crate::tools::builtin::verify::verification_evidence(&command, output);
-    (evidence.kind == crate::core::types::VerificationEvidenceKind::Tests && evidence.executed > 0).then_some(command)
+    (evidence.kind == crate::core::types::VerificationEvidenceKind::Tests && evidence.executed > 0)
+        .then_some(command)
 }
 
 pub fn extract_bash_command(raw_input: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(raw_input).ok()?;
-    parsed.get("command").and_then(Value::as_str).map(str::to_string)
+    parsed
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// The build warm-up for a workspace, if any, when a Cargo.toml sits at
@@ -1415,10 +2146,20 @@ pub fn build_warmup_command(cwd: &str, goal: &str) -> Option<(String, Vec<String
     if !Path::new(cwd).join("Cargo.toml").is_file() {
         return None;
     }
-    if let Some(args) = goal_declared_check_commands(goal).iter().find_map(|command| cargo_test_warmup_args(command)) {
+    if let Some(args) = goal_declared_check_commands(goal)
+        .iter()
+        .find_map(|command| cargo_test_warmup_args(command))
+    {
         return Some(("cargo".to_string(), args));
     }
-    Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]))
+    Some((
+        "cargo".to_string(),
+        vec![
+            "build".to_string(),
+            "--tests".to_string(),
+            "--quiet".to_string(),
+        ],
+    ))
 }
 
 /// The `cargo test` arguments of a check command with `--no-run` added and
@@ -1429,13 +2170,19 @@ pub fn build_warmup_command(cwd: &str, goal: &str) -> Option<(String, Vec<String
 pub fn cargo_test_warmup_args(command: &str) -> Option<Vec<String>> {
     let head = command.split(['|', ';']).next()?.split("&&").next()?;
     let tokens: Vec<&str> = head.split_whitespace().collect();
-    let start = tokens.windows(2).position(|pair| pair[0] == "cargo" && pair[1] == "test")?;
+    let start = tokens
+        .windows(2)
+        .position(|pair| pair[0] == "cargo" && pair[1] == "test")?;
     let mut args = vec!["test".to_string()];
     for token in &tokens[start + 2..] {
         if *token == "--" {
             break;
         }
-        if *token == "--no-run" || token.starts_with("2>") || token.starts_with('>') || token.starts_with('<') {
+        if *token == "--no-run"
+            || token.starts_with("2>")
+            || token.starts_with('>')
+            || token.starts_with('<')
+        {
             continue;
         }
         args.push((*token).to_string());
@@ -1464,7 +2211,10 @@ pub use crate::harness::model_call::BASE_MODEL_DEFAULT_REASONING_EFFORT;
 /// (effort to send, whether it is the harness default rather than the
 /// profile's own setting).
 pub fn base_model_reasoning_effort(configured: Option<&str>) -> (Option<String>, bool) {
-    match configured.map(str::trim).filter(|effort| !effort.is_empty()) {
+    match configured
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+    {
         Some(effort) => (Some(effort.to_string()), false),
         None => (Some(BASE_MODEL_DEFAULT_REASONING_EFFORT.to_string()), true),
     }
@@ -1481,7 +2231,11 @@ pub fn detect_project_check_command(cwd: &str) -> Option<(String, &'static str)>
     if let Ok(text) = std::fs::read_to_string(root.join("package.json")) {
         let has_test_script = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
-            .and_then(|json| json.get("scripts")?.get("test")?.as_str().map(|script| !script.trim().is_empty() && !script.contains("no test specified")))
+            .and_then(|json| {
+                json.get("scripts")?.get("test")?.as_str().map(|script| {
+                    !script.trim().is_empty() && !script.contains("no test specified")
+                })
+            })
             .unwrap_or(false);
         if has_test_script {
             let runner = if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
@@ -1496,15 +2250,25 @@ pub fn detect_project_check_command(cwd: &str) -> Option<(String, &'static str)>
             return Some((runner.to_string(), "package.json test script"));
         }
     }
-    if root.join("pytest.ini").is_file() || root.join("conftest.py").is_file() || root.join("tests/conftest.py").is_file() {
+    if root.join("pytest.ini").is_file()
+        || root.join("conftest.py").is_file()
+        || root.join("tests/conftest.py").is_file()
+    {
         return Some(("python3 -m pytest -q".to_string(), "pytest configuration"));
     }
     if root.join("tests").is_dir() {
         let has_python_tests = std::fs::read_dir(root.join("tests"))
-            .map(|entries| entries.flatten().any(|entry| entry.file_name().to_string_lossy().ends_with(".py")))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().ends_with(".py"))
+            })
             .unwrap_or(false);
         if has_python_tests {
-            return Some(("python3 -m unittest discover -s tests -q".to_string(), "tests/ directory"));
+            return Some((
+                "python3 -m unittest discover -s tests -q".to_string(),
+                "tests/ directory",
+            ));
         }
     }
     None
@@ -1512,7 +2276,8 @@ pub fn detect_project_check_command(cwd: &str) -> Option<(String, &'static str)>
 
 /// True when a BASH/VERIFY result says the command was killed at its timeout.
 pub fn output_reports_hang(tool_content: &str) -> bool {
-    tool_content.contains("TIMED OUT after") || tool_content.contains("HUNG: the command did not finish")
+    tool_content.contains("TIMED OUT after")
+        || tool_content.contains("HUNG: the command did not finish")
 }
 
 /// Consecutive runs of one command shape (no edit between) before the result
@@ -1560,7 +2325,12 @@ pub fn normalize_command_shape(command: &str) -> String {
         }
         break;
     }
-    if words.len() > 2 && matches!(words[0], "timeout" | "gtimeout") && words[1].chars().all(|c| c.is_ascii_digit() || c == 's' || c == 'm') {
+    if words.len() > 2
+        && matches!(words[0], "timeout" | "gtimeout")
+        && words[1]
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == 's' || c == 'm')
+    {
         words.drain(0..2);
     }
     // Trailing `2>/dev/null` redirect.
@@ -1575,7 +2345,12 @@ pub fn normalize_command_shape(command: &str) -> String {
             words.pop();
         }
     }
-    words.retain(|word| !matches!(*word, "2>&1" | "-v" | "-vv" | "-q" | "--verbose" | "--quiet"));
+    words.retain(|word| {
+        !matches!(
+            *word,
+            "2>&1" | "-v" | "-vv" | "-q" | "--verbose" | "--quiet"
+        )
+    });
     words.join(" ")
 }
 
@@ -1610,8 +2385,16 @@ pub const HUNG_SHAPE_LEASH_MS: u64 = 30_000;
 pub fn leash_timeout(raw_input: &str, tool_name: &str, leash_ms: u64) -> Option<String> {
     let mut value: serde_json::Value = serde_json::from_str(raw_input).ok()?;
     let object = value.as_object_mut()?;
-    let key = if tool_name == "VERIFY" { "timeout" } else { "timeoutMs" };
-    if object.get(key).and_then(serde_json::Value::as_f64).is_some_and(|current| current <= leash_ms as f64) {
+    let key = if tool_name == "VERIFY" {
+        "timeout"
+    } else {
+        "timeoutMs"
+    };
+    if object
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|current| current <= leash_ms as f64)
+    {
         return None;
     }
     object.insert(key.to_string(), serde_json::json!(leash_ms));
@@ -1665,7 +2448,11 @@ pub fn extract_goal_paths(goal: &str) -> Vec<String> {
         if !boundary_ok {
             continue;
         }
-        let normalized = path.as_str().strip_prefix("./").unwrap_or(path.as_str()).to_string();
+        let normalized = path
+            .as_str()
+            .strip_prefix("./")
+            .unwrap_or(path.as_str())
+            .to_string();
         if !paths.contains(&normalized) {
             paths.push(normalized);
         }
@@ -1717,13 +2504,21 @@ pub fn build_unnamed_path_note(goal: &str, patch_output: &str) -> Option<String>
     let unnamed: Vec<String> = extract_created_paths(patch_output)
         .into_iter()
         .filter(|path| {
-            !goal_paths.contains(path) && !goal_paths.iter().any(|goal_path| path.starts_with(&format!("{goal_path}/")))
+            !goal_paths.contains(path)
+                && !goal_paths
+                    .iter()
+                    .any(|goal_path| path.starts_with(&format!("{goal_path}/")))
         })
         .collect();
     if unnamed.is_empty() {
         return None;
     }
-    let mut shown = goal_paths.iter().take(4).cloned().collect::<Vec<_>>().join(", ");
+    let mut shown = goal_paths
+        .iter()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if goal_paths.len() > 4 {
         shown.push_str(&format!(", … ({} paths)", goal_paths.len()));
     }
@@ -1833,9 +2628,12 @@ fn verification_pattern_matches(command: &str) -> bool {
             || paired("zig", &["test", "build"])
             || paired("gradle", &["test", "check", "build"])
             || paired("mvn", &["test", "verify"])
-            || ["pytest", "vitest", "jest", "tsc", "unittest", "mocha", "rspec", "phpunit", "tox", "nox"]
-                .iter()
-                .any(|word| word_at(bytes, start, end, word))
+            || [
+                "pytest", "vitest", "jest", "tsc", "unittest", "mocha", "rspec", "phpunit", "tox",
+                "nox",
+            ]
+            .iter()
+            .any(|word| word_at(bytes, start, end, word))
         {
             return true;
         }
@@ -1847,7 +2645,9 @@ fn verification_pattern_matches(command: &str) -> bool {
 /// Stable, goal-unique verification record identity ("v<n>"): the next number
 /// after the highest id already present, so replaying identical command text
 /// still yields a new, distinct record id. Cycle-agnostic by construction.
-pub fn next_verification_record_id(records: &Option<Vec<crate::core::types::HarnessVerificationRecord>>) -> String {
+pub fn next_verification_record_id(
+    records: &Option<Vec<crate::core::types::HarnessVerificationRecord>>,
+) -> String {
     let highest = records
         .iter()
         .flatten()
@@ -1893,7 +2693,12 @@ pub fn hash_text(text: &str) -> String {
 // Full tool output for truncated results, written beside the session state
 // (…/<session>/outputs/<loop>-<callId>.log). Best-effort: spill failures
 // must never fail the tool round.
-pub fn spill_tool_output(state_path: &str, loop_number: u32, call_id: &str, content: &str) -> Option<String> {
+pub fn spill_tool_output(
+    state_path: &str,
+    loop_number: u32,
+    call_id: &str,
+    content: &str,
+) -> Option<String> {
     let result = (|| -> Option<String> {
         let dir = Path::new(state_path)
             .parent()
@@ -1904,7 +2709,13 @@ pub fn spill_tool_output(state_path: &str, loop_number: u32, call_id: &str, cont
 
         let mut safe_call_id: String = call_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         safe_call_id = safe_call_id.chars().take(60).collect();
         let spill_path = dir.join(format!("{}-{}.log", loop_number, safe_call_id));
@@ -1980,7 +2791,15 @@ pub const EDIT_CHECKS_MAX_PER_LOOP: u32 = 3;
 pub const EDIT_CHECK_MAX_KNOWN_MS: i64 = 8_000;
 /// Runners that compile before they test; unknown durations for these are
 /// assumed slow.
-pub const EDIT_CHECK_SLOW_RUNNERS: &[&str] = &["cargo test", "cargo nextest", "go test", "dotnet test", "mvn test", "gradle test", "mix test"];
+pub const EDIT_CHECK_SLOW_RUNNERS: &[&str] = &[
+    "cargo test",
+    "cargo nextest",
+    "go test",
+    "dotnet test",
+    "mvn test",
+    "gradle test",
+    "mix test",
+];
 
 /// Whether the goal's check is cheap enough to run after an edit round.
 /// `build_warm`: the run's background warm-up build for this runner has
@@ -1992,7 +2811,11 @@ pub const EDIT_CHECK_SLOW_RUNNERS: &[&str] = &["cargo test", "cargo nextest", "g
 pub fn edit_check_allowed(command: &str, known_ms: Option<i64>, build_warm: bool) -> bool {
     match known_ms {
         Some(ms) => ms <= EDIT_CHECK_MAX_KNOWN_MS,
-        None => build_warm || !native_runner_name(command).is_some_and(|runner| EDIT_CHECK_SLOW_RUNNERS.contains(&runner)),
+        None => {
+            build_warm
+                || !native_runner_name(command)
+                    .is_some_and(|runner| EDIT_CHECK_SLOW_RUNNERS.contains(&runner))
+        }
     }
 }
 
@@ -2002,9 +2825,18 @@ pub fn edit_check_allowed(command: &str, known_ms: Option<i64>, build_warm: bool
 /// recorded pwrde run measured its first `cargo test features::` at 34s
 /// that way and skipped every later edit check as "measured slow", though
 /// the same check took 5s once the build was warm.
-pub fn check_duration_measurable(warmup_command: Option<&str>, warmup_done: bool, command: &str) -> bool {
+pub fn check_duration_measurable(
+    warmup_command: Option<&str>,
+    warmup_done: bool,
+    command: &str,
+) -> bool {
     match warmup_command {
-        Some(warmup) if native_runner_name(warmup).is_some() && native_runner_name(warmup) == native_runner_name(command) => warmup_done,
+        Some(warmup)
+            if native_runner_name(warmup).is_some()
+                && native_runner_name(warmup) == native_runner_name(command) =>
+        {
+            warmup_done
+        }
         _ => true,
     }
 }
@@ -2039,8 +2871,26 @@ pub enum FinishRecheck {
 /// question, none of the in-progress phrasings.
 pub fn narration_reads_as_completion(text: &str) -> bool {
     const IN_PROGRESS: &[&str] = &[
-        "next i", "i will", "i'll", "let me", "now i", "todo", "remaining", "not yet", "cannot", "can't", "unable",
-        "blocked", "need to", "needs to", "should i", "would you", "waiting", "still failing", "does not pass", "doesn't pass",
+        "next i",
+        "i will",
+        "i'll",
+        "let me",
+        "now i",
+        "todo",
+        "remaining",
+        "not yet",
+        "cannot",
+        "can't",
+        "unable",
+        "blocked",
+        "need to",
+        "needs to",
+        "should i",
+        "would you",
+        "waiting",
+        "still failing",
+        "does not pass",
+        "doesn't pass",
     ];
     let trimmed = text.trim();
     if trimmed.chars().count() < 20 || trimmed.ends_with('?') {
@@ -2054,10 +2904,14 @@ pub fn narration_reads_as_completion(text: &str) -> bool {
 /// changed since the last check, and that check was an external
 /// (goal-declared or project) suite that passed with tests executed.
 pub fn verified_after_last_edit(state: &HarnessState) -> bool {
-    if state.workspace_edits.unwrap_or(0) == 0 || state.mutations_since_verification.unwrap_or(1) != 0 {
+    if state.workspace_edits.unwrap_or(0) == 0
+        || state.mutations_since_verification.unwrap_or(1) != 0
+    {
         return false;
     }
-    let Some(record) = state.last_verification.as_ref() else { return false };
+    let Some(record) = state.last_verification.as_ref() else {
+        return false;
+    };
     if record.failed || record.ran_no_tests == Some(true) {
         return false;
     }
@@ -2080,7 +2934,9 @@ pub fn goal_named_paths_all_edited(goal: &str, edited_paths: &[String]) -> bool 
 }
 
 pub fn finish_recheck_reason(bounce: &str, mutations_since: i64) -> Option<FinishRecheck> {
-    if bounce.contains("no verification command (test/build/typecheck) has run") || bounce.contains("no correctness-class evidence") {
+    if bounce.contains("no verification command (test/build/typecheck) has run")
+        || bounce.contains("no correctness-class evidence")
+    {
         return Some(FinishRecheck::Unchecked);
     }
     let edited_since = mutations_since > 0;
@@ -2124,7 +2980,10 @@ pub const GOAL_DECLARED_CHECK_MARKER: &str = "harnessGoalDeclaredCheck";
 /// not send two tool calls in one response (GLM sent 0 of 19 finishes with
 /// its last PATCH when asked) do set a field on the call they are already
 /// making.
-pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<String>) -> (Vec<NormalizedCall>, usize) {
+pub fn expand_patch_finishes(
+    calls: Vec<NormalizedCall>,
+    used_ids: &mut HashSet<String>,
+) -> (Vec<NormalizedCall>, usize) {
     let mut out = Vec::with_capacity(calls.len() + 1);
     let mut expanded = 0usize;
     for mut call in calls {
@@ -2142,8 +3001,18 @@ pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<
         };
         let (summary, check) = match &finish {
             Value::Object(fields) => (
-                fields.get("summary").and_then(Value::as_str).unwrap_or("").trim().to_string(),
-                fields.get("check").and_then(Value::as_str).map(str::trim).filter(|check| !check.is_empty()).map(str::to_string),
+                fields
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                fields
+                    .get("check")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|check| !check.is_empty())
+                    .map(str::to_string),
             ),
             Value::String(summary) => (summary.trim().to_string(), None),
             _ => (String::new(), None),
@@ -2182,10 +3051,12 @@ pub fn expand_patch_finishes(calls: Vec<NormalizedCall>, used_ids: &mut HashSet<
             normalized: crate::harness::transport::OpenAICompatibleToolCall {
                 id: Some(finish_id),
                 tool_type: Some("function".to_string()),
-                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
-                    name: Some("finish_task".to_string()),
-                    arguments: Some(raw_input.clone()),
-                }),
+                function: Some(
+                    crate::harness::transport::OpenAICompatibleToolCallFunction {
+                        name: Some("finish_task".to_string()),
+                        arguments: Some(raw_input.clone()),
+                    },
+                ),
             },
             raw_input,
             tool_name: "finish_task".to_string(),
@@ -2204,7 +3075,10 @@ fn lift_patch_finish(input: &mut Value) -> Option<Value> {
     let mut finish = input.as_object_mut()?.remove("finish");
     if let Some(Value::Array(entries)) = input.get_mut("files") {
         for entry in entries.iter_mut() {
-            if let Some(nested) = entry.as_object_mut().and_then(|fields| fields.remove("finish")) {
+            if let Some(nested) = entry
+                .as_object_mut()
+                .and_then(|fields| fields.remove("finish"))
+            {
                 finish.get_or_insert(nested);
             }
         }
@@ -2223,7 +3097,10 @@ fn lift_patch_finish(input: &mut Value) -> Option<Value> {
 }
 
 fn patch_entry_is_a_noop(entry: &Value) -> bool {
-    let path_is_noop = entry.get("path").and_then(Value::as_str).is_some_and(|path| path.contains("__noop__"));
+    let path_is_noop = entry
+        .get("path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| path.contains("__noop__"));
     let identical = match (entry.get("find"), entry.get("replace")) {
         (Some(Value::String(find)), Some(Value::String(replace))) => find == replace,
         _ => false,
@@ -2236,7 +3113,8 @@ fn patch_entry_is_a_noop(entry: &Value) -> bool {
 fn patch_input_carries_an_edit(input: &Value) -> bool {
     let has_edit = |object: &Value| {
         object.get("content").and_then(Value::as_str).is_some()
-            || (object.get("find").and_then(Value::as_str).is_some() && object.get("replace").is_some())
+            || (object.get("find").and_then(Value::as_str).is_some()
+                && object.get("replace").is_some())
     };
     if has_edit(input) {
         return true;
@@ -2258,7 +3136,12 @@ pub fn finish_after_failed_call(raw_input: &str, failed: &[String]) -> Option<St
     }
     let status = serde_json::from_str::<Value>(raw_input)
         .ok()
-        .and_then(|input| input.get("status").and_then(Value::as_str).map(str::to_string))
+        .and_then(|input| {
+            input
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "completed".to_string());
     if status != "completed" {
         return None;
@@ -2284,7 +3167,12 @@ pub fn declared_verification_anchor_for_goal(
 ) -> Option<crate::core::types::VerificationAnchor> {
     let command = serde_json::from_str::<serde_json::Value>(raw_input)
         .ok()
-        .and_then(|input| input.get("command").and_then(|value| value.as_str()).map(str::to_string))
+        .and_then(|input| {
+            input
+                .get("command")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let declared = goal_declared_check_commands(goal);
     let goal_check = declared.iter().find(|check| command.contains(check.trim()));
@@ -2304,7 +3192,9 @@ pub fn declared_verification_anchor_for_goal(
             expectation_subject: None,
         });
     };
-    if anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored && anchor.downgraded_reason.is_none() {
+    if anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored
+        && anchor.downgraded_reason.is_none()
+    {
         if let Some(check) = goal_check {
             anchor.kind = crate::core::types::VerificationAnchorKind::External;
             anchor.source = Some(format!("goal-declared acceptance check: {check} (declared self by the agent; the goal declares this command)"));
@@ -2329,12 +3219,17 @@ pub fn promote_native_runner_anchor(
     evidence: &crate::core::types::VerificationEvidence,
     edited_paths: &[String],
 ) -> Option<crate::core::types::VerificationAnchor> {
-    use crate::core::types::{VerificationAnchor, VerificationAnchorKind, VerificationEvidenceKind};
+    use crate::core::types::{
+        VerificationAnchor, VerificationAnchorKind, VerificationEvidenceKind,
+    };
     if evidence.kind != VerificationEvidenceKind::Tests || evidence.executed <= 0 {
         return anchor;
     }
     let names_edited_file = edited_paths.iter().any(|path| {
-        let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path.as_str());
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path.as_str());
         !name.is_empty() && command.contains(name)
     });
     if names_edited_file {
@@ -2389,8 +3284,11 @@ pub fn repeated_verify_reuse(
     if evidence.executed == 0 {
         return None;
     }
-    let same = normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(command))
-        == normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(&record.command));
+    let same = normalize_command_shape(&crate::tools::builtin::verify::strip_trailing_tail_pipe(
+        command,
+    )) == normalize_command_shape(
+        &crate::tools::builtin::verify::strip_trailing_tail_pipe(&record.command),
+    );
     if !same {
         return None;
     }
@@ -2454,7 +3352,11 @@ pub fn goal_placement_anchor(goal: &str) -> Option<(bool, String)> {
         let name = capture.get(2)?.as_str();
         let inner = &name[1..name.len().saturating_sub(1).max(1)];
         let identifier_shaped = name.len() >= 4
-            && (inner.contains('_') || name.chars().zip(name.chars().skip(1)).any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase()));
+            && (inner.contains('_')
+                || name
+                    .chars()
+                    .zip(name.chars().skip(1))
+                    .any(|(a, b)| a.is_ascii_lowercase() && b.is_ascii_uppercase()));
         if !identifier_shaped {
             continue;
         }
@@ -2470,19 +3372,34 @@ pub fn goal_placement_anchor(goal: &str) -> Option<(bool, String)> {
 /// the end of the file (or before its closing brace), and the model spent
 /// READ + PATCH rounds moving the text — or left it there.
 pub fn anchor_append_to_goal(raw_input: &str, goal: &str) -> (String, Option<String>) {
-    let Some((after, name)) = goal_placement_anchor(goal) else { return (raw_input.to_string(), None) };
-    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else { return (raw_input.to_string(), None) };
+    let Some((after, name)) = goal_placement_anchor(goal) else {
+        return (raw_input.to_string(), None);
+    };
+    let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return (raw_input.to_string(), None);
+    };
     let key = if after { "after" } else { "before" };
     let mut anchored = false;
     let anchor_entry = |entry: &mut serde_json::Value, anchored: &mut bool| {
-        let has_append = entry.get("append").and_then(|value| value.as_str()).is_some_and(|text| !text.is_empty());
-        let placed = ["after", "before", "find"].iter().any(|field| entry.get(field).and_then(|value| value.as_str()).is_some_and(|text| !text.is_empty()));
+        let has_append = entry
+            .get("append")
+            .and_then(|value| value.as_str())
+            .is_some_and(|text| !text.is_empty());
+        let placed = ["after", "before", "find"].iter().any(|field| {
+            entry
+                .get(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| !text.is_empty())
+        });
         if has_append && !placed {
             entry[key] = serde_json::Value::String(name.clone());
             *anchored = true;
         }
     };
-    if let Some(entries) = input.get_mut("files").and_then(|value| value.as_array_mut()) {
+    if let Some(entries) = input
+        .get_mut("files")
+        .and_then(|value| value.as_array_mut())
+    {
         for entry in entries.iter_mut() {
             anchor_entry(entry, &mut anchored);
         }
@@ -2497,7 +3414,9 @@ pub fn anchor_append_to_goal(raw_input: &str, goal: &str) -> (String, Option<Str
 
 /// The workspace paths a PATCH input writes to (single-file and files[]).
 pub fn patched_paths(raw_input: &str) -> Vec<String> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_input) else {
+        return Vec::new();
+    };
     let mut paths: Vec<String> = Vec::new();
     let mut push = |path: Option<&str>| {
         if let Some(path) = path.filter(|path| !path.is_empty()) {
@@ -2523,7 +3442,11 @@ pub fn read_range_of(raw_input: &str) -> Option<(String, (i64, i64))> {
     let path = value.get("path")?.as_str()?.to_string();
     let range = match value.get("offset").and_then(serde_json::Value::as_i64) {
         Some(offset) => {
-            let limit = value.get("limit").and_then(serde_json::Value::as_i64).unwrap_or(2000).max(1);
+            let limit = value
+                .get("limit")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(2000)
+                .max(1);
             (offset, offset.saturating_add(limit))
         }
         None => (0, i64::MAX),
@@ -2537,7 +3460,13 @@ pub fn read_range_of(raw_input: &str) -> Option<(String, (i64, i64))> {
 pub fn overlapping_read_note(seen: &[(i64, i64)], range: (i64, i64)) -> Option<String> {
     let (lo, hi) = range;
     let overlap = seen.iter().find(|(s, e)| lo < *e && *s < hi)?;
-    let describe = |(s, e): (i64, i64)| if e == i64::MAX { "the whole file".to_string() } else { format!("lines {}-{}", s + 1, e) };
+    let describe = |(s, e): (i64, i64)| {
+        if e == i64::MAX {
+            "the whole file".to_string()
+        } else {
+            format!("lines {}-{}", s + 1, e)
+        }
+    };
     Some(format!(
         "[harness] READ: {} of this file overlaps your earlier READ of {} this run, still verbatim in the conversation above — the file has not been edited since, so those lines are unchanged. Re-reading an unedited file spends a round; READ only a region you have not seen yet, or act on the copy above.",
         describe(range),
@@ -2545,26 +3474,47 @@ pub fn overlapping_read_note(seen: &[(i64, i64)], range: (i64, i64)) -> Option<S
     ))
 }
 
-pub fn promote_read_to_whole_file(raw_input: &str, prior_windows: u32, cwd: &std::path::Path) -> (String, Option<String>) {
+pub fn promote_read_to_whole_file(
+    raw_input: &str,
+    prior_windows: u32,
+    cwd: &std::path::Path,
+) -> (String, Option<String>) {
     if prior_windows < READ_WHOLE_FILE_AFTER {
         return (raw_input.to_string(), None);
     }
     let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
         return (raw_input.to_string(), None);
     };
-    let Some(path) = input.get("path").and_then(|value| value.as_str()).map(str::to_string) else {
+    let Some(path) = input
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
         return (raw_input.to_string(), None);
     };
-    let full = if std::path::Path::new(&path).is_absolute() { std::path::PathBuf::from(&path) } else { cwd.join(&path) };
+    let full = if std::path::Path::new(&path).is_absolute() {
+        std::path::PathBuf::from(&path)
+    } else {
+        cwd.join(&path)
+    };
     let Ok(text) = std::fs::read_to_string(&full) else {
         return (raw_input.to_string(), None);
     };
     let lines = text.lines().count();
-    if lines == 0 || lines > READ_WHOLE_FILE_MAX_LINES || text.chars().count() > READ_WHOLE_FILE_MAX_CHARS {
+    if lines == 0
+        || lines > READ_WHOLE_FILE_MAX_LINES
+        || text.chars().count() > READ_WHOLE_FILE_MAX_CHARS
+    {
         return (raw_input.to_string(), None);
     }
-    let offset = input.get("offset").and_then(|value| value.as_f64()).unwrap_or(1.0);
-    let limit = input.get("limit").and_then(|value| value.as_f64()).unwrap_or(400.0);
+    let offset = input
+        .get("offset")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(1.0);
+    let limit = input
+        .get("limit")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(400.0);
     if offset <= 1.0 && limit as usize >= lines {
         return (raw_input.to_string(), None);
     }
@@ -2583,7 +3533,11 @@ pub fn drop_runner_tail_filter(raw_input: &str) -> (String, Option<String>) {
     let Ok(mut input) = serde_json::from_str::<serde_json::Value>(raw_input) else {
         return (raw_input.to_string(), None);
     };
-    let Some(command) = input.get("command").and_then(|value| value.as_str()).map(str::to_string) else {
+    let Some(command) = input
+        .get("command")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
         return (raw_input.to_string(), None);
     };
     if native_runner_name(&command).is_none() {
@@ -2619,7 +3573,10 @@ pub fn native_runner_name(command: &str) -> Option<&'static str> {
         ("gradle test", "gradle test"),
         ("./gradlew test", "gradle test"),
     ];
-    RUNNERS.iter().find(|(needle, _)| command.contains(needle)).map(|(_, name)| *name)
+    RUNNERS
+        .iter()
+        .find(|(needle, _)| command.contains(needle))
+        .map(|(_, name)| *name)
 }
 
 pub fn declared_verification_anchor(
@@ -2628,7 +3585,10 @@ pub fn declared_verification_anchor(
 ) -> Option<crate::core::types::VerificationAnchor> {
     use crate::core::types::{VerificationAnchor, VerificationAnchorKind};
     let input: serde_json::Value = serde_json::from_str(raw_input).ok()?;
-    let goal_declared = input.get(GOAL_DECLARED_CHECK_MARKER).and_then(|value| value.as_bool()).unwrap_or(false);
+    let goal_declared = input
+        .get(GOAL_DECLARED_CHECK_MARKER)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let anchor = input.get("anchor")?;
     let source = anchor
         .get("source")
@@ -2673,8 +3633,17 @@ pub fn declared_verification_anchor(
     // include a test file this run touched is still mostly pre-existing
     // checks, and the free-text source must be allowed to mention that file
     // honestly without turning the whole run's evidence self-authored.
-    let command = input.get("command").and_then(|value| value.as_str()).unwrap_or_default();
-    let named = if goal_declared { None } else { edited_paths.iter().find(|path| command_names_path(command, path)) };
+    let command = input
+        .get("command")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let named = if goal_declared {
+        None
+    } else {
+        edited_paths
+            .iter()
+            .find(|path| command_names_path(command, path))
+    };
     match named {
         Some(path) => Some(VerificationAnchor {
             kind: VerificationAnchorKind::SelfAuthored,
@@ -2705,8 +3674,14 @@ pub fn command_names_path(haystack: &str, path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    let file_name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    let stem = std::path::Path::new(path).file_stem().and_then(|name| name.to_str()).unwrap_or_default();
+    let file_name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     // The stem rule exists for runner targets that are test files
     // (`--test test_totals` ↔ tests/test_totals.rs). A source module's stem
     // used as a runner filter (`cargo test --lib child_process` ↔
@@ -2722,9 +3697,12 @@ pub fn command_names_path(haystack: &str, path: &str) -> bool {
         || stem.ends_with("_tests")
         || stem.ends_with(".test")
         || stem.ends_with(".spec");
-    let test_shaped_stem = test_like_path && stem.len() >= 4 && (stem.contains('_') || stem.contains('-'));
+    let test_shaped_stem =
+        test_like_path && stem.len() >= 4 && (stem.contains('_') || stem.contains('-'));
     haystack
-        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ';' | '|' | '&' | ',' | '='))
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | ';' | '|' | '&' | ',' | '=')
+        })
         .map(|token| token.trim_start_matches("./"))
         .filter(|token| !token.is_empty())
         .any(|token| {
@@ -2742,8 +3720,15 @@ pub fn command_names_path(haystack: &str, path: &str) -> bool {
 pub fn extract_shell_write_targets(command: &str) -> Vec<String> {
     let mut targets: Vec<String> = Vec::new();
     let mut push = |token: &str| {
-        let token = token.trim_matches(|c| matches!(c, '"' | '\'' | ';' | ')' | '(')).trim_start_matches("./");
-        if !token.is_empty() && !token.starts_with('-') && !token.starts_with('$') && token != "/dev/null" && !targets.iter().any(|known| known == token) {
+        let token = token
+            .trim_matches(|c| matches!(c, '"' | '\'' | ';' | ')' | '('))
+            .trim_start_matches("./");
+        if !token.is_empty()
+            && !token.starts_with('-')
+            && !token.starts_with('$')
+            && token != "/dev/null"
+            && !targets.iter().any(|known| known == token)
+        {
             targets.push(token.to_string());
         }
     };
@@ -2755,7 +3740,10 @@ pub fn extract_shell_write_targets(command: &str) -> Vec<String> {
                 if let Some(next) = words.get(index + 1) {
                     push(next);
                 }
-            } else if let Some(rest) = trimmed.strip_prefix(">>").or_else(|| trimmed.strip_prefix('>')) {
+            } else if let Some(rest) = trimmed
+                .strip_prefix(">>")
+                .or_else(|| trimmed.strip_prefix('>'))
+            {
                 if !rest.is_empty() {
                     push(rest);
                 }
@@ -2763,11 +3751,18 @@ pub fn extract_shell_write_targets(command: &str) -> Vec<String> {
         }
         let program = words.first().copied().unwrap_or("");
         if program == "tee" {
-            for word in words[1..].iter().filter(|word| !word.contains('>') && !word.contains('<')) {
+            for word in words[1..]
+                .iter()
+                .filter(|word| !word.contains('>') && !word.contains('<'))
+            {
                 push(word);
             }
         }
-        if program == "sed" && words.iter().any(|word| *word == "-i" || word.starts_with("-i") || *word == "--in-place") {
+        if program == "sed"
+            && words
+                .iter()
+                .any(|word| *word == "-i" || word.starts_with("-i") || *word == "--in-place")
+        {
             // Operands after the script: every non-flag word past the first
             // non-flag word (the script itself).
             let mut seen_script = false;
@@ -2844,11 +3839,20 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
     // thing a `| tail` cuts off, and the doc-test block that closes cargo's
     // output always says "running 0 tests".
     let executed_by_summary = output.lines().any(|line| {
-        let Some(rest) = line.strip_prefix("test result: ") else { return false };
-        let Some(rest) = rest.strip_prefix("ok. ").or_else(|| rest.strip_prefix("FAILED. ")) else { return false };
+        let Some(rest) = line.strip_prefix("test result: ") else {
+            return false;
+        };
+        let Some(rest) = rest
+            .strip_prefix("ok. ")
+            .or_else(|| rest.strip_prefix("FAILED. "))
+        else {
+            return false;
+        };
         let mut counts = rest.split("; ").filter_map(|part| {
             let (count, label) = part.split_once(' ')?;
-            (label == "passed" || label == "failed").then(|| count.parse::<u64>().ok()).flatten()
+            (label == "passed" || label == "failed")
+                .then(|| count.parse::<u64>().ok())
+                .flatten()
         });
         counts.any(|count| count > 0)
     });
@@ -2861,7 +3865,9 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
         .lines()
         .filter_map(|line| {
             let rest = line.strip_prefix("running ")?;
-            let rest = rest.strip_suffix(" tests").or_else(|| rest.strip_suffix(" test"))?;
+            let rest = rest
+                .strip_suffix(" tests")
+                .or_else(|| rest.strip_suffix(" test"))?;
             rest.parse::<u64>().ok()
         })
         .collect();
@@ -2877,9 +3883,14 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
 
     // vitest / jest / pytest / go test spell it out.
     let lower = output.to_lowercase();
-    if ["no test files found", "no tests found", "no tests ran", "collected 0 items"]
-        .iter()
-        .any(|marker| lower.contains(marker))
+    if [
+        "no test files found",
+        "no tests found",
+        "no tests ran",
+        "collected 0 items",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
     {
         return true;
     }
@@ -2891,7 +3902,11 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
             matches!(parts.next(), Some("ok") | Some("FAIL") | Some("?")) && parts.next().is_some()
         })
         .collect();
-    if !go_packages.is_empty() && go_packages.iter().all(|line| line.contains("[no test files]")) {
+    if !go_packages.is_empty()
+        && go_packages
+            .iter()
+            .all(|line| line.contains("[no test files]"))
+    {
         return true;
     }
 
@@ -2900,7 +3915,9 @@ pub fn detect_empty_test_run(command: &str, output: &str) -> bool {
 
 fn heredoc_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r#"<<-?\s*(?:'([^']+)'|"([^"]+)"|(\w+))"#).expect("heredoc regex"))
+    RE.get_or_init(|| {
+        regex::Regex::new(r#"<<-?\s*(?:'([^']+)'|"([^"]+)"|(\w+))"#).expect("heredoc regex")
+    })
 }
 
 /// A command with its heredoc bodies removed (`cat > f <<'EOF' … EOF` keeps
@@ -2942,7 +3959,9 @@ fn collapse_whitespace(text: &str) -> String {
 /// verification and counts like one.
 pub fn is_goal_declared_verification(goal: &str, command: &str) -> bool {
     let collapsed = collapse_whitespace(&strip_heredoc_bodies(command));
-    collapsed.chars().count() >= 8 && collapsed.contains(' ') && collapse_whitespace(goal).contains(&collapsed)
+    collapsed.chars().count() >= 8
+        && collapsed.contains(' ')
+        && collapse_whitespace(goal).contains(&collapsed)
 }
 
 /// Check commands the goal itself declares in backticks (`python3 -m unittest
@@ -2966,7 +3985,10 @@ pub enum PlanMode {
 
 impl PlanMode {
     pub fn parse(raw: Option<&str>) -> PlanMode {
-        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+        match raw
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             Some("always") => PlanMode::Always,
             Some("direct") => PlanMode::Direct,
             _ => PlanMode::Auto,
@@ -3017,7 +4039,11 @@ pub fn goal_declared_check_chain(goal: &str) -> Option<String> {
     // A command that already contains another declared one (a chain the
     // goal spelled out) subsumes it.
     let full: Vec<String> = commands.clone();
-    commands.retain(|command| !full.iter().any(|other| other != command && other.contains(command.as_str())));
+    commands.retain(|command| {
+        !full
+            .iter()
+            .any(|other| other != command && other.contains(command.as_str()))
+    });
     if commands.is_empty() {
         return None;
     }
@@ -3028,17 +4054,27 @@ pub fn goal_declared_check_chain(goal: &str) -> Option<String> {
 /// command, or the chain of all of them.
 pub fn command_is_goal_declared(goal: &str, command: &str) -> bool {
     let shape = normalize_command_shape(command);
-    goal_declared_check_commands(goal).iter().any(|declared| normalize_command_shape(declared) == shape)
-        || goal_declared_check_chain(goal).is_some_and(|chain| normalize_command_shape(&chain) == shape)
+    goal_declared_check_commands(goal)
+        .iter()
+        .any(|declared| normalize_command_shape(declared) == shape)
+        || goal_declared_check_chain(goal)
+            .is_some_and(|chain| normalize_command_shape(&chain) == shape)
 }
 
 /// Whether a stale finish should re-run the last record rather than the
 /// goal-declared chain: the record already is the declared check, the goal
 /// declares none, or the declared chain hung earlier.
-pub fn rerun_keeps_goal_standing(goal: &str, record: &crate::core::types::HarnessVerificationRecord, hung_commands: &[String]) -> bool {
+pub fn rerun_keeps_goal_standing(
+    goal: &str,
+    record: &crate::core::types::HarnessVerificationRecord,
+    hung_commands: &[String],
+) -> bool {
     match goal_declared_check_chain(goal) {
         None => true,
-        Some(chain) => command_is_goal_declared(goal, &record.command) || hung_commands.iter().any(|hung| *hung == chain),
+        Some(chain) => {
+            command_is_goal_declared(goal, &record.command)
+                || hung_commands.iter().any(|hung| *hung == chain)
+        }
     }
 }
 
@@ -3046,7 +4082,11 @@ pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
     let mut commands: Vec<String> = Vec::new();
     for span in goal.split('`').skip(1).step_by(2) {
         let candidate = collapse_whitespace(span.trim());
-        if candidate.chars().count() < 8 || candidate.chars().count() > 200 || !candidate.contains(' ') || candidate.contains('\n') {
+        if candidate.chars().count() < 8
+            || candidate.chars().count() > 200
+            || !candidate.contains(' ')
+            || candidate.contains('\n')
+        {
             continue;
         }
         if verification_pattern_matches(&candidate) && !commands.contains(&candidate) {
@@ -3064,25 +4104,58 @@ pub fn goal_declared_check_commands(goal: &str) -> Vec<String> {
 /// Runner phrases a goal may name in plain prose, longest first so
 /// `python3 -m pytest` wins over `pytest`.
 const PROSE_RUNNERS: &[&str] = &[
-    "python3 -m unittest", "python -m unittest", "python3 -m pytest", "python -m pytest", "cargo nextest run", "cargo nextest",
-    "cargo test", "npm run test", "npm test", "pnpm test", "yarn test", "bun test", "go test", "mix test", "dotnet test",
-    "mvn test", "gradle test", "pytest",
+    "python3 -m unittest",
+    "python -m unittest",
+    "python3 -m pytest",
+    "python -m pytest",
+    "cargo nextest run",
+    "cargo nextest",
+    "cargo test",
+    "npm run test",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "bun test",
+    "go test",
+    "mix test",
+    "dotnet test",
+    "mvn test",
+    "gradle test",
+    "pytest",
     // Type checks, builds and lints a goal names beside its tests: a recorded
     // claude-web goal said "Verify with bun run typecheck && bun test …" and
     // only the bun test half was run, so a pre-existing type error never
     // reached the finish gate.
-    "bun run typecheck", "npm run typecheck", "pnpm run typecheck", "pnpm typecheck", "yarn typecheck", "bunx tsc", "npx tsc",
-    "tsc --noEmit", "bun run lint", "npm run lint", "bun run check", "npm run check", "cargo check", "cargo clippy", "cargo build",
-    "go build", "go vet", "ruff check", "mypy",
+    "bun run typecheck",
+    "npm run typecheck",
+    "pnpm run typecheck",
+    "pnpm typecheck",
+    "yarn typecheck",
+    "bunx tsc",
+    "npx tsc",
+    "tsc --noEmit",
+    "bun run lint",
+    "npm run lint",
+    "bun run check",
+    "npm run check",
+    "cargo check",
+    "cargo clippy",
+    "cargo build",
+    "go build",
+    "go vet",
+    "ruff check",
+    "mypy",
 ];
 /// Words that end a prose command: the argument list stops where the
 /// sentence resumes.
 const PROSE_STOP_WORDS: &[&str] = &[
-    "the", "to", "and", "then", "must", "should", "pass", "passes", "passing", "green", "exit", "exits", "with", "for", "in",
-    "is", "are", "before", "after", "that", "so", "which", "until", "once", "stays", "stay", "clean", "cleanly", "when", "if",
-    "or", "as", "on", "at", "from", "by", "a", "an", "it", "this", "all", "again", "first", "last", "still", "also", "too",
-    "of", "succeeds", "succeed", "runs", "run", "ok", "works", "without", "verify", "verifies", "check", "checks", "there",
-    "here", "now", "finally", "please", "make", "sure", "keep", "keeps", "remains", "remain", "against",
+    "the", "to", "and", "then", "must", "should", "pass", "passes", "passing", "green", "exit",
+    "exits", "with", "for", "in", "is", "are", "before", "after", "that", "so", "which", "until",
+    "once", "stays", "stay", "clean", "cleanly", "when", "if", "or", "as", "on", "at", "from",
+    "by", "a", "an", "it", "this", "all", "again", "first", "last", "still", "also", "too", "of",
+    "succeeds", "succeed", "runs", "run", "ok", "works", "without", "verify", "verifies", "check",
+    "checks", "there", "here", "now", "finally", "please", "make", "sure", "keep", "keeps",
+    "remains", "remain", "against",
 ];
 
 /// Check commands a goal names in plain prose — `Run cargo test --release
@@ -3116,7 +4189,10 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
             // `cargo test --lib"` from such a sample instead of the declared
             // `cargo test --release --lib`, compiling the wrong profile.
             let preceded_by_quote = start > 0 && matches!(line.as_bytes()[start - 1], b'"' | b'\'');
-            let followed_by_word = line.as_bytes().get(from).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
+            let followed_by_word = line
+                .as_bytes()
+                .get(from)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
             if preceded_by_word || preceded_by_quote || followed_by_word {
                 continue;
             }
@@ -3128,12 +4204,19 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
             let mut cursor = start;
             let mut end = start;
             for (index, token) in line[start..].split_whitespace().enumerate() {
-                let token_start = line[cursor..].find(token).map(|offset| cursor + offset).unwrap_or(cursor);
+                let token_start = line[cursor..]
+                    .find(token)
+                    .map(|offset| cursor + offset)
+                    .unwrap_or(cursor);
                 cursor = token_start + token.len();
                 let clean = token.trim_end_matches(|c: char| ".,;:)".contains(c));
                 if clean == "&&" {
                     let rest = line[cursor..].trim_start();
-                    match PROSE_RUNNERS.iter().filter(|next| rest.starts_with(*next)).max_by_key(|next| next.len()) {
+                    match PROSE_RUNNERS
+                        .iter()
+                        .filter(|next| rest.starts_with(*next))
+                        .max_by_key(|next| next.len())
+                    {
                         Some(next) if !tokens.is_empty() => {
                             tokens.push("&&".to_string());
                             exempt_until = index + 1 + next.split_whitespace().count();
@@ -3142,10 +4225,17 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
                         _ => break,
                     }
                 }
-                if clean.is_empty() || clean.starts_with('(') || clean == "||" || clean == "|" || clean.contains('"') {
+                if clean.is_empty()
+                    || clean.starts_with('(')
+                    || clean == "||"
+                    || clean == "|"
+                    || clean.contains('"')
+                {
                     break;
                 }
-                if index >= exempt_until && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str()) {
+                if index >= exempt_until
+                    && PROSE_STOP_WORDS.contains(&clean.to_ascii_lowercase().as_str())
+                {
                     break;
                 }
                 tokens.push(clean.to_string());
@@ -3159,7 +4249,12 @@ pub fn plain_prose_check_commands(goal: &str) -> Vec<String> {
             }
             let command = tokens.join(" ");
             let chars = command.chars().count();
-            if tokens.len() >= 2 && chars >= 8 && chars <= 200 && verification_pattern_matches(&command) && !commands.contains(&command) {
+            if tokens.len() >= 2
+                && chars >= 8
+                && chars <= 200
+                && verification_pattern_matches(&command)
+                && !commands.contains(&command)
+            {
                 commands.push(command);
             }
         }
@@ -3174,9 +4269,16 @@ pub fn compact_tool_input(raw_input: &str, limit: usize) -> String {
     let text = serde_json::from_str::<serde_json::Value>(raw_input)
         .ok()
         .and_then(|value| {
-            ["command", "path", "pattern", "find", "query", "url", "title", "name"]
-                .iter()
-                .find_map(|key| value.get(key).and_then(|field| field.as_str()).map(str::to_string))
+            [
+                "command", "path", "pattern", "find", "query", "url", "title", "name",
+            ]
+            .iter()
+            .find_map(|key| {
+                value
+                    .get(key)
+                    .and_then(|field| field.as_str())
+                    .map(str::to_string)
+            })
         })
         .unwrap_or_else(|| raw_input.to_string());
     truncate_text(&collapse_whitespace(text.trim()), limit)
@@ -3186,7 +4288,11 @@ pub fn extract_verification_command(tool_name: &str, raw_input: &str) -> Option<
     extract_verification_command_for_goal(tool_name, raw_input, "")
 }
 
-pub fn extract_verification_command_for_goal(tool_name: &str, raw_input: &str, goal: &str) -> Option<String> {
+pub fn extract_verification_command_for_goal(
+    tool_name: &str,
+    raw_input: &str,
+    goal: &str,
+) -> Option<String> {
     if tool_name == "CHECK" {
         return Some(format!("CHECK {}", raw_input));
     }
@@ -3206,7 +4312,11 @@ pub fn extract_verification_command_for_goal(tool_name: &str, raw_input: &str, g
     // Calling VERIFY *is* the declaration that this command verifies the work
     // — no pattern sniffing; BASH still gets the heuristic.
     if tool_name == "VERIFY" {
-        return if command.is_empty() { None } else { Some(command) };
+        return if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        };
     }
 
     if verification_pattern_matches(&strip_heredoc_bodies(&command)) {
@@ -3246,7 +4356,9 @@ mod loop_helpers_tests {
     // distinct record id, so citing "the same record" is detectable by id.
     #[test]
     fn next_verification_record_id_is_goal_unique_across_identical_replays() {
-        use crate::core::types::{HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind};
+        use crate::core::types::{
+            HarnessVerificationRecord, VerificationEvidence, VerificationEvidenceKind,
+        };
         let record = |id: Option<String>| HarnessVerificationRecord {
             at_iteration: 1,
             command: "cargo test".to_string(),
@@ -3306,7 +4418,9 @@ mod loop_helpers_tests {
             Some(TransportContent::Text(text)) => text.clone(),
             other => panic!("expected text content, got {:?}", other),
         };
-        assert!(digest.starts_with("[folded] BASH result from an earlier cycle of this loop, digest: "));
+        assert!(
+            digest.starts_with("[folded] BASH result from an earlier cycle of this loop, digest: ")
+        );
         assert!(digest.contains("line one line two tab"));
         assert!(digest.contains("recover the full cached output with recall {toolName, query}"));
 
@@ -3320,7 +4434,10 @@ mod loop_helpers_tests {
     #[test]
     fn fold_pins_the_freshest_read_of_each_file_past_the_hot_window() {
         let read = |path: &str| {
-            tool_message("READ", &format!("Read lines 1-3 of 3 from {path}.\n1\tone\n2\ttwo\n3\tthree"))
+            tool_message(
+                "READ",
+                &format!("Read lines 1-3 of 3 from {path}.\n1\tone\n2\ttwo\n3\tthree"),
+            )
         };
         let mut messages = vec![
             read("src/a.rs"),                    // 0: superseded by the later read of a
@@ -3367,10 +4484,12 @@ mod loop_helpers_tests {
         let bash_call = |command: &str| TransportRequestMessage {
             role: ChatRoleTag::Assistant,
             tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
-                function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
-                    arguments: Some(serde_json::json!({ "command": command }).to_string()),
-                    name: Some("BASH".to_string()),
-                }),
+                function: Some(
+                    crate::harness::transport::OpenAICompatibleToolCallFunction {
+                        arguments: Some(serde_json::json!({ "command": command }).to_string()),
+                        name: Some("BASH".to_string()),
+                    },
+                ),
                 id: Some("c".to_string()),
                 tool_type: Some("function".to_string()),
             }]),
@@ -3378,9 +4497,9 @@ mod loop_helpers_tests {
         };
         let mut messages = vec![
             tool_message("READ", "Read lines 1-2 of 2 from src/d.rs.\n1\tx\n2\ty"), // 0: read of d
-            bash_call("sed -i '' 's/x/z/' src/d.rs"),                              // 1: shell edit of d
-            tool_message("BASH", "done"),                                          // 2
-            tool_message("BASH", "hot"),                                           // 3: hot
+            bash_call("sed -i '' 's/x/z/' src/d.rs"), // 1: shell edit of d
+            tool_message("BASH", "done"),             // 2
+            tool_message("BASH", "hot"),              // 3: hot
         ];
         let mut folded = HashSet::new();
 
@@ -3388,13 +4507,16 @@ mod loop_helpers_tests {
             fold_cold_tool_results(&mut messages, 1, &mut folded, MAX_PINNED_READ_FILES);
 
         // The read (0) is not pinned — a later mutating shell command named d.rs.
-        assert!(folded.contains(&0), "stale read must fold, folded={folded:?}");
+        assert!(
+            folded.contains(&0),
+            "stale read must fold, folded={folded:?}"
+        );
         assert!(folded_count >= 1);
         // A read of a DIFFERENT file the command did not name stays pinned.
         let mut messages2 = vec![
             tool_message("READ", "Read lines 1-2 of 2 from src/other.rs.\n1\tx\n2\ty"), // 0
-            bash_call("sed -i '' 's/x/z/' src/d.rs"),                                   // 1: edits d, not other
-            tool_message("BASH", "hot"),                                                // 2
+            bash_call("sed -i '' 's/x/z/' src/d.rs"), // 1: edits d, not other
+            tool_message("BASH", "hot"),              // 2
         ];
         let mut folded2 = HashSet::new();
         fold_cold_tool_results(&mut messages2, 1, &mut folded2, MAX_PINNED_READ_FILES);
@@ -3404,7 +4526,8 @@ mod loop_helpers_tests {
     #[test]
     fn read_result_path_reads_the_header_and_patch_paths_read_the_diff() {
         assert_eq!(
-            super::read_result_path("Read lines 1-9 of 9 from src/web/settings.ts.\n1\tx").as_deref(),
+            super::read_result_path("Read lines 1-9 of 9 from src/web/settings.ts.\n1\tx")
+                .as_deref(),
             Some("src/web/settings.ts")
         );
         assert_eq!(super::read_result_path("no header here"), None);
@@ -3456,10 +4579,21 @@ mod loop_helpers_tests {
         ] {
             assert!(is_writing_shell_command(command), "{command}");
         }
-        for command in ["cargo test 2>&1 | tail -20", "cat tools/read-tool.ts", "git status", "python3 -c 'print(1)'", "", "cargo build >/dev/null 2>&1", "echo x 1>&2"] {
+        for command in [
+            "cargo test 2>&1 | tail -20",
+            "cat tools/read-tool.ts",
+            "git status",
+            "python3 -c 'print(1)'",
+            "",
+            "cargo build >/dev/null 2>&1",
+            "echo x 1>&2",
+        ] {
             assert!(!is_writing_shell_command(command), "{command}");
         }
-        assert_eq!(extract_bash_command(r#"{"command":"ls"}"#).as_deref(), Some("ls"));
+        assert_eq!(
+            extract_bash_command(r#"{"command":"ls"}"#).as_deref(),
+            Some("ls")
+        );
         assert_eq!(extract_bash_command("{"), None);
     }
 
@@ -3470,16 +4604,30 @@ mod loop_helpers_tests {
         let declared = r#"test -s docs/TOOLS.md   && grep -c "^## " docs/TOOLS.md"#;
         assert!(is_goal_declared_verification(goal, declared));
         assert!(!is_goal_declared_verification(goal, "ls docs"));
-        assert!(!is_goal_declared_verification(goal, "grep -c \"^## \" other.md"));
+        assert!(!is_goal_declared_verification(
+            goal,
+            "grep -c \"^## \" other.md"
+        ));
         let raw = serde_json::json!({ "command": declared }).to_string();
-        assert_eq!(extract_verification_command_for_goal("BASH", &raw, goal).as_deref(), Some(declared));
-        assert_eq!(extract_verification_command_for_goal("BASH", &raw, ""), None);
+        assert_eq!(
+            extract_verification_command_for_goal("BASH", &raw, goal).as_deref(),
+            Some(declared)
+        );
+        assert_eq!(
+            extract_verification_command_for_goal("BASH", &raw, ""),
+            None
+        );
         assert_eq!(extract_verification_command("BASH", &raw), None);
         // VERIFY is the declaration itself — the goal heuristic never changes it.
-        assert_eq!(extract_verification_command_for_goal("VERIFY", r#"{"command":"ls"}"#, "").as_deref(), Some("ls"));
-        assert_eq!(extract_verification_command_for_goal("VERIFY", r#"{"command":""}"#, goal), None);
+        assert_eq!(
+            extract_verification_command_for_goal("VERIFY", r#"{"command":"ls"}"#, "").as_deref(),
+            Some("ls")
+        );
+        assert_eq!(
+            extract_verification_command_for_goal("VERIFY", r#"{"command":""}"#, goal),
+            None
+        );
     }
-
 
     // "keeps whole exchanges within the hot-result and size caps, newest first"
     #[test]
@@ -3489,10 +4637,12 @@ mod loop_helpers_tests {
                 TransportRequestMessage {
                     role: ChatRoleTag::Assistant,
                     tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
-                        function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
-                            arguments: Some("{}".to_string()),
-                            name: Some("READ".to_string()),
-                        }),
+                        function: Some(
+                            crate::harness::transport::OpenAICompatibleToolCallFunction {
+                                arguments: Some("{}".to_string()),
+                                name: Some("READ".to_string()),
+                            },
+                        ),
                         id: Some(id.to_string()),
                         tool_type: Some("function".to_string()),
                     }]),
@@ -3508,33 +4658,78 @@ mod loop_helpers_tests {
             ]
         }
         fn user(text: &str) -> TransportRequestMessage {
-            TransportRequestMessage { content: Some(TransportContent::Text(text.to_string())), role: ChatRoleTag::User, ..Default::default() }
+            TransportRequestMessage {
+                content: Some(TransportContent::Text(text.to_string())),
+                role: ChatRoleTag::User,
+                ..Default::default()
+            }
         }
-        let mut messages = vec![TransportRequestMessage { content: Some(TransportContent::Text("sys".into())), role: ChatRoleTag::System, ..Default::default() }, user("iteration")];
+        let mut messages = vec![
+            TransportRequestMessage {
+                content: Some(TransportContent::Text("sys".into())),
+                role: ChatRoleTag::System,
+                ..Default::default()
+            },
+            user("iteration"),
+        ];
         messages.extend(exchange("a", "one"));
         messages.extend(exchange("b", "two"));
         messages.push(user("continue"));
         messages.extend(exchange("c", "three"));
 
         let shape = |kept: Vec<TransportRequestMessage>| -> Vec<String> {
-            kept.iter().map(|m| if m.role == ChatRoleTag::Tool { message_text(m).to_string() } else { "call".to_string() }).collect()
+            kept.iter()
+                .map(|m| {
+                    if m.role == ChatRoleTag::Tool {
+                        message_text(m).to_string()
+                    } else {
+                        "call".to_string()
+                    }
+                })
+                .collect()
         };
-        assert_eq!(shape(extract_loop_carryover(&messages, 2)), vec!["call", "two", "call", "three"]);
-        assert!(extract_loop_carryover(&messages, 6).iter().all(|m| m.role != ChatRoleTag::User));
+        assert_eq!(
+            shape(extract_loop_carryover(&messages, 2)),
+            vec!["call", "two", "call", "three"]
+        );
+        assert!(extract_loop_carryover(&messages, 6)
+            .iter()
+            .all(|m| m.role != ChatRoleTag::User));
         assert!(extract_loop_carryover(&messages[..1], 6).is_empty());
         // One oversized exchange is still carried (never an empty handoff for a loop that read something).
-        assert_eq!(extract_loop_carryover(&exchange("big", &"x".repeat(30_000)), 6).len(), 2);
-        let same = LoopCarryover { finished: false, r#loop: 3, messages: vec![], task_id: Some("task-1".into()), task_title: Some("read then finish".into()) };
+        assert_eq!(
+            extract_loop_carryover(&exchange("big", &"x".repeat(30_000)), 6).len(),
+            2
+        );
+        let same = LoopCarryover {
+            finished: false,
+            r#loop: 3,
+            messages: vec![],
+            task_id: Some("task-1".into()),
+            task_title: Some("read then finish".into()),
+        };
         assert_eq!(
             build_carryover_note(&same, "task-1", 1),
             "harness: loop 3 worked this same task and ended before finish_task; its last 1 tool exchange(s) are replayed above, verbatim, so you continue from there instead of re-reading. Act on what they show now."
         );
-        let finished = LoopCarryover { finished: true, r#loop: 2, messages: vec![], task_id: Some("task-1".into()), task_title: Some("survey".into()) };
+        let finished = LoopCarryover {
+            finished: true,
+            r#loop: 2,
+            messages: vec![],
+            task_id: Some("task-1".into()),
+            task_title: Some("survey".into()),
+        };
         assert_eq!(
             build_carryover_note(&finished, "task-2", 4),
             "harness: loop 2 worked task-1 (\"survey\") and finished it; its last 4 tool exchange(s) are replayed above, verbatim, so this task builds on what was already read instead of re-reading. Act on what they show now."
         );
-        let planning = LoopCarryover { finished: false, r#loop: 1, messages: vec![], task_id: None, task_title: None };
+        let planning = LoopCarryover {
+            finished: false,
+            r#loop: 1,
+            messages: vec![],
+            task_id: None,
+            task_title: None,
+        };
         assert_eq!(
             build_carryover_note(&planning, "task-1", 2),
             "harness: loop 1 worked the planning step; its last 2 tool exchange(s) are replayed above, verbatim, so this task builds on what was already read instead of re-reading. Act on what they show now."
@@ -3549,10 +4744,12 @@ mod loop_helpers_tests {
                 TransportRequestMessage {
                     role: ChatRoleTag::Assistant,
                     tool_calls: Some(vec![crate::harness::transport::OpenAICompatibleToolCall {
-                        function: Some(crate::harness::transport::OpenAICompatibleToolCallFunction {
-                            arguments: Some("{}".to_string()),
-                            name: Some(tool.to_string()),
-                        }),
+                        function: Some(
+                            crate::harness::transport::OpenAICompatibleToolCallFunction {
+                                arguments: Some("{}".to_string()),
+                                name: Some(tool.to_string()),
+                            },
+                        ),
                         id: Some(id.to_string()),
                         tool_type: Some("function".to_string()),
                     }]),
@@ -3585,7 +4782,12 @@ mod loop_helpers_tests {
         let goal = "Definition of done: 1. NEW FILE drip/src/cli/headless_output.rs — port of src/cli/headless-output.ts.\n2. UPDATED `drip/src/cli/mod.rs` (see ./drip/PLAN.md). Verify with cargo test; v1.2.3 and README.md are not paths.";
         assert_eq!(
             extract_goal_paths(goal),
-            vec!["drip/src/cli/headless_output.rs", "src/cli/headless-output.ts", "drip/src/cli/mod.rs", "drip/PLAN.md"]
+            vec![
+                "drip/src/cli/headless_output.rs",
+                "src/cli/headless-output.ts",
+                "drip/src/cli/mod.rs",
+                "drip/PLAN.md"
+            ]
         );
         assert!(extract_goal_paths("fix the flaky test").is_empty());
         // A path glued to a following word is not a path (JS lookahead parity).
@@ -3594,7 +4796,10 @@ mod loop_helpers_tests {
 
     #[test]
     fn extract_created_paths_reads_both_patch_result_forms() {
-        assert_eq!(extract_created_paths("Created src/new.ts with 12 line(s)."), vec!["src/new.ts"]);
+        assert_eq!(
+            extract_created_paths("Created src/new.ts with 12 line(s)."),
+            vec!["src/new.ts"]
+        );
         assert!(extract_created_paths("Overwrote src/old.ts with 3 line(s).").is_empty());
         assert_eq!(
             extract_created_paths("Applied 2 file(s):\n  src/a.ts: replaced 1 occurrence(s)\n  src/b.ts: created 4 line(s)\n"),
@@ -3605,13 +4810,35 @@ mod loop_helpers_tests {
     #[test]
     fn unnamed_path_note_fires_only_for_new_files_outside_the_goal() {
         let goal = "NEW FILE drip/src/cli/headless_output.rs mirroring src/cli/headless-output.ts";
-        let note = build_unnamed_path_note(goal, "Created drip/src/result_payload.rs with 40 line(s).").unwrap();
-        assert!(note.contains("[harness] PATCH created drip/src/result_payload.rs, which the goal does not name"));
-        assert!(note.contains("it names drip/src/cli/headless_output.rs, src/cli/headless-output.ts"));
-        assert!(build_unnamed_path_note(goal, "Created drip/src/cli/headless_output.rs with 40 line(s).").is_none());
-        assert!(build_unnamed_path_note(goal, "Overwrote drip/src/result_payload.rs with 40 line(s).").is_none());
-        assert!(build_unnamed_path_note("port the module", "Created drip/src/anything.rs with 1 line(s).").is_none());
-        assert!(build_unnamed_path_note("add fixtures under test/fixtures/widgets", "Created test/fixtures/widgets/a.json with 1 line(s).").is_none());
+        let note =
+            build_unnamed_path_note(goal, "Created drip/src/result_payload.rs with 40 line(s).")
+                .unwrap();
+        assert!(note.contains(
+            "[harness] PATCH created drip/src/result_payload.rs, which the goal does not name"
+        ));
+        assert!(
+            note.contains("it names drip/src/cli/headless_output.rs, src/cli/headless-output.ts")
+        );
+        assert!(build_unnamed_path_note(
+            goal,
+            "Created drip/src/cli/headless_output.rs with 40 line(s)."
+        )
+        .is_none());
+        assert!(build_unnamed_path_note(
+            goal,
+            "Overwrote drip/src/result_payload.rs with 40 line(s)."
+        )
+        .is_none());
+        assert!(build_unnamed_path_note(
+            "port the module",
+            "Created drip/src/anything.rs with 1 line(s)."
+        )
+        .is_none());
+        assert!(build_unnamed_path_note(
+            "add fixtures under test/fixtures/widgets",
+            "Created test/fixtures/widgets/a.json with 1 line(s)."
+        )
+        .is_none());
     }
 
     #[test]
@@ -3628,27 +4855,54 @@ mod loop_helpers_tests {
 
     #[test]
     fn detect_empty_test_run_flags_runners_that_executed_zero_tests() {
-        assert!(detect_empty_test_run("cargo test", "running 0 tests\n\ntest result: ok. 0 passed\n\nrunning 0 tests\n"));
+        assert!(detect_empty_test_run(
+            "cargo test",
+            "running 0 tests\n\ntest result: ok. 0 passed\n\nrunning 0 tests\n"
+        ));
         // A `| tail` that kept only the doc-test block's header but also the lib
         // block's summary: the summary proves tests ran.
         assert!(!detect_empty_test_run(
             "cargo test 2>&1 | tail -20",
             "test plan::b ... ok\n\ntest result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n   Doc-tests reviewkit\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
         ));
-        assert!(!detect_empty_test_run("cargo test", "running 0 tests\n\ntest result: FAILED. 0 passed; 2 failed; 0 ignored\n"));
-        assert!(detect_empty_test_run("bun test", "bun test v1.2\n\n 0 pass\n 0 fail\n"));
-        assert!(detect_empty_test_run("bun run test", "No test files found, exiting with code 1"));
-        assert!(detect_empty_test_run("pytest -k widget", "collected 0 items\n\nno tests ran in 0.01s"));
-        assert!(detect_empty_test_run("go test ./...", "?   \texample.com/a\t[no test files]\n?   \texample.com/b\t[no test files]\n"));
+        assert!(!detect_empty_test_run(
+            "cargo test",
+            "running 0 tests\n\ntest result: FAILED. 0 passed; 2 failed; 0 ignored\n"
+        ));
+        assert!(detect_empty_test_run(
+            "bun test",
+            "bun test v1.2\n\n 0 pass\n 0 fail\n"
+        ));
+        assert!(detect_empty_test_run(
+            "bun run test",
+            "No test files found, exiting with code 1"
+        ));
+        assert!(detect_empty_test_run(
+            "pytest -k widget",
+            "collected 0 items\n\nno tests ran in 0.01s"
+        ));
+        assert!(detect_empty_test_run(
+            "go test ./...",
+            "?   \texample.com/a\t[no test files]\n?   \texample.com/b\t[no test files]\n"
+        ));
     }
 
     #[test]
     fn detect_empty_test_run_leaves_real_runs_and_non_test_commands_alone() {
-        assert!(!detect_empty_test_run("cargo test", "running 0 tests\n\nrunning 12 tests\ntest result: ok. 12 passed"));
+        assert!(!detect_empty_test_run(
+            "cargo test",
+            "running 0 tests\n\nrunning 12 tests\ntest result: ok. 12 passed"
+        ));
         assert!(!detect_empty_test_run("bun test", " 34 pass\n 0 fail\n"));
-        assert!(!detect_empty_test_run("go test ./...", "?   \texample.com/a\t[no test files]\nok  \texample.com/b\t0.01s\n"));
+        assert!(!detect_empty_test_run(
+            "go test ./...",
+            "?   \texample.com/a\t[no test files]\nok  \texample.com/b\t0.01s\n"
+        ));
         assert!(!detect_empty_test_run("cargo check", "running 0 tests"));
-        assert!(!detect_empty_test_run("bun run typecheck", "No tests found"));
+        assert!(!detect_empty_test_run(
+            "bun run typecheck",
+            "No tests found"
+        ));
         assert!(!detect_empty_test_run("attest run", "no tests ran"));
     }
 
@@ -3656,11 +4910,21 @@ mod loop_helpers_tests {
     #[test]
     fn heredoc_bodies_do_not_make_a_write_a_verification() {
         let write = "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'\n# Tools\nit detects bun test, vitest, pytest, cargo test\nEOF";
-        assert_eq!(strip_heredoc_bodies(write), "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'");
+        assert_eq!(
+            strip_heredoc_bodies(write),
+            "mkdir -p docs && cat > docs/TOOLS.md <<'EOF'"
+        );
         let raw = serde_json::json!({ "command": write }).to_string();
         assert_eq!(extract_verification_command("BASH", &raw), None);
         let real = "cat > t.sh <<EOF\necho hi\nEOF\ncargo test";
-        assert_eq!(extract_verification_command("BASH", &serde_json::json!({ "command": real }).to_string()).as_deref(), Some(real));
+        assert_eq!(
+            extract_verification_command(
+                "BASH",
+                &serde_json::json!({ "command": real }).to_string()
+            )
+            .as_deref(),
+            Some(real)
+        );
         assert_eq!(strip_heredoc_bodies("cargo test"), "cargo test");
     }
 
@@ -3678,7 +4942,10 @@ mod loop_helpers_tests {
             extract_verification_command("BASH", r#"{"command":"bun run check"}"#),
             Some("bun run check".to_string())
         );
-        assert_eq!(extract_verification_command("BASH", r#"{"command":"ls"}"#), None);
+        assert_eq!(
+            extract_verification_command("BASH", r#"{"command":"ls"}"#),
+            None
+        );
         // BASH_ASYNC never records verification.
         assert_eq!(
             extract_verification_command("BASH_ASYNC", r#"{"command":"cargo test"}"#),
@@ -3689,7 +4956,10 @@ mod loop_helpers_tests {
             extract_verification_command("VERIFY", r#"{"command":"ls"}"#),
             Some("ls".to_string())
         );
-        assert_eq!(extract_verification_command("READ", r#"{"command":"cargo test"}"#), None);
+        assert_eq!(
+            extract_verification_command("READ", r#"{"command":"cargo test"}"#),
+            None
+        );
     }
 
     #[test]
@@ -3699,7 +4969,11 @@ mod loop_helpers_tests {
         for index in 0..MAX_FOOTPRINT_ENTRIES + 5 {
             record_task_footprint(&mut footprint, &format!("ran checker {index}"));
         }
-        assert!(footprint.as_ref().unwrap().iter().any(|entry| entry.starts_with("edited ")));
+        assert!(footprint
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.starts_with("edited ")));
         assert_eq!(footprint.unwrap().len(), MAX_FOOTPRINT_ENTRIES);
     }
 
@@ -3712,7 +4986,10 @@ mod loop_helpers_tests {
         record_edited_path(&mut edited, "./tests/test_totals.py");
         record_edited_path(&mut edited, "tests/test_totals.py");
         record_edited_path(&mut edited, "src/lib.rs");
-        assert_eq!(edited, vec!["tests/test_totals.py".to_string(), "src/lib.rs".to_string()]);
+        assert_eq!(
+            edited,
+            vec!["tests/test_totals.py".to_string(), "src/lib.rs".to_string()]
+        );
 
         let downgraded = declared_verification_anchor(
             r#"{"command":"pytest tests/test_totals.py","anchor":{"kind":"external","source":"project suite"}}"#,
@@ -3720,7 +4997,11 @@ mod loop_helpers_tests {
         )
         .expect("anchor declared");
         assert_eq!(downgraded.kind, VerificationAnchorKind::SelfAuthored);
-        assert!(downgraded.downgraded_reason.as_deref().unwrap_or_default().contains("tests/test_totals.py"));
+        assert!(downgraded
+            .downgraded_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tests/test_totals.py"));
         assert_eq!(downgraded.source.as_deref(), Some("project suite"));
 
         // The source text naming an edited file is not a downgrade on its
@@ -3740,21 +5021,53 @@ mod loop_helpers_tests {
 
         // Runner forms name the test by stem; a directory that merely
         // contains an edited file is not a match.
-        assert!(command_names_path("cargo test --test test_totals", "tests/test_totals.rs"));
-        assert!(command_names_path("pytest ./tests/test_totals.py::test_sum", "tests/test_totals.py") || command_names_path("pytest tests/test_totals.py", "tests/test_totals.py"));
+        assert!(command_names_path(
+            "cargo test --test test_totals",
+            "tests/test_totals.rs"
+        ));
+        assert!(
+            command_names_path(
+                "pytest ./tests/test_totals.py::test_sum",
+                "tests/test_totals.py"
+            ) || command_names_path("pytest tests/test_totals.py", "tests/test_totals.py")
+        );
         assert!(!command_names_path("pytest tests/", "tests/test_totals.py"));
         assert!(!command_names_path("cargo test --lib", "src/lib.rs"));
         // A source module's stem as a runner filter is not the file's own test.
-        assert!(!command_names_path("cargo test --lib child_process", "src/tools/child_process.rs"));
-        assert!(!command_names_path("cargo test --lib builtin::bash", "src/tools/builtin/bash.rs"));
-        assert!(command_names_path("cargo test --test child_process_test", "tests/child_process_test.rs"));
-        assert!(command_names_path("bun test session_name.test", "hub/test/session_name.test.ts"));
+        assert!(!command_names_path(
+            "cargo test --lib child_process",
+            "src/tools/child_process.rs"
+        ));
+        assert!(!command_names_path(
+            "cargo test --lib builtin::bash",
+            "src/tools/builtin/bash.rs"
+        ));
+        assert!(command_names_path(
+            "cargo test --test child_process_test",
+            "tests/child_process_test.rs"
+        ));
+        assert!(command_names_path(
+            "bun test session_name.test",
+            "hub/test/session_name.test.ts"
+        ));
 
         let mut shell_edited = Vec::new();
         for target in extract_shell_write_targets("cat > tests/test_shell.py <<'EOF'\nassert 1\nEOF\n && sed -i 's/a/b/' src/a.rs src/b.rs; echo ok | tee -a notes.txt >/dev/null; printf x 2>err.log") {
             record_edited_path(&mut shell_edited, &target);
         }
-        assert_eq!(shell_edited, vec!["tests/test_shell.py", "src/a.rs", "src/b.rs", "notes.txt", "err.log"].into_iter().map(String::from).collect::<Vec<_>>());
+        assert_eq!(
+            shell_edited,
+            vec![
+                "tests/test_shell.py",
+                "src/a.rs",
+                "src/b.rs",
+                "notes.txt",
+                "err.log"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
 
         let external = declared_verification_anchor(
             r#"{"command":"pytest tests/test_invariants.py","anchor":{"kind":"external","source":"pre-existing suite"}}"#,
@@ -3779,7 +5092,6 @@ mod loop_helpers_tests {
         // No anchor object at all: the parser records an absent anchor
         // (None) rather than fabricating a default.
         assert!(declared_verification_anchor(r#"{"command":"cargo test"}"#, &edited).is_none());
-
     }
 
     // Declared coverage and the expectation binding ride inside the anchor
@@ -3793,7 +5105,10 @@ mod loop_helpers_tests {
             &edited,
         )
         .unwrap();
-        assert_eq!(component.coverage, Some(CoverageGranularity::InputOrComponent));
+        assert_eq!(
+            component.coverage,
+            Some(CoverageGranularity::InputOrComponent)
+        );
         let bound = declared_verification_anchor(
             r#"{"command":"cargo test","anchor":{"kind":"external","source":"suite","coverage":"reportedClaim","expectationSubject":"e2"}}"#,
             &edited,
@@ -3834,16 +5149,23 @@ mod loop_helpers_tests {
             build_repeated_read_stub("READ", 1),
             "[harness] READ: identical call #2 this run and the output is unchanged — it is verbatim in this conversation above (an earlier READ result). Use that copy; re-reading adds nothing. Act on it, or record the finding with observe/remember/finish_task."
         );
-        assert!(DEDUPED_READ_ONLY_TOOLS.contains(&"GREP") && !DEDUPED_READ_ONLY_TOOLS.contains(&"BASH"));
+        assert!(
+            DEDUPED_READ_ONLY_TOOLS.contains(&"GREP") && !DEDUPED_READ_ONLY_TOOLS.contains(&"BASH")
+        );
     }
 
     #[test]
     fn hash_text_is_stable_hex() {
-        assert_eq!(hash_text("cargo build failed"), hash_text("cargo build failed"));
+        assert_eq!(
+            hash_text("cargo build failed"),
+            hash_text("cargo build failed")
+        );
         assert_ne!(hash_text("cargo build"), hash_text("cargo build failed"));
         assert_eq!(hash_text(""), "1505");
         let digest = hash_text("boom");
-        assert!(digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }
 // ---------------------------------------------------------------------------
@@ -3861,25 +5183,24 @@ use std::sync::{Arc, Mutex};
 use indexmap::IndexMap;
 
 use crate::core::types::{
-    HarnessActivationDigest, HarnessLoopConfig, HarnessOperatorMessage,
-    HarnessState, HarnessTask, HarnessTelemetryConfig, HarnessUsageByTask,
-};
-use crate::harness::harness_tools::{
-    apply_harness_op, is_harness_tool, parse_harness_op_with_gate, HarnessRoleGate, RepoMemoryConfig,
-};
-use crate::harness::telemetry::{
-    record_tool_telemetry, tool_telemetry_key, truncate_text_keeping_ends,
+    HarnessActivationDigest, HarnessLoopConfig, HarnessOperatorMessage, HarnessState, HarnessTask,
+    HarnessTelemetryConfig, HarnessUsageByTask,
 };
 use crate::core::types::{HarnessVerificationRecord, HarnessVerificationStreak};
-use crate::harness::model_call::{
-    AbortSignal, ModelCallRecord, ModelCaller, ModelRoute, SleepFn,
+use crate::harness::harness_tools::{
+    apply_harness_op, is_harness_tool, parse_harness_op_with_gate, HarnessRoleGate,
+    RepoMemoryConfig,
 };
-use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
-use crate::harness::transport::OpenAICompatibleRequestTool;
+use crate::harness::model_call::{AbortSignal, ModelCallRecord, ModelCaller, ModelRoute, SleepFn};
 use crate::harness::prompt::{
     build_cycle_continuation_message, build_iteration_messages, CycleContinuationArgs,
     HarnessLoopInfo, HarnessLoopRole, HarnessRunBudget, IterationMessagesArgs,
 };
+use crate::harness::roles::{HarnessRoleBindings, HarnessRoleRuntime};
+use crate::harness::telemetry::{
+    record_tool_telemetry, tool_telemetry_key, truncate_text_keeping_ends,
+};
+use crate::harness::transport::OpenAICompatibleRequestTool;
 use crate::tools::types::{ChatToolDefinition, ChatToolRuntimeServices};
 
 /// Rate-limit backoff defaults live in model_call; the loop only reads
@@ -3962,7 +5283,11 @@ pub fn effective_mcp_servers(
     role: Option<&HarnessRoleRuntime>,
     run_gate: Option<Vec<String>>,
 ) -> Option<Vec<String>> {
-    if run_gate.as_ref().map(|servers| servers.is_empty()).unwrap_or(false) {
+    if run_gate
+        .as_ref()
+        .map(|servers| servers.is_empty())
+        .unwrap_or(false)
+    {
         return Some(Vec::new());
     }
     match role.and_then(|role| role.mcp_servers.as_ref()) {
@@ -3983,7 +5308,9 @@ pub fn loop_allows_tool(
 ) -> bool {
     match crate::tools::mcp::mcp_server_of(tool_name) {
         None => role_tool_names.map_or(true, |names| names.iter().any(|name| name == tool_name)),
-        Some(server) => mcp_servers_for_loop.map_or(false, |servers| servers.iter().any(|allowed| allowed == server)),
+        Some(server) => mcp_servers_for_loop.map_or(false, |servers| {
+            servers.iter().any(|allowed| allowed == server)
+        }),
     }
 }
 
@@ -4013,7 +5340,10 @@ pub fn loop_tool_scope(
         .cloned()
         .collect();
 
-    LoopToolScope { allowed, mcp_servers }
+    LoopToolScope {
+        allowed,
+        mcp_servers,
+    }
 }
 
 /// Whether every requirement a skill is KNOWN to have is present in the loop's
@@ -4027,7 +5357,10 @@ pub fn requirements_satisfied(
         return true;
     }
 
-    requirements.required.iter().all(|name| available.contains(name))
+    requirements
+        .required
+        .iter()
+        .all(|name| available.contains(name))
 }
 
 #[cfg(test)]
@@ -4054,7 +5387,10 @@ mod dynamic_skills_tests {
         }
     }
 
-    fn mcp_role(mcp_servers: Option<Vec<&str>>, tool_names: Option<Vec<&str>>) -> HarnessRoleRuntime {
+    fn mcp_role(
+        mcp_servers: Option<Vec<&str>>,
+        tool_names: Option<Vec<&str>>,
+    ) -> HarnessRoleRuntime {
         HarnessRoleRuntime {
             description: None,
             r#loop: None,
@@ -4083,14 +5419,20 @@ mod dynamic_skills_tests {
     fn loop_tool_scope_matches_the_loops_role_and_mcp_gate() {
         let tools = strings(&["READ", "PATCH", "MCP__github__search", "MCP__files__read"]);
 
-        let scoped =
-            loop_tool_scope(&tools, Some(&mcp_role(Some(vec!["github"]), Some(vec!["READ"]))), None);
+        let scoped = loop_tool_scope(
+            &tools,
+            Some(&mcp_role(Some(vec!["github"]), Some(vec!["READ"]))),
+            None,
+        );
         assert_eq!(scoped.allowed, strings(&["READ", "MCP__github__search"]));
         assert_eq!(scoped.mcp_servers, Some(strings(&["github"])));
 
         // No role: the run-level gate decides MCP, and every builtin is in scope.
         let ungated = loop_tool_scope(&tools, None, Some(strings(&["files"])));
-        assert_eq!(ungated.allowed, strings(&["READ", "PATCH", "MCP__files__read"]));
+        assert_eq!(
+            ungated.allowed,
+            strings(&["READ", "PATCH", "MCP__files__read"])
+        );
 
         // --no-mcp: no MCP tool belongs to any loop.
         let closed = loop_tool_scope(&tools, None, Some(Vec::new()));
@@ -4108,11 +5450,23 @@ mod dynamic_skills_tests {
             strings(&["READ", "PATCH", "github"]).into_iter().collect();
 
         assert!(requirements_satisfied(&requirement(&[], false), &available));
-        assert!(requirements_satisfied(&requirement(&["MISSING"], false), &available));
+        assert!(requirements_satisfied(
+            &requirement(&["MISSING"], false),
+            &available
+        ));
         assert!(requirements_satisfied(&requirement(&[], true), &available));
-        assert!(requirements_satisfied(&requirement(&["READ", "github"], true), &available));
-        assert!(!requirements_satisfied(&requirement(&["MISSING"], true), &available));
-        assert!(!requirements_satisfied(&requirement(&["READ", "BASH"], true), &available));
+        assert!(requirements_satisfied(
+            &requirement(&["READ", "github"], true),
+            &available
+        ));
+        assert!(!requirements_satisfied(
+            &requirement(&["MISSING"], true),
+            &available
+        ));
+        assert!(!requirements_satisfied(
+            &requirement(&["READ", "BASH"], true),
+            &available
+        ));
 
         let pool = vec![
             dynamic("satisfiable", &["READ"], true),
@@ -4243,7 +5597,8 @@ pub struct SolidStateHarnessOptions {
     pub prompt_cache_key: Option<String>,
     pub reasoning_effort: Option<String>,
     pub request_timeout_ms: Option<u64>,
-    pub refresh_headers: Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
+    pub refresh_headers:
+        Option<Arc<dyn Fn() -> Result<Vec<(String, String)>, String> + Send + Sync>>,
     pub repo_memory: Option<RepoMemoryConfig>,
     pub repo_memory_index: Option<String>,
     pub role_bindings: Option<HarnessRoleBindings>,
@@ -4313,7 +5668,12 @@ pub struct SolidStateHarnessOptions {
 /// this inbox and the loop drains it right after every call_model.
 #[derive(Default)]
 pub struct UsageInbox {
-    pub usages: Mutex<Vec<(Option<crate::harness::model_call::OpenAICompatibleResponseUsage>, ModelCallRecord)>>,
+    pub usages: Mutex<
+        Vec<(
+            Option<crate::harness::model_call::OpenAICompatibleResponseUsage>,
+            ModelCallRecord,
+        )>,
+    >,
     pub retry_waits: Mutex<Vec<f64>>,
     pub iteration: std::sync::atomic::AtomicI64,
 }
@@ -4535,10 +5895,12 @@ pub fn model_route_from_role_route(route: &crate::harness::roles::ModelRoute) ->
             .fallback_route
             .as_ref()
             .map(|inner| Box::new(model_route_from_role_route(inner))),
-        headers: route
-            .headers
-            .as_ref()
-            .map(|headers| headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
+        headers: route.headers.as_ref().map(|headers| {
+            headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }),
         model: route.model.clone(),
         provider: route.provider.clone(),
         reasoning_effort: route.reasoning_effort.clone(),
@@ -4595,8 +5957,7 @@ fn build_harness_tool_specs(
             // The opt-in ask_user survey tool is only offered to the model
             // when the run enables it (--ask); every other spec is unchanged.
             .filter(|definition| {
-                ask_user_enabled
-                    || definition["function"]["name"].as_str() != Some("ask_user")
+                ask_user_enabled || definition["function"]["name"].as_str() != Some("ask_user")
             })
             .map(|definition| {
                 let function = &definition["function"];
@@ -4681,13 +6042,21 @@ impl HarnessRun {
         if self.state.review_opt_out.unwrap_or(false) {
             return;
         }
-        let Some(gate) = self.role_gate.clone() else { return };
+        let Some(gate) = self.role_gate.clone() else {
+            return;
+        };
         if crate::harness::harness_tools::author_work_remains(&self.state)
-            || !self.state.tasks.iter().any(|task| task.awaiting_review_by.is_some())
+            || !self
+                .state
+                .tasks
+                .iter()
+                .any(|task| task.awaiting_review_by.is_some())
         {
             return;
         }
-        if let Some((review_task_id, covered)) = crate::harness::harness_tools::spawn_deferred_review(&mut self.state, &gate) {
+        if let Some((review_task_id, covered)) =
+            crate::harness::harness_tools::spawn_deferred_review(&mut self.state, &gate)
+        {
             self.emit(HarnessEvent {
                 data: None,
                 detail: format!("deferred review {review_task_id} spawned covering {covered}"),
@@ -4699,8 +6068,14 @@ impl HarnessRun {
     }
 
     pub async fn new(mut options: SolidStateHarnessOptions) -> Result<HarnessRun, String> {
-        let now: NowFn = options.now.clone().unwrap_or_else(|| Arc::new(chrono::Utc::now));
-        let emit_fn: EmitFn = options.on_event.clone().unwrap_or_else(|| Arc::new(|_event| {}));
+        let now: NowFn = options
+            .now
+            .clone()
+            .unwrap_or_else(|| Arc::new(chrono::Utc::now));
+        let emit_fn: EmitFn = options
+            .on_event
+            .clone()
+            .unwrap_or_else(|| Arc::new(|_event| {}));
         let run_started_at_ms = now().timestamp_millis();
 
         // Providers return usage on every completion; discarding it left drivers
@@ -4718,7 +6093,8 @@ impl HarnessRun {
             wall_ms: 0,
         };
         let redactor = crate::tools::command_policy::build_redactor(options.redact_secrets.clone());
-        let redact: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |text| redactor(text));
+        let redact: Arc<dyn Fn(&str) -> String + Send + Sync> =
+            Arc::new(move |text| redactor(text));
 
         let url = options
             .url
@@ -4736,8 +6112,9 @@ impl HarnessRun {
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
         let max_loops = options.max_loops.unwrap_or(i64::MAX);
         let run_start_head = git_head(&cwd);
-        let warmup = build_warmup_command(&cwd, &options.goal)
-            .and_then(|(program, args)| crate::tools::child_process::WarmupJob::spawn(&program, &args, &cwd).ok());
+        let warmup = build_warmup_command(&cwd, &options.goal).and_then(|(program, args)| {
+            crate::tools::child_process::WarmupJob::spawn(&program, &args, &cwd).ok()
+        });
         if let Some(job) = &warmup {
             (emit_fn)(HarnessEvent {
                 data: None,
@@ -4753,7 +6130,9 @@ impl HarnessRun {
         let defaults = default_loop_config();
         let overrides = options.r#loop.unwrap_or_default();
         let mut loop_config = HarnessLoopConfig {
-            hot_tool_results: overrides.hot_tool_results.unwrap_or(defaults.hot_tool_results),
+            hot_tool_results: overrides
+                .hot_tool_results
+                .unwrap_or(defaults.hot_tool_results),
             max_cycles: overrides.max_cycles.unwrap_or(defaults.max_cycles),
             max_tool_result_chars: overrides
                 .max_tool_result_chars
@@ -4762,17 +6141,27 @@ impl HarnessRun {
                 .max_tool_rounds_per_cycle
                 .unwrap_or(defaults.max_tool_rounds_per_cycle),
         };
-        if let (Some(rounds), None) = (options.max_tool_rounds_per_iteration, overrides.max_tool_rounds_per_cycle) {
+        if let (Some(rounds), None) = (
+            options.max_tool_rounds_per_iteration,
+            overrides.max_tool_rounds_per_cycle,
+        ) {
             loop_config.max_tool_rounds_per_cycle = rounds;
         }
         // A zero, negative, or NaN cycle/round budget would spin the outer run loop
         // without ever calling the model or advancing the iteration counter.
         loop_config.max_cycles = clamp_loop_value(loop_config.max_cycles, 1, defaults.max_cycles);
-        loop_config.max_tool_rounds_per_cycle =
-            clamp_loop_value(loop_config.max_tool_rounds_per_cycle, 1, defaults.max_tool_rounds_per_cycle);
-        loop_config.hot_tool_results = clamp_loop_value(loop_config.hot_tool_results, 0, defaults.hot_tool_results);
-        loop_config.max_tool_result_chars =
-            clamp_loop_value(loop_config.max_tool_result_chars, 1, defaults.max_tool_result_chars);
+        loop_config.max_tool_rounds_per_cycle = clamp_loop_value(
+            loop_config.max_tool_rounds_per_cycle,
+            1,
+            defaults.max_tool_rounds_per_cycle,
+        );
+        loop_config.hot_tool_results =
+            clamp_loop_value(loop_config.hot_tool_results, 0, defaults.hot_tool_results);
+        loop_config.max_tool_result_chars = clamp_loop_value(
+            loop_config.max_tool_result_chars,
+            1,
+            defaults.max_tool_result_chars,
+        );
 
         let stall_limit = options.stall_limit.unwrap_or(3);
         let plan_mode = PlanMode::parse(options.plan_mode.as_deref());
@@ -4796,7 +6185,9 @@ impl HarnessRun {
         let telemetry_defaults = default_telemetry_config();
         let telemetry_overrides = options.telemetry.unwrap_or_default();
         let telemetry_config = HarnessTelemetryConfig {
-            base_ttl: telemetry_overrides.base_ttl.unwrap_or(telemetry_defaults.base_ttl),
+            base_ttl: telemetry_overrides
+                .base_ttl
+                .unwrap_or(telemetry_defaults.base_ttl),
             max_observations: telemetry_overrides
                 .max_observations
                 .unwrap_or(telemetry_defaults.max_observations),
@@ -4809,7 +6200,9 @@ impl HarnessRun {
             max_promoted_output_chars: telemetry_overrides
                 .max_promoted_output_chars
                 .unwrap_or(telemetry_defaults.max_promoted_output_chars),
-            max_ttl: telemetry_overrides.max_ttl.unwrap_or(telemetry_defaults.max_ttl),
+            max_ttl: telemetry_overrides
+                .max_ttl
+                .unwrap_or(telemetry_defaults.max_ttl),
             observation_base_ttl: telemetry_overrides
                 .observation_base_ttl
                 .unwrap_or(telemetry_defaults.observation_base_ttl),
@@ -4827,7 +6220,12 @@ impl HarnessRun {
         let dynamic_tool_names: HashSet<String> = options
             .dynamic_tool_names
             .clone()
-            .unwrap_or_else(|| DEFAULT_DYNAMIC_TOOL_NAMES.iter().map(|name| name.to_string()).collect())
+            .unwrap_or_else(|| {
+                DEFAULT_DYNAMIC_TOOL_NAMES
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect()
+            })
             .into_iter()
             .collect();
 
@@ -4848,25 +6246,39 @@ impl HarnessRun {
                     .map(|(name, role)| {
                         (
                             name.clone(),
-                            crate::harness::harness_tools::HarnessRoleSpec { verified_by: role.verified_by.clone(), blind: role.blind },
+                            crate::harness::harness_tools::HarnessRoleSpec {
+                                verified_by: role.verified_by.clone(),
+                                blind: role.blind,
+                            },
                         )
                     })
                     .collect(),
                 max_review_rounds: Some(
-                    options.max_review_rounds.unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS).max(0) as u32,
+                    options
+                        .max_review_rounds
+                        .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS)
+                        .max(0) as u32,
                 ),
-                default_task_role: options.role_bindings.as_ref().and_then(|bindings| bindings.task.clone()),
+                default_task_role: options
+                    .role_bindings
+                    .as_ref()
+                    .and_then(|bindings| bindings.task.clone()),
             })
         };
         let role_names: Vec<String> = role_map.keys().cloned().collect();
-        let harness_tool_specs =
-            build_harness_tool_specs(&role_names, options.ask_user_enabled);
+        let harness_tool_specs = build_harness_tool_specs(&role_names, options.ask_user_enabled);
         let mut default_transport_tools = build_transport_tools(&tools);
         default_transport_tools.extend(harness_tool_specs.iter().cloned());
 
         let mut headers = options.headers.clone();
-        if !headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("content-type")) {
-            headers.insert(0, ("content-type".to_string(), "application/json".to_string()));
+        if !headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+        {
+            headers.insert(
+                0,
+                ("content-type".to_string(), "application/json".to_string()),
+            );
         }
 
         // `options.toolServices ?? createChatToolRuntimeServices({ cwd })`:
@@ -4919,7 +6331,9 @@ impl HarnessRun {
                 emit: emit_fn.clone(),
                 fallback_route: options.fallback_route.clone(),
                 get_iteration: Arc::new(move || {
-                    iteration_cell.iteration.load(std::sync::atomic::Ordering::Relaxed)
+                    iteration_cell
+                        .iteration
+                        .load(std::sync::atomic::Ordering::Relaxed)
                 }),
                 headers,
                 model: model.clone(),
@@ -4927,7 +6341,11 @@ impl HarnessRun {
                     retry_sink.retry_waits.lock().unwrap().push(wait_seconds);
                 }),
                 on_usage: Arc::new(move |response, record| {
-                    usage_sink.usages.lock().unwrap().push((response.usage.clone(), record));
+                    usage_sink
+                        .usages
+                        .lock()
+                        .unwrap()
+                        .push((response.usage.clone(), record));
                 }),
                 provider: options.provider.clone(),
                 refresh_headers: options.refresh_headers.clone(),
@@ -5030,10 +6448,16 @@ impl HarnessRun {
     ) {
         // Treat an empty string like an absent value.
         let task_id = call.task_id.clone().filter(|task_id| !task_id.is_empty());
-        let provider = call.provider.clone().filter(|provider| !provider.is_empty());
+        let provider = call
+            .provider
+            .clone()
+            .filter(|provider| !provider.is_empty());
         // Per-role inference accounting: bucket this call under its loop role
         // (falls back to "default" when usage arrives outside a role loop).
-        let role_key = self.active_role.clone().unwrap_or_else(|| "default".to_string());
+        let role_key = self
+            .active_role
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         let role_bucket = self
             .role_inference
             .entry(role_key)
@@ -5046,11 +6470,10 @@ impl HarnessRun {
             role_bucket.hedges_won += 1;
         }
         role_bucket.latency_ms += call.latency_ms.max(0) as u64;
-        role_bucket.completion_tokens +=
-            usage
-                .and_then(|usage| usage.completion_tokens)
-                .unwrap_or(0)
-                .max(0) as u64;
+        role_bucket.completion_tokens += usage
+            .and_then(|usage| usage.completion_tokens)
+            .unwrap_or(0)
+            .max(0) as u64;
 
         let prompt_tokens = usage.and_then(|usage| usage.prompt_tokens).unwrap_or(0);
         let completion_tokens = usage.and_then(|usage| usage.completion_tokens).unwrap_or(0);
@@ -5077,23 +6500,21 @@ impl HarnessRun {
         self.run_usage.calls += 1;
         self.run_usage.prompt_tokens += prompt_tokens;
         self.run_usage.completion_tokens += completion_tokens;
-        self.run_usage.cache_creation_tokens = Some(
-            self.run_usage.cache_creation_tokens.unwrap_or(0) + cache_creation_tokens,
-        );
-        self.run_usage.cache_read_tokens = Some(
-            self.run_usage.cache_read_tokens.unwrap_or(0) + cache_read_tokens,
-        );
+        self.run_usage.cache_creation_tokens =
+            Some(self.run_usage.cache_creation_tokens.unwrap_or(0) + cache_creation_tokens);
+        self.run_usage.cache_read_tokens =
+            Some(self.run_usage.cache_read_tokens.unwrap_or(0) + cache_read_tokens);
 
         if let Some(task_id) = task_id.as_deref() {
-            let bucket = self
-                .run_usage
-                .by_task
-                .entry(task_id.to_string())
-                .or_insert(HarnessUsageByTask {
-                    calls: 0,
-                    completion_tokens: 0,
-                    prompt_tokens: 0,
-                });
+            let bucket =
+                self.run_usage
+                    .by_task
+                    .entry(task_id.to_string())
+                    .or_insert(HarnessUsageByTask {
+                        calls: 0,
+                        completion_tokens: 0,
+                        prompt_tokens: 0,
+                    });
 
             bucket.calls += 1;
             bucket.prompt_tokens += prompt_tokens;
@@ -5245,10 +6666,7 @@ impl HarnessRun {
     /// arrives in answers.jsonl (~500 ms poll), the run aborts, or the
     /// ask_user timeout expires. On timeout the pending survey is preserved
     /// and the run is flagged to end with reason "awaiting-input".
-    async fn run_survey_block(
-        &mut self,
-        survey: crate::core::types::QuestionSurvey,
-    ) -> SurveyWait {
+    async fn run_survey_block(&mut self, survey: crate::core::types::QuestionSurvey) -> SurveyWait {
         let Some(answers_path) = self.answers_path() else {
             self.ask_user_awaiting = true;
             return SurveyWait::Aborted;
@@ -5416,85 +6834,125 @@ impl HarnessRun {
     ) -> Option<String> {
         let tool_name = tool_name.to_string();
         let raw_input = raw_input.to_string();
-            // A reused VERIFY ran nothing: the record it cites stays current.
-            if tool_name == "VERIFY" && !execution.dispatched && execution.tool_content.starts_with(VERIFY_REUSED_PREFIX) {
-                return None;
-            }
-            let verification_command = extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
+        // A reused VERIFY ran nothing: the record it cites stays current.
+        if tool_name == "VERIFY"
+            && !execution.dispatched
+            && execution.tool_content.starts_with(VERIFY_REUSED_PREFIX)
+        {
+            return None;
+        }
+        let verification_command =
+            extract_verification_command_for_goal(&tool_name, &raw_input, &self.state.goal)
                 .or_else(|| {
-                    (tool_name == "BASH" && execution.tool_content.lines().any(|line| line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)))
-                        .then(|| extract_bash_command(&raw_input)).flatten()
-                        // An echoed marker is not a check that ran (see parse_verify_output).
-                        .filter(|command| !crate::tools::builtin::verify::marker_is_fabricated(command))
+                    (tool_name == "BASH"
+                        && execution.tool_content.lines().any(|line| {
+                            line.starts_with(crate::tools::builtin::verify::CUSTOM_RESULT_PREFIX)
+                        }))
+                    .then(|| extract_bash_command(&raw_input))
+                    .flatten()
+                    // An echoed marker is not a check that ran (see parse_verify_output).
+                    .filter(|command| !crate::tools::builtin::verify::marker_is_fabricated(command))
                 })
-                .or_else(|| bash_native_runner_verification(&tool_name, &raw_input, &execution.tool_content));
-            if let Some(verification_command) = verification_command.clone() {
-                let truncated_command = truncate_text(&verification_command, 200);
-                let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
-                let ran_no_tests =
-                    !execution.failed && detect_empty_test_run(&verification_command, &execution.tool_content);
-                let evidence = if tool_name == "CHECK" {
-                    crate::core::types::VerificationEvidence {
-                        anchor: None,
-                        kind: crate::core::types::VerificationEvidenceKind::Typecheck,
-                        executed: 0, passed: 0, failed: i64::from(execution.failed), skipped: None,
-                        detail: Some("Compiler diagnostics for the requested scope; no tests executed.".into()),
-                    }
-                } else {
-                    let mut evidence = crate::tools::builtin::verify::verification_evidence(&verification_command, &execution.tool_content);
-                    if tool_name == "VERIFY" || tool_name == "BASH" {
-                        // BASH input carries no anchor field: the declared
-                        // anchor is None and only the native-runner
-                        // promotion below can make it external.
-                        evidence.anchor = declared_verification_anchor_for_goal(&raw_input, &self.state.edited_paths, &self.state.goal);
-                        let before = evidence.anchor.as_ref().map(|anchor| anchor.kind.clone());
-                        evidence.anchor = promote_native_runner_anchor(evidence.anchor.take(), &verification_command, &evidence, &self.state.edited_paths);
-                        if evidence.anchor.as_ref().map(|anchor| anchor.kind.clone()) != before
-                            && evidence.anchor.as_ref().map_or(false, |anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
-                        {
-                            self.emit(HarnessEvent {
+                .or_else(|| {
+                    bash_native_runner_verification(&tool_name, &raw_input, &execution.tool_content)
+                });
+        if let Some(verification_command) = verification_command.clone() {
+            let truncated_command = truncate_text(&verification_command, 200);
+            let output_tail = truncate_text_keeping_ends(&execution.tool_content, 500);
+            let ran_no_tests = !execution.failed
+                && detect_empty_test_run(&verification_command, &execution.tool_content);
+            let evidence = if tool_name == "CHECK" {
+                crate::core::types::VerificationEvidence {
+                    anchor: None,
+                    kind: crate::core::types::VerificationEvidenceKind::Typecheck,
+                    executed: 0,
+                    passed: 0,
+                    failed: i64::from(execution.failed),
+                    skipped: None,
+                    detail: Some(
+                        "Compiler diagnostics for the requested scope; no tests executed.".into(),
+                    ),
+                }
+            } else {
+                let mut evidence = crate::tools::builtin::verify::verification_evidence(
+                    &verification_command,
+                    &execution.tool_content,
+                );
+                if tool_name == "VERIFY" || tool_name == "BASH" {
+                    // BASH input carries no anchor field: the declared
+                    // anchor is None and only the native-runner
+                    // promotion below can make it external.
+                    evidence.anchor = declared_verification_anchor_for_goal(
+                        &raw_input,
+                        &self.state.edited_paths,
+                        &self.state.goal,
+                    );
+                    let before = evidence.anchor.as_ref().map(|anchor| anchor.kind.clone());
+                    evidence.anchor = promote_native_runner_anchor(
+                        evidence.anchor.take(),
+                        &verification_command,
+                        &evidence,
+                        &self.state.edited_paths,
+                    );
+                    if evidence.anchor.as_ref().map(|anchor| anchor.kind.clone()) != before
+                        && evidence.anchor.as_ref().map_or(false, |anchor| {
+                            anchor.kind == crate::core::types::VerificationAnchorKind::External
+                        })
+                    {
+                        self.emit(HarnessEvent {
                                 data: None,
                                 detail: format!("verification anchor promoted to external: project suite run by a native runner ({})", truncate_text(&verification_command, 80)),
                                 iteration: self.state.iteration,
                                 r#type: HarnessEventType::HarnessOp,
                             });
-                        }
-                        // The tool built its result text before the harness
-                        // attached the declared anchor, so it reads
-                        // "anchor: undeclared" for every call; a model that
-                        // sees that re-declares the same anchor round after
-                        // round. Print the anchor the record actually carries.
-                        if evidence.anchor.is_some() {
-                            execution.tool_content = execution.tool_content.replacen(
-                                "; anchor: undeclared",
-                                &format!("; anchor: {}", crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())),
-                                1,
-                            );
-                        }
-                        if let Some(reason) = evidence.anchor.as_ref().and_then(|anchor| anchor.downgraded_reason.clone()) {
-                            self.emit(HarnessEvent {
-                                data: None,
-                                detail: format!("verification anchor downgraded to self-authored: {reason}"),
-                                iteration: self.state.iteration,
-                                r#type: HarnessEventType::RunWarning,
-                            });
-                        }
                     }
-                    evidence
-                };
-                execution.failed |= evidence.failed > 0;
-                let verification_record = HarnessVerificationRecord {
-                    at_iteration: self.state.iteration,
-                    command: truncated_command.clone(),
-                    failed: execution.failed,
-                    output_tail: output_tail.clone(),
-                    ran_no_tests: ran_no_tests.then_some(true),
-                    evidence: Some(evidence),
-                    id: Some(next_verification_record_id(&self.state.verifications)),
-                };
+                    // The tool built its result text before the harness
+                    // attached the declared anchor, so it reads
+                    // "anchor: undeclared" for every call; a model that
+                    // sees that re-declares the same anchor round after
+                    // round. Print the anchor the record actually carries.
+                    if evidence.anchor.is_some() {
+                        execution.tool_content = execution.tool_content.replacen(
+                            "; anchor: undeclared",
+                            &format!(
+                                "; anchor: {}",
+                                crate::core::state::describe_verification_anchor(
+                                    evidence.anchor.as_ref()
+                                )
+                            ),
+                            1,
+                        );
+                    }
+                    if let Some(reason) = evidence
+                        .anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.downgraded_reason.clone())
+                    {
+                        self.emit(HarnessEvent {
+                            data: None,
+                            detail: format!(
+                                "verification anchor downgraded to self-authored: {reason}"
+                            ),
+                            iteration: self.state.iteration,
+                            r#type: HarnessEventType::RunWarning,
+                        });
+                    }
+                }
+                evidence
+            };
+            execution.failed |= evidence.failed > 0;
+            let verification_record = HarnessVerificationRecord {
+                at_iteration: self.state.iteration,
+                command: truncated_command.clone(),
+                failed: execution.failed,
+                output_tail: output_tail.clone(),
+                ran_no_tests: ran_no_tests.then_some(true),
+                evidence: Some(evidence),
+                id: Some(next_verification_record_id(&self.state.verifications)),
+            };
 
-                if ran_no_tests {
-                    self.emit(HarnessEvent {
+            if ran_no_tests {
+                self.emit(HarnessEvent {
                         data: None,
                         detail: format!(
                             "verification passed without executing any test: {truncated_command} — it does not count as evidence until a run executes tests"
@@ -5502,69 +6960,81 @@ impl HarnessRun {
                         iteration: self.state.iteration,
                         r#type: HarnessEventType::RunWarning,
                     });
-                }
+            }
 
-                // The record ref is how the model cites this evidence later
-                // (finish_task evidence on a value revision), so it must be
-                // visible in the tool result itself, not only in state.
-                let record_ref = verification_record.id.clone();
-                if tool_name == "VERIFY" {
-                    if let Some(record_id) = record_ref.as_deref() {
-                        execution.tool_content = format!(
-                            "{}\nverification record: {record_id}",
-                            execution.tool_content
-                        );
-                    }
-                } else if tool_name == "BASH" {
-                    if let (Some(record_id), Some(evidence)) = (record_ref.as_deref(), verification_record.evidence.as_ref()) {
-                        execution.tool_content = format!(
+            // The record ref is how the model cites this evidence later
+            // (finish_task evidence on a value revision), so it must be
+            // visible in the tool result itself, not only in state.
+            let record_ref = verification_record.id.clone();
+            if tool_name == "VERIFY" {
+                if let Some(record_id) = record_ref.as_deref() {
+                    execution.tool_content = format!(
+                        "{}\nverification record: {record_id}",
+                        execution.tool_content
+                    );
+                }
+            } else if tool_name == "BASH" {
+                if let (Some(record_id), Some(evidence)) =
+                    (record_ref.as_deref(), verification_record.evidence.as_ref())
+                {
+                    execution.tool_content = format!(
                             "{}\n[harness] recorded as verification record {record_id}: {} executed, {} failed; anchor: {} — no separate VERIFY of the same suite is needed before finish_task",
                             execution.tool_content,
                             evidence.executed,
                             evidence.failed,
                             crate::core::state::describe_verification_anchor(evidence.anchor.as_ref())
                         );
-                    }
-                }
-                self.state.last_verification = Some(verification_record.clone());
-                scope.progress_this_cycle = true;
-                scope.verification_progress_this_cycle = true;
-                self.state.verifications = {
-                    let mut timeline = self.state.verifications.clone().unwrap_or_default();
-                    timeline.push(verification_record);
-                    if timeline.len() > MAX_VERIFICATION_TIMELINE {
-                        let excess = timeline.len() - MAX_VERIFICATION_TIMELINE;
-                        timeline.drain(0..excess);
-                    }
-                    Some(timeline)
-                };
-                self.state.mutations_since_verification = Some(0);
-
-                if execution.failed {
-                    let failure_hash = hash_text(&output_tail);
-                    let prior = self.state.verification_streak.take();
-                    let streak = match prior {
-                        Some(prior) if prior.command == truncated_command && prior.output_tail_hash == failure_hash => {
-                            HarnessVerificationStreak {
-                                command: truncated_command,
-                                consecutive_failures: prior.consecutive_failures + 1,
-                                output_tail_hash: failure_hash,
-                            }
-                        }
-                        _ => HarnessVerificationStreak {
-                            command: truncated_command,
-                            consecutive_failures: 1,
-                            output_tail_hash: failure_hash,
-                        },
-                    };
-                    self.state.verification_streak = Some(streak);
-                    if self.state.verification_streak.as_ref().map(|s| s.consecutive_failures).unwrap_or(0) >= VERIFICATION_STUCK_THRESHOLD as i64 {
-                        scope.verification_stuck_this_loop = true;
-                    }
-                } else {
-                    self.state.verification_streak = None;
                 }
             }
+            self.state.last_verification = Some(verification_record.clone());
+            scope.progress_this_cycle = true;
+            scope.verification_progress_this_cycle = true;
+            self.state.verifications = {
+                let mut timeline = self.state.verifications.clone().unwrap_or_default();
+                timeline.push(verification_record);
+                if timeline.len() > MAX_VERIFICATION_TIMELINE {
+                    let excess = timeline.len() - MAX_VERIFICATION_TIMELINE;
+                    timeline.drain(0..excess);
+                }
+                Some(timeline)
+            };
+            self.state.mutations_since_verification = Some(0);
+
+            if execution.failed {
+                let failure_hash = hash_text(&output_tail);
+                let prior = self.state.verification_streak.take();
+                let streak = match prior {
+                    Some(prior)
+                        if prior.command == truncated_command
+                            && prior.output_tail_hash == failure_hash =>
+                    {
+                        HarnessVerificationStreak {
+                            command: truncated_command,
+                            consecutive_failures: prior.consecutive_failures + 1,
+                            output_tail_hash: failure_hash,
+                        }
+                    }
+                    _ => HarnessVerificationStreak {
+                        command: truncated_command,
+                        consecutive_failures: 1,
+                        output_tail_hash: failure_hash,
+                    },
+                };
+                self.state.verification_streak = Some(streak);
+                if self
+                    .state
+                    .verification_streak
+                    .as_ref()
+                    .map(|s| s.consecutive_failures)
+                    .unwrap_or(0)
+                    >= VERIFICATION_STUCK_THRESHOLD as i64
+                {
+                    scope.verification_stuck_this_loop = true;
+                }
+            } else {
+                self.state.verification_streak = None;
+            }
+        }
 
         verification_command
     }
@@ -5602,19 +7072,30 @@ impl HarnessRun {
     /// self-authored, with no workspace edit since. The waiver adds a size
     /// bound on top; the review brief uses it as-is so the reviewer does not
     /// spend a round re-running a check that already settled the change.
-    pub fn verified_after_last_edit(&self, harness_ran: Option<&str>) -> Option<(&'static str, String)> {
+    pub fn verified_after_last_edit(
+        &self,
+        harness_ran: Option<&str>,
+    ) -> Option<(&'static str, String)> {
         let (how, command) = match harness_ran {
-            Some(command) => ("the harness ran the goal-declared check", command.to_string()),
+            Some(command) => (
+                "the harness ran the goal-declared check",
+                command.to_string(),
+            ),
             None => {
                 let record = self.state.last_verification.as_ref()?;
-                if record.failed || record.ran_no_tests == Some(true) || self.state.mutations_since_verification.unwrap_or(0) > 0 {
+                if record.failed
+                    || record.ran_no_tests == Some(true)
+                    || self.state.mutations_since_verification.unwrap_or(0) > 0
+                {
                     return None;
                 }
                 if record
                     .evidence
                     .as_ref()
                     .and_then(|evidence| evidence.anchor.as_ref())
-                    .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored)
+                    .is_some_and(|anchor| {
+                        anchor.kind == crate::core::types::VerificationAnchorKind::SelfAuthored
+                    })
                 {
                     return None;
                 }
@@ -5626,7 +7107,9 @@ impl HarnessRun {
                     .evidence
                     .as_ref()
                     .and_then(|evidence| evidence.anchor.as_ref())
-                    .is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External)
+                    .is_some_and(|anchor| {
+                        anchor.kind == crate::core::types::VerificationAnchorKind::External
+                    })
                     && native_runner_name(&command).is_some()
                 {
                     // No declared check to match: an external-anchored run of
@@ -5640,7 +7123,11 @@ impl HarnessRun {
                         .and_then(|anchor| anchor.source.as_deref())
                         .is_some_and(|source| source.starts_with("check named in finish_task"));
                     (
-                        if named_in_finish { "the harness ran the project suite named in finish_task" } else { "the last VERIFY was the project suite with an external anchor" },
+                        if named_in_finish {
+                            "the harness ran the project suite named in finish_task"
+                        } else {
+                            "the last VERIFY was the project suite with an external anchor"
+                        },
                         command,
                     )
                 } else {
@@ -5682,7 +7169,8 @@ impl HarnessRun {
         if count < FINISH_BOUNCE_AUTO_UNRECONCILE_AT {
             return outcome;
         }
-        let Some(input) = unreconciled_finish_input(raw_input, &self.state, count, &outcome.text) else {
+        let Some(input) = unreconciled_finish_input(raw_input, &self.state, count, &outcome.text)
+        else {
             return outcome;
         };
         let op = match parse_harness_op_with_gate(tool_name, &input, self.role_gate.as_ref()) {
@@ -5724,7 +7212,10 @@ impl HarnessRun {
         if tool_name != "finish_task" {
             return outcome;
         }
-        let recheck = finish_recheck_reason(&outcome.text, self.state.mutations_since_verification.unwrap_or(0));
+        let recheck = finish_recheck_reason(
+            &outcome.text,
+            self.state.mutations_since_verification.unwrap_or(0),
+        );
         let stale = recheck == Some(FinishRecheck::Stale);
         let unchecked = recheck == Some(FinishRecheck::Unchecked);
         // Stale finish: re-run the record the agent already made. Unchecked
@@ -5733,11 +7224,9 @@ impl HarnessRun {
         // Records keep a 200-char truncation of the command; a cut command
         // (or a CHECK alias) cannot be re-run faithfully, so a stale finish
         // whose last check is unusable falls back to the goal-declared one.
-        let rerunnable = self
-            .state
-            .last_verification
-            .clone()
-            .filter(|record| record.command.chars().count() < 200 && !record.command.starts_with("CHECK "));
+        let rerunnable = self.state.last_verification.clone().filter(|record| {
+            record.command.chars().count() < 200 && !record.command.starts_with("CHECK ")
+        });
         let mut detected_source: Option<&'static str> = None;
         let mut explicit_source: Option<String> = None;
         let explicit = explicit_finish_check(raw_input);
@@ -5748,7 +7237,10 @@ impl HarnessRun {
             let command = explicit.unwrap_or_default();
             let declared = command_is_goal_declared(&self.state.goal, &command);
             if !declared {
-                explicit_source = Some(format!("check named in finish_task ({}), run by the harness", truncate_text(&command, 120)));
+                explicit_source = Some(format!(
+                    "check named in finish_task ({}), run by the harness",
+                    truncate_text(&command, 120)
+                ));
             }
             scope.finish_checks_run += 1;
             (
@@ -5763,7 +7255,15 @@ impl HarnessRun {
                 },
                 declared,
             )
-        } else if stale && rerunnable.is_some() && budget_left && rerun_keeps_goal_standing(&self.state.goal, rerunnable.as_ref().unwrap(), &self.hung_commands) {
+        } else if stale
+            && rerunnable.is_some()
+            && budget_left
+            && rerun_keeps_goal_standing(
+                &self.state.goal,
+                rerunnable.as_ref().unwrap(),
+                &self.hung_commands,
+            )
+        {
             // A re-run of a goal-declared command keeps its goal-declared
             // standing (anchor, review waiver): the bench showed a finish
             // whose harness-run check failed, then a fix, then a finish that
@@ -5790,8 +7290,16 @@ impl HarnessRun {
                     r#type: HarnessEventType::HarnessOp,
                 });
             }
-            let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
-            let Some(command) = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone())) else { return outcome };
+            let detected = if declared.is_none() {
+                detect_project_check_command(&self.cwd)
+            } else {
+                None
+            };
+            let Some(command) =
+                declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone()))
+            else {
+                return outcome;
+            };
             if let Some((_, source)) = &detected {
                 detected_source = Some(source);
                 self.emit(HarnessEvent {
@@ -5830,7 +7338,11 @@ impl HarnessRun {
         } else if let Some(source) = &explicit_source {
             input["anchor"] = serde_json::json!({ "kind": "external", "source": source, "coverage": "reportedClaim" });
         }
-        if let Some(anchor) = record.evidence.as_ref().and_then(|evidence| evidence.anchor.as_ref()) {
+        if let Some(anchor) = record
+            .evidence
+            .as_ref()
+            .and_then(|evidence| evidence.anchor.as_ref())
+        {
             let kind = match anchor.kind {
                 crate::core::types::VerificationAnchorKind::External => "external",
                 crate::core::types::VerificationAnchorKind::SelfAuthored => "self",
@@ -5841,7 +7353,8 @@ impl HarnessRun {
                 if let Some(coverage) = &anchor.coverage {
                     input["anchor"]["coverage"] = serde_json::json!(match coverage {
                         crate::core::types::CoverageGranularity::ReportedClaim => "reportedClaim",
-                        crate::core::types::CoverageGranularity::InputOrComponent => "inputOrComponent",
+                        crate::core::types::CoverageGranularity::InputOrComponent =>
+                            "inputOrComponent",
                     });
                 }
                 if let Some(subject) = &anchor.expectation_subject {
@@ -5851,10 +7364,19 @@ impl HarnessRun {
         }
         let verify_input = input.to_string();
         let reverify_id = format!("{call_id}-reverify");
-        let mut execution = self.execute_workspace_tool(&reverify_id, &verify_input, Some(&scope.loop_tool_indexes), "VERIFY");
+        let mut execution = self.execute_workspace_tool(
+            &reverify_id,
+            &verify_input,
+            Some(&scope.loop_tool_indexes),
+            "VERIFY",
+        );
         self.record_verification_outcome(scope, "VERIFY", &verify_input, &mut execution);
         let verdict = match &self.state.last_verification {
-            Some(latest) => core_state::describe_verification_outcome(latest.failed, latest.ran_no_tests, latest.evidence.as_ref()),
+            Some(latest) => core_state::describe_verification_outcome(
+                latest.failed,
+                latest.ran_no_tests,
+                latest.evidence.as_ref(),
+            ),
             None => core_state::describe_verification_outcome(execution.failed, None, None),
         };
         self.emit(HarnessEvent {
@@ -5864,16 +7386,28 @@ impl HarnessRun {
                 ..Default::default()
             }),
             detail: if goal_declared {
-                format!("harness ran the goal-declared check for the finish: {} -> {verdict}", truncate_text(&record.command, 120))
+                format!(
+                    "harness ran the goal-declared check for the finish: {} -> {verdict}",
+                    truncate_text(&record.command, 120)
+                )
             } else if explicit_source.is_some() {
-                format!("harness ran the check named in finish_task: {} -> {verdict}", truncate_text(&record.command, 120))
+                format!(
+                    "harness ran the check named in finish_task: {} -> {verdict}",
+                    truncate_text(&record.command, 120)
+                )
             } else {
-                format!("harness re-ran the last check after workspace edits: {} -> {verdict}", truncate_text(&record.command, 120))
+                format!(
+                    "harness re-ran the last check after workspace edits: {} -> {verdict}",
+                    truncate_text(&record.command, 120)
+                )
             },
             iteration: self.state.iteration,
             r#type: HarnessEventType::HarnessOp,
         });
-        scope.digest_actions.push(format!("harness ran {} -> {verdict}", truncate_text(&record.command, 80)));
+        scope.digest_actions.push(format!(
+            "harness ran {} -> {verdict}",
+            truncate_text(&record.command, 80)
+        ));
         if execution.failed {
             return crate::harness::harness_tools::HarnessOpOutcome {
                 text: format!(
@@ -5908,17 +7442,32 @@ impl HarnessRun {
         let reapplied = apply_harness_op(&mut self.state, op, &op_context);
         if reapplied.text.contains("Review waived:") {
             self.emit(HarnessEvent {
-                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
-                detail: format!("review waived — {}", op_context.review_waived.clone().unwrap_or_default()),
+                data: Some(HarnessEventData {
+                    r#loop: Some(self.state.r#loop),
+                    task_id: scope.current_task_id.clone(),
+                    ..Default::default()
+                }),
+                detail: format!(
+                    "review waived — {}",
+                    op_context.review_waived.clone().unwrap_or_default()
+                ),
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::HarnessOp,
             });
-            scope.digest_actions.push("review waived: harness-verified small change".to_string());
+            scope
+                .digest_actions
+                .push("review waived: harness-verified small change".to_string());
         }
         crate::harness::harness_tools::HarnessOpOutcome {
             text: format!(
                 "harness {} {} -> {verdict}. {}",
-                if goal_declared { "ran the goal-declared check:" } else if explicit_source.is_some() { "ran the check named in finish_task:" } else { "re-ran the last check after your edits:" },
+                if goal_declared {
+                    "ran the goal-declared check:"
+                } else if explicit_source.is_some() {
+                    "ran the check named in finish_task:"
+                } else {
+                    "re-ran the last check after your edits:"
+                },
                 truncate_text(&record.command, 120),
                 reapplied.text
             ),
@@ -5950,9 +7499,7 @@ impl HarnessRun {
             })],
             context_files: None,
             context_state: None,
-            created_at: Some(
-                (self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ),
+            created_at: Some((self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             failed: None,
             id: format!("harness-activation-{}", self.state.iteration),
             pending: None,
@@ -5993,44 +7540,83 @@ impl HarnessRun {
             return WorkspaceToolExecution {
                 dispatched: false,
                 failed: true,
-                tool_content: format!(
-                    "tool call blocked by pre_tool_use hook: {stderr_excerpt}"
-                ),
+                tool_content: format!("tool call blocked by pre_tool_use hook: {stderr_excerpt}"),
             };
         }
-        let command = matches!(tool_name, "BASH" | "VERIFY").then(|| extract_bash_command(raw_input)).flatten();
-        if let Some(command) = command.as_deref().filter(|command| self.hung_commands.iter().any(|hung| hung == command)) {
+        let command = matches!(tool_name, "BASH" | "VERIFY")
+            .then(|| extract_bash_command(raw_input))
+            .flatten();
+        if let Some(command) = command
+            .as_deref()
+            .filter(|command| self.hung_commands.iter().any(|hung| hung == command))
+        {
             let text = hung_command_refusal(tool_name, command);
             self.emit(HarnessEvent {
-                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                detail: format!("refused re-run of a hung {tool_name} command: {}", truncate_text(command, 120)),
+                data: Some(HarnessEventData {
+                    r#loop: Some(self.state.r#loop),
+                    ..Default::default()
+                }),
+                detail: format!(
+                    "refused re-run of a hung {tool_name} command: {}",
+                    truncate_text(command, 120)
+                ),
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::HarnessOp,
             });
-            return WorkspaceToolExecution { dispatched: false, failed: true, tool_content: text };
+            return WorkspaceToolExecution {
+                dispatched: false,
+                failed: true,
+                tool_content: text,
+            };
         }
         // Same shape as an earlier hang: run, but on a short leash.
         let leashed: Option<(String, String)> = command.as_deref().and_then(|command| {
             let shape = normalize_command_shape(command);
-            let hung_before = self.hung_shapes.iter().find(|(hung, _)| *hung == shape).map(|(_, command)| command.clone())?;
-            leash_timeout(raw_input, tool_name, self.hung_shape_leash_ms).map(|rewritten| (rewritten, hung_before))
+            let hung_before = self
+                .hung_shapes
+                .iter()
+                .find(|(hung, _)| *hung == shape)
+                .map(|(_, command)| command.clone())?;
+            leash_timeout(raw_input, tool_name, self.hung_shape_leash_ms)
+                .map(|rewritten| (rewritten, hung_before))
         });
-        let raw_input: &str = leashed.as_ref().map(|(rewritten, _)| rewritten.as_str()).unwrap_or(raw_input);
+        let raw_input: &str = leashed
+            .as_ref()
+            .map(|(rewritten, _)| rewritten.as_str())
+            .unwrap_or(raw_input);
         if let Some((_, hung_before)) = &leashed {
             self.emit(HarnessEvent {
-                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                detail: format!("hung-shape leash: {} runs under {}s (same shape as {})", truncate_text(command.as_deref().unwrap_or(""), 100), self.hung_shape_leash_ms / 1000, truncate_text(hung_before, 80)),
+                data: Some(HarnessEventData {
+                    r#loop: Some(self.state.r#loop),
+                    ..Default::default()
+                }),
+                detail: format!(
+                    "hung-shape leash: {} runs under {}s (same shape as {})",
+                    truncate_text(command.as_deref().unwrap_or(""), 100),
+                    self.hung_shape_leash_ms / 1000,
+                    truncate_text(hung_before, 80)
+                ),
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::HarnessOp,
             });
         }
         if tool_name == "VERIFY" {
             if let Some(text) = command.as_deref().and_then(|command| {
-                repeated_verify_reuse(command, self.state.last_verification.as_ref(), self.state.mutations_since_verification.unwrap_or(0))
+                repeated_verify_reuse(
+                    command,
+                    self.state.last_verification.as_ref(),
+                    self.state.mutations_since_verification.unwrap_or(0),
+                )
             }) {
                 self.emit(HarnessEvent {
-                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                    detail: format!("repeated VERIFY reused the current record instead of re-running: {}", truncate_text(command.as_deref().unwrap_or(""), 120)),
+                    data: Some(HarnessEventData {
+                        r#loop: Some(self.state.r#loop),
+                        ..Default::default()
+                    }),
+                    detail: format!(
+                        "repeated VERIFY reused the current record instead of re-running: {}",
+                        truncate_text(command.as_deref().unwrap_or(""), 120)
+                    ),
                     iteration: self.state.iteration,
                     r#type: HarnessEventType::HarnessOp,
                 });
@@ -6040,12 +7626,18 @@ impl HarnessRun {
                 // bounced for "self-authored or undeclared".
                 let goal_declared = serde_json::from_str::<serde_json::Value>(raw_input)
                     .ok()
-                    .and_then(|input| input.get(GOAL_DECLARED_CHECK_MARKER).and_then(|value| value.as_bool()))
+                    .and_then(|input| {
+                        input
+                            .get(GOAL_DECLARED_CHECK_MARKER)
+                            .and_then(|value| value.as_bool())
+                    })
                     .unwrap_or(false);
                 if goal_declared {
                     if let Some(record) = self.state.last_verification.as_mut() {
                         if let Some(evidence) = record.evidence.as_mut() {
-                            let external = evidence.anchor.as_ref().is_some_and(|anchor| anchor.kind == crate::core::types::VerificationAnchorKind::External);
+                            let external = evidence.anchor.as_ref().is_some_and(|anchor| {
+                                anchor.kind == crate::core::types::VerificationAnchorKind::External
+                            });
                             if !external {
                                 evidence.anchor = Some(crate::core::types::VerificationAnchor {
                                     kind: crate::core::types::VerificationAnchorKind::External,
@@ -6067,7 +7659,11 @@ impl HarnessRun {
                         }
                     }
                 }
-                return WorkspaceToolExecution { dispatched: false, failed: false, tool_content: text };
+                return WorkspaceToolExecution {
+                    dispatched: false,
+                    failed: false,
+                    tool_content: text,
+                };
             }
         }
         let dispatched = tool.is_some();
@@ -6099,9 +7695,15 @@ impl HarnessRun {
         // telemetry, transcript events, and the NDJSON stream all read this.
         let mut tool_content = (self.redact)(&executed.tool_content);
         if let Some((_, hung_before)) = &leashed {
-            tool_content.push_str(&hung_shape_leash_note(self.hung_shape_leash_ms, hung_before));
+            tool_content.push_str(&hung_shape_leash_note(
+                self.hung_shape_leash_ms,
+                hung_before,
+            ));
         }
-        if let Some(command) = command.as_ref().filter(|_| failed && output_reports_hang(&tool_content)) {
+        if let Some(command) = command
+            .as_ref()
+            .filter(|_| failed && output_reports_hang(&tool_content))
+        {
             self.hung_commands.push(command.clone());
             let shape = normalize_command_shape(command);
             if !self.hung_shapes.iter().any(|(hung, _)| *hung == shape) {
@@ -6125,14 +7727,22 @@ impl HarnessRun {
                 tool_content.push_str("\n\n");
                 tool_content.push_str(&repeated_command_nudge(count));
                 self.emit(HarnessEvent {
-                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                    detail: format!("flailing nudge: {shape} ran {count} times with no edit between"),
+                    data: Some(HarnessEventData {
+                        r#loop: Some(self.state.r#loop),
+                        ..Default::default()
+                    }),
+                    detail: format!(
+                        "flailing nudge: {shape} ran {count} times with no edit between"
+                    ),
                     iteration: self.state.iteration,
                     r#type: HarnessEventType::HarnessOp,
                 });
             }
         }
-        self.fire_hook(crate::harness::hooks::HookEvent::PostToolUse, Some((tool_name, &tool_content)));
+        self.fire_hook(
+            crate::harness::hooks::HookEvent::PostToolUse,
+            Some((tool_name, &tool_content)),
+        );
         // drip-specific: memory-bank writes (remember/forget) get their own
         // event, but harness ops dispatch in dispatch_tool_calls and never
         // reach execute_workspace_tool, so MemoryWrite fires there — gated
@@ -6211,7 +7821,10 @@ impl HarnessRun {
         event: crate::harness::hooks::HookEvent,
         tool: Option<(&str, &str)>,
     ) -> Vec<crate::harness::hooks::HookOutcome> {
-        let commands = self.options.hooks.commands_for(event, tool.map(|(name, _)| name));
+        let commands = self
+            .options
+            .hooks
+            .commands_for(event, tool.map(|(name, _)| name));
         if commands.is_empty() {
             return Vec::new();
         }
@@ -6291,18 +7904,28 @@ impl HarnessRun {
             if !self.direct_plan_checked {
                 self.direct_plan_checked = true;
                 if self.state.tasks.is_empty() {
-                    let project_check = if goal_declared_check_commands(&self.state.goal).is_empty() {
+                    let project_check = if goal_declared_check_commands(&self.state.goal).is_empty()
+                    {
                         detect_project_check_command(&self.cwd)
                     } else {
                         None
                     };
-                    if let Some(title) = direct_task_title(&self.state.goal, self.plan_mode, project_check.is_some()) {
+                    if let Some(title) =
+                        direct_task_title(&self.state.goal, self.plan_mode, project_check.is_some())
+                    {
                         let added = core_state::add_tasks(
                             &mut self.state,
-                            vec![core_state::HarnessTaskInput { depends_on: None, review_of: None, role: None, title }],
+                            vec![core_state::HarnessTaskInput {
+                                depends_on: None,
+                                review_of: None,
+                                role: None,
+                                title,
+                            }],
                             core_state::HarnessTaskPlacement::End,
                         );
-                        if let Some(task) = added.first().and_then(|task| core_state::get_task_by_id_mut(&mut self.state, &task.id)) {
+                        if let Some(task) = added.first().and_then(|task| {
+                            core_state::get_task_by_id_mut(&mut self.state, &task.id)
+                        }) {
                             core_state::append_task_note(
                                 task,
                                 "direct task: the planner was skipped (plan mode); the goal text is the contract — read what it names, make the change, run the check it declares.",
@@ -6318,7 +7941,10 @@ impl HarnessRun {
                                 .unwrap_or_default()
                         );
                         self.emit(HarnessEvent {
-                            data: Some(HarnessEventData { task_id: added.first().map(|task| task.id.clone()), ..Default::default() }),
+                            data: Some(HarnessEventData {
+                                task_id: added.first().map(|task| task.id.clone()),
+                                ..Default::default()
+                            }),
                             detail,
                             iteration: self.state.iteration,
                             r#type: HarnessEventType::HarnessOp,
@@ -6426,7 +8052,11 @@ impl HarnessRun {
                     );
                     scope.digest_actions.push(detail.clone());
                     self.emit(HarnessEvent {
-                        data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                        data: Some(HarnessEventData {
+                            r#loop: Some(self.state.r#loop),
+                            task_id: scope.current_task_id.clone(),
+                            ..Default::default()
+                        }),
                         detail,
                         iteration: self.state.iteration,
                         r#type: HarnessEventType::HarnessOp,
@@ -6541,9 +8171,15 @@ impl HarnessRun {
         }
 
         let (task_id, role) = self.loop_role_for_state();
-        let loop_tool_names: Vec<String> = self.tools.iter().map(|tool| tool.name.clone()).collect();
-        let scope = loop_tool_scope(&loop_tool_names, role.as_ref(), self.options.mcp_servers.clone());
-        let mut available: std::collections::BTreeSet<String> = scope.allowed.iter().cloned().collect();
+        let loop_tool_names: Vec<String> =
+            self.tools.iter().map(|tool| tool.name.clone()).collect();
+        let scope = loop_tool_scope(
+            &loop_tool_names,
+            role.as_ref(),
+            self.options.mcp_servers.clone(),
+        );
+        let mut available: std::collections::BTreeSet<String> =
+            scope.allowed.iter().cloned().collect();
         if let Some(servers) = scope.mcp_servers.as_ref() {
             available.extend(servers.iter().cloned());
         }
@@ -6572,7 +8208,11 @@ impl HarnessRun {
         if let Some(cached) = self.dynamic_skill_cache.get(&task_id).cloned() {
             self.dynamic_skills = cached
                 .into_iter()
-                .filter(|skill| candidates.iter().any(|candidate| candidate.name == skill.name))
+                .filter(|skill| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.name == skill.name)
+                })
                 .collect();
             return;
         }
@@ -6580,7 +8220,9 @@ impl HarnessRun {
         // The state the classifier sees: the goal, this task's id and title
         // and its last three notes, the phase, the role, and the
         // tool names. No repository contents, no transcript.
-        let task = task_id.as_deref().and_then(|id| core_state::get_task_by_id(&self.state, id));
+        let task = task_id
+            .as_deref()
+            .and_then(|id| core_state::get_task_by_id(&self.state, id));
         let notes: Vec<String> = task
             .map(|task| task.notes.iter().rev().take(3).rev().cloned().collect())
             .unwrap_or_default();
@@ -6601,8 +8243,7 @@ impl HarnessRun {
             "availableTools": scope.allowed,
         });
 
-        let selection =
-            crate::harness::classifier::select_skills(&route, state, &candidates).await;
+        let selection = crate::harness::classifier::select_skills(&route, state, &candidates).await;
 
         for warning in &selection.warnings {
             self.emit(HarnessEvent {
@@ -6620,7 +8261,12 @@ impl HarnessRun {
             if !candidates.iter().any(|candidate| &candidate.name == name) {
                 continue;
             }
-            if let Some(skill) = self.options.skill_pool.iter().find(|skill| &skill.name == name) {
+            if let Some(skill) = self
+                .options
+                .skill_pool
+                .iter()
+                .find(|skill| &skill.name == name)
+            {
                 selected.push(crate::cli::skills::LoadedCliSkill {
                     name: skill.name.clone(),
                     content: skill.content.clone(),
@@ -6641,8 +8287,7 @@ impl HarnessRun {
 
     pub fn begin_loop(&mut self) -> LoopScope {
         // pending → in_progress; activations counts pickups.
-        let current_task_id = core_state::get_current_task(&self.state)
-            .map(|task| task.id.clone());
+        let current_task_id = core_state::get_current_task(&self.state).map(|task| task.id.clone());
         if let Some(task_id) = current_task_id.as_deref() {
             if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, task_id) {
                 if task.status == HarnessTaskStatus::Pending {
@@ -6655,14 +8300,24 @@ impl HarnessRun {
             // run start plus the run's verification records, so the reviewer
             // judges the artifact instead of spending rounds re-reading files
             // and re-running checks the author already ran.
-            let wants_brief = core_state::get_task_by_id(&self.state, task_id).is_some_and(|task| {
-                task.review_of.is_some() && !task.notes.iter().any(|note| note.starts_with(REVIEW_BRIEF_PREFIX))
-            });
+            let wants_brief =
+                core_state::get_task_by_id(&self.state, task_id).is_some_and(|task| {
+                    task.review_of.is_some()
+                        && !task
+                            .notes
+                            .iter()
+                            .any(|note| note.starts_with(REVIEW_BRIEF_PREFIX))
+                });
             if wants_brief {
                 let settled = self
                     .verified_after_last_edit(None)
                     .map(|(how, command)| format!("{how} ({})", truncate_text(&command, 80)));
-                let brief = build_review_brief_with(&self.cwd, self.run_start_head.as_deref(), &self.state, settled.as_deref());
+                let brief = build_review_brief_with(
+                    &self.cwd,
+                    self.run_start_head.as_deref(),
+                    &self.state,
+                    settled.as_deref(),
+                );
                 if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, task_id) {
                     crate::core::state::append_task_note(task, &brief);
                 }
@@ -6686,8 +8341,13 @@ impl HarnessRun {
         // (MCP__<server>__<tool>) additionally need their server in the loop's
         // effective set: the role's mcpServers when it sets one, else the
         // run-level --mcp set, else none.
-        let loop_tool_names: Vec<String> = self.tools.iter().map(|tool| tool.name.clone()).collect();
-        let loop_scope = loop_tool_scope(&loop_tool_names, role.as_ref(), self.options.mcp_servers.clone());
+        let loop_tool_names: Vec<String> =
+            self.tools.iter().map(|tool| tool.name.clone()).collect();
+        let loop_scope = loop_tool_scope(
+            &loop_tool_names,
+            role.as_ref(),
+            self.options.mcp_servers.clone(),
+        );
         let loop_tool_indexes: Vec<usize> = self
             .tools
             .iter()
@@ -6699,7 +8359,8 @@ impl HarnessRun {
         // The transport list must agree with the index list: the cached
         // default covers the full pack only, so rebuild whenever the role
         // allowlist or the MCP gate narrowed it.
-        let loop_transport_tools: Vec<OpenAICompatibleRequestTool> = if loop_tool_indexes.len() != self.tools.len() {
+        let loop_transport_tools: Vec<OpenAICompatibleRequestTool> =
+            if loop_tool_indexes.len() != self.tools.len() {
                 let mut tools = self
                     .tools
                     .iter()
@@ -6709,8 +8370,7 @@ impl HarnessRun {
                         crate::harness::transport::create_request_tool(
                             &tool.name,
                             &tool.description,
-                            serde_json::to_value(&tool.parameters)
-                                .unwrap_or(serde_json::json!({})),
+                            serde_json::to_value(&tool.parameters).unwrap_or(serde_json::json!({})),
                         )
                     })
                     .collect::<Vec<_>>();
@@ -6732,7 +8392,9 @@ impl HarnessRun {
         let loop_budget = match role.as_ref().and_then(|r| r.r#loop.as_ref()) {
             Some(role_loop) => HarnessLoopConfig {
                 hot_tool_results: clamp_loop_value(
-                    role_loop.hot_tool_results.unwrap_or(self.loop_config.hot_tool_results),
+                    role_loop
+                        .hot_tool_results
+                        .unwrap_or(self.loop_config.hot_tool_results),
                     0,
                     self.loop_config.hot_tool_results,
                 ),
@@ -6876,10 +8538,7 @@ impl HarnessRun {
             .len()
             .saturating_sub(MAX_DIGEST_ACTIONS);
         let actions: Vec<String> = if overflow_count > 0 {
-            let mut actions = vec![format!(
-                "({} earlier action(s) omitted)",
-                overflow_count
-            )];
+            let mut actions = vec![format!("({} earlier action(s) omitted)", overflow_count)];
             actions.extend(
                 scope.digest_actions[scope.digest_actions.len() - MAX_DIGEST_ACTIONS..]
                     .iter()
@@ -6973,15 +8632,15 @@ impl HarnessRun {
         // Steering goes stale: after ~12 cycles of being acted on it stops
         // outranking everything else in the prompt.
         let stale_before_iteration = self.state.iteration - 12;
-        let operator_messages_stale = self
-            .state
-            .operator_messages
-            .as_ref()
-            .is_some_and(|messages| {
-                messages
-                    .iter()
-                    .any(|message| message.received_at_iteration < stale_before_iteration)
-            });
+        let operator_messages_stale =
+            self.state
+                .operator_messages
+                .as_ref()
+                .is_some_and(|messages| {
+                    messages
+                        .iter()
+                        .any(|message| message.received_at_iteration < stale_before_iteration)
+                });
         if operator_messages_stale {
             let kept: Vec<HarnessOperatorMessage> = self
                 .state
@@ -7183,14 +8842,25 @@ impl HarnessRun {
             let file_outlines = match current_task {
                 Some(task) if !scope.review_loop => {
                     let notes = task.notes.join("\n");
-                    let texts = [task.title.as_str(), notes.as_str(), self.state.goal.as_str()];
+                    let texts = [
+                        task.title.as_str(),
+                        notes.as_str(),
+                        self.state.goal.as_str(),
+                    ];
                     let mut parts: Vec<String> = Vec::new();
                     // Short named files travel whole (the text a READ would
                     // return); the rest get outlines.
                     if let Some(tree) = crate::harness::outline::repo_tree_for_prompt(&self.cwd) {
                         self.emit(HarnessEvent {
-                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                            detail: format!("repository file list carried into {}'s first prompt ({} chars)", task.id, tree.chars().count()),
+                            data: Some(HarnessEventData {
+                                r#loop: Some(self.state.r#loop),
+                                ..Default::default()
+                            }),
+                            detail: format!(
+                                "repository file list carried into {}'s first prompt ({} chars)",
+                                task.id,
+                                tree.chars().count()
+                            ),
                             iteration: self.state.iteration,
                             r#type: HarnessEventType::HarnessOp,
                         });
@@ -7198,14 +8868,32 @@ impl HarnessRun {
                     }
                     let named_paths = crate::harness::outline::named_paths_for_texts(&texts);
                     let mut carry_paths = named_paths.clone();
-                    carry_paths.extend(crate::harness::outline::definition_files_for_texts(&self.cwd, &texts, &named_paths));
-                    let hit_files = crate::harness::outline::symbol_hit_files_for_texts(&self.cwd, &texts, &carry_paths);
+                    carry_paths.extend(crate::harness::outline::definition_files_for_texts(
+                        &self.cwd,
+                        &texts,
+                        &named_paths,
+                    ));
+                    let hit_files = crate::harness::outline::symbol_hit_files_for_texts(
+                        &self.cwd,
+                        &texts,
+                        &carry_paths,
+                    );
                     carry_paths.extend(hit_files);
-                    carry_paths.extend(crate::harness::outline::named_directory_files(&self.cwd, &texts, &carry_paths));
-                    let (bodies, carried) = crate::harness::outline::named_file_bodies_for_paths(&self.cwd, &carry_paths);
+                    carry_paths.extend(crate::harness::outline::named_directory_files(
+                        &self.cwd,
+                        &texts,
+                        &carry_paths,
+                    ));
+                    let (bodies, carried) = crate::harness::outline::named_file_bodies_for_paths(
+                        &self.cwd,
+                        &carry_paths,
+                    );
                     if let Some(bodies) = bodies {
                         self.emit(HarnessEvent {
-                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
+                            data: Some(HarnessEventData {
+                                r#loop: Some(self.state.r#loop),
+                                ..Default::default()
+                            }),
                             detail: format!(
                                 "named files carried whole into {}'s first prompt: {} ({} chars)",
                                 task.id,
@@ -7217,17 +8905,44 @@ impl HarnessRun {
                         });
                         parts.push(bodies);
                     }
-                    let outline_paths: Vec<String> = named_paths.iter().filter(|path| !carried.contains(path)).cloned().collect();
-                    parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &outline_paths));
-                    parts.extend(crate::harness::outline::symbol_hits_for_texts(&self.cwd, &texts));
-                    parts.extend(crate::harness::outline::definition_hits_for_texts(&self.cwd, &texts));
+                    let outline_paths: Vec<String> = named_paths
+                        .iter()
+                        .filter(|path| !carried.contains(path))
+                        .cloned()
+                        .collect();
+                    parts.extend(crate::harness::outline::outlines_for_paths(
+                        &self.cwd,
+                        &outline_paths,
+                    ));
+                    parts.extend(crate::harness::outline::symbol_hits_for_texts(
+                        &self.cwd, &texts,
+                    ));
+                    parts.extend(crate::harness::outline::definition_hits_for_texts(
+                        &self.cwd, &texts,
+                    ));
                     let mut span_paths: Vec<String> = Vec::new();
-                    if let Some(spans) = crate::harness::outline::definition_spans_for_texts(&self.cwd, &texts, &carried) {
-                        let names: Vec<&str> = spans.lines().filter_map(|line| line.strip_prefix("== ")).map(|line| line.split(' ').next().unwrap_or(line)).collect();
-                        span_paths.extend(names.iter().filter_map(|name| name.rsplit_once(':').map(|(path, _)| path.to_string())));
+                    if let Some(spans) = crate::harness::outline::definition_spans_for_texts(
+                        &self.cwd, &texts, &carried,
+                    ) {
+                        let names: Vec<&str> = spans
+                            .lines()
+                            .filter_map(|line| line.strip_prefix("== "))
+                            .map(|line| line.split(' ').next().unwrap_or(line))
+                            .collect();
+                        span_paths.extend(names.iter().filter_map(|name| {
+                            name.rsplit_once(':').map(|(path, _)| path.to_string())
+                        }));
                         self.emit(HarnessEvent {
-                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                            detail: format!("definition bodies carried into {}'s first prompt: {} ({} chars)", task.id, names.join(", "), spans.chars().count()),
+                            data: Some(HarnessEventData {
+                                r#loop: Some(self.state.r#loop),
+                                ..Default::default()
+                            }),
+                            detail: format!(
+                                "definition bodies carried into {}'s first prompt: {} ({} chars)",
+                                task.id,
+                                names.join(", "),
+                                spans.chars().count()
+                            ),
                             iteration: self.state.iteration,
                             r#type: HarnessEventType::HarnessOp,
                         });
@@ -7238,11 +8953,27 @@ impl HarnessRun {
                     // spent a READ round on them to match their style.
                     let mut sibling_sources = carry_paths.clone();
                     sibling_sources.extend(span_paths);
-                    let siblings = crate::harness::outline::sibling_test_files(&self.cwd, &sibling_sources, &carried);
-                    if let (Some(bodies), tests) = crate::harness::outline::file_bodies_for_paths(&self.cwd, &siblings, crate::harness::outline::SIBLING_TESTS_HEADER) {
+                    let siblings = crate::harness::outline::sibling_test_files(
+                        &self.cwd,
+                        &sibling_sources,
+                        &carried,
+                    );
+                    if let (Some(bodies), tests) = crate::harness::outline::file_bodies_for_paths(
+                        &self.cwd,
+                        &siblings,
+                        crate::harness::outline::SIBLING_TESTS_HEADER,
+                    ) {
                         self.emit(HarnessEvent {
-                            data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
-                            detail: format!("sibling tests carried into {}'s first prompt: {} ({} chars)", task.id, tests.join(", "), bodies.chars().count()),
+                            data: Some(HarnessEventData {
+                                r#loop: Some(self.state.r#loop),
+                                ..Default::default()
+                            }),
+                            detail: format!(
+                                "sibling tests carried into {}'s first prompt: {} ({} chars)",
+                                task.id,
+                                tests.join(", "),
+                                bodies.chars().count()
+                            ),
                             iteration: self.state.iteration,
                             r#type: HarnessEventType::HarnessOp,
                         });
@@ -7253,10 +8984,16 @@ impl HarnessRun {
                     // spent 2-3× the author time of direct runs on the same
                     // task count because each task loop re-explored the work.
                     let earlier_author_work = self.state.tasks.iter().any(|other| {
-                        other.id != task.id && other.review_of.is_none() && other.status == HarnessTaskStatus::Completed
+                        other.id != task.id
+                            && other.review_of.is_none()
+                            && other.status == HarnessTaskStatus::Completed
                     });
                     if earlier_author_work {
-                        if let Some((section, files)) = self.run_start_head.as_deref().and_then(|base| changes_so_far(&self.cwd, base)) {
+                        if let Some((section, files)) = self
+                            .run_start_head
+                            .as_deref()
+                            .and_then(|base| changes_so_far(&self.cwd, base))
+                        {
                             self.emit(HarnessEvent {
                                 data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), ..Default::default() }),
                                 detail: format!("changes so far: {} file(s) edited by earlier tasks carried into {}'s prompt with their outlines", files.len(), task.id),
@@ -7264,7 +9001,9 @@ impl HarnessRun {
                                 r#type: HarnessEventType::HarnessOp,
                             });
                             parts.push(section);
-                            parts.extend(crate::harness::outline::outlines_for_paths(&self.cwd, &files));
+                            parts.extend(crate::harness::outline::outlines_for_paths(
+                                &self.cwd, &files,
+                            ));
                         }
                     }
                     if parts.is_empty() {
@@ -7302,7 +9041,8 @@ impl HarnessRun {
             scope.transport_messages = build_iteration_messages(
                 &self.state,
                 &IterationMessagesArgs {
-                    current_date: &(self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    current_date: &(self.now)()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     current_task,
                     file_outlines: file_outlines.as_deref(),
                     goal_context: goal_context.as_deref(),
@@ -7322,17 +9062,29 @@ impl HarnessRun {
                 },
             );
 
-            let blind_role = scope.role.as_ref().filter(|role| role.blind).map(|role| role.name.clone());
+            let blind_role = scope
+                .role
+                .as_ref()
+                .filter(|role| role.blind)
+                .map(|role| role.name.clone());
             let carried = match (&self.carryover, &scope.current_task_id) {
-                (Some(carryover), Some(task_id)) if carryover.r#loop == self.state.r#loop - 1 && !carryover.messages.is_empty() => {
+                (Some(carryover), Some(task_id))
+                    if carryover.r#loop == self.state.r#loop - 1
+                        && !carryover.messages.is_empty() =>
+                {
                     let mut carryover = carryover.clone();
                     // A review loop's brief already carries the diff and every
                     // new file in full; replaying PATCH exchanges (the whole
                     // file the author wrote) would double the reviewer's prompt.
-                    let next_is_review = crate::core::state::get_task_by_id(&self.state, task_id).is_some_and(|task| task.review_of.is_some());
+                    let next_is_review = crate::core::state::get_task_by_id(&self.state, task_id)
+                        .is_some_and(|task| task.review_of.is_some());
                     if next_is_review {
                         let before = carryover.messages.len();
-                        carryover.messages = extract_loop_carryover_excluding(&carryover.messages, before, &["PATCH"]);
+                        carryover.messages = extract_loop_carryover_excluding(
+                            &carryover.messages,
+                            before,
+                            &["PATCH"],
+                        );
                         if carryover.messages.len() < before {
                             self.emit(HarnessEvent {
                                 data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: Some(task_id.clone()), ..Default::default() }),
@@ -7350,7 +9102,11 @@ impl HarnessRun {
             // the author's exchanges would make two loops share one derivation.
             let carried = match (carried, blind_role) {
                 (Some(carryover), Some(role_name)) => {
-                    let exchanges = carryover.messages.iter().filter(|message| message.role == ChatRoleTag::Tool).count();
+                    let exchanges = carryover
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == ChatRoleTag::Tool)
+                        .count();
                     self.emit(HarnessEvent {
                         data: Some(HarnessEventData {
                             r#loop: Some(self.state.r#loop),
@@ -7370,7 +9126,9 @@ impl HarnessRun {
             };
             if let Some(carryover) = carried {
                 let first_carried = scope.transport_messages.len();
-                scope.transport_messages.extend(carryover.messages.iter().cloned());
+                scope
+                    .transport_messages
+                    .extend(carryover.messages.iter().cloned());
 
                 // Replayed read-only results are as good as this loop's own for
                 // the repeat stub; replayed folds stay folded; replayed call ids
@@ -7389,16 +9147,28 @@ impl HarnessRun {
                             if let Some(TransportContent::Text(content)) = &message.content {
                                 if content.starts_with(FOLDED_RESULT_MARKER) {
                                     scope.folded_message_indexes.insert(index);
-                                } else if let Some(name) = message.name.as_deref().filter(|name| DEDUPED_READ_ONLY_TOOLS.contains(name)) {
+                                } else if let Some(name) = message
+                                    .name
+                                    .as_deref()
+                                    .filter(|name| DEDUPED_READ_ONLY_TOOLS.contains(name))
+                                {
                                     let arguments = scope.transport_messages[first_carried..index]
                                         .iter()
                                         .flat_map(|earlier| earlier.tool_calls.iter().flatten())
-                                        .find(|candidate| candidate.id.is_some() && candidate.id == message.tool_call_id)
-                                        .and_then(|call| call.function.as_ref().and_then(|function| function.arguments.clone()));
+                                        .find(|candidate| {
+                                            candidate.id.is_some()
+                                                && candidate.id == message.tool_call_id
+                                        })
+                                        .and_then(|call| {
+                                            call.function
+                                                .as_ref()
+                                                .and_then(|function| function.arguments.clone())
+                                        });
                                     if let Some(arguments) = arguments {
-                                        scope
-                                            .hot_read_only_results
-                                            .insert(tool_telemetry_key(name, &arguments), (index, hash_text(content)));
+                                        scope.hot_read_only_results.insert(
+                                            tool_telemetry_key(name, &arguments),
+                                            (index, hash_text(content)),
+                                        );
                                     }
                                 }
                             }
@@ -7407,10 +9177,16 @@ impl HarnessRun {
                     }
                 }
 
-                let exchanges = carryover.messages.iter().filter(|message| message.role == ChatRoleTag::Assistant).count();
+                let exchanges = carryover
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == ChatRoleTag::Assistant)
+                    .count();
                 let task_id = scope.current_task_id.clone().unwrap_or_default();
                 scope.transport_messages.push(TransportRequestMessage {
-                    content: Some(TransportContent::Text(build_carryover_note(&carryover, &task_id, exchanges))),
+                    content: Some(TransportContent::Text(build_carryover_note(
+                        &carryover, &task_id, exchanges,
+                    ))),
                     role: ChatRoleTag::User,
                     ..Default::default()
                 });
@@ -7510,8 +9286,16 @@ impl HarnessRun {
                 crate::tools::types::ChatAsyncToolJobStatus::Failed => "failed",
                 crate::tools::types::ChatAsyncToolJobStatus::Running => "running",
             };
-            let exit = job.exit_code.flatten().map(|code| format!(" (exit {code})")).unwrap_or_default();
-            let headline = format!("background job {} ({}) finished: {status}{exit}", job.id, truncate_text(&job.title, 80));
+            let exit = job
+                .exit_code
+                .flatten()
+                .map(|code| format!(" (exit {code})"))
+                .unwrap_or_default();
+            let headline = format!(
+                "background job {} ({}) finished: {status}{exit}",
+                job.id,
+                truncate_text(&job.title, 80)
+            );
             let tail = tail.trim();
             let text = if tail.is_empty() {
                 format!("{BACKGROUND_REPORT_PREFIX} {headline}. It produced no output. No ASYNC_WAIT or ASYNC_TAIL is needed for this job.")
@@ -7529,7 +9313,11 @@ impl HarnessRun {
             });
             scope.digest_actions.push(headline.clone());
             self.emit(HarnessEvent {
-                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                data: Some(HarnessEventData {
+                    r#loop: Some(self.state.r#loop),
+                    task_id: scope.current_task_id.clone(),
+                    ..Default::default()
+                }),
                 detail: format!("{headline} — reported to the model"),
                 iteration: self.state.iteration,
                 r#type: HarnessEventType::HarnessOp,
@@ -7537,14 +9325,24 @@ impl HarnessRun {
         }
     }
 
-    pub async fn run_round(&mut self, scope: &mut LoopScope, cycle: i64, round: i64) -> RoundOutcome {
+    pub async fn run_round(
+        &mut self,
+        scope: &mut LoopScope,
+        cycle: i64,
+        round: i64,
+    ) -> RoundOutcome {
         self.fire_hook(crate::harness::hooks::HookEvent::RelayStart, None);
         let outcome = self.run_round_inner(scope, cycle, round).await;
         self.fire_hook(crate::harness::hooks::HookEvent::RelayFinish, None);
         outcome
     }
 
-    async fn run_round_inner(&mut self, scope: &mut LoopScope, _cycle: i64, round: i64) -> RoundOutcome {
+    async fn run_round_inner(
+        &mut self,
+        scope: &mut LoopScope,
+        _cycle: i64,
+        round: i64,
+    ) -> RoundOutcome {
         use crate::harness::model_call::ModelCallOptions;
 
         if self.options.signal.as_ref().map(AbortSignal::is_aborted) == Some(true) {
@@ -7565,8 +9363,12 @@ impl HarnessRun {
             .sum::<usize>();
 
         if approximate_chars > MAX_LOOP_TRANSCRIPT_CHARS {
-            let folded_count =
-                fold_cold_tool_results(&mut scope.transport_messages, 0, &mut scope.folded_message_indexes, 0);
+            let folded_count = fold_cold_tool_results(
+                &mut scope.transport_messages,
+                0,
+                &mut scope.folded_message_indexes,
+                0,
+            );
 
             if folded_count > 0 {
                 self.emit(HarnessEvent {
@@ -7761,9 +9563,9 @@ impl HarnessRun {
                     role: ChatRoleTag::User,
                     ..Default::default()
                 });
-                scope
-                    .digest_actions
-                    .push("reply truncated at the output cap (nudged to say less and act)".to_string());
+                scope.digest_actions.push(
+                    "reply truncated at the output cap (nudged to say less and act)".to_string(),
+                );
                 return RoundOutcome::Continue;
             }
         }
@@ -7783,7 +9585,8 @@ impl HarnessRun {
                 && verified_after_last_edit(&self.state)
                 && narration_reads_as_completion(&trimmed)
             {
-                self.accept_narration_as_finish(scope, round, &response_text, false).await;
+                self.accept_narration_as_finish(scope, round, &response_text, false)
+                    .await;
                 return RoundOutcome::Continue;
             }
             // A narration-only first reply with an unfinished task gets ONE
@@ -7804,15 +9607,11 @@ impl HarnessRun {
                     role: ChatRoleTag::Assistant,
                     ..Default::default()
                 });
-                scope
-                    .transport_messages
-                    .push(TransportRequestMessage {
-                        content: Some(TransportContent::Text(
-                            NARRATION_NUDGE_MESSAGE.to_string(),
-                        )),
-                        role: ChatRoleTag::User,
-                        ..Default::default()
-                    });
+                scope.transport_messages.push(TransportRequestMessage {
+                    content: Some(TransportContent::Text(NARRATION_NUDGE_MESSAGE.to_string())),
+                    role: ChatRoleTag::User,
+                    ..Default::default()
+                });
 
                 if let Some(task) = scope
                     .current_task_id
@@ -7868,7 +9667,8 @@ impl HarnessRun {
         scope.tool_calls_this_loop += tool_calls.len() as i64;
 
         let normalized_calls = self.normalize_tool_calls(scope, round, &tool_calls);
-        let (normalized_calls, expanded_finishes) = expand_patch_finishes(normalized_calls, &mut scope.used_tool_call_ids);
+        let (normalized_calls, expanded_finishes) =
+            expand_patch_finishes(normalized_calls, &mut scope.used_tool_call_ids);
         if expanded_finishes > 0 {
             self.emit(HarnessEvent {
                 data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
@@ -7888,10 +9688,10 @@ impl HarnessRun {
         let native_ids_preserved = response_message
             .and_then(|message| message.anthropic_content.as_ref())
             .is_some()
-            && normalized_calls
-                .iter()
-                .enumerate()
-                .all(|(index, entry)| tool_calls.get(index).and_then(|call| call.id.as_deref()) == Some(entry.call_id.as_str()));
+            && normalized_calls.iter().enumerate().all(|(index, entry)| {
+                tool_calls.get(index).and_then(|call| call.id.as_deref())
+                    == Some(entry.call_id.as_str())
+            });
         scope.transport_messages.push(TransportRequestMessage {
             anthropic_content: if native_ids_preserved {
                 response_message.and_then(|message| message.anthropic_content.clone())
@@ -7904,17 +9704,28 @@ impl HarnessRun {
                 Some(TransportContent::Text(response_text.clone()))
             },
             role: ChatRoleTag::Assistant,
-            tool_calls: Some(normalized_calls.iter().map(|entry| entry.normalized.clone()).collect()),
+            tool_calls: Some(
+                normalized_calls
+                    .iter()
+                    .map(|entry| entry.normalized.clone())
+                    .collect(),
+            ),
             ..Default::default()
         });
 
-        let edits_only = !normalized_calls.is_empty() && normalized_calls.iter().all(|call| call.tool_name == "PATCH");
+        let edits_only = !normalized_calls.is_empty()
+            && normalized_calls
+                .iter()
+                .all(|call| call.tool_name == "PATCH");
         self.dispatch_tool_calls(scope, normalized_calls).await;
         if self.ask_user_awaiting {
             return RoundOutcome::Break;
         }
         if scope.plan_yield_requested {
-            scope.digest_actions.push("plan landed; the planning loop yields to the first task without another round".to_string());
+            scope.digest_actions.push(
+                "plan landed; the planning loop yields to the first task without another round"
+                    .to_string(),
+            );
             return RoundOutcome::Break;
         }
         // A completion report sent with the edits themselves: the goal's
@@ -7930,9 +9741,11 @@ impl HarnessRun {
             && verified_after_last_edit(&self.state)
         {
             let reads_as_done = narration_reads_as_completion(&response_text);
-            let named_edited = goal_named_paths_all_edited(&self.state.goal, &self.state.edited_paths);
+            let named_edited =
+                goal_named_paths_all_edited(&self.state.goal, &self.state.edited_paths);
             if reads_as_done && named_edited {
-                self.accept_narration_as_finish(scope, round, &response_text, true).await;
+                self.accept_narration_as_finish(scope, round, &response_text, true)
+                    .await;
             } else {
                 // The shape that costs a lone finish round; say why the
                 // text with the edits was not taken as the finish, so
@@ -7940,11 +9753,18 @@ impl HarnessRun {
                 let why = if response_text.trim().is_empty() {
                     "the response carried no text".to_string()
                 } else if !reads_as_done {
-                    format!("the text does not read as a completion report: {}", truncate_text(response_text.trim(), 160))
+                    format!(
+                        "the text does not read as a completion report: {}",
+                        truncate_text(response_text.trim(), 160)
+                    )
                 } else {
                     format!(
                         "a path the goal names has not been edited (edited: {})",
-                        if self.state.edited_paths.is_empty() { "none".to_string() } else { self.state.edited_paths.join(", ") }
+                        if self.state.edited_paths.is_empty() {
+                            "none".to_string()
+                        } else {
+                            self.state.edited_paths.join(", ")
+                        }
                     )
                 };
                 self.emit(HarnessEvent {
@@ -7966,7 +9786,9 @@ impl HarnessRun {
         round: i64,
         tool_calls: &[crate::harness::transport::OpenAICompatibleToolCall],
     ) -> Vec<NormalizedCall> {
-        use crate::harness::transport::{normalize_openai_compatible_tool_call, OpenAICompatibleToolCall};
+        use crate::harness::transport::{
+            normalize_openai_compatible_tool_call, OpenAICompatibleToolCall,
+        };
 
         let mut normalized_calls: Vec<NormalizedCall> = Vec::new();
 
@@ -7989,7 +9811,10 @@ impl HarnessRun {
             while scope.used_tool_call_ids.contains(&call_id) {
                 call_id = format!(
                     "{}-c{}-{}-{}",
-                    call_id, self.state.iteration, round, index + 1
+                    call_id,
+                    self.state.iteration,
+                    round,
+                    index + 1
                 );
             }
 
@@ -8013,7 +9838,10 @@ impl HarnessRun {
             normalized_calls.push(NormalizedCall {
                 call_id,
                 normalized,
-                raw_input: function.arguments.clone().unwrap_or_else(|| "{}".to_string()),
+                raw_input: function
+                    .arguments
+                    .clone()
+                    .unwrap_or_else(|| "{}".to_string()),
                 tool_name,
             });
         }
@@ -8048,7 +9876,11 @@ impl HarnessRun {
             return None;
         }
         let declared = goal_declared_check_chain(&self.state.goal);
-        let detected = if declared.is_none() { detect_project_check_command(&self.cwd) } else { None };
+        let detected = if declared.is_none() {
+            detect_project_check_command(&self.cwd)
+        } else {
+            None
+        };
         let command = declared.or_else(|| detected.as_ref().map(|(command, _)| command.clone()))?;
         if self.hung_commands.iter().any(|hung| *hung == command) {
             return None;
@@ -8058,7 +9890,10 @@ impl HarnessRun {
         let build_warm = self
             .warmup
             .as_mut()
-            .filter(|job| native_runner_name(&job.command).is_some() && native_runner_name(&job.command) == native_runner_name(&command))
+            .filter(|job| {
+                native_runner_name(&job.command).is_some()
+                    && native_runner_name(&job.command) == native_runner_name(&command)
+            })
             // Finished, not succeeded: the model edits the crate while the
             // warm-up compiles it, so the warm-up can fail on the crate's
             // own error having already paid for the dependencies.
@@ -8088,14 +9923,23 @@ impl HarnessRun {
         input[GOAL_DECLARED_CHECK_MARKER] = serde_json::json!(true);
         let verify_input = input.to_string();
         let started = (self.now)().timestamp_millis();
-        let mut execution = self.execute_workspace_tool(&format!("{call_id}-editcheck"), &verify_input, Some(&scope.loop_tool_indexes), "VERIFY");
+        let mut execution = self.execute_workspace_tool(
+            &format!("{call_id}-editcheck"),
+            &verify_input,
+            Some(&scope.loop_tool_indexes),
+            "VERIFY",
+        );
         let took = (self.now)().timestamp_millis() - started;
         if self.check_duration_is_measurable(&command) {
             self.check_durations_ms.insert(shape, took);
         }
         self.record_verification_outcome(scope, "VERIFY", &verify_input, &mut execution);
         let verdict = match &self.state.last_verification {
-            Some(latest) => core_state::describe_verification_outcome(latest.failed, latest.ran_no_tests, latest.evidence.as_ref()),
+            Some(latest) => core_state::describe_verification_outcome(
+                latest.failed,
+                latest.ran_no_tests,
+                latest.evidence.as_ref(),
+            ),
             None => core_state::describe_verification_outcome(execution.failed, None, None),
         };
         self.emit(HarnessEvent {
@@ -8104,25 +9948,47 @@ impl HarnessRun {
             iteration: self.state.iteration,
             r#type: HarnessEventType::HarnessOp,
         });
-        scope.digest_actions.push(format!("harness ran {} after the edit -> {verdict}", truncate_text(&command, 80)));
-        Some(edit_check_note(&command, !execution.failed, &verdict, &truncate_text_keeping_ends(&execution.tool_content, 1200)))
+        scope.digest_actions.push(format!(
+            "harness ran {} after the edit -> {verdict}",
+            truncate_text(&command, 80)
+        ));
+        Some(edit_check_note(
+            &command,
+            !execution.failed,
+            &verdict,
+            &truncate_text_keeping_ends(&execution.tool_content, 1200),
+        ))
     }
 
     /// Dispatches a synthetic finish_task whose summary is the model's own
     /// completion report. `after_tool_calls`: the response's assistant
     /// message (with its tool calls) is already in the transcript, so the
     /// finish joins that message's calls instead of opening a new one.
-    pub async fn accept_narration_as_finish(&mut self, scope: &mut LoopScope, round: i64, response_text: &str, after_tool_calls: bool) {
-        use crate::harness::transport::{normalize_openai_compatible_tool_call, OpenAICompatibleToolCall, OpenAICompatibleToolCallFunction};
+    pub async fn accept_narration_as_finish(
+        &mut self,
+        scope: &mut LoopScope,
+        round: i64,
+        response_text: &str,
+        after_tool_calls: bool,
+    ) {
+        use crate::harness::transport::{
+            normalize_openai_compatible_tool_call, OpenAICompatibleToolCall,
+            OpenAICompatibleToolCallFunction,
+        };
         let trimmed = response_text.trim().to_string();
-        let raw_input = serde_json::json!({ "status": "completed", "summary": truncate_text(&trimmed, 600) }).to_string();
+        let raw_input =
+            serde_json::json!({ "status": "completed", "summary": truncate_text(&trimmed, 600) })
+                .to_string();
         let mut call_id = format!("narration-finish-{}-{}", self.state.iteration, round);
         while scope.used_tool_call_ids.contains(&call_id) {
             call_id.push('x');
         }
         scope.used_tool_call_ids.insert(call_id.clone());
         let normalized = normalize_openai_compatible_tool_call(OpenAICompatibleToolCall {
-            function: Some(OpenAICompatibleToolCallFunction { arguments: Some(raw_input.clone()), name: Some("finish_task".to_string()) }),
+            function: Some(OpenAICompatibleToolCallFunction {
+                arguments: Some(raw_input.clone()),
+                name: Some("finish_task".to_string()),
+            }),
             id: Some(call_id.clone()),
             tool_type: Some("function".to_string()),
         });
@@ -8136,7 +10002,10 @@ impl HarnessRun {
             iteration: self.state.iteration,
             r#type: HarnessEventType::HarnessOp,
         });
-        scope.digest_actions.push(format!("said (accepted as finish): {}", truncate_text(&trimmed, MAX_DIGEST_ACTION_CHARS)));
+        scope.digest_actions.push(format!(
+            "said (accepted as finish): {}",
+            truncate_text(&trimmed, MAX_DIGEST_ACTION_CHARS)
+        ));
         let joined = after_tool_calls
             && scope
                 .transport_messages
@@ -8144,7 +10013,10 @@ impl HarnessRun {
                 .rev()
                 .find(|message| message.role == ChatRoleTag::Assistant)
                 .map(|message| {
-                    message.tool_calls.get_or_insert_with(Vec::new).push(normalized.clone());
+                    message
+                        .tool_calls
+                        .get_or_insert_with(Vec::new)
+                        .push(normalized.clone());
                     // Native content blocks would not carry the added call.
                     message.anthropic_content = None;
                 })
@@ -8159,7 +10031,16 @@ impl HarnessRun {
             });
         }
         scope.tool_calls_this_loop += 1;
-        self.dispatch_tool_calls(scope, vec![NormalizedCall { call_id, normalized, raw_input, tool_name: "finish_task".to_string() }]).await;
+        self.dispatch_tool_calls(
+            scope,
+            vec![NormalizedCall {
+                call_id,
+                normalized,
+                raw_input,
+                tool_name: "finish_task".to_string(),
+            }],
+        )
+        .await;
     }
 
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
@@ -8167,7 +10048,12 @@ impl HarnessRun {
         let response_has_finish = calls.iter().any(|call| call.tool_name == "finish_task");
         let last_patch_index = calls.iter().rposition(|call| call.tool_name == "PATCH");
         for (call_index, call) in calls.into_iter().enumerate() {
-            let NormalizedCall { call_id, raw_input, tool_name, .. } = call;
+            let NormalizedCall {
+                call_id,
+                raw_input,
+                tool_name,
+                ..
+            } = call;
 
             // A survey timeout or a mid-wait abort ends the run: the calls
             // after it in this same model response must not execute — they
@@ -8183,9 +10069,13 @@ impl HarnessRun {
             // own freshly spawned review (or drop it). Additive ops (plan_tasks,
             // notes, memory) still run.
             if scope.task_finished
-                && (tool_name == "finish_task" || tool_name == "drop_task" || tool_name == "revise_task")
+                && (tool_name == "finish_task"
+                    || tool_name == "drop_task"
+                    || tool_name == "revise_task")
             {
-                scope.digest_actions.push(format!("{tool_name}: skipped after loop end"));
+                scope
+                    .digest_actions
+                    .push(format!("{tool_name}: skipped after loop end"));
                 self.emit(HarnessEvent {
                     data: None,
                     detail: format!("{tool_name}: skipped — the loop already ended"),
@@ -8212,28 +10102,42 @@ impl HarnessRun {
             // failed PATCH or command in that response would finish on an
             // edit that never landed, so it comes back instead.
             if tool_name == "finish_task" {
-                if let Some(bounce) = finish_after_failed_call(&raw_input, &scope.failed_calls_this_response) {
-                    scope.digest_actions.push("finish_task: bounced — a call failed earlier in the same response".to_string());
+                if let Some(bounce) =
+                    finish_after_failed_call(&raw_input, &scope.failed_calls_this_response)
+                {
+                    scope.digest_actions.push(
+                        "finish_task: bounced — a call failed earlier in the same response"
+                            .to_string(),
+                    );
                     self.emit(HarnessEvent {
-                        data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                        data: Some(HarnessEventData {
+                            r#loop: Some(self.state.r#loop),
+                            task_id: scope.current_task_id.clone(),
+                            ..Default::default()
+                        }),
                         detail: format!("finish_task: {bounce}"),
                         iteration: self.state.iteration,
                         r#type: HarnessEventType::HarnessOp,
                     });
-                    scope.transport_messages.push(crate::harness::transport::TransportRequestMessage {
-                        content: Some(crate::harness::transport::TransportContent::Text(bounce)),
-                        name: Some(tool_name),
-                        role: ChatRoleTag::Tool,
-                        tool_call_id: Some(call_id),
-                        tool_calls: None,
-                        anthropic_content: None,
-                    });
+                    scope.transport_messages.push(
+                        crate::harness::transport::TransportRequestMessage {
+                            content: Some(crate::harness::transport::TransportContent::Text(
+                                bounce,
+                            )),
+                            name: Some(tool_name),
+                            role: ChatRoleTag::Tool,
+                            tool_call_id: Some(call_id),
+                            tool_calls: None,
+                            anthropic_content: None,
+                        },
+                    );
                     continue;
                 }
             }
 
             if is_harness_tool(&tool_name) {
-                let op = parse_harness_op_with_gate(&tool_name, &raw_input, self.role_gate.as_ref());
+                let op =
+                    parse_harness_op_with_gate(&tool_name, &raw_input, self.role_gate.as_ref());
                 let op_context = crate::harness::harness_tools::HarnessOpContext {
                     loop_number: self.state.r#loop as u32,
                     current_task_id: scope.current_task_id.clone(),
@@ -8253,29 +10157,53 @@ impl HarnessRun {
                     // phrase, operator message, --no-review, --lite); also
                     // rejects delayed Review*/reviewer task work mid-run.
                     review_opt_out: self.state.review_opt_out == Some(true),
-                    review_waived: if tool_name == "finish_task" { self.review_waiver_reason(None) } else { None },
+                    review_waived: if tool_name == "finish_task" {
+                        self.review_waiver_reason(None)
+                    } else {
+                        None
+                    },
                 };
                 let outcome = match op {
                     Ok(op) => {
-                        let ask_user_pending = matches!(
-                            op,
-                            crate::harness::harness_tools::HarnessOp::AskUser { .. }
-                        );
+                        let ask_user_pending =
+                            matches!(op, crate::harness::harness_tools::HarnessOp::AskUser { .. });
                         let outcome = apply_harness_op(&mut self.state, op, &op_context);
                         // The waiver's event was only emitted on the harness-run
                         // re-verify path; a finish the agent's own goal-declared
                         // VERIFY earned was waived silently (bench counters missed it).
                         if outcome.text.contains("Review waived:") {
                             self.emit(HarnessEvent {
-                                data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
-                                detail: format!("review waived — {}", op_context.review_waived.clone().unwrap_or_default()),
+                                data: Some(HarnessEventData {
+                                    r#loop: Some(self.state.r#loop),
+                                    task_id: scope.current_task_id.clone(),
+                                    ..Default::default()
+                                }),
+                                detail: format!(
+                                    "review waived — {}",
+                                    op_context.review_waived.clone().unwrap_or_default()
+                                ),
                                 iteration: self.state.iteration,
                                 r#type: HarnessEventType::HarnessOp,
                             });
-                            scope.digest_actions.push("review waived: harness-verified small change".to_string());
+                            scope
+                                .digest_actions
+                                .push("review waived: harness-verified small change".to_string());
                         }
-                        let outcome = self.auto_reverify_stale_finish(scope, &tool_name, &raw_input, &call_id, &op_context, outcome);
-                        let outcome = self.auto_unreconcile_repeated_bounce(scope, &tool_name, &raw_input, &op_context, outcome);
+                        let outcome = self.auto_reverify_stale_finish(
+                            scope,
+                            &tool_name,
+                            &raw_input,
+                            &call_id,
+                            &op_context,
+                            outcome,
+                        );
+                        let outcome = self.auto_unreconcile_repeated_bounce(
+                            scope,
+                            &tool_name,
+                            &raw_input,
+                            &op_context,
+                            outcome,
+                        );
                         // ask_user accepted: expose the survey as a question
                         // event (the blocking answers.jsonl wait and the
                         // awaiting-input timeout land with the lifecycle task).
@@ -8325,16 +10253,18 @@ impl HarnessRun {
                             iteration: self.state.iteration,
                             r#type: HarnessEventType::HarnessOp,
                         });
-                        scope
-                            .transport_messages
-                            .push(crate::harness::transport::TransportRequestMessage {
-                                content: Some(crate::harness::transport::TransportContent::Text(err)),
+                        scope.transport_messages.push(
+                            crate::harness::transport::TransportRequestMessage {
+                                content: Some(crate::harness::transport::TransportContent::Text(
+                                    err,
+                                )),
                                 name: Some(tool_name),
                                 role: ChatRoleTag::Tool,
                                 tool_call_id: Some(call_id),
                                 tool_calls: None,
                                 anthropic_content: None,
-                            });
+                            },
+                        );
                         continue;
                     }
                 };
@@ -8362,7 +10292,12 @@ impl HarnessRun {
                 if tool_name == "plan_tasks"
                     && outcome.state_changed
                     && scope.current_task_id.is_none()
-                    && self.state.tasks.iter().any(|task| matches!(task.status, HarnessTaskStatus::Pending | HarnessTaskStatus::InProgress))
+                    && self.state.tasks.iter().any(|task| {
+                        matches!(
+                            task.status,
+                            HarnessTaskStatus::Pending | HarnessTaskStatus::InProgress
+                        )
+                    })
                 {
                     scope.plan_yield_requested = true;
                 }
@@ -8383,7 +10318,9 @@ impl HarnessRun {
                 scope
                     .transport_messages
                     .push(crate::harness::transport::TransportRequestMessage {
-                        content: Some(crate::harness::transport::TransportContent::Text(outcome.text)),
+                        content: Some(crate::harness::transport::TransportContent::Text(
+                            outcome.text,
+                        )),
                         name: Some(tool_name),
                         role: ChatRoleTag::Tool,
                         tool_call_id: Some(call_id),
@@ -8398,21 +10335,42 @@ impl HarnessRun {
             // what it produced.
             let telemetry_key = tool_telemetry_key(&tool_name, &raw_input);
             let prior_record = self.state.telemetry.get(&telemetry_key).cloned();
-            let prior_call_count = prior_record.as_ref().map(|record| record.call_count).unwrap_or(0);
-            let prior_loop_text = prior_record.as_ref().map(|record| record.last_used_iteration.to_string());
+            let prior_call_count = prior_record
+                .as_ref()
+                .map(|record| record.call_count)
+                .unwrap_or(0);
+            let prior_loop_text = prior_record
+                .as_ref()
+                .map(|record| record.last_used_iteration.to_string());
             let prior_output = prior_record.map(|record| record.last_output);
 
-            let (raw_input, dropped_tail_filter) = if tool_name == "BASH" { drop_runner_tail_filter(&raw_input) } else { (raw_input, None) };
+            let (raw_input, dropped_tail_filter) = if tool_name == "BASH" {
+                drop_runner_tail_filter(&raw_input)
+            } else {
+                (raw_input, None)
+            };
             let (raw_input, whole_file_note) = if tool_name == "READ" {
                 let path = serde_json::from_str::<serde_json::Value>(&raw_input)
                     .ok()
-                    .and_then(|value| value.get("path").and_then(|path| path.as_str()).map(str::to_string));
-                let prior = path.as_ref().and_then(|path| scope.read_windows.get(path).copied()).unwrap_or(0);
-                let (raw_input, whole_note) = promote_read_to_whole_file(&raw_input, prior, std::path::Path::new(&self.cwd));
+                    .and_then(|value| {
+                        value
+                            .get("path")
+                            .and_then(|path| path.as_str())
+                            .map(str::to_string)
+                    });
+                let prior = path
+                    .as_ref()
+                    .and_then(|path| scope.read_windows.get(path).copied())
+                    .unwrap_or(0);
+                let (raw_input, whole_note) =
+                    promote_read_to_whole_file(&raw_input, prior, std::path::Path::new(&self.cwd));
                 // Whole-file promotion wins the note; otherwise flag an overlap.
                 let overlap_note = if whole_note.is_none() {
                     read_range_of(&raw_input).and_then(|(range_path, range)| {
-                        let note = scope.read_ranges.get(&range_path).and_then(|seen| overlapping_read_note(seen, range));
+                        let note = scope
+                            .read_ranges
+                            .get(&range_path)
+                            .and_then(|seen| overlapping_read_note(seen, range));
                         scope.read_ranges.entry(range_path).or_default().push(range);
                         note
                     })
@@ -8426,22 +10384,36 @@ impl HarnessRun {
             } else {
                 (raw_input, None)
             };
-            let (raw_input, anchor_note) = if tool_name == "PATCH" { anchor_append_to_goal(&raw_input, &self.state.goal) } else { (raw_input, None) };
+            let (raw_input, anchor_note) = if tool_name == "PATCH" {
+                anchor_append_to_goal(&raw_input, &self.state.goal)
+            } else {
+                (raw_input, None)
+            };
             if let Some(note) = anchor_note.as_deref() {
                 self.emit(HarnessEvent {
-                    data: Some(HarnessEventData { r#loop: Some(self.state.r#loop), task_id: scope.current_task_id.clone(), ..Default::default() }),
+                    data: Some(HarnessEventData {
+                        r#loop: Some(self.state.r#loop),
+                        task_id: scope.current_task_id.clone(),
+                        ..Default::default()
+                    }),
                     detail: note.to_string(),
                     iteration: self.state.iteration,
                     r#type: HarnessEventType::HarnessOp,
                 });
             }
             let execution_started_at_ms = (self.now)().timestamp_millis();
-            let mut execution = self.execute_workspace_tool(&call_id, &raw_input, Some(&scope.loop_tool_indexes), &tool_name);
+            let mut execution = self.execute_workspace_tool(
+                &call_id,
+                &raw_input,
+                Some(&scope.loop_tool_indexes),
+                &tool_name,
+            );
             let execution_duration_ms = (self.now)().timestamp_millis() - execution_started_at_ms;
             if tool_name == "VERIFY" || tool_name == "BASH" {
                 if let Some(command) = extract_bash_command(&raw_input) {
                     if self.check_duration_is_measurable(&command) {
-                        self.check_durations_ms.insert(normalize_command_shape(&command), execution_duration_ms);
+                        self.check_durations_ms
+                            .insert(normalize_command_shape(&command), execution_duration_ms);
                     }
                 }
             }
@@ -8449,29 +10421,44 @@ impl HarnessRun {
             // A successful workspace mutation counts as task progress even if
             // finish_task is not called this loop, so the stall counter does
             // not increment for loops that land real edits.
-            let bash_command = if tool_name == "BASH" { Some(extract_bash_command(&raw_input).unwrap_or_default()) } else { None };
+            let bash_command = if tool_name == "BASH" {
+                Some(extract_bash_command(&raw_input).unwrap_or_default())
+            } else {
+                None
+            };
             // Flash writes whole files with `cat > f <<'EOF'` and edits with
             // `sed -i`: a plain shell write mutates the workspace exactly
             // like a PATCH and must count the same way, or the loop registers
             // no progress (stall accounting), the verification staleness
             // counter stays at 0, and the task footprint never says "edited".
-            let shell_write = bash_command.as_deref().is_some_and(is_writing_shell_command);
-            let may_mutate = execution.dispatched && (shell_write || self.tool_registry.get(&tool_name)
-                .is_some_and(|index| self.tools[*index].mutates_workspace));
+            let shell_write = bash_command
+                .as_deref()
+                .is_some_and(is_writing_shell_command);
+            let may_mutate = execution.dispatched
+                && (shell_write
+                    || self
+                        .tool_registry
+                        .get(&tool_name)
+                        .is_some_and(|index| self.tools[*index].mutates_workspace));
             // A failed writer may have changed files before failing. Its old
             // verification must become stale even if side effects are unknown.
             if may_mutate {
                 scope.made_progress |= !execution.failed;
                 scope.persisted_this_loop = true;
-                self.state.mutations_since_verification = Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
+                self.state.mutations_since_verification =
+                    Some(self.state.mutations_since_verification.unwrap_or(0) + 1);
                 self.state.workspace_edits = Some(self.state.workspace_edits.unwrap_or(0) + 1);
             }
-            let edit_check_note =
-                if tool_name == "PATCH" && !execution.failed && !response_has_finish && last_patch_index == Some(call_index) && !scope.review_loop {
-                    self.run_edit_check(scope, &call_id)
-                } else {
-                    None
-                };
+            let edit_check_note = if tool_name == "PATCH"
+                && !execution.failed
+                && !response_has_finish
+                && last_patch_index == Some(call_index)
+                && !scope.review_loop
+            {
+                self.run_edit_check(scope, &call_id)
+            } else {
+                None
+            };
             // Paths the run has edited decide whether a later "external"
             // verification anchor is honest: a check that names a file the
             // agent wrote is consistency with its own work, not correctness.
@@ -8483,17 +10470,21 @@ impl HarnessRun {
                 }
             }
             if shell_write {
-                for target in extract_shell_write_targets(bash_command.as_deref().unwrap_or_default()) {
+                for target in
+                    extract_shell_write_targets(bash_command.as_deref().unwrap_or_default())
+                {
                     record_edited_path(&mut self.state.edited_paths, &target);
                 }
             }
 
-            let verification_command = self.record_verification_outcome(scope, &tool_name, &raw_input, &mut execution);
+            let verification_command =
+                self.record_verification_outcome(scope, &tool_name, &raw_input, &mut execution);
 
             // A promoted whole-file READ is the one result allowed past the
             // per-result cap: it replaces the pages the model would request.
             let result_cap = if whole_file_note.is_some() {
-                (scope.loop_budget.max_tool_result_chars as usize).max(READ_WHOLE_FILE_MAX_CHARS + 512)
+                (scope.loop_budget.max_tool_result_chars as usize)
+                    .max(READ_WHOLE_FILE_MAX_CHARS + 512)
             } else {
                 scope.loop_budget.max_tool_result_chars as usize
             };
@@ -8529,13 +10520,21 @@ impl HarnessRun {
             // A truncated runner failure keeps its panic block: the ends-kept
             // cut drops the middle, which is where the assertion lives.
             if execution.failed
-                && bash_command.as_deref().or(verification_command.as_deref()).is_some_and(|command| native_runner_name(command).is_some())
-                && execution.tool_content.chars().count() > scope.loop_budget.max_tool_result_chars as usize
+                && bash_command
+                    .as_deref()
+                    .or(verification_command.as_deref())
+                    .is_some_and(|command| native_runner_name(command).is_some())
+                && execution.tool_content.chars().count()
+                    > scope.loop_budget.max_tool_result_chars as usize
             {
-                if let Some(excerpt) = crate::tools::builtin::verify::runner_failure_excerpt(&execution.tool_content) {
+                if let Some(excerpt) =
+                    crate::tools::builtin::verify::runner_failure_excerpt(&execution.tool_content)
+                {
                     let first = excerpt.lines().next().unwrap_or("");
                     if !first.is_empty() && !tool_content.contains(first) {
-                        tool_content.push_str(&format!("\n\n[harness] failure excerpt from the elided middle:\n{excerpt}"));
+                        tool_content.push_str(&format!(
+                            "\n\n[harness] failure excerpt from the elided middle:\n{excerpt}"
+                        ));
                     }
                 }
             }
@@ -8544,7 +10543,12 @@ impl HarnessRun {
             // elided middle stays recoverable with READ/GREP.
             if execution.tool_content.chars().count() > result_cap {
                 if let Some(state_path) = self.options.state_path.clone() {
-                    let spill_path = spill_tool_output(&state_path.to_string_lossy(), self.state.r#loop as u32, &call_id, &execution.tool_content);
+                    let spill_path = spill_tool_output(
+                        &state_path.to_string_lossy(),
+                        self.state.r#loop as u32,
+                        &call_id,
+                        &execution.tool_content,
+                    );
                     if let Some(spill_path) = spill_path {
                         tool_content = format!(
                             "{}\n\n[harness] {} chars total — the full output is saved at {}; READ or GREP that exact absolute path (it is outside the workspace) instead of re-running the command.",
@@ -8576,7 +10580,9 @@ impl HarnessRun {
                 && scope
                     .hot_read_only_results
                     .get(&telemetry_key)
-                    .is_some_and(|(index, hash)| *hash == content_hash && !scope.folded_message_indexes.contains(index));
+                    .is_some_and(|(index, hash)| {
+                        *hash == content_hash && !scope.folded_message_indexes.contains(index)
+                    });
 
             // Identical re-runs get one line of feedback in the tool result.
             if repeats_hot_result {
@@ -8585,7 +10591,9 @@ impl HarnessRun {
                 tool_content = build_repeated_read_stub(&tool_name, prior_call_count);
             } else if prior_call_count > 0 {
                 let output_unchanged = prior_output.as_deref() == Some(record.last_output.as_str());
-                let prior_loop = prior_loop_text.clone().unwrap_or_else(|| "undefined".to_string());
+                let prior_loop = prior_loop_text
+                    .clone()
+                    .unwrap_or_else(|| "undefined".to_string());
                 tool_content = format!(
                     "{tool_content}\n\n[harness] Identical call #{} this run (previously in loop {}). {}",
                     prior_call_count + 1,
@@ -8606,7 +10614,10 @@ impl HarnessRun {
 
             if deduped_tool && !execution.failed && !repeats_hot_result {
                 // The message pushed at the end of this call lands at this index.
-                scope.hot_read_only_results.insert(telemetry_key.clone(), (scope.transport_messages.len(), content_hash));
+                scope.hot_read_only_results.insert(
+                    telemetry_key.clone(),
+                    (scope.transport_messages.len(), content_hash),
+                );
             }
 
             if tool_name == "PATCH" && !execution.failed {
@@ -8616,18 +10627,29 @@ impl HarnessRun {
                     scope.read_ranges.remove(&path);
                 }
             }
-            let read_only_bash = bash_command.as_deref().is_some_and(is_read_only_shell_command);
+            let read_only_bash = bash_command
+                .as_deref()
+                .is_some_and(is_read_only_shell_command);
 
             if (deduped_tool || read_only_bash) && !execution.failed {
                 scope.read_only_calls_this_loop += 1;
                 // Eight reads in the first cycle of a fresh loop is normal
                 // orientation, not drift: the nudge waits for the second
                 // cycle (or sixteen reads), so it lands when it means something.
-                let orientation = scope.cycle <= 1 && scope.read_only_calls_this_loop < READ_ONLY_NUDGE_EVERY * 2;
-                if !scope.persisted_this_loop && !scope.review_loop && !orientation && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0 {
+                let orientation =
+                    scope.cycle <= 1 && scope.read_only_calls_this_loop < READ_ONLY_NUDGE_EVERY * 2;
+                if !scope.persisted_this_loop
+                    && !scope.review_loop
+                    && !orientation
+                    && scope.read_only_calls_this_loop % READ_ONLY_NUDGE_EVERY == 0
+                {
                     tool_content = format!(
                         "{tool_content}\n\n{}",
-                        build_read_only_loop_nudge(scope.read_only_calls_this_loop, scope.cycle, scope.affordable_cycles)
+                        build_read_only_loop_nudge(
+                            scope.read_only_calls_this_loop,
+                            scope.cycle,
+                            scope.affordable_cycles
+                        )
                     );
                     // Surfaced in the event stream so transcript audits can see
                     // when the nudge fired and what the model did next.
@@ -8650,7 +10672,9 @@ impl HarnessRun {
             // A new file at a path the goal never named gets one line of
             // feedback while it is still cheap to move.
             if !execution.failed && tool_name == "PATCH" {
-                if let Some(note) = build_unnamed_path_note(&self.state.goal, &execution.tool_content) {
+                if let Some(note) =
+                    build_unnamed_path_note(&self.state.goal, &execution.tool_content)
+                {
                     tool_content = format!("{tool_content}\n\n{note}");
                     self.emit(HarnessEvent {
                         data: Some(HarnessEventData {
@@ -8658,7 +10682,10 @@ impl HarnessRun {
                             tool_name: Some(tool_name.clone()),
                             ..Default::default()
                         }),
-                        detail: format!("unnamed-path note: {}", note.trim_start_matches("[harness] ")),
+                        detail: format!(
+                            "unnamed-path note: {}",
+                            note.trim_start_matches("[harness] ")
+                        ),
                         iteration: self.state.iteration,
                         r#type: HarnessEventType::RunWarning,
                     });
@@ -8683,7 +10710,10 @@ impl HarnessRun {
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
                         scope.progress_this_cycle = true;
                         scope.edit_progress_this_cycle = true;
-                        record_task_footprint(&mut task.footprint, &format!("edited via {tool_name}"));
+                        record_task_footprint(
+                            &mut task.footprint,
+                            &format!("edited via {tool_name}"),
+                        );
                     }
                 }
                 if may_mutate && execution.failed {
@@ -8697,15 +10727,24 @@ impl HarnessRun {
                         for patched_path in patched {
                             scope.progress_this_cycle = true;
                             scope.edit_progress_this_cycle = true;
-                            record_task_footprint(&mut task.footprint, &format!("edited {patched_path}"));
+                            record_task_footprint(
+                                &mut task.footprint,
+                                &format!("edited {patched_path}"),
+                            );
                         }
                     }
                 }
                 if shell_write && !execution.failed {
                     let command = bash_command.as_deref().unwrap_or_default();
-                    let collapsed = strip_heredoc_bodies(command).split_whitespace().collect::<Vec<_>>().join(" ");
+                    let collapsed = strip_heredoc_bodies(command)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
-                        record_task_footprint(&mut task.footprint, &format!("edited via shell: {}", truncate_text(&collapsed, 120)));
+                        record_task_footprint(
+                            &mut task.footprint,
+                            &format!("edited via shell: {}", truncate_text(&collapsed, 120)),
+                        );
                     }
                 }
                 if let Some(command) = verification_command.as_deref() {
@@ -8713,8 +10752,16 @@ impl HarnessRun {
                         "ran {} -> {}",
                         truncate_text(command, 120),
                         match &self.state.last_verification {
-                            Some(record) => core_state::describe_verification_outcome(record.failed, record.ran_no_tests, record.evidence.as_ref()),
-                            None => core_state::describe_verification_outcome(execution.failed, None, None),
+                            Some(record) => core_state::describe_verification_outcome(
+                                record.failed,
+                                record.ran_no_tests,
+                                record.evidence.as_ref()
+                            ),
+                            None => core_state::describe_verification_outcome(
+                                execution.failed,
+                                None,
+                                None
+                            ),
                         }
                     );
                     if let Some(task) = core_state::get_task_by_id_mut(&mut self.state, &task_id) {
@@ -8769,7 +10816,9 @@ impl HarnessRun {
             scope
                 .transport_messages
                 .push(crate::harness::transport::TransportRequestMessage {
-                    content: Some(crate::harness::transport::TransportContent::Text(tool_content)),
+                    content: Some(crate::harness::transport::TransportContent::Text(
+                        tool_content,
+                    )),
                     name: Some(tool_name),
                     role: ChatRoleTag::Tool,
                     tool_call_id: Some(call_id),
@@ -8805,7 +10854,10 @@ impl HarnessRun {
         self.carryover = if self.aborted {
             None
         } else {
-            let messages = extract_loop_carryover(&scope.transport_messages, scope.loop_budget.hot_tool_results.max(0) as usize);
+            let messages = extract_loop_carryover(
+                &scope.transport_messages,
+                scope.loop_budget.hot_tool_results.max(0) as usize,
+            );
             if messages.is_empty() {
                 None
             } else {
@@ -8846,11 +10898,15 @@ impl HarnessRun {
                 let mut auto_block_stalls: Option<i64> = None;
                 let mut auto_block_budget: Option<i64> = None;
 
-                if let Some(task) = crate::core::state::get_task_by_id_mut(&mut self.state, &task_id) {
+                if let Some(task) =
+                    crate::core::state::get_task_by_id_mut(&mut self.state, &task_id)
+                {
                     // Loop budget: a task that keeps editing but never
                     // finishes is bounded here, independent of stalls.
                     let loops_run = task.loops_run.unwrap_or(0);
-                    if loops_run >= self.task_loop_limit && task.status == HarnessTaskStatus::InProgress {
+                    if loops_run >= self.task_loop_limit
+                        && task.status == HarnessTaskStatus::InProgress
+                    {
                         auto_block_budget = Some(loops_run);
                     }
                     // Edits made while the same verification keeps failing
@@ -8987,7 +11043,8 @@ impl HarnessRun {
                     // Reopening them again would replay the same stall loop,
                     // so escalate: drop them with an honest summary and let
                     // the run either finish or replan fresh.
-                    let dropped_tasks = crate::core::state::drop_exhausted_blocked_tasks(&mut self.state);
+                    let dropped_tasks =
+                        crate::core::state::drop_exhausted_blocked_tasks(&mut self.state);
 
                     self.emit(crate::core::types::HarnessEvent {
                         data: None,
@@ -9055,7 +11112,10 @@ impl HarnessRun {
             });
         }
 
-        for observation in crate::core::state::decay_observations(&mut self.state, Some(scope.loop_start_iteration)) {
+        for observation in crate::core::state::decay_observations(
+            &mut self.state,
+            Some(scope.loop_start_iteration),
+        ) {
             self.emit(crate::core::types::HarnessEvent {
                 data: None,
                 detail: format!(
@@ -9085,11 +11145,9 @@ impl HarnessRun {
         // or whose expectation matched, or whose own text reports success)
         // become notes: the run completes instead of ending unreconciled.
         if core_state::is_goal_complete(&self.state) && !self.state.anomalies.is_empty() {
-            let blocking = self
-                .state
-                .anomalies
-                .iter()
-                .any(|anomaly| crate::harness::harness_tools::anomaly_blocks_completion(&self.state, anomaly));
+            let blocking = self.state.anomalies.iter().any(|anomaly| {
+                crate::harness::harness_tools::anomaly_blocks_completion(&self.state, anomaly)
+            });
             if !blocking {
                 let notes: Vec<String> = self
                     .state
@@ -9103,10 +11161,20 @@ impl HarnessRun {
                     .tasks
                     .iter()
                     .rev()
-                    .find(|task| task.status == HarnessTaskStatus::Completed && task.review_of.is_none())
-                    .or_else(|| self.state.tasks.iter().rev().find(|task| task.status == HarnessTaskStatus::Completed))
+                    .find(|task| {
+                        task.status == HarnessTaskStatus::Completed && task.review_of.is_none()
+                    })
+                    .or_else(|| {
+                        self.state
+                            .tasks
+                            .iter()
+                            .rev()
+                            .find(|task| task.status == HarnessTaskStatus::Completed)
+                    })
                     .map(|task| task.id.clone());
-                if let Some(task) = target.and_then(|id| core_state::get_task_by_id_mut(&mut self.state, &id)) {
+                if let Some(task) =
+                    target.and_then(|id| core_state::get_task_by_id_mut(&mut self.state, &id))
+                {
                     for note in &notes {
                         core_state::append_task_note(task, note);
                     }
@@ -9193,13 +11261,7 @@ impl HarnessRun {
         if !leaked_jobs.is_empty() {
             let running = leaked_jobs
                 .iter()
-                .map(|job| {
-                    format!(
-                        "{} ({})",
-                        job.session_name,
-                        truncate_text(&job.command, 60)
-                    )
-                })
+                .map(|job| format!("{} ({})", job.session_name, truncate_text(&job.command, 60)))
                 .collect::<Vec<_>>()
                 .join(", ");
             self.emit(HarnessEvent {
@@ -9420,7 +11482,11 @@ fn render_survey_answers(
     survey: &crate::core::types::QuestionSurvey,
     answers: &crate::core::types::HarnessSurveyAnswers,
 ) -> String {
-    if let Some(chat) = answers.chat.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(chat) = answers
+        .chat
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         // "Chat about this": the operator answered the WHOLE survey in one
         // free-form message, so echo every question (and its options) back
         // before the message itself.
@@ -9428,7 +11494,12 @@ fn render_survey_answers(
             "The operator chose to chat about your clarification questions instead of answering them one by one. Their message follows; take it as the answer to the whole survey, ask ONE refined survey only if something essential is still open, then revise the plan with plan_tasks/revise_task before continuing.".to_string(),
         ];
         for (index, question) in survey.questions.iter().enumerate() {
-            lines.push(format!("Q{} [{}]: {}", index + 1, question.header, question.question));
+            lines.push(format!(
+                "Q{} [{}]: {}",
+                index + 1,
+                question.header,
+                question.question
+            ));
             for option in &question.options {
                 lines.push(format!("  - {}", option.label));
             }
@@ -9436,9 +11507,7 @@ fn render_survey_answers(
         lines.push(format!("Operator: {chat}"));
         return lines.join("\n");
     }
-    let mut lines = vec![
-        crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE.to_string(),
-    ];
+    let mut lines = vec![crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE.to_string()];
     for answer in &answers.answers {
         if answer.index < 0 {
             continue;
@@ -9458,7 +11527,9 @@ fn render_survey_answers(
 }
 
 /// the public entry point.
-pub async fn run_solid_state_harness(options: SolidStateHarnessOptions) -> Result<HarnessRunResult, String> {
+pub async fn run_solid_state_harness(
+    options: SolidStateHarnessOptions,
+) -> Result<HarnessRunResult, String> {
     let mut run = HarnessRun::new(options).await?;
     if let Some(result) = run.run_loops().await {
         return Ok(result);
@@ -9504,8 +11575,14 @@ mod ask_user_survey_tests {
                     header: "Approach".into(),
                     question: "Poll or channel?".into(),
                     options: vec![
-                        HarnessSurveyOption { label: "Poll".into(), description: "file".into() },
-                        HarnessSurveyOption { label: "Channel".into(), description: "pipe".into() },
+                        HarnessSurveyOption {
+                            label: "Poll".into(),
+                            description: "file".into(),
+                        },
+                        HarnessSurveyOption {
+                            label: "Channel".into(),
+                            description: "pipe".into(),
+                        },
                     ],
                     allow_other: true,
                 },
@@ -9513,8 +11590,14 @@ mod ask_user_survey_tests {
                     header: "Scope".into(),
                     question: "Include tests?".into(),
                     options: vec![
-                        HarnessSurveyOption { label: "Yes".into(), description: "with tests".into() },
-                        HarnessSurveyOption { label: "No".into(), description: "without tests".into() },
+                        HarnessSurveyOption {
+                            label: "Yes".into(),
+                            description: "with tests".into(),
+                        },
+                        HarnessSurveyOption {
+                            label: "No".into(),
+                            description: "without tests".into(),
+                        },
                     ],
                     allow_other: false,
                 },
@@ -9571,21 +11654,36 @@ mod ask_user_survey_tests {
             if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 Vec::new()
             } else {
-                vec![OperatorInboxEntry { at: None, text: "use the other crate".into() }]
+                vec![OperatorInboxEntry {
+                    at: None,
+                    text: "use the other crate".into(),
+                }]
             }
         }));
         let mut scope = run.begin_loop();
-        assert!(!run.ask_window_open, "a task loop starts with the window shut");
+        assert!(
+            !run.ask_window_open,
+            "a task loop starts with the window shut"
+        );
         let _ = run.begin_cycle(&mut scope, 1);
-        assert!(run.ask_window_open, "the operator message reopens the window");
+        assert!(
+            run.ask_window_open,
+            "the operator message reopens the window"
+        );
         // An empty message is not a fresh instruction and must not reopen it.
         run.ask_window_open = false;
         run.options.collect_operator_messages = Some(Box::new(|_| {
-            vec![OperatorInboxEntry { at: None, text: "   ".into() }]
+            vec![OperatorInboxEntry {
+                at: None,
+                text: "   ".into(),
+            }]
         }));
         let mut empty_scope = run.begin_loop();
         let _ = run.begin_cycle(&mut empty_scope, 1);
-        assert!(!run.ask_window_open, "a blank operator message leaves it shut");
+        assert!(
+            !run.ask_window_open,
+            "a blank operator message leaves it shut"
+        );
     }
 
     /// A HarnessRun against a temp session dir with fake monotonic clock
@@ -9628,7 +11726,12 @@ mod ask_user_survey_tests {
             "timeout must keep the pending survey for --resume"
         );
         assert!(
-            run.state.pending_questions.as_ref().unwrap().answers_cursor.is_some(),
+            run.state
+                .pending_questions
+                .as_ref()
+                .unwrap()
+                .answers_cursor
+                .is_some(),
             "timeout must persist the replay cursor with the survey"
         );
         let result = run.awaiting_input_result();
@@ -9643,11 +11746,9 @@ mod ask_user_survey_tests {
             "awaiting-input result needs a usable continueCommand, got {:?}",
             result.continue_command
         );
-        let loaded = crate::core::state::load_harness_state(
-            &dir.path().join("session/state.json"),
-        )
-        .unwrap()
-        .unwrap();
+        let loaded = crate::core::state::load_harness_state(&dir.path().join("session/state.json"))
+            .unwrap()
+            .unwrap();
         assert!(
             loaded.pending_questions.is_some(),
             "pending survey must be persisted to state.json on timeout"
@@ -9684,10 +11785,16 @@ mod ask_user_survey_tests {
             run.state.pending_questions.is_none(),
             "a matching answer batch must consume the pending survey"
         );
-        let messages = run.state.operator_messages.as_ref().expect("accepted answers must record an operator feedback message");
+        let messages = run
+            .state
+            .operator_messages
+            .as_ref()
+            .expect("accepted answers must record an operator feedback message");
         assert_eq!(messages.len(), 1);
         assert!(
-            messages[0].text.contains("Q: Which approach should the run take?"),
+            messages[0]
+                .text
+                .contains("Q: Which approach should the run take?"),
             "operator feedback must carry the rendered Q->A summary, got: {}",
             messages[0].text
         );
@@ -9764,18 +11871,38 @@ mod ask_user_survey_tests {
     #[test]
     fn validate_survey_answers_rejects_out_of_range_duplicate_and_partial() {
         let survey = two_question_survey();
-        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(0, "Poll")).is_err());
-        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(2, "Poll")).is_err());
-        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &batch(-1, "Poll")).is_err());
+        assert!(
+            crate::harness::harness_tools::validate_survey_answers(&survey, &batch(0, "Poll"))
+                .is_err()
+        );
+        assert!(
+            crate::harness::harness_tools::validate_survey_answers(&survey, &batch(2, "Poll"))
+                .is_err()
+        );
+        assert!(crate::harness::harness_tools::validate_survey_answers(
+            &survey,
+            &batch(-1, "Poll")
+        )
+        .is_err());
         let duplicate = HarnessSurveyAnswers {
             at: "2026-01-01T00:00:00Z".into(),
             answers: vec![
-                HarnessSurveyAnswer { index: 0, choice: Some("Poll".into()), other: None },
-                HarnessSurveyAnswer { index: 0, choice: Some("Channel".into()), other: None },
+                HarnessSurveyAnswer {
+                    index: 0,
+                    choice: Some("Poll".into()),
+                    other: None,
+                },
+                HarnessSurveyAnswer {
+                    index: 0,
+                    choice: Some("Channel".into()),
+                    other: None,
+                },
             ],
             chat: None,
         };
-        assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &duplicate).is_err());
+        assert!(
+            crate::harness::harness_tools::validate_survey_answers(&survey, &duplicate).is_err()
+        );
     }
 
     #[test]
@@ -9791,15 +11918,27 @@ mod ask_user_survey_tests {
             answers: vec![first, second],
             chat: None,
         };
-        let other = |index: i64, text: &str| HarnessSurveyAnswer { index, choice: None, other: Some(text.into()) };
-        let pick = |index: i64, label: &str| HarnessSurveyAnswer { index, choice: Some(label.into()), other: None };
+        let other = |index: i64, text: &str| HarnessSurveyAnswer {
+            index,
+            choice: None,
+            other: Some(text.into()),
+        };
+        let pick = |index: i64, label: &str| HarnessSurveyAnswer {
+            index,
+            choice: Some(label.into()),
+            other: None,
+        };
         // allow_other: question 0 accepts free text, question 1 does not.
         assert!(validate(&survey, &pair(other(0, "do it my way"), pick(1, "Yes"))).is_ok());
         assert!(validate(&survey, &pair(pick(0, "Poll"), other(1, "surprise me"))).is_err());
         // Choices must be listed labels.
         assert!(validate(&survey, &pair(pick(0, "Poll"), pick(1, "NotListed"))).is_err());
         assert!(validate(&survey, &pair(pick(0, "Channel"), pick(1, "No"))).is_ok());
-        let empty = HarnessSurveyAnswers { at: "2026-01-01T00:00:00Z".into(), answers: vec![], chat: None };
+        let empty = HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: vec![],
+            chat: None,
+        };
         assert!(validate(&survey, &empty).is_err());
     }
 
@@ -9821,10 +11960,22 @@ mod ask_user_survey_tests {
         assert!(rendered.contains("chose to chat about your clarification questions"));
         assert!(rendered.contains("ONE refined survey"));
         for question in &survey.questions {
-            assert!(rendered.contains(&question.header), "header missing: {}", question.header);
-            assert!(rendered.contains(&question.question), "question missing: {}", question.question);
+            assert!(
+                rendered.contains(&question.header),
+                "header missing: {}",
+                question.header
+            );
+            assert!(
+                rendered.contains(&question.question),
+                "question missing: {}",
+                question.question
+            );
             for option in &question.options {
-                assert!(rendered.contains(&option.label), "option missing: {}", option.label);
+                assert!(
+                    rendered.contains(&option.label),
+                    "option missing: {}",
+                    option.label
+                );
             }
         }
         assert!(rendered.contains("Operator: Let us talk this through: polls please"));
@@ -9909,12 +12060,16 @@ mod ask_user_survey_tests {
             .expect("live answers must inject an operator feedback message");
         assert_eq!(messages.len(), 1, "live delivery must happen exactly once");
         assert!(
-            messages[0].text.starts_with(crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE),
+            messages[0]
+                .text
+                .starts_with(crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE),
             "injected summary must start with the plan-revision directive, got: {}",
             messages[0].text
         );
         assert!(
-            messages[0].text.contains("Q: Which approach should the run take?")
+            messages[0]
+                .text
+                .contains("Q: Which approach should the run take?")
                 && messages[0].text.contains("Channel"),
             "injected summary must render the question and the chosen answer, got: {}",
             messages[0].text
@@ -9940,16 +12095,25 @@ mod role_inference_tests {
         HarnessRun::new(options).await.unwrap()
     }
 
-
     #[test]
     fn warmup_command_only_for_cargo_workspaces() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_string_lossy().into_owned();
-        assert_eq!(build_warmup_command(&cwd, "Fix the bug; run `cargo test --release`"), None);
+        assert_eq!(
+            build_warmup_command(&cwd, "Fix the bug; run `cargo test --release`"),
+            None
+        );
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         assert_eq!(
             build_warmup_command(&cwd, "Fix the bug in page"),
-            Some(("cargo".to_string(), vec!["build".to_string(), "--tests".to_string(), "--quiet".to_string()]))
+            Some((
+                "cargo".to_string(),
+                vec![
+                    "build".to_string(),
+                    "--tests".to_string(),
+                    "--quiet".to_string()
+                ]
+            ))
         );
         assert_eq!(
             build_warmup_command(&cwd, "Add the test. Acceptance: `cargo test --release --lib harness::model_call` passes."),
@@ -9964,12 +12128,18 @@ mod role_inference_tests {
     #[test]
     fn cargo_test_warmup_args_keep_selection_flags_and_drop_the_shell_tail() {
         let args = |command: &str| cargo_test_warmup_args(command).map(|args| args.join(" "));
-        assert_eq!(args("cargo test -q 2>&1 | tail -20"), Some("test -q --no-run".to_string()));
+        assert_eq!(
+            args("cargo test -q 2>&1 | tail -20"),
+            Some("test -q --no-run".to_string())
+        );
         assert_eq!(
             args("timeout 120 cargo test --release -p drip --lib tools::patch -- --nocapture && echo ok"),
             Some("test --release -p drip --lib tools::patch --no-run --quiet".to_string())
         );
-        assert_eq!(args("cargo test --no-run --quiet"), Some("test --quiet --no-run".to_string()));
+        assert_eq!(
+            args("cargo test --no-run --quiet"),
+            Some("test --quiet --no-run".to_string())
+        );
         assert_eq!(args("cargo build --release"), None);
         assert_eq!(args("python3 -m unittest"), None);
     }
@@ -9989,9 +12159,18 @@ mod role_inference_tests {
         ] {
             assert_eq!(normalize_command_shape(variant), base, "{variant}");
         }
-        assert_eq!(normalize_command_shape("cargo test foo 2>/dev/null"), "cargo test foo");
-        assert_eq!(normalize_command_shape("cargo test foo -- --nocapture"), "cargo test foo");
-        assert_ne!(normalize_command_shape("python3 -m unittest tests.test_server"), base);
+        assert_eq!(
+            normalize_command_shape("cargo test foo 2>/dev/null"),
+            "cargo test foo"
+        );
+        assert_eq!(
+            normalize_command_shape("cargo test foo -- --nocapture"),
+            "cargo test foo"
+        );
+        assert_ne!(
+            normalize_command_shape("python3 -m unittest tests.test_server"),
+            base
+        );
     }
 
     #[tokio::test]
@@ -10001,24 +12180,54 @@ mod role_inference_tests {
             goal: "test goal".into(),
             state_path: Some(dir.path().join("state.json")),
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            tools: crate::tools::pack::builtin_tool_pack(
+                crate::tools::pack::BuiltinToolOptions::with_allow_net(false),
+            ),
             ..SolidStateHarnessOptions::default()
         };
         let mut run = HarnessRun::new(options).await.unwrap();
-        let first = run.execute_workspace_tool("c1", r#"{"command":"false 2>&1 | tail -3"}"#, None, "BASH");
-        let second = run.execute_workspace_tool("c2", r#"{"command":"timeout 5 false -v"}"#, None, "BASH");
-        assert!(!first.tool_content.contains("[harness] this command shape") && !second.tool_content.contains("[harness] this command shape"));
-        let third = run.execute_workspace_tool("c3", r#"{"command":"false; echo \"exit=$?\""}"#, None, "BASH");
-        assert!(third.tool_content.contains("has now run 3 times in a row"), "{}", third.tool_content);
+        let first =
+            run.execute_workspace_tool("c1", r#"{"command":"false 2>&1 | tail -3"}"#, None, "BASH");
+        let second =
+            run.execute_workspace_tool("c2", r#"{"command":"timeout 5 false -v"}"#, None, "BASH");
+        assert!(
+            !first.tool_content.contains("[harness] this command shape")
+                && !second.tool_content.contains("[harness] this command shape")
+        );
+        let third = run.execute_workspace_tool(
+            "c3",
+            r#"{"command":"false; echo \"exit=$?\""}"#,
+            None,
+            "BASH",
+        );
+        assert!(
+            third.tool_content.contains("has now run 3 times in a row"),
+            "{}",
+            third.tool_content
+        );
         std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
-        let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        let _ = run.execute_workspace_tool(
+            "c4",
+            r#"{"path":"a.txt","find":"x","replace":"y"}"#,
+            None,
+            "PATCH",
+        );
         let after_edit = run.execute_workspace_tool("c5", r#"{"command":"false"}"#, None, "BASH");
-        assert!(!after_edit.tool_content.contains("[harness] this command shape"), "{}", after_edit.tool_content);
+        assert!(
+            !after_edit
+                .tool_content
+                .contains("[harness] this command shape"),
+            "{}",
+            after_edit.tool_content
+        );
     }
 
     #[tokio::test]
     async fn an_external_native_runner_suite_settles_the_change_without_a_declared_check() {
-        use crate::core::types::{HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind};
+        use crate::core::types::{
+            HarnessVerificationRecord, VerificationAnchor, VerificationAnchorKind,
+            VerificationEvidence, VerificationEvidenceKind,
+        };
         let dir = tempfile::tempdir().unwrap();
         let options = SolidStateHarnessOptions {
             goal: "tidy the helper; no check declared".into(),
@@ -10040,67 +12249,155 @@ mod role_inference_tests {
                 failed: 0,
                 skipped: None,
                 detail: None,
-                anchor: Some(VerificationAnchor { kind, source: None, downgraded_reason: None, coverage: None, expectation_subject: None }),
+                anchor: Some(VerificationAnchor {
+                    kind,
+                    source: None,
+                    downgraded_reason: None,
+                    coverage: None,
+                    expectation_subject: None,
+                }),
             }),
             id: Some("v1".into()),
         };
         run.state.mutations_since_verification = Some(0);
-        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
-        let (how, _) = run.verified_after_last_edit(None).expect("external suite settles the change");
+        run.state.last_verification =
+            Some(record("cargo test -q", VerificationAnchorKind::External));
+        let (how, _) = run
+            .verified_after_last_edit(None)
+            .expect("external suite settles the change");
         assert!(how.contains("project suite"), "{how}");
-        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::SelfAuthored));
-        assert!(run.verified_after_last_edit(None).is_none(), "self-authored never settles");
-        run.state.last_verification = Some(record("python3 probe.py", VerificationAnchorKind::External));
-        assert!(run.verified_after_last_edit(None).is_none(), "an ad-hoc probe is not the project suite");
-        run.state.last_verification = Some(record("cargo test -q", VerificationAnchorKind::External));
+        run.state.last_verification = Some(record(
+            "cargo test -q",
+            VerificationAnchorKind::SelfAuthored,
+        ));
+        assert!(
+            run.verified_after_last_edit(None).is_none(),
+            "self-authored never settles"
+        );
+        run.state.last_verification =
+            Some(record("python3 probe.py", VerificationAnchorKind::External));
+        assert!(
+            run.verified_after_last_edit(None).is_none(),
+            "an ad-hoc probe is not the project suite"
+        );
+        run.state.last_verification =
+            Some(record("cargo test -q", VerificationAnchorKind::External));
         run.state.mutations_since_verification = Some(1);
-        assert!(run.verified_after_last_edit(None).is_none(), "an edit after the check unsettles it");
+        assert!(
+            run.verified_after_last_edit(None).is_none(),
+            "an edit after the check unsettles it"
+        );
     }
 
     #[test]
     fn project_check_is_detected_from_the_workspace_layout() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_string_lossy().to_string();
-        assert!(detect_project_check_command(&cwd).is_none(), "empty workspace");
+        assert!(
+            detect_project_check_command(&cwd).is_none(),
+            "empty workspace"
+        );
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-        assert!(detect_project_check_command(&cwd).is_none(), "tests/ without python files");
+        assert!(
+            detect_project_check_command(&cwd).is_none(),
+            "tests/ without python files"
+        );
         std::fs::write(dir.path().join("tests/test_a.py"), "").unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m unittest discover -s tests -q");
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap().0,
+            "python3 -m unittest discover -s tests -q"
+        );
         std::fs::write(dir.path().join("pytest.ini"), "[pytest]\n").unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m pytest -q");
-        std::fs::write(dir.path().join("package.json"), r#"{"scripts": {"test": "echo \"Error: no test specified\" && exit 1"}}"#).unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "python3 -m pytest -q", "a placeholder npm test script is ignored");
-        std::fs::write(dir.path().join("package.json"), r#"{"scripts": {"test": "vitest run"}}"#).unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "npm test --silent");
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap().0,
+            "python3 -m pytest -q"
+        );
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"test": "echo \"Error: no test specified\" && exit 1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap().0,
+            "python3 -m pytest -q",
+            "a placeholder npm test script is ignored"
+        );
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"test": "vitest run"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap().0,
+            "npm test --silent"
+        );
         std::fs::write(dir.path().join("bun.lockb"), "").unwrap();
         assert_eq!(detect_project_check_command(&cwd).unwrap().0, "bun test");
         std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap().0, "go test ./...");
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap().0,
+            "go test ./..."
+        );
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
-        assert_eq!(detect_project_check_command(&cwd).unwrap(), ("cargo test -q".to_string(), "Cargo.toml"));
+        assert_eq!(
+            detect_project_check_command(&cwd).unwrap(),
+            ("cargo test -q".to_string(), "Cargo.toml")
+        );
     }
 
     #[test]
     fn repeated_anomaly_bounces_reshape_the_finish_as_unreconciled() {
-        assert_eq!(finish_bounce_family("harness: not accepted yet — 2 support-gap anomaly(ies) on record: x"), Some("support gap"));
+        assert_eq!(
+            finish_bounce_family(
+                "harness: not accepted yet — 2 support-gap anomaly(ies) on record: x"
+            ),
+            Some("support gap")
+        );
         assert_eq!(finish_bounce_family("harness: not accepted yet — unresolved support-gap anomalies prevent a clean review verdict"), Some("support gap"));
         assert_eq!(finish_bounce_family("harness: not accepted yet — expectation 'exit' mismatched (expected 0, observed 1)"), Some("expectation mismatch"));
-        assert_eq!(finish_bounce_family("harness: not accepted yet — registered expectation(s) have no observation: e1"), Some("unobserved expectation"));
-        assert_eq!(finish_bounce_family("harness: not accepted yet — no correctness-class evidence"), None);
+        assert_eq!(
+            finish_bounce_family(
+                "harness: not accepted yet — registered expectation(s) have no observation: e1"
+            ),
+            Some("unobserved expectation")
+        );
+        assert_eq!(
+            finish_bounce_family("harness: not accepted yet — no correctness-class evidence"),
+            None
+        );
         assert_eq!(finish_bounce_family("Task task-1 marked completed."), None);
 
         let mut state = crate::core::state::create_harness_state("goal");
-        state.anomalies.push(crate::core::types::HarnessAnomaly { subject: "exit code".into(), expected: "0".into(), observed: "1".into(), note: "support gap: unsupported revision".into() });
+        state.anomalies.push(crate::core::types::HarnessAnomaly {
+            subject: "exit code".into(),
+            expected: "0".into(),
+            observed: "1".into(),
+            note: "support gap: unsupported revision".into(),
+        });
         state.expectations = vec![serde_json::from_value(serde_json::json!({
             "id": "e2", "subject": "files changed", "expected": "two", "registeredAtIteration": 1,
             "observations": [{"atIteration": 3, "observed": "three", "matches": false}]
-        })).unwrap()];
+        }))
+        .unwrap()];
         let raw = r#"{"status": "completed", "summary": "done", "taskId": "task-1"}"#;
-        let input = unreconciled_finish_input(raw, &state, 2, "harness: not accepted yet — expectation 'files changed' mismatched (expected two)").expect("reshaped");
+        let input = unreconciled_finish_input(
+            raw,
+            &state,
+            2,
+            "harness: not accepted yet — expectation 'files changed' mismatched (expected two)",
+        )
+        .expect("reshaped");
         let value: serde_json::Value = serde_json::from_str(&input).unwrap();
         assert_eq!(value["status"], "unreconciled");
         assert_eq!(value["taskId"], "task-1");
-        assert!(value["summary"].as_str().unwrap().starts_with("done [harness: finished unreconciled after 2 identical bounces"), "{}", value["summary"]);
+        assert!(
+            value["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("done [harness: finished unreconciled after 2 identical bounces"),
+            "{}",
+            value["summary"]
+        );
         let anomalies = value["anomalies"].as_array().unwrap();
         assert_eq!(anomalies.len(), 2, "{anomalies:?}");
         assert_eq!(anomalies[1]["subject"], "files changed");
@@ -10114,13 +12411,28 @@ mod role_inference_tests {
     fn a_native_runner_run_through_bash_counts_as_a_verification() {
         let cargo = r#"{"command": "cargo test -q --lib 2>&1 | tail -3"}"#;
         let output = "Bash command output from . — exit code 0.\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
-        assert_eq!(bash_native_runner_verification("BASH", cargo, output).as_deref(), Some("cargo test -q --lib 2>&1 | tail -3"));
+        assert_eq!(
+            bash_native_runner_verification("BASH", cargo, output).as_deref(),
+            Some("cargo test -q --lib 2>&1 | tail -3")
+        );
         // Not BASH, no runner, or output that is not a test result: nothing.
         assert!(bash_native_runner_verification("VERIFY", cargo, output).is_none());
-        assert!(bash_native_runner_verification("BASH", r#"{"command": "ls -la"}"#, output).is_none());
-        assert!(bash_native_runner_verification("BASH", cargo, "Bash command output — exit code 101.\n\nerror[E0425]: cannot find value").is_none());
+        assert!(
+            bash_native_runner_verification("BASH", r#"{"command": "ls -la"}"#, output).is_none()
+        );
+        assert!(bash_native_runner_verification(
+            "BASH",
+            cargo,
+            "Bash command output — exit code 101.\n\nerror[E0425]: cannot find value"
+        )
+        .is_none());
         let unittest = r#"{"command": "python3 -m unittest discover -s tests -q"}"#;
-        assert!(bash_native_runner_verification("BASH", unittest, "----\nRan 5 tests in 0.01s\n\nOK\n").is_some());
+        assert!(bash_native_runner_verification(
+            "BASH",
+            unittest,
+            "----\nRan 5 tests in 0.01s\n\nOK\n"
+        )
+        .is_some());
     }
 
     #[tokio::test]
@@ -10132,7 +12444,9 @@ mod role_inference_tests {
             goal: "test goal".into(),
             state_path: Some(dir.path().join("state.json")),
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            tools: crate::tools::pack::builtin_tool_pack(
+                crate::tools::pack::BuiltinToolOptions::with_allow_net(false),
+            ),
             on_event: Some(Arc::new(move |event: HarnessEvent| {
                 sink.lock().unwrap().push(event);
             })),
@@ -10140,12 +12454,30 @@ mod role_inference_tests {
         };
         let mut run = HarnessRun::new(options).await.unwrap();
         for call in ["c1", "c2", "c3"] {
-            let _ = run.execute_workspace_tool(call, r#"{"command":"false 2>&1 | tail -3"}"#, None, "BASH");
+            let _ = run.execute_workspace_tool(
+                call,
+                r#"{"command":"false 2>&1 | tail -3"}"#,
+                None,
+                "BASH",
+            );
         }
         let events = events.lock().unwrap();
-        let nudges: Vec<&HarnessEvent> = events.iter().filter(|event| event.r#type == HarnessEventType::HarnessOp && event.detail.contains("flailing nudge")).collect();
-        assert_eq!(nudges.len(), 1, "one nudge event after three identical runs");
-        assert_eq!(nudges[0].detail, "flailing nudge: false ran 3 times with no edit between");
+        let nudges: Vec<&HarnessEvent> = events
+            .iter()
+            .filter(|event| {
+                event.r#type == HarnessEventType::HarnessOp
+                    && event.detail.contains("flailing nudge")
+            })
+            .collect();
+        assert_eq!(
+            nudges.len(),
+            1,
+            "one nudge event after three identical runs"
+        );
+        assert_eq!(
+            nudges[0].detail,
+            "flailing nudge: false ran 3 times with no edit between"
+        );
     }
 
     #[tokio::test]
@@ -10155,25 +12487,55 @@ mod role_inference_tests {
             goal: "test goal".into(),
             state_path: Some(dir.path().join("state.json")),
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            tools: crate::tools::pack::builtin_tool_pack(
+                crate::tools::pack::BuiltinToolOptions::with_allow_net(false),
+            ),
             ..SolidStateHarnessOptions::default()
         };
         let mut run = HarnessRun::new(options).await.unwrap();
         // A BASH that hits its timeout is remembered as hung …
-        let hung = run.execute_workspace_tool("c1", r#"{"command":"sleep 5","timeoutMs":1000}"#, None, "BASH");
+        let hung = run.execute_workspace_tool(
+            "c1",
+            r#"{"command":"sleep 5","timeoutMs":1000}"#,
+            None,
+            "BASH",
+        );
         assert!(hung.failed, "{}", hung.tool_content);
-        assert!(output_reports_hang(&hung.tool_content), "{}", hung.tool_content);
+        assert!(
+            output_reports_hang(&hung.tool_content),
+            "{}",
+            hung.tool_content
+        );
         assert_eq!(run.hung_commands, vec!["sleep 5".to_string()]);
         // … and the identical command is refused without running.
-        let again = run.execute_workspace_tool("c2", r#"{"command":"sleep 5","timeoutMs":1000}"#, None, "BASH");
+        let again = run.execute_workspace_tool(
+            "c2",
+            r#"{"command":"sleep 5","timeoutMs":1000}"#,
+            None,
+            "BASH",
+        );
         assert!(!again.dispatched && again.failed);
-        assert!(again.tool_content.contains("already hung"), "{}", again.tool_content);
+        assert!(
+            again.tool_content.contains("already hung"),
+            "{}",
+            again.tool_content
+        );
         // A changed command runs normally.
-        let changed = run.execute_workspace_tool("c3", r#"{"command":"timeout 1 sleep 5; true"}"#, None, "BASH");
+        let changed = run.execute_workspace_tool(
+            "c3",
+            r#"{"command":"timeout 1 sleep 5; true"}"#,
+            None,
+            "BASH",
+        );
         assert!(changed.dispatched, "{}", changed.tool_content);
         // After an edit the fix may have landed: the original command runs again.
         std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
-        let _ = run.execute_workspace_tool("c4", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        let _ = run.execute_workspace_tool(
+            "c4",
+            r#"{"path":"a.txt","find":"x","replace":"y"}"#,
+            None,
+            "PATCH",
+        );
         assert!(run.hung_commands.is_empty());
     }
 
@@ -10184,27 +12546,62 @@ mod role_inference_tests {
             goal: "test goal".into(),
             state_path: Some(dir.path().join("state.json")),
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            tools: crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::with_allow_net(false)),
+            tools: crate::tools::pack::builtin_tool_pack(
+                crate::tools::pack::BuiltinToolOptions::with_allow_net(false),
+            ),
             ..SolidStateHarnessOptions::default()
         };
         let mut run = HarnessRun::new(options).await.unwrap();
         run.hung_shape_leash_ms = 1_000;
-        let hung = run.execute_workspace_tool("c1", r#"{"command":"sleep 4","timeoutMs":1000}"#, None, "BASH");
-        assert!(hung.failed && output_reports_hang(&hung.tool_content), "{}", hung.tool_content);
+        let hung = run.execute_workspace_tool(
+            "c1",
+            r#"{"command":"sleep 4","timeoutMs":1000}"#,
+            None,
+            "BASH",
+        );
+        assert!(
+            hung.failed && output_reports_hang(&hung.tool_content),
+            "{}",
+            hung.tool_content
+        );
         assert_eq!(run.hung_shapes.len(), 1);
         // Same shape under a different spelling: not refused, but cut at the leash.
         let started = std::time::Instant::now();
-        let again = run.execute_workspace_tool("c2", r#"{"command":"timeout 9 sleep 4 2>&1 | tail -1"}"#, None, "BASH");
+        let again = run.execute_workspace_tool(
+            "c2",
+            r#"{"command":"timeout 9 sleep 4 2>&1 | tail -1"}"#,
+            None,
+            "BASH",
+        );
         assert!(again.dispatched, "{}", again.tool_content);
-        assert!(started.elapsed() < std::time::Duration::from_secs(3), "leash did not apply: {:?}", started.elapsed());
-        assert!(again.tool_content.contains("ran under a 1s leash"), "{}", again.tool_content);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "leash did not apply: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            again.tool_content.contains("ran under a 1s leash"),
+            "{}",
+            again.tool_content
+        );
         // An explicit timeout at or under the leash is left alone; a longer one is leashed.
         assert!(leash_timeout(r#"{"command":"x","timeoutMs":500}"#, "BASH", 1_000).is_none());
-        assert_eq!(leash_timeout(r#"{"command":"x","timeoutMs":5000}"#, "BASH", 1_000).as_deref(), Some(r#"{"command":"x","timeoutMs":1000}"#));
-        assert_eq!(leash_timeout(r#"{"command":"x"}"#, "VERIFY", 1_000).as_deref(), Some(r#"{"command":"x","timeout":1000}"#));
+        assert_eq!(
+            leash_timeout(r#"{"command":"x","timeoutMs":5000}"#, "BASH", 1_000).as_deref(),
+            Some(r#"{"command":"x","timeoutMs":1000}"#)
+        );
+        assert_eq!(
+            leash_timeout(r#"{"command":"x"}"#, "VERIFY", 1_000).as_deref(),
+            Some(r#"{"command":"x","timeout":1000}"#)
+        );
         // Edits do not clear the shape memory: the leash still applies after a PATCH.
         std::fs::write(dir.path().join("a.txt"), "x\n").unwrap();
-        let _ = run.execute_workspace_tool("c3", r#"{"path":"a.txt","find":"x","replace":"y"}"#, None, "PATCH");
+        let _ = run.execute_workspace_tool(
+            "c3",
+            r#"{"path":"a.txt","find":"x","replace":"y"}"#,
+            None,
+            "PATCH",
+        );
         assert!(run.hung_commands.is_empty() && run.hung_shapes.len() == 1);
     }
 
@@ -10217,7 +12614,10 @@ mod role_inference_tests {
     }
 
     fn call(latency_ms: i64) -> ModelCallRecord {
-        ModelCallRecord { latency_ms, ..Default::default() }
+        ModelCallRecord {
+            latency_ms,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -10229,12 +12629,20 @@ mod role_inference_tests {
         // Hedged call where the second request answered first.
         run.record_model_usage(
             usage(5).as_ref(),
-            &ModelCallRecord { hedged: true, hedge_won: true, ..call(50) },
+            &ModelCallRecord {
+                hedged: true,
+                hedge_won: true,
+                ..call(50)
+            },
         );
         // Hedged call where the first request won.
         run.record_model_usage(
             usage(5).as_ref(),
-            &ModelCallRecord { hedged: true, hedge_won: false, ..call(60) },
+            &ModelCallRecord {
+                hedged: true,
+                hedge_won: false,
+                ..call(60)
+            },
         );
         let totals = run.role_inference.get("author").unwrap();
         assert_eq!(totals.hedges_fired, 2);
@@ -10256,7 +12664,7 @@ mod role_inference_tests {
         // helper sets none, so seed an explicit one for the cache-read path).
         let mut cached_usage = usage(10).unwrap();
         cached_usage.prompt_tokens = Some(700);
-                cached_usage.prompt_tokens_details = Some(
+        cached_usage.prompt_tokens_details = Some(
             crate::harness::model_call::OpenAICompatibleResponsePromptTokensDetails {
                 cached_tokens: Some(400),
             },
@@ -10273,8 +12681,17 @@ mod role_inference_tests {
         run.record_model_usage(usage(10).as_ref(), &call(100));
         run.active_role = Some("reviewer".to_string());
         run.record_model_usage(usage(3).as_ref(), &call(30));
-        assert_eq!(run.role_inference.get("author").unwrap().completion_tokens, 10);
-        assert_eq!(run.role_inference.get("reviewer").unwrap().completion_tokens, 3);
+        assert_eq!(
+            run.role_inference.get("author").unwrap().completion_tokens,
+            10
+        );
+        assert_eq!(
+            run.role_inference
+                .get("reviewer")
+                .unwrap()
+                .completion_tokens,
+            3
+        );
         assert_eq!(run.role_inference.len(), 2);
     }
 
@@ -10283,7 +12700,10 @@ mod role_inference_tests {
         let mut run = role_inference_test_run().await;
         run.record_model_usage(usage(7).as_ref(), &call(20));
         let totals = run.role_inference.get("default").unwrap();
-        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (1, 20, 7));
+        assert_eq!(
+            (totals.calls, totals.latency_ms, totals.completion_tokens),
+            (1, 20, 7)
+        );
     }
 
     #[tokio::test]
@@ -10291,7 +12711,10 @@ mod role_inference_tests {
         let mut run = role_inference_test_run().await;
         run.record_model_usage(None, &call(40));
         let totals = run.role_inference.get("default").unwrap();
-        assert_eq!((totals.calls, totals.latency_ms, totals.completion_tokens), (1, 40, 0));
+        assert_eq!(
+            (totals.calls, totals.latency_ms, totals.completion_tokens),
+            (1, 40, 0)
+        );
     }
 
     #[tokio::test]
@@ -10301,8 +12724,14 @@ mod role_inference_tests {
         run.record_model_usage(usage(9).as_ref(), &call(120));
         let json = serde_json::to_value(&run.role_inference).unwrap();
         let entry = json.get("planner").unwrap();
-        assert!(entry.get("latencyMs").is_some(), "camelCase latencyMs expected: {json}");
-        assert!(entry.get("completionTokens").is_some(), "camelCase completionTokens expected: {json}");
+        assert!(
+            entry.get("latencyMs").is_some(),
+            "camelCase latencyMs expected: {json}"
+        );
+        assert!(
+            entry.get("completionTokens").is_some(),
+            "camelCase completionTokens expected: {json}"
+        );
         assert!(entry.get("calls").is_some());
     }
 }
@@ -10312,10 +12741,22 @@ mod review_opt_out_tests {
 
     #[test]
     fn base_model_effort_defaults_to_low_only_when_the_profile_sets_none() {
-        assert_eq!(base_model_reasoning_effort(None), (Some("low".to_string()), true));
-        assert_eq!(base_model_reasoning_effort(Some("  ")), (Some("low".to_string()), true));
-        assert_eq!(base_model_reasoning_effort(Some("high")), (Some("high".to_string()), false));
-        assert_eq!(base_model_reasoning_effort(Some(" medium ")), (Some("medium".to_string()), false));
+        assert_eq!(
+            base_model_reasoning_effort(None),
+            (Some("low".to_string()), true)
+        );
+        assert_eq!(
+            base_model_reasoning_effort(Some("  ")),
+            (Some("low".to_string()), true)
+        );
+        assert_eq!(
+            base_model_reasoning_effort(Some("high")),
+            (Some("high".to_string()), false)
+        );
+        assert_eq!(
+            base_model_reasoning_effort(Some(" medium ")),
+            (Some("medium".to_string()), false)
+        );
     }
     use super::*;
     use crate::core::state::{create_harness_state, start_follow_up_goal};
@@ -10401,7 +12842,10 @@ mod review_opt_out_tests {
         assert_eq!(state.opt_out_warning_emitted, None);
     }
 
-    fn mcp_role(mcp_servers: Option<Vec<&str>>, tool_names: Option<Vec<&str>>) -> HarnessRoleRuntime {
+    fn mcp_role(
+        mcp_servers: Option<Vec<&str>>,
+        tool_names: Option<Vec<&str>>,
+    ) -> HarnessRoleRuntime {
         HarnessRoleRuntime {
             description: None,
             r#loop: None,
@@ -10433,9 +12877,15 @@ mod review_opt_out_tests {
             effective_mcp_servers(Some(&unscoped), Some(strings(&["files"]))),
             Some(strings(&["files"]))
         );
-        assert_eq!(effective_mcp_servers(None, Some(strings(&["files"]))), Some(strings(&["files"])));
+        assert_eq!(
+            effective_mcp_servers(None, Some(strings(&["files"]))),
+            Some(strings(&["files"]))
+        );
         assert_eq!(effective_mcp_servers(Some(&unscoped), None), None);
-        assert_eq!(effective_mcp_servers(Some(&role), Some(Vec::new())), Some(Vec::new()));
+        assert_eq!(
+            effective_mcp_servers(Some(&role), Some(Vec::new())),
+            Some(Vec::new())
+        );
     }
 
     // MCP tools are gated by their server alone — the role's tool allowlist
@@ -10447,8 +12897,16 @@ mod review_opt_out_tests {
         assert!(loop_allows_tool("READ", Some(&allowlist), Some(&scope)));
         assert!(!loop_allows_tool("PATCH", Some(&allowlist), Some(&scope)));
         assert!(loop_allows_tool("PATCH", None, Some(&scope)));
-        assert!(loop_allows_tool("MCP__github__search", Some(&allowlist), Some(&scope)));
-        assert!(!loop_allows_tool("MCP__files__read", Some(&allowlist), Some(&scope)));
+        assert!(loop_allows_tool(
+            "MCP__github__search",
+            Some(&allowlist),
+            Some(&scope)
+        ));
+        assert!(!loop_allows_tool(
+            "MCP__files__read",
+            Some(&allowlist),
+            Some(&scope)
+        ));
         assert!(!loop_allows_tool("MCP__github__search", None, None));
         assert!(!loop_allows_tool("MCP__github__search", None, Some(&[])));
     }

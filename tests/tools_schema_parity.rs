@@ -65,7 +65,20 @@ fn fixture_covers_exactly_the_built_in_pack() {
         .map(|entry| entry["function"]["name"].as_str().unwrap().to_string())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["BASH", "BASH_ASYNC", "CHECK", "DIR", "FETCH", "GREP", "PATCH", "READ", "VERIFY"]);
+    assert_eq!(
+        names,
+        vec![
+            "BASH",
+            "BASH_ASYNC",
+            "CHECK",
+            "DIR",
+            "FETCH",
+            "GREP",
+            "PATCH",
+            "READ",
+            "VERIFY"
+        ]
+    );
 }
 
 #[test]

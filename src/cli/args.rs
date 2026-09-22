@@ -401,12 +401,7 @@ fn take_required_value(
     }
 }
 
-fn set_session_ref(
-    slot: &mut Option<String>,
-    flag: &str,
-    value: &str,
-    errors: &mut Vec<String>,
-) {
+fn set_session_ref(slot: &mut Option<String>, flag: &str, value: &str, errors: &mut Vec<String>) {
     if value.trim().is_empty() {
         errors.push(format!(
             "{}= needs a session id or prefix after the equals sign.",
@@ -466,15 +461,13 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                     parsed.wait = true;
                     set_session_ref(&mut parsed.wait_id, flag_name, value, &mut parsed.errors);
                 }
-                "--port" => {
-                    match value.parse::<u16>() {
-                        Ok(port) if port > 0 => parsed.port = Some(port),
-                        _ => parsed.errors.push(format!(
-                            "--port needs a port number between 1 and 65535, got \"{}\".",
-                            value
-                        )),
-                    }
-                }
+                "--port" => match value.parse::<u16>() {
+                    Ok(port) if port > 0 => parsed.port = Some(port),
+                    _ => parsed.errors.push(format!(
+                        "--port needs a port number between 1 and 65535, got \"{}\".",
+                        value
+                    )),
+                },
                 _ => {
                     parsed.errors.push(format!(
                         "Unknown flag \"{}=...\" — only session-ref flags accept the equals form. Run drip --help.",
@@ -532,7 +525,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--timeout-secs" => {
-                if let Some(raw) = take_required_value(argv, index, "--timeout-secs", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--timeout-secs", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.timeout_secs = Some(value),
                         None => parsed.errors.push(format!(
@@ -548,7 +543,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.gc = true;
             }
             "--older-than" => {
-                if let Some(raw) = take_required_value(argv, index, "--older-than", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--older-than", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.older_than = Some(value),
                         None => parsed.errors.push(format!(
@@ -620,8 +617,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--prompt" => {
                 match argv.get(index + 1) {
                     None => {
-                        parsed.errors
-                            .push("--prompt requires the goal text: --prompt \"goal\".".to_string());
+                        parsed.errors.push(
+                            "--prompt requires the goal text: --prompt \"goal\".".to_string(),
+                        );
                     }
                     Some(next) if next.starts_with('-') => {
                         // A dash-leading next token is almost always a forgotten
@@ -675,8 +673,10 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                                 index += 1;
                             }
                             _ => {
-                                parsed.errors
-                                    .push("--undo-last needs a positive count when one is given.".to_string());
+                                parsed.errors.push(
+                                    "--undo-last needs a positive count when one is given."
+                                        .to_string(),
+                                );
                                 index += 1;
                             }
                         }
@@ -707,7 +707,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.no_mcp = true;
             }
             "--classifier" => {
-                if let Some(value) = take_required_value(argv, index, "--classifier", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--classifier", &mut parsed.errors)
+                {
                     parsed.classifier = Some(value);
                     index += 1;
                 }
@@ -725,7 +727,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.no_ask = true;
             }
             "--ask-timeout" => {
-                if let Some(raw) = take_required_value(argv, index, "--ask-timeout", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--ask-timeout", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.ask_timeout_secs = Some(value),
                         None => parsed.errors.push(format!(
@@ -738,7 +742,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--reference-root" => {
-                if let Some(value) = take_required_value(argv, index, "--reference-root", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--reference-root", &mut parsed.errors)
+                {
                     parsed.reference_roots.push(value);
                     index += 1;
                 }
@@ -759,43 +765,53 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.no_skills = true;
             }
             "--skill" => {
-                if let Some(value) = take_required_value(argv, index, "--skill", &mut parsed.errors) {
+                if let Some(value) = take_required_value(argv, index, "--skill", &mut parsed.errors)
+                {
                     parsed.skill_names.push(value);
                     index += 1;
                 }
             }
             "--roles" => {
-                if let Some(value) = take_required_value(argv, index, "--roles", &mut parsed.errors) {
+                if let Some(value) = take_required_value(argv, index, "--roles", &mut parsed.errors)
+                {
                     parsed.roles_preset_or_path = Some(value);
                     index += 1;
                 }
             }
             "--home" => {
-                if let Some(value) = take_required_value(argv, index, "--home", &mut parsed.errors) {
+                if let Some(value) = take_required_value(argv, index, "--home", &mut parsed.errors)
+                {
                     parsed.home = Some(value);
                     index += 1;
                 }
             }
             "--project-dir" => {
-                if let Some(value) = take_required_value(argv, index, "--project-dir", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--project-dir", &mut parsed.errors)
+                {
                     parsed.project_dir = Some(value);
                     index += 1;
                 }
             }
             "--profile" => {
-                if let Some(value) = take_required_value(argv, index, "--profile", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--profile", &mut parsed.errors)
+                {
                     parsed.profile = Some(value);
                     index += 1;
                 }
             }
             "--tools" => {
-                if let Some(value) = take_required_value(argv, index, "--tools", &mut parsed.errors) {
+                if let Some(value) = take_required_value(argv, index, "--tools", &mut parsed.errors)
+                {
                     parsed.tools_path = value;
                     index += 1;
                 }
             }
             "--max-iterations" => {
-                if let Some(raw) = take_required_value(argv, index, "--max-iterations", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--max-iterations", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.max_iterations = Some(value),
                         None => parsed.errors.push(format!(
@@ -808,7 +824,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--max-loops" => {
-                if let Some(raw) = take_required_value(argv, index, "--max-loops", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--max-loops", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.max_loops = Some(value),
                         None => parsed.errors.push(format!(
@@ -821,18 +839,24 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--plan-mode" => {
-                if let Some(raw) = take_required_value(argv, index, "--plan-mode", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--plan-mode", &mut parsed.errors)
+                {
                     let value = raw.trim().to_ascii_lowercase();
                     if matches!(value.as_str(), "always" | "auto" | "direct") {
                         parsed.plan_mode = Some(value);
                     } else {
-                        parsed.errors.push(format!("--plan-mode must be always, auto, or direct, got \"{raw}\"."));
+                        parsed.errors.push(format!(
+                            "--plan-mode must be always, auto, or direct, got \"{raw}\"."
+                        ));
                     }
                     index += 1;
                 }
             }
             "--task-loop-limit" => {
-                if let Some(raw) = take_required_value(argv, index, "--task-loop-limit", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--task-loop-limit", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.task_loop_limit = Some(value),
                         None => parsed.errors.push(format!(
@@ -845,7 +869,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--review-waiver-lines" => {
-                if let Some(raw) = take_required_value(argv, index, "--review-waiver-lines", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--review-waiver-lines", &mut parsed.errors)
+                {
                     match raw.parse::<usize>() {
                         Ok(value) => parsed.review_waiver_lines = Some(value),
                         Err(_) => parsed.errors.push(format!(
@@ -861,7 +887,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.marketplace_list = true;
             }
             "--marketplace-add" => {
-                if let Some(source) = take_required_value(argv, index, "--marketplace-add", &mut parsed.errors) {
+                if let Some(source) =
+                    take_required_value(argv, index, "--marketplace-add", &mut parsed.errors)
+                {
                     parsed.marketplace_add = true;
                     parsed.marketplace_add_source = Some(source);
                     index += 1;
@@ -876,7 +904,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--marketplace-remove" => {
-                if let Some(name) = take_required_value(argv, index, "--marketplace-remove", &mut parsed.errors) {
+                if let Some(name) =
+                    take_required_value(argv, index, "--marketplace-remove", &mut parsed.errors)
+                {
                     parsed.marketplace_remove = true;
                     parsed.marketplace_remove_name = Some(name);
                     index += 1;
@@ -894,14 +924,18 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--plugin-enable" => {
-                if let Some(key) = take_required_value(argv, index, "--plugin-enable", &mut parsed.errors) {
+                if let Some(key) =
+                    take_required_value(argv, index, "--plugin-enable", &mut parsed.errors)
+                {
                     parsed.plugin_enable = true;
                     parsed.plugin_enable_key = Some(key);
                     index += 1;
                 }
             }
             "--plugin-disable" => {
-                if let Some(key) = take_required_value(argv, index, "--plugin-disable", &mut parsed.errors) {
+                if let Some(key) =
+                    take_required_value(argv, index, "--plugin-disable", &mut parsed.errors)
+                {
                     parsed.plugin_disable = true;
                     parsed.plugin_disable_key = Some(key);
                     index += 1;
@@ -918,19 +952,24 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 parsed.no_review = true;
             }
             "--base" => {
-                if let Some(value) = take_required_value(argv, index, "--base", &mut parsed.errors) {
+                if let Some(value) = take_required_value(argv, index, "--base", &mut parsed.errors)
+                {
                     parsed.review_base = Some(value);
                     index += 1;
                 }
             }
             "--context" => {
-                if let Some(value) = take_required_value(argv, index, "--context", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--context", &mut parsed.errors)
+                {
                     parsed.review_context = Some(value);
                     index += 1;
                 }
             }
             "--concurrency" => {
-                if let Some(raw) = take_required_value(argv, index, "--concurrency", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--concurrency", &mut parsed.errors)
+                {
                     match parse_positive_int(&raw) {
                         Some(value) => parsed.review_concurrency = Some(value),
                         None => parsed.errors.push(format!(
@@ -943,13 +982,17 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--synth-profile" => {
-                if let Some(value) = take_required_value(argv, index, "--synth-profile", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--synth-profile", &mut parsed.errors)
+                {
                     parsed.review_synth_profile = Some(value);
                     index += 1;
                 }
             }
             "--synthesis" => {
-                if let Some(raw) = take_required_value(argv, index, "--synthesis", &mut parsed.errors) {
+                if let Some(raw) =
+                    take_required_value(argv, index, "--synthesis", &mut parsed.errors)
+                {
                     match raw.trim() {
                         "auto" => parsed.review_synthesis = Some(ReviewSynthesis::Auto),
                         "always" => parsed.review_synthesis = Some(ReviewSynthesis::Always),
@@ -964,7 +1007,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                 }
             }
             "--file-profile" => {
-                if let Some(value) = take_required_value(argv, index, "--file-profile", &mut parsed.errors) {
+                if let Some(value) =
+                    take_required_value(argv, index, "--file-profile", &mut parsed.errors)
+                {
                     parsed.review_file_profile = Some(value);
                     index += 1;
                 }
@@ -1084,9 +1129,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
     // --ask and --no-ask are two sides of one opt-in: supplying both is a
     // contradiction, not a last-one-wins flag.
     if parsed.ask && parsed.no_ask {
-        parsed.errors.push(
-            "--ask and --no-ask cannot be combined: pass at most one of them.".to_string(),
-        );
+        parsed
+            .errors
+            .push("--ask and --no-ask cannot be combined: pass at most one of them.".to_string());
     }
 
     // Draft mode is mutually exclusive with the lanes built on the reviewed
@@ -1168,12 +1213,14 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
     }
 
     if parsed.port.is_some() && !parsed.ui {
-        parsed.errors
+        parsed
+            .errors
             .push("--port only applies with --ui.".to_string());
     }
 
     if parsed.recursive && !parsed.list {
-        parsed.errors
+        parsed
+            .errors
             .push("--recursive only applies with --list.".to_string());
     }
 
@@ -1206,7 +1253,10 @@ mod tests {
         assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
         assert!(parsed.no_mcp);
         assert!(parsed.mcp.is_empty());
-        assert!(parse(&["--mcp"]).errors.iter().any(|problem| problem.contains("--mcp")));
+        assert!(parse(&["--mcp"])
+            .errors
+            .iter()
+            .any(|problem| problem.contains("--mcp")));
     }
 
     #[test]
@@ -1227,11 +1277,18 @@ mod tests {
         let override_only = parse(&["--classifier", "jev-direct", "goal"]);
         assert!(!override_only.no_classifier);
         assert_eq!(override_only.classifier.as_deref(), Some("jev-direct"));
-        assert!(override_only.errors.is_empty(), "{:?}", override_only.errors);
+        assert!(
+            override_only.errors.is_empty(),
+            "{:?}",
+            override_only.errors
+        );
 
         let dangling = parse(&["--classifier"]);
         assert!(dangling.classifier.is_none());
-        assert!(dangling.errors.iter().any(|error| error.contains("--classifier requires a value.")));
+        assert!(dangling
+            .errors
+            .iter()
+            .any(|error| error.contains("--classifier requires a value.")));
     }
 
     // --- strict argument validation ---
@@ -1240,7 +1297,10 @@ mod tests {
     fn rejects_unknown_flags_instead_of_treating_them_as_goal_text() {
         let typo = parse(&["--max-iteration", "20"]);
 
-        assert!(typo.errors.iter().any(|problem| problem.contains("--max-iteration")));
+        assert!(typo
+            .errors
+            .iter()
+            .any(|problem| problem.contains("--max-iteration")));
         assert!(!parse(&["-x"]).errors.is_empty());
         assert!(parse(&["do the work"]).errors.is_empty());
         assert_eq!(parse(&["do the work"]).goal.as_deref(), Some("do the work"));
@@ -1250,7 +1310,10 @@ mod tests {
     // the goal slot for the entry writer to consume.
     #[test]
     fn parses_answer_flag_with_optional_session_ref() {
-        let bare = parse(&["--answer", "{\"answers\":[{\"index\":0,\"choice\":\"A\",\"other\":null}]}"]);
+        let bare = parse(&[
+            "--answer",
+            "{\"answers\":[{\"index\":0,\"choice\":\"A\",\"other\":null}]}",
+        ]);
         assert!(bare.answer);
         assert!(bare.answer_id.is_none());
         assert_eq!(
@@ -1289,7 +1352,13 @@ mod tests {
         assert!(!off.ask);
         // The pair contradicts itself: a parse error, never a silent winner.
         let both = parse(&["--ask", "--no-ask", "goal"]);
-        assert!(both.errors.iter().any(|error| error.contains("cannot be combined")), "{:?}", both.errors);
+        assert!(
+            both.errors
+                .iter()
+                .any(|error| error.contains("cannot be combined")),
+            "{:?}",
+            both.errors
+        );
     }
 
     // --reference-root is repeatable and ordered: oasis searches the roots in
@@ -1298,13 +1367,23 @@ mod tests {
     fn collects_reference_roots_in_order_and_requires_a_value() {
         assert!(parse(&["goal"]).reference_roots.is_empty());
         assert_eq!(
-            parse(&["--reference-root", "b/wiki", "--reference-root", "a/wiki", "goal"]).reference_roots,
+            parse(&[
+                "--reference-root",
+                "b/wiki",
+                "--reference-root",
+                "a/wiki",
+                "goal"
+            ])
+            .reference_roots,
             vec!["b/wiki".to_string(), "a/wiki".to_string()]
         );
 
         let missing_value = parse(&["--reference-root"]);
         assert!(
-            missing_value.errors.iter().any(|problem| problem.contains("--reference-root")),
+            missing_value
+                .errors
+                .iter()
+                .any(|problem| problem.contains("--reference-root")),
             "{:?}",
             missing_value.errors
         );
@@ -1443,8 +1522,18 @@ mod tests {
 
     #[test]
     fn plan_flag_accepts_the_three_modes_only() {
-        assert_eq!(parse(&["do it", "--plan-mode", "auto"]).plan_mode.as_deref(), Some("auto"));
-        assert_eq!(parse(&["do it", "--plan-mode", "Direct"]).plan_mode.as_deref(), Some("direct"));
+        assert_eq!(
+            parse(&["do it", "--plan-mode", "auto"])
+                .plan_mode
+                .as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            parse(&["do it", "--plan-mode", "Direct"])
+                .plan_mode
+                .as_deref(),
+            Some("direct")
+        );
         assert_eq!(parse(&["do it"]).plan_mode, None);
         assert!(!parse(&["--plan-mode", "sometimes"]).errors.is_empty());
     }
@@ -1535,7 +1624,10 @@ mod tests {
     #[test]
     fn parses_stop_with_and_without_a_session_ref() {
         assert!(parse(&["--stop"]).stop);
-        assert_eq!(parse(&["--stop", "abc123"]).stop_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            parse(&["--stop", "abc123"]).stop_id.as_deref(),
+            Some("abc123")
+        );
         assert_eq!(parse(&["--stop", "not a ref"]).stop_id, None);
     }
 
@@ -1548,7 +1640,9 @@ mod tests {
         assert!(parsed.state);
         assert_eq!(parsed.state_id.as_deref(), Some("1ea4beef"));
         assert_eq!(
-            parse(&["--resume=abc123", "--prompt", "goal"]).resume_id.as_deref(),
+            parse(&["--resume=abc123", "--prompt", "goal"])
+                .resume_id
+                .as_deref(),
             Some("abc123")
         );
         assert_eq!(parse(&["--wait=abc123"]).wait_id.as_deref(), Some("abc123"));
@@ -1571,9 +1665,15 @@ mod tests {
     #[test]
     fn parses_result_and_wait_with_and_without_a_session_ref() {
         assert!(parse(&["--result"]).result);
-        assert_eq!(parse(&["--result", "abc123"]).result_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            parse(&["--result", "abc123"]).result_id.as_deref(),
+            Some("abc123")
+        );
         assert!(parse(&["--wait"]).wait);
-        assert_eq!(parse(&["--wait", "abc123"]).wait_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            parse(&["--wait", "abc123"]).wait_id.as_deref(),
+            Some("abc123")
+        );
     }
 
     // --- Flag parsing ---
@@ -1636,9 +1736,15 @@ mod tests {
     #[test]
     fn session_refs_are_not_swallowed_from_goal_text_and_defaults_hold() {
         // "abc123" looks like a ref; "not a ref" does not.
-        assert_eq!(parse(&["--resume", "abc123"]).resume_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            parse(&["--resume", "abc123"]).resume_id.as_deref(),
+            Some("abc123")
+        );
         assert_eq!(parse(&["--resume", "goal text"]).resume_id, None);
-        assert_eq!(parse(&["--resume", "goal text"]).goal.as_deref(), Some("goal text"));
+        assert_eq!(
+            parse(&["--resume", "goal text"]).goal.as_deref(),
+            Some("goal text")
+        );
 
         let defaulted = parse(&[]);
         assert!(!defaulted.help);
@@ -1760,7 +1866,13 @@ mod tests {
         // otherwise parse everywhere and take effect nowhere.
         for argv in [
             vec!["--wait", "--timeout-ms", "5000", "goal"],
-            vec!["--review", "--context", "a twenty character context", "--distill-min-lines", "5"],
+            vec![
+                "--review",
+                "--context",
+                "a twenty character context",
+                "--distill-min-lines",
+                "5",
+            ],
             vec!["--distill-profile", "glm-5-3-flash", "goal"],
         ] {
             let parsed = parse(&argv);
@@ -1889,7 +2001,7 @@ mod tests {
         assert!(!parse(&["--port", "0"]).errors.is_empty());
         assert!(!parse(&["--port", "99999"]).errors.is_empty());
         assert!(!parse(&["--ui", "--port"]).errors.is_empty());
- assert_eq!(
+        assert_eq!(
             parse(&["--ui", "--port", "abc"]).errors,
             vec!["--port needs a port number between 1 and 65535, got \"abc\".".to_string()]
         );
@@ -1899,24 +2011,35 @@ mod tests {
     fn port_requires_ui_and_recursive_requires_list() {
         let port_only = parse(&["--port", "4141"]);
         assert!(
-            port_only.errors.iter().any(|e| e.contains("--port") && e.contains("--ui")),
+            port_only
+                .errors
+                .iter()
+                .any(|e| e.contains("--port") && e.contains("--ui")),
             "{:?}",
             port_only.errors
         );
 
         let recursive_only = parse(&["--recursive"]);
         assert!(
-            recursive_only.errors.iter().any(|e| e.contains("--recursive") && e.contains("--list")),
+            recursive_only
+                .errors
+                .iter()
+                .any(|e| e.contains("--recursive") && e.contains("--list")),
             "{:?}",
             recursive_only.errors
         );
 
         // --recursive without --list errors even next to --ui; --port errors
         // even next to --list.
-        assert!(parse(&["--ui", "--recursive"]).errors.iter().any(|e| e.contains("--recursive")));
-        assert!(parse(&["--list", "--port", "4141"]).errors.iter().any(|e| e.contains("--port")));
+        assert!(parse(&["--ui", "--recursive"])
+            .errors
+            .iter()
+            .any(|e| e.contains("--recursive")));
+        assert!(parse(&["--list", "--port", "4141"])
+            .errors
+            .iter()
+            .any(|e| e.contains("--port")));
         assert!(parse(&["--list", "--recursive"]).errors.is_empty());
         assert!(parse(&["--ui", "--port", "4141"]).errors.is_empty());
     }
-
 }

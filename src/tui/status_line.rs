@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use crate::core::config::StatusLineSetting;
 use crate::tools::child_env::build_child_process_env;
 use crate::tools::child_process::{run_captured_process, CapturedProcessArgs};
-use crate::watch::ansi::{char_width};
+use crate::watch::ansi::char_width;
 
 /// Upper bound on captured stdout, so a chatty command cannot balloon the TUI.
 pub const STATUS_LINE_MAX_OUTPUT_CHARS: usize = 8_192;
@@ -66,9 +66,7 @@ pub struct StatusLineOutput {
     pub finished_at: Instant,
 }
 
-impl StatusLineOutput {
-
-}
+impl StatusLineOutput {}
 
 /// Serialized stdin payload (kept public for the payload tests and README).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -90,9 +88,9 @@ pub struct StatusLineWorkspace<'a> {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct StatusLineModel<'a> {
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<&'a str>,
-    #[serde(skip_serializing_if="Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<&'a str>,
 }
 
@@ -244,7 +242,12 @@ impl StatusLineRunner {
             generation
         };
         let sent = match &self.job_tx {
-            Some(tx) => tx.send(StatusLineJob { request, generation }).is_ok(),
+            Some(tx) => tx
+                .send(StatusLineJob {
+                    request,
+                    generation,
+                })
+                .is_ok(),
             None => false,
         };
         if !sent {
@@ -327,8 +330,7 @@ impl StatusLineWorker {
 
             // Only the newest generation may publish; a superseded job's
             // output is stale by definition.
-            let fresh =
-                job.generation == self.generation.load(Ordering::SeqCst);
+            let fresh = job.generation == self.generation.load(Ordering::SeqCst);
             let output = match result {
                 Some(mut output) => {
                     output.fresh = fresh;
@@ -370,10 +372,12 @@ impl StatusLineWorker {
                     None
                 } else {
                     state.pending.take().map(|request| {
-                        let generation =
-                            self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
                         state.running_generation = Some(generation);
-                        StatusLineJob { request, generation }
+                        StatusLineJob {
+                            request,
+                            generation,
+                        }
                     })
                 }
             }
@@ -463,7 +467,11 @@ pub fn run_status_line_job(
     let ok = !timed_out && result.exit_code == Some(0);
 
     // Cap captured output before any processing.
-    let raw: String = result.stdout.chars().take(STATUS_LINE_MAX_OUTPUT_CHARS).collect();
+    let raw: String = result
+        .stdout
+        .chars()
+        .take(STATUS_LINE_MAX_OUTPUT_CHARS)
+        .collect();
     // Content-only sanitization: width fitting and configured padding happen
     // at render time (the terminal width changes without re-running the job).
     let line = sanitize_status_line(raw.trim(), 0, 0);
@@ -708,7 +716,7 @@ mod tests {
         // East-Asian wide chars are two cells; the row fits exactly.
         let out = sanitize_status_line("日本", 6, 0);
         assert_eq!(out, "日本  "); // 4 cells content + 2 trailing spaces
-        // Combining mark adds zero width.
+                                   // Combining mark adds zero width.
         let out = sanitize_status_line("e\u{301}x", 4, 0);
         let visible: usize = out.chars().map(|c| char_width(c as u32)).sum();
         assert_eq!(visible, 4);
@@ -739,7 +747,10 @@ mod tests {
     #[test]
     fn finished_at_set_on_timeout_and_failure() {
         let s = setting("sleep 5");
-        let s = StatusLineSetting { timeout_ms: 300, ..s };
+        let s = StatusLineSetting {
+            timeout_ms: 300,
+            ..s
+        };
         let started = Instant::now();
         let out = run_status_line_job(&s, &request(80)).expect("job ran");
         assert!(!out.ok);
@@ -809,8 +820,8 @@ mod tests {
     #[test]
     fn output_is_capped() {
         let s = setting("yes drip | head -c 100000");
-        let out = run_status_line_job(&s, &request(STATUS_LINE_MAX_OUTPUT_CHARS * 2))
-            .expect("job ran");
+        let out =
+            run_status_line_job(&s, &request(STATUS_LINE_MAX_OUTPUT_CHARS * 2)).expect("job ran");
         assert!(out.ok);
         assert!(out.line.chars().count() <= STATUS_LINE_MAX_OUTPUT_CHARS + 32);
     }
@@ -836,27 +847,42 @@ mod tests {
         let out = sanitize_status_line(raw, 80, 0);
         assert!(out.starts_with("\x1b[32mgreen\x1b[0m plain"));
         assert!(out.ends_with("\x1b[0m"));
-        assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 80);
+        assert_eq!(
+            crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)),
+            80
+        );
     }
 
     #[test]
     fn unicode_width_and_narrow_truncation() {
         // '世' and '界' are wide (2 cells each): 4 visible cells.
         let out = sanitize_status_line("世界", 6, 1);
-        assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 6);
+        assert_eq!(
+            crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)),
+            6
+        );
         // Truncation never splits a wide char past the budget.
         let out = sanitize_status_line("世界世界", 5, 0);
-        assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 5);
+        assert_eq!(
+            crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)),
+            5
+        );
         assert_eq!(out, "世界".to_string() + &" ".repeat(1));
         // Combining marks add zero width.
         let out = sanitize_status_line("e\u{0301}x", 80, 0);
-        assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 80);
+        assert_eq!(
+            crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)),
+            80
+        );
     }
 
     #[test]
     fn padding_is_applied_within_width() {
         let out = sanitize_status_line("hi", 10, 2);
-        assert_eq!(crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)), 10);
+        assert_eq!(
+            crate::watch::ansi::string_width(&crate::watch::ansi::strip_ansi(&out)),
+            10
+        );
         assert!(out.starts_with("  hi  "));
     }
 
@@ -899,14 +925,14 @@ mod tests {
     fn runner_delivers_failure_after_an_earlier_success() {
         // The command succeeds on the first run and exits nonzero on the
         // second (marker file), so the same runner sees success then failure.
-        let marker = std::env::temp_dir().join(format!(
-            "drip-statusline-fail-{}.flag",
-            std::process::id()
-        ));
+        let marker =
+            std::env::temp_dir().join(format!("drip-statusline-fail-{}.flag", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let path = marker.to_string_lossy().into_owned();
-        let mut runner =
-            worker_runner(&format!("if [ -f {path} ]; then exit 3; fi; touch {path}; printf drip-row"), 5_000);
+        let mut runner = worker_runner(
+            &format!("if [ -f {path} ]; then exit 3; fi; touch {path}; printf drip-row"),
+            5_000,
+        );
         let first = drive_until(&mut runner, 80, |out| out.ok);
         assert_eq!(first.line, "drip-row");
         let second = drive_until(&mut runner, 80, |out| !out.ok);
@@ -1030,10 +1056,7 @@ mod tests {
         let _ = std::fs::remove_file(&payload_path);
     }
 
-    fn wait_for_output(
-        runner: &mut StatusLineRunner,
-        deadline: Instant,
-    ) -> StatusLineOutput {
+    fn wait_for_output(runner: &mut StatusLineRunner, deadline: Instant) -> StatusLineOutput {
         loop {
             if let Some(out) = runner.poll_output() {
                 return out;

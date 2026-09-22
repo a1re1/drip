@@ -78,9 +78,8 @@ mod anchoring_render_tests {
     #[test]
     fn empty_expectations_render_no_section() {
         let state = state_with_expectations(Vec::new());
-        assert!(
-            !build_iteration_user_message(&state, &iteration_args()).contains("Pre-registered expectations:")
-        );
+        assert!(!build_iteration_user_message(&state, &iteration_args())
+            .contains("Pre-registered expectations:"));
     }
 
     #[test]
@@ -114,11 +113,7 @@ mod anchoring_render_tests {
         ]);
         let message = build_iteration_user_message(&state, &iteration_args());
         assert!(message.contains("Pre-registered expectations:"));
-        assert!(
-            message.contains(
-                "expectation e1 \"line count\": expected \"12\" — unobserved"
-            )
-        );
+        assert!(message.contains("expectation e1 \"line count\": expected \"12\" — unobserved"));
         assert!(
             message.contains(
                 "expectation e3 \"file count\": expected \"7\" — observed \"7\" (matched at iteration 3)"
@@ -140,9 +135,7 @@ mod anchoring_render_tests {
             claimed_confidence: Some(ClaimedConfidence::High),
         });
         let message = build_iteration_user_message(&state, &iteration_args());
-        assert!(
-            message.contains("completion anchored externally (correctness-class check passed)")
-        );
+        assert!(message.contains("completion anchored externally (correctness-class check passed)"));
     }
 
     #[test]
@@ -158,11 +151,23 @@ mod anchoring_render_tests {
         let state = HarnessState::default();
         let with = build_iteration_user_message(
             &state,
-            &IterationUserMessageArgs { file_outlines: Some("src/a.rs (900 lines): 3 pub fn a; 40 struct B"), ..iteration_args() },
+            &IterationUserMessageArgs {
+                file_outlines: Some("src/a.rs (900 lines): 3 pub fn a; 40 struct B"),
+                ..iteration_args()
+            },
         );
-        assert!(with.contains(&format!("{FILE_OUTLINE_PREFIX} (harness-generated")), "{with}");
+        assert!(
+            with.contains(&format!("{FILE_OUTLINE_PREFIX} (harness-generated")),
+            "{with}"
+        );
         assert!(with.contains("src/a.rs (900 lines): 3 pub fn a; 40 struct B"));
-        let without = build_iteration_user_message(&state, &IterationUserMessageArgs { file_outlines: Some("  "), ..iteration_args() });
+        let without = build_iteration_user_message(
+            &state,
+            &IterationUserMessageArgs {
+                file_outlines: Some("  "),
+                ..iteration_args()
+            },
+        );
         assert!(!without.contains(FILE_OUTLINE_PREFIX));
     }
 
@@ -299,15 +304,22 @@ pub fn build_tool_usage_line(tool_usage: &std::collections::BTreeMap<String, u64
     };
 
     if entries.is_empty() {
-        return format!("tool_usage (harness-recorded for this run): no workspace tools were called; {tail}");
+        return format!(
+            "tool_usage (harness-recorded for this run): no workspace tools were called; {tail}"
+        );
     }
 
-    format!("tool_usage (harness-recorded for this run): {}; {tail}", entries.join(", "))
+    format!(
+        "tool_usage (harness-recorded for this run): {}; {tail}",
+        entries.join(", ")
+    )
 }
 
 pub fn compose_harness_system_prompt(persona_prompt: Option<&str>) -> String {
     match persona_prompt {
-        Some(persona) if !persona.trim().is_empty() => format!("{persona}\n\n{}", DEFAULT_HARNESS_SYSTEM_PROMPT),
+        Some(persona) if !persona.trim().is_empty() => {
+            format!("{persona}\n\n{}", DEFAULT_HARNESS_SYSTEM_PROMPT)
+        }
         _ => DEFAULT_HARNESS_SYSTEM_PROMPT.to_string(),
     }
 }
@@ -331,7 +343,10 @@ pub fn looks_like_question_goal(goal: &str) -> bool {
     question_regexes().0.is_match(trimmed) || question_regexes().1.is_match(trimmed)
 }
 
-pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMessageArgs<'_>) -> String {
+pub fn build_iteration_user_message(
+    state: &HarnessState,
+    args: &IterationUserMessageArgs<'_>,
+) -> String {
     let mut sections: Vec<String> = Vec::new();
 
     // Stable-first ordering: the goal leads so the provider's
@@ -351,13 +366,19 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             OPERATOR_MESSAGES_HEADER
         );
         for message in state.operator_messages.iter().flatten() {
-            operator_section.push_str(&format!("\n- [cycle {}] {}", message.received_at_iteration, message.text));
+            operator_section.push_str(&format!(
+                "\n- [cycle {}] {}",
+                message.received_at_iteration, message.text
+            ));
         }
         sections.push(operator_section);
     }
 
     if let Some(loop_role) = args.loop_info.as_ref().and_then(|info| info.role.as_ref()) {
-        let mut role_section = format!("role: this loop runs as the \"{}\" subagent", loop_role.name);
+        let mut role_section = format!(
+            "role: this loop runs as the \"{}\" subagent",
+            loop_role.name
+        );
         if let Some(description) = &loop_role.description {
             role_section.push_str(&format!(" — {}", description));
         }
@@ -393,7 +414,10 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         let mut tasks_section = String::from("tasks:");
         for task in &state.tasks {
             tasks_section.push('\n');
-            tasks_section.push_str(&format_task_line(task, args.current_task.as_ref().map(|task| task.id.as_str())));
+            tasks_section.push_str(&format_task_line(
+                task,
+                args.current_task.as_ref().map(|task| task.id.as_str()),
+            ));
         }
         sections.push(tasks_section);
     } else {
@@ -422,7 +446,9 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
     if let Some(task) = args.current_task {
         let used = task.loops_run.unwrap_or(0);
-        let limit = args.task_loop_limit.unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT);
+        let limit = args
+            .task_loop_limit
+            .unwrap_or(crate::core::types::DEFAULT_TASK_LOOP_LIMIT);
         if used >= limit {
             sections.push(format!(
                 "{} this is task loop {used} of {limit} for this task — the LAST one. Finish it in this loop: finish_task completed once the check passes, otherwise finish_task blocked stating exactly what remains and why. If this loop ends without finish_task the harness blocks the task itself.",
@@ -445,10 +471,17 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             "{} (harness-recorded — trust THIS over memory or summaries): {} → {} (cycle {}{})",
             LAST_VERIFICATION_PREFIX,
             verification.command,
-            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref()),
+            crate::core::state::describe_verification_outcome(
+                verification.failed,
+                verification.ran_no_tests,
+                verification.evidence.as_ref()
+            ),
             verification.at_iteration,
             if mutations_after > 0 {
-                format!("; STALE — {} workspace edit(s) landed after it, re-run before relying on it", mutations_after)
+                format!(
+                    "; STALE — {} workspace edit(s) landed after it, re-run before relying on it",
+                    mutations_after
+                )
             } else {
                 String::new()
             }
@@ -501,7 +534,13 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         sections.push(format!("memory:\n{}", memory_lines.join("\n")));
     }
 
-    if !args.repo_memory_index.as_deref().unwrap_or("").trim().is_empty() {
+    if !args
+        .repo_memory_index
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         let repo_memory_guidance = if args.repo_memory_dir.is_some() {
             format!(
                 "pages live in {} (open with READ using the absolute path); save durable repo learnings with remember scope=repo.",
@@ -522,7 +561,10 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
             "observations (short-lived findings — ttl decays once per task loop; each expires at 0 unless re-observed with observe):",
         );
         for observation in &state.observations {
-            observations_section.push_str(&format!("\n- ({}, ttl {}) {}", observation.id, observation.ttl, observation.text));
+            observations_section.push_str(&format!(
+                "\n- ({}, ttl {}) {}",
+                observation.id, observation.ttl, observation.text
+            ));
         }
         sections.push(observations_section);
     }
@@ -537,8 +579,16 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
                 entry.tool_name,
                 entry.input_preview,
                 entry.ttl,
-                if entry.dynamic { ", refreshed live" } else { "" },
-                if entry.last_failed == Some(true) { ", FAILED when last run" } else { "" }
+                if entry.dynamic {
+                    ", refreshed live"
+                } else {
+                    ""
+                },
+                if entry.last_failed == Some(true) {
+                    ", FAILED when last run"
+                } else {
+                    ""
+                }
             ));
             warm_section.push('\n');
             warm_section.push_str(&entry.output);
@@ -562,7 +612,10 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
 
     if let Some(current_task) = args.current_task.as_ref() {
         let mut task_sections: Vec<String> = Vec::new();
-        task_sections.push(format!("current_task: {}: {}", current_task.id, current_task.title));
+        task_sections.push(format!(
+            "current_task: {}: {}",
+            current_task.id, current_task.title
+        ));
 
         if !current_task.notes.is_empty() {
             let notes_lines: Vec<String> = current_task
@@ -570,7 +623,10 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
                 .iter()
                 .map(|note| format!("- {}", note))
                 .collect();
-            task_sections.push(format!("notes from earlier loops:\n{}", notes_lines.join("\n")));
+            task_sections.push(format!(
+                "notes from earlier loops:\n{}",
+                notes_lines.join("\n")
+            ));
         }
 
         let plan_review_nudge = build_plan_review_nudge(state);
@@ -597,7 +653,11 @@ pub fn build_iteration_user_message(state: &HarnessState, args: &IterationUserMe
         sections.push(task_sections.join("\n"));
     } else if state.tasks.is_empty() {
         sections.push("instruction: No tasks exist yet. Call plan_tasks with the fewest concrete tasks that cover the goal (usually one or two).".to_string());
-    } else if state.tasks.iter().any(|task| task.status == crate::core::types::HarnessTaskStatus::Blocked) {
+    } else if state
+        .tasks
+        .iter()
+        .any(|task| task.status == crate::core::types::HarnessTaskStatus::Blocked)
+    {
         sections.push(
             "instruction: No pending tasks remain but blocked tasks exist. Resolve them BY ID: finish_task {taskId, status: completed, summary} when other work (or your own check now) already satisfied one — cite the evidence in the summary; drop_task {taskId, reason} for ones no longer needed; plan_tasks only for genuinely new unblocking work. A task blocked as unverified whose verification has since passed should be completed by id with that result, not replanned. If a task waits on something only the operator can supply, re-block it with blockedOn: \"operator\" stating what is needed and stop — the run ends awaiting that input with the finished work intact; do not plan more search or workaround tasks for it.".to_string(),
         );
@@ -648,7 +708,10 @@ fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
     Some(line)
 }
 
-pub fn build_iteration_messages(state: &HarnessState, args: &IterationMessagesArgs<'_>) -> Vec<TransportRequestMessage> {
+pub fn build_iteration_messages(
+    state: &HarnessState,
+    args: &IterationMessagesArgs<'_>,
+) -> Vec<TransportRequestMessage> {
     let base_user_text = build_iteration_user_message(
         state,
         &IterationUserMessageArgs {
@@ -695,7 +758,10 @@ pub fn build_iteration_messages(state: &HarnessState, args: &IterationMessagesAr
 // The user message injected at each cycle boundary inside a task loop. The
 // transcript above it carries the working context, so this stays small: where
 // the loop stands, what still has to be persisted, and the current task.
-pub fn build_cycle_continuation_message(state: &HarnessState, args: &CycleContinuationArgs<'_>) -> String {
+pub fn build_cycle_continuation_message(
+    state: &HarnessState,
+    args: &CycleContinuationArgs<'_>,
+) -> String {
     let mut sections: Vec<String> = vec![format!(
         "cycle: {} of up to {} in this task loop — the transcript above is this loop's earlier work; older tool results may have been folded to digests.",
         args.cycle, args.max_cycles
@@ -706,7 +772,10 @@ pub fn build_cycle_continuation_message(state: &HarnessState, args: &CycleContin
     }
 
     if let Some(current_task) = args.current_task {
-        sections.push(format!("current_task: {}: {}", current_task.id, current_task.title));
+        sections.push(format!(
+            "current_task: {}: {}",
+            current_task.id, current_task.title
+        ));
     }
 
     // One line, not the full block: the continuation shares the loop's
@@ -766,17 +835,36 @@ fn reason_wire_tag(reason: HarnessRunReason) -> &'static str {
     }
 }
 
-pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessagesArgs<'_>) -> Vec<TransportRequestMessage> {
+pub fn build_run_summary_messages(
+    state: &HarnessState,
+    args: &RunSummaryMessagesArgs<'_>,
+) -> Vec<TransportRequestMessage> {
     let mut sections: Vec<String> = vec![
         format!("current_date: {}", args.current_date),
         format!("goal: {}", state.goal),
-        format!("run_ended: {} — {}", reason_wire_tag(args.reason), run_reason_description(args.reason)),
+        format!(
+            "run_ended: {} — {}",
+            reason_wire_tag(args.reason),
+            run_reason_description(args.reason)
+        ),
     ];
 
     if !state.tasks.is_empty() {
-        let completed_count = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Completed).count();
-        let blocked_count = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Blocked).count();
-        let dropped_count = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Dropped).count();
+        let completed_count = state
+            .tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Completed)
+            .count();
+        let blocked_count = state
+            .tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Blocked)
+            .count();
+        let dropped_count = state
+            .tasks
+            .iter()
+            .filter(|task| task.status == HarnessTaskStatus::Dropped)
+            .count();
 
         sections.push(
             ["tasks:".to_string()]
@@ -799,7 +887,12 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
         sections.push(
             ["memory:".to_string()]
                 .into_iter()
-                .chain(state.memory.iter().map(|note| format!("- ({}) {}", note.id, note.text)))
+                .chain(
+                    state
+                        .memory
+                        .iter()
+                        .map(|note| format!("- ({}) {}", note.id, note.text)),
+                )
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -843,7 +936,9 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
             // The ledger can lag reality in both directions (work done but never
             // finish_task'd, or claimed done without artifacts) — give the summary the
             // actual workspace delta so it reconciles instead of guessing.
-            sections.push(format!("workspace_changes (ground truth at run end):\n{workspace_changes}"));
+            sections.push(format!(
+                "workspace_changes (ground truth at run end):\n{workspace_changes}"
+            ));
         }
     }
 
@@ -861,7 +956,9 @@ pub fn build_run_summary_messages(state: &HarnessState, args: &RunSummaryMessage
 
     vec![
         TransportRequestMessage {
-            content: Some(TransportContent::Text(RUN_SUMMARY_SYSTEM_PROMPT.to_string())),
+            content: Some(TransportContent::Text(
+                RUN_SUMMARY_SYSTEM_PROMPT.to_string(),
+            )),
             role: ChatRoleTag::System,
             ..Default::default()
         },
@@ -878,7 +975,12 @@ mod composed_summary_tests {
     use super::*;
     use crate::core::state::create_harness_state;
 
-    fn task(id: &str, summary: Option<&str>, review_of: Option<&str>, status: HarnessTaskStatus) -> HarnessTask {
+    fn task(
+        id: &str,
+        summary: Option<&str>,
+        review_of: Option<&str>,
+        status: HarnessTaskStatus,
+    ) -> HarnessTask {
         let mut task: HarnessTask = serde_json::from_value(serde_json::json!({
             "activations": 1, "createdAtIteration": 0, "id": id, "notes": [], "stallCount": 0,
             "status": "pending", "title": format!("do {id}")
@@ -894,23 +996,54 @@ mod composed_summary_tests {
     fn small_completed_runs_compose_their_summary_from_task_summaries() {
         let mut state = create_harness_state("goal");
         state.tasks = vec![
-            task("task-1", Some("fixed the offset"), None, HarnessTaskStatus::Completed),
-            task("task-2", Some("suite green, confirmed"), Some("task-1"), HarnessTaskStatus::Completed),
+            task(
+                "task-1",
+                Some("fixed the offset"),
+                None,
+                HarnessTaskStatus::Completed,
+            ),
+            task(
+                "task-2",
+                Some("suite green, confirmed"),
+                Some("task-1"),
+                HarnessTaskStatus::Completed,
+            ),
         ];
         let text = build_composed_run_summary(&state, 2).expect("composed");
-        assert!(text.starts_with("Completed 1 task(s), confirmed by 1 review(s)."), "{text}");
-        assert!(text.contains("task-1: do task-1 — fixed the offset"), "{text}");
-        assert!(text.contains("task-2 (review of task-1): suite green, confirmed"), "{text}");
+        assert!(
+            text.starts_with("Completed 1 task(s), confirmed by 1 review(s)."),
+            "{text}"
+        );
+        assert!(
+            text.contains("task-1: do task-1 — fixed the offset"),
+            "{text}"
+        );
+        assert!(
+            text.contains("task-2 (review of task-1): suite green, confirmed"),
+            "{text}"
+        );
 
         // Too many author tasks, a missing summary, or open work: the model writes it.
-        state.tasks.push(task("task-3", Some("x"), None, HarnessTaskStatus::Completed));
-        state.tasks.push(task("task-4", Some("y"), None, HarnessTaskStatus::Completed));
+        state.tasks.push(task(
+            "task-3",
+            Some("x"),
+            None,
+            HarnessTaskStatus::Completed,
+        ));
+        state.tasks.push(task(
+            "task-4",
+            Some("y"),
+            None,
+            HarnessTaskStatus::Completed,
+        ));
         assert!(build_composed_run_summary(&state, 2).is_none());
         state.tasks.truncate(2);
         state.tasks[0].summary = None;
         assert!(build_composed_run_summary(&state, 2).is_none());
         state.tasks[0].summary = Some("fixed".into());
-        state.tasks.push(task("task-5", None, None, HarnessTaskStatus::Pending));
+        state
+            .tasks
+            .push(task("task-5", None, None, HarnessTaskStatus::Pending));
         assert!(build_composed_run_summary(&state, 2).is_none());
     }
 }
@@ -920,9 +1053,16 @@ mod composed_summary_tests {
 /// non-empty summary. None when the run is bigger or a summary is missing,
 /// so the model-written summary still covers the runs that need one.
 pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Option<String> {
-    let completed: Vec<&HarnessTask> =
-        state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Completed).collect();
-    if completed.is_empty() || state.tasks.iter().any(|task| task.status != HarnessTaskStatus::Completed && task.status != HarnessTaskStatus::Dropped) {
+    let completed: Vec<&HarnessTask> = state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Completed)
+        .collect();
+    if completed.is_empty()
+        || state.tasks.iter().any(|task| {
+            task.status != HarnessTaskStatus::Completed && task.status != HarnessTaskStatus::Dropped
+        })
+    {
         return None;
     }
     let (reviews, authored): (Vec<&HarnessTask>, Vec<&HarnessTask>) =
@@ -930,20 +1070,42 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
     if authored.is_empty() || authored.len() > max_tasks {
         return None;
     }
-    if authored.iter().any(|task| task.summary.as_deref().map_or(true, |summary| summary.trim().is_empty())) {
+    if authored.iter().any(|task| {
+        task.summary
+            .as_deref()
+            .map_or(true, |summary| summary.trim().is_empty())
+    }) {
         return None;
     }
     let mut lines = vec![format!(
         "Completed {} task(s){}.",
         authored.len(),
-        if reviews.is_empty() { String::new() } else { format!(", confirmed by {} review(s)", reviews.len()) }
+        if reviews.is_empty() {
+            String::new()
+        } else {
+            format!(", confirmed by {} review(s)", reviews.len())
+        }
     )];
     for task in &authored {
-        lines.push(format!("- {}: {} — {}", task.id, task.title, task.summary.as_deref().unwrap_or_default().trim()));
+        lines.push(format!(
+            "- {}: {} — {}",
+            task.id,
+            task.title,
+            task.summary.as_deref().unwrap_or_default().trim()
+        ));
     }
     for review in &reviews {
-        if let Some(summary) = review.summary.as_deref().filter(|summary| !summary.trim().is_empty()) {
-            lines.push(format!("- {} (review of {}): {}", review.id, review.review_of.as_deref().unwrap_or_default(), summary.trim()));
+        if let Some(summary) = review
+            .summary
+            .as_deref()
+            .filter(|summary| !summary.trim().is_empty())
+        {
+            lines.push(format!(
+                "- {} (review of {}): {}",
+                review.id,
+                review.review_of.as_deref().unwrap_or_default(),
+                summary.trim()
+            ));
         }
     }
     if !state.anomalies.is_empty() {
@@ -961,15 +1123,31 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
         );
     }
 
-    let completed_count = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Completed).count();
-    let blocked_tasks: Vec<&HarnessTask> = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Blocked).collect();
-    let dropped_count = state.tasks.iter().filter(|task| task.status == HarnessTaskStatus::Dropped).count();
+    let completed_count = state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Completed)
+        .count();
+    let blocked_tasks: Vec<&HarnessTask> = state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Blocked)
+        .collect();
+    let dropped_count = state
+        .tasks
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Dropped)
+        .count();
     let blocked_suffix = if !blocked_tasks.is_empty() {
         format!(", {} blocked", blocked_tasks.len())
     } else {
         String::new()
     };
-    let dropped_suffix = if dropped_count > 0 { format!(", {dropped_count} dropped") } else { String::new() };
+    let dropped_suffix = if dropped_count > 0 {
+        format!(", {dropped_count} dropped")
+    } else {
+        String::new()
+    };
     let mut lines = vec![format!(
         "Run ended ({}): {}/{} task(s) completed{}{}.",
         reason_wire_tag(reason),
@@ -1012,8 +1190,6 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
 // ---------------------------------------------------------------------------
 // History / telemetry formatting helpers
 // ---------------------------------------------------------------------------
-
-
 
 pub(crate) fn format_task_telemetry(task: &HarnessTask) -> String {
     if task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Dropped {
@@ -1073,7 +1249,13 @@ pub(crate) fn format_task_line(task: &HarnessTask, current_task_id: Option<&str>
 
     format!(
         "{} {}: {}{}{}{}{}{}",
-        status_mark, task.id, task.title, summary_suffix, role_suffix, review_suffix, depends_suffix,
+        status_mark,
+        task.id,
+        task.title,
+        summary_suffix,
+        role_suffix,
+        review_suffix,
+        depends_suffix,
         telemetry_suffix
     )
 }
@@ -1105,13 +1287,19 @@ pub(crate) fn format_history_outcome(tasks: &[HarnessTask]) -> String {
         }
     );
 
-    format!("{}/{} tasks completed{}", completed_count, tasks.len(), suffixes)
+    format!(
+        "{}/{} tasks completed{}",
+        completed_count,
+        tasks.len(),
+        suffixes
+    )
 }
 
 pub(crate) fn build_history_section(state: &HarnessState) -> String {
     let record_start = state.history.len().saturating_sub(MAX_HISTORY_GOALS);
     let recent_records = &state.history[record_start..];
-    let mut lines: Vec<String> = vec!["history (earlier goals this session, oldest first):".to_string()];
+    let mut lines: Vec<String> =
+        vec!["history (earlier goals this session, oldest first):".to_string()];
 
     for (record_index, record) in recent_records.iter().enumerate() {
         lines.push(format!(
@@ -1127,7 +1315,11 @@ pub(crate) fn build_history_section(state: &HarnessState) -> String {
                 lines.push(format!("  {}", format_task_line(task, None)));
             }
 
-            if let Some(summary) = record.summary.as_deref().filter(|summary| !summary.is_empty()) {
+            if let Some(summary) = record
+                .summary
+                .as_deref()
+                .filter(|summary| !summary.is_empty())
+            {
                 let truncated: String = summary.chars().take(MAX_HISTORY_SUMMARY_CHARS).collect();
                 lines.push(format!("  run summary: {}", truncated));
             }
@@ -1145,7 +1337,10 @@ pub(crate) fn build_run_budget_line(budget: &HarnessRunBudget) -> String {
         ""
     };
 
-    format!("run_budget: cycle {} of {} for this run{}", budget.used, budget.total, warning)
+    format!(
+        "run_budget: cycle {} of {} for this run{}",
+        budget.used, budget.total, warning
+    )
 }
 
 pub(crate) fn build_last_activation_section(state: &HarnessState) -> String {
@@ -1164,7 +1359,10 @@ pub(crate) fn build_last_activation_section(state: &HarnessState) -> String {
         .as_deref()
         .map(|task_id| format!(", working {}", task_id))
         .unwrap_or_default();
-    let heading = format!("last_activation (previous loop{}{}):", cycles_suffix, task_suffix);
+    let heading = format!(
+        "last_activation (previous loop{}{}):",
+        cycles_suffix, task_suffix
+    );
     let mut lines: Vec<String> = vec![heading];
 
     for action in &digest.actions {
@@ -1180,7 +1378,8 @@ pub(crate) fn build_plan_review_nudge(state: &HarnessState) -> String {
         .tasks
         .iter()
         .filter(|task| {
-            (task.status == HarnessTaskStatus::Completed || task.status == HarnessTaskStatus::Blocked)
+            (task.status == HarnessTaskStatus::Completed
+                || task.status == HarnessTaskStatus::Blocked)
                 && task.finished_at_iteration == Some(state.iteration - 1)
         })
         .collect();
@@ -1368,7 +1567,10 @@ mod tests {
         let line = format_task_recovery_line(&task).unwrap();
 
         assert!(line.contains("was last dropped"), "line: {line}");
-        assert!(line.contains("(3 recovery events recorded)"), "line: {line}");
+        assert!(
+            line.contains("(3 recovery events recorded)"),
+            "line: {line}"
+        );
     }
 
     #[test]
@@ -1376,20 +1578,16 @@ mod tests {
         let exhausted = recovery_task(json!([
             {"action": "exhausted", "taskTitle": "Flaky step", "atIteration": 9}
         ]));
-        assert!(
-            format_task_recovery_line(&exhausted)
-                .unwrap()
-                .contains("was last retries exhausted")
-        );
+        assert!(format_task_recovery_line(&exhausted)
+            .unwrap()
+            .contains("was last retries exhausted"));
 
         let replied = recovery_task(json!([
             {"action": "operator-reply", "taskTitle": "Flaky step", "detail": "originals are in /backup", "atIteration": 11}
         ]));
-        assert!(
-            format_task_recovery_line(&replied)
-                .unwrap()
-                .contains("was last operator replied")
-        );
+        assert!(format_task_recovery_line(&replied)
+            .unwrap()
+            .contains("was last operator replied"));
     }
 
     #[test]
@@ -1466,7 +1664,14 @@ mod tests {
         let task = recovery_task(json!(events));
         let line = format_task_recovery_line(&task).unwrap();
 
-        assert!(line.contains("(8 recovery events recorded)"), "line: {line}");
-        assert!(line.len() < 350, "line should stay bounded, got {}", line.len());
+        assert!(
+            line.contains("(8 recovery events recorded)"),
+            "line: {line}"
+        );
+        assert!(
+            line.len() < 350,
+            "line should stay bounded, got {}",
+            line.len()
+        );
     }
 }

@@ -312,7 +312,10 @@ mod tests {
     #[test]
     fn fallback_bounds_goal_to_five_words_and_chars() {
         assert_eq!(fallback_title("fix the login bug"), "fix the login bug");
-        assert_eq!(fallback_title("  refactor   the\t parser\n "), "refactor the parser");
+        assert_eq!(
+            fallback_title("  refactor   the\t parser\n "),
+            "refactor the parser"
+        );
         assert_eq!(
             fallback_title("one two three four five six seven"),
             "one two three four five"
@@ -446,26 +449,23 @@ mod tests {
         assert_eq!(title.tick(start + Duration::from_millis(180)), None);
         // Setting the same label emits nothing (frame and label unchanged).
         assert_eq!(
-            title
-                .set_label("fix login bug", start + Duration::from_millis(160)),
+            title.set_label("fix login bug", start + Duration::from_millis(160)),
             None
         );
         // A different label emits again.
-        assert!(
-            title
-                .set_label("refactor parser", start + Duration::from_millis(240))
-                .is_some()
-        );
+        assert!(title
+            .set_label("refactor parser", start + Duration::from_millis(240))
+            .is_some());
         // Idle: bare label emitted, then the same words in an unsanitized
         // variant sanitize to the identical label and dedupe to None.
-        assert!(
-            title
-                .set_busy(false, start + Duration::from_millis(250))
-                .is_some()
-        );
+        assert!(title
+            .set_busy(false, start + Duration::from_millis(250))
+            .is_some());
         assert_eq!(
-            title
-                .set_label("  refactor\t\"parser\" ", start + Duration::from_millis(260)),
+            title.set_label(
+                "  refactor\t\"parser\" ",
+                start + Duration::from_millis(260)
+            ),
             None
         );
     }

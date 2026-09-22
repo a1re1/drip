@@ -149,7 +149,8 @@ mod tests {
                 Ok(ChatToolCompletionResult {
                     blocks: Some(Vec::new()),
                     tool_content: None,
-                 tags: None })
+                    tags: None,
+                })
             }),
         })
     }

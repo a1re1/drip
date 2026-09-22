@@ -1167,14 +1167,25 @@ pub mod answers {
 			.get("answers")
 			.and_then(Value::as_array)
 			.ok_or_else(|| "answers line needs an answers array".to_string())?;
-		if items.is_empty() {
+		// A "chat about this" record answers the whole survey with one free-form
+		// message, so it may carry an empty answers array; any other record still
+		// needs at least one answer.
+		let chat = match object.get("chat") {
+			Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+			Some(Value::String(_)) | None => None,
+			Some(_) => return Err("answers chat must be a string".to_string()),
+		};
+		if chat.is_some() && !items.is_empty() {
+			return Err("answers chat stands for the whole survey: drop the answers array when chat is set".to_string());
+		}
+		if items.is_empty() && chat.is_none() {
 			return Err("answers array must not be empty".to_string());
 		}
 		let mut answers = Vec::with_capacity(items.len());
 		for item in items {
 			answers.push(parse_answer(item)?);
 		}
-		Ok(HarnessSurveyAnswers { at, answers })
+		Ok(HarnessSurveyAnswers { at, answers, chat })
 	}
 
 	/// RFC3339 timestamp validator shared by writers and tests.
@@ -1198,20 +1209,44 @@ pub mod answers {
 			.get("answers")
 			.and_then(Value::as_array)
 			.ok_or_else(|| "answers payload needs an answers array".to_string())?;
-		if items.is_empty() {
+		// A "chat about this" record answers the whole survey with one free-form
+		// message, so it may carry an empty answers array; any other record still
+		// needs at least one answer.
+		let chat = match object.get("chat") {
+			Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+			Some(Value::String(_)) | None => None,
+			Some(_) => return Err("answers chat must be a string".to_string()),
+		};
+		if chat.is_some() && !items.is_empty() {
+			return Err("answers chat stands for the whole survey: drop the answers array when chat is set".to_string());
+		}
+		if items.is_empty() && chat.is_none() {
 			return Err("answers array must not be empty".to_string());
 		}
 		let mut answers = Vec::with_capacity(items.len());
 		for item in items {
 			answers.push(parse_answer(item)?);
 		}
-		Ok(HarnessSurveyAnswers { at, answers })
+		Ok(HarnessSurveyAnswers { at, answers, chat })
 	}
 
 	/// Append one answers record as a single JSONL line (creating the file).
 	pub fn append_answers(path: &Path, record: &HarnessSurveyAnswers) -> std::io::Result<()> {
 		let line = serde_json::to_string(record).expect("answers record serializes");
 		append_line(path, &line)
+	}
+
+	/// Append one "chat about this" record: the operator's free-form message
+	/// stands as the answer to the whole survey (the answers array stays empty).
+	pub fn append_chat(path: &Path, text: &str) -> std::io::Result<()> {
+		append_answers(
+			path,
+			&HarnessSurveyAnswers {
+				at: HarnessSurveyAnswers::now_iso(),
+				answers: Vec::new(),
+				chat: Some(text.to_string()),
+			},
+		)
 	}
 
 	/// Append one raw JSONL line (also used for the boundary marker).
@@ -2118,6 +2153,7 @@ mod tests {
                 HarnessSurveyAnswer { index: 0, choice: Some("Poll answers.jsonl".into()), other: None },
                 HarnessSurveyAnswer { index: 1, choice: None, other: Some("do it yourself".into()) },
             ],
+            chat: None,
         };
         assert!(answers::is_rfc3339(&record.at));
         let line = serde_json::to_string(&record).unwrap();
@@ -2144,6 +2180,33 @@ mod tests {
         assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[{\"index\":0,\"choice\":\"a\"}]}").is_err());
     }
 
+    /// A "chat about this" record: an empty answers array is legal only when a
+    /// non-empty chat string stands in for the whole survey.
+    #[test]
+    fn chat_records_round_trip_and_append_chat_writes_jsonl() {
+        let line = "{\"at\":\"2026-02-03T04:05:06.789Z\",\"answers\":[],\"chat\":\"ask the maintainer instead of me\"}";
+        let parsed = answers::parse_answers_line(line).unwrap();
+        assert!(parsed.answers.is_empty());
+        assert_eq!(parsed.chat.as_deref(), Some("ask the maintainer instead of me"));
+        assert_eq!(answers::parse_answers_line(&serde_json::to_string(&parsed).unwrap()).unwrap(), parsed);
+        // an empty chat string is not a chat record: the empty answers array stays invalid
+        assert!(answers::parse_answers_line("{\"at\":\"t\",\"answers\":[],\"chat\":\"  \"}").is_err());
+        // A hybrid record would have per-question answers silently discarded
+        // in favour of the chat text, so the codec rejects it outright.
+        assert!(answers::parse_answers_line("{\"answers\":[{\"index\":0,\"choice\":\"x\"}],\"chat\":\"also this\"}").is_err());
+        assert!(answers::parse_answers_value(&serde_json::json!({"answers": [{"index": 0, "choice": "x"}], "chat": "also this"})).is_err());
+        assert!(answers::parse_answers_value(&serde_json::json!({"at": "t", "answers": [], "chat": 3})).is_err());
+        assert_ne!(answers::parse_answers_value(&serde_json::json!({"answers": [], "chat": "x"})).unwrap().at, "");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("answers.jsonl");
+        answers::append_chat(&path, "chat text").unwrap();
+        let records = answers::read_answer_batches(&path);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record.chat.as_deref(), Some("chat text"));
+        assert!(records[0].record.answers.is_empty());
+    }
+
     #[test]
     fn malformed_lines_and_partial_trailing_jsonl_are_handled() {
         let temp = tempfile::tempdir().unwrap();
@@ -2151,6 +2214,7 @@ mod tests {
         let record = HarnessSurveyAnswers {
             at: "2026-02-03T04:05:06.789Z".into(),
             answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+            chat: None,
         };
         let line = serde_json::to_string(&record).unwrap();
         // good line, malformed line, good line, partial trailing line (no newline)
@@ -2173,6 +2237,7 @@ mod tests {
         let record = HarnessSurveyAnswers {
             at: "2026-02-03T04:05:06.789Z".into(),
             answers: vec![HarnessSurveyAnswer { index: 0, choice: Some("a".into()), other: None }],
+            chat: None,
         };
         answers::append_answers(&path, &record).unwrap();
         answers::append_answers(&path, &record).unwrap();

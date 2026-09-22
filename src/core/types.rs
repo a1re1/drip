@@ -858,6 +858,10 @@ pub struct HarnessSurveyAnswer {
 pub struct HarnessSurveyAnswers {
 	pub at: String,
 	pub answers: Vec<HarnessSurveyAnswer>,
+	/// The operator chose "chat about this": one free-form message standing as
+	/// the answer to the whole survey (per-question answers stay empty).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub chat: Option<String>,
 }
 
 impl HarnessSurveyAnswers {

@@ -69,7 +69,8 @@ use crate::tui::compact::{
 };
 use crate::tui::widgets::{
     composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
-    render_composer, render_picker, render_status_bar, ComposerProps, PickerItem, StatusBarProps,
+    render_composer, render_picker, render_status_bar, render_survey, ComposerProps, PickerItem,
+    StatusBarProps,
 };
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -208,6 +209,10 @@ struct Overlay {
 /// prefix keeps it disjoint from any real option label.
 const SURVEY_OTHER_ID: &str = "\u{0}other";
 
+/// Sentinel PickerItem id for the survey's last row: chat about the whole
+/// survey instead of answering the questions one by one.
+const SURVEY_CHAT_ID: &str = "\u{0}chat";
+
 /// A live ask_user survey being answered one question at a time. The harness
 /// thread stays blocked on answers.jsonl; the overlay/composer only collect.
 struct SurveyState {
@@ -217,6 +222,12 @@ struct SurveyState {
     answers: Vec<HarnessSurveyAnswer>,
     /// Some while the operator is typing a free-text "Other…" answer.
     other_input: Option<String>,
+    /// The last question the survey showed; a failed chat write reopens it.
+    last_question: usize,
+    /// Set when the operator chose "Chat about this": the survey stays alive
+    /// with no overlay, and the next composer submit stands as the answer to
+    /// every question (written as a chat record).
+    chat_mode: bool,
     /// answers.jsonl of the session whose run asked — captured at open so a
     /// later session switch cannot redirect the answers to the wrong file.
     answers_path: std::path::PathBuf,
@@ -768,6 +779,33 @@ impl TuiApp {
 
     // ----- painting -------------------------------------------------------
 
+    /// The stepped survey layout for the live Question overlay: the survey
+    /// state supplies the header, question, progress and the option list (the
+    /// overlay keeps the items the key handling consumes).
+    fn survey_rows(&self, overlay: &Overlay) -> Vec<String> {
+        let Some(state) = &self.survey else {
+            return render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols);
+        };
+        let Some(question) = state.survey.questions.get(state.current) else {
+            return render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols);
+        };
+        let listed = if question.allow_other {
+            overlay.items.len().saturating_sub(2)
+        } else {
+            overlay.items.len().saturating_sub(1)
+        };
+        render_survey(
+            &question.header,
+            &question.question,
+            &overlay.items[..listed],
+            question.allow_other,
+            overlay.selected,
+            state.current + 1,
+            state.survey.questions.len(),
+            self.cols,
+        )
+    }
+
     fn live_region(&self) -> Vec<String> {
         let mut rows = vec![String::new()]; // marginTop 1
 
@@ -786,11 +824,17 @@ impl TuiApp {
                 .map(|question| question.question.as_str())
                 .unwrap_or("");
             let input = state.other_input.as_deref().unwrap_or("");
-            rows.push(format!("Other — {question}"));
+            rows.push(format!("Type something — {question}"));
             rows.push(format!("> {input}▏"));
             rows.push("enter to submit · esc back to choices".to_string());
         } else if let Some(overlay) = &self.overlay {
-            rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
+            // The survey overlay draws its own stepped layout; every other
+            // picker keeps the generic renderer (and its exact output).
+            if overlay.kind == OverlayKind::Question {
+                rows.extend(self.survey_rows(overlay));
+            } else {
+                rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
+            }
         } else {
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
             let queued: Vec<String> = self.queued_prompts.iter().cloned().collect();
@@ -1140,6 +1184,15 @@ impl TuiApp {
 
         self.apply_edit(String::new(), 0);
 
+        // "Chat about this": the composer's next message answers the whole
+        // survey, so it is recorded instead of starting a goal or steering.
+        if self.survey.as_ref().is_some_and(|state| state.chat_mode) {
+            if !submitted.is_empty() {
+                self.record_chat_reply(submitted);
+            }
+            return;
+        }
+
         let command = parse_slash_command(&submitted);
 
         // A run in flight can still be typed to, but enter must not start a
@@ -1192,6 +1245,40 @@ impl TuiApp {
             submitted
         };
         self.run_goal(goal);
+    }
+
+    /// Write the operator's free-form survey reply as a chat record: the
+    /// message stands as the answer to every question, so the answers array
+    /// stays empty. Retries like finish_survey; a failure keeps chat mode on
+    /// and puts the reply back in the composer so Enter retries it.
+    fn record_chat_reply(&mut self, text: String) {
+        let Some(state) = self.survey.as_ref() else { return };
+        let path = state.answers_path.clone();
+        let mut outcome = crate::core::state::answers::append_chat(&path, &text);
+        for _ in 0..2 {
+            if outcome.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            outcome = crate::core::state::answers::append_chat(&path, &text);
+        }
+        match outcome {
+            Ok(()) => {
+                self.survey = None;
+                self.overlay = None;
+                self.push_info("chat reply recorded — the run continues");
+            }
+            Err(error) => {
+                // Stay in chat mode and put the reply back in the composer:
+                // Enter retries the append instead of losing what was typed.
+                self.push_error(format!(
+                    "could not record the chat reply: {error} — press Enter to retry"
+                ));
+                let cursor = text.chars().count();
+                self.apply_edit(text, cursor);
+            }
+        }
+        self.repaint();
     }
 
     /// Enter while a run is in flight: hold the prompt for the NEXT run. It is
@@ -1337,9 +1424,34 @@ impl TuiApp {
                 Key::Down | Key::Tab => {
                     overlay.selected = (overlay.selected + 1).min(overlay.items.len().saturating_sub(1));
                 }
+                // Digit keys jump: the question overlay confirms that row
+                // immediately, every other picker just highlights it.
+                Key::Text(text) if !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit()) => {
+                    let number: usize = text.parse().unwrap_or(0);
+                    if number >= 1 && number <= overlay.items.len() {
+                        overlay.selected = number - 1;
+                        if overlay.kind == OverlayKind::Question {
+                            let selected = overlay.items[number - 1].clone();
+                            self.overlay = None;
+                            self.on_pick(OverlayKind::Question, selected);
+                        }
+                    }
+                }
                 Key::Ctrl('c') => self.quit = true,
                 _ => {}
             }
+            return;
+        }
+
+        // "Chat about this": no overlay is up, so Esc dismisses the survey
+        // exactly like Esc on the overlay does today.
+        // Every other key falls through to the composer arms below, so the
+        // reply is typed like any message and Enter reaches submit().
+        if matches!(key, Key::Escape) && self.survey.as_ref().is_some_and(|state| state.chat_mode) {
+            self.survey = None;
+            self.push_info(
+                "survey dismissed — answer with `drip --answer` or the run ends at its ask timeout",
+            );
             return;
         }
 
@@ -1647,6 +1759,8 @@ impl TuiApp {
             current: 0,
             answers: Vec::new(),
             other_input: None,
+            last_question: 0,
+            chat_mode: false,
             // The exact file the blocked harness thread polls (loop.rs answers_path()).
             answers_path: Path::new(&self.paths.state_path).with_file_name("answers.jsonl"),
         });
@@ -1669,9 +1783,15 @@ impl TuiApp {
             items.push(PickerItem {
                 detail: Some("answer with free text instead".to_string()),
                 id: SURVEY_OTHER_ID.to_string(),
-                label: "Other…".to_string(),
+                label: "Type something.".to_string(),
             });
         }
+        // Always last: hand the whole survey back to the operator in prose.
+        items.push(PickerItem {
+            detail: None,
+            id: SURVEY_CHAT_ID.to_string(),
+            label: "Chat about this".to_string(),
+        });
         let title = format!(
             "clarification {}/{} · {} — {}",
             state.current + 1,
@@ -1691,6 +1811,7 @@ impl TuiApp {
                 other,
             });
             state.other_input = None;
+            state.last_question = state.current;
             state.current += 1;
             state.current >= state.survey.questions.len()
         };
@@ -1715,7 +1836,7 @@ impl TuiApp {
 
     fn finish_survey(&mut self) {
         let Some(state) = self.survey.as_ref() else { return };
-        let record = HarnessSurveyAnswers { at: now_iso(), answers: state.answers.clone() };
+        let record = HarnessSurveyAnswers { at: now_iso(), answers: state.answers.clone(), chat: None };
         // A single local append syscall: transient failures are worth two
         // cheap retries before falling back to the manual re-answer path.
         let mut outcome = crate::core::state::answers::append_answers(&state.answers_path, &record);
@@ -1747,6 +1868,37 @@ impl TuiApp {
         }
     }
 
+    /// Enter on "Chat about this": close the overlay, keep the survey alive in
+    /// chat mode, and echo every question so the operator can answer the whole
+    /// survey in one message (the next composer submit writes the chat record).
+    fn begin_survey_chat(&mut self) {
+        let lines = {
+            let Some(state) = self.survey.as_mut() else { return };
+            state.chat_mode = true;
+            state.last_question = state.current;
+            let total = state.survey.questions.len();
+            let mut lines = vec![format!(
+                "chat about the survey — your next message answers all {total} questions"
+            )];
+            for (index, question) in state.survey.questions.iter().enumerate() {
+                lines.push(format!("{}. {} — {}", index + 1, question.header, question.question));
+                for (option_index, option) in question.options.iter().enumerate() {
+                    lines.push(format!(
+                        "   {}. {} — {}",
+                        option_index + 1,
+                        option.label,
+                        option.description
+                    ));
+                }
+            }
+            lines.push("esc dismisses the survey (answer it later with `drip --answer`)".to_string());
+            lines
+        };
+        self.overlay = None;
+        self.push_info(lines.join("\n"));
+        self.repaint();
+    }
+
     fn on_pick(&mut self, kind: OverlayKind, item: PickerItem) {
         match kind {
             OverlayKind::Question => {
@@ -1754,6 +1906,8 @@ impl TuiApp {
                     if let Some(state) = self.survey.as_mut() {
                         state.other_input = Some(String::new());
                     }
+                } else if item.id == SURVEY_CHAT_ID {
+                    self.begin_survey_chat();
                 } else {
                     self.record_survey_answer(Some(item.id), None);
                 }
@@ -5123,5 +5277,171 @@ mod prompt_history_wiring_tests {
             "no draft restored from the previous session"
         );
         assert_eq!(fixture.app.prompt_history.len(), 1, "entries kept");
+    }
+}
+
+/// Focused tests for the stepped clarification survey: the renderer wiring,
+/// digit-key answers, and the "Chat about this" protocol end to end.
+#[cfg(test)]
+mod survey_tests {
+    use super::*;
+    use crate::core::types::{HarnessSurveyOption, HarnessSurveyQuestion};
+
+    fn question(header: &str, prompt: &str, options: &[(&str, &str)], allow_other: bool) -> HarnessSurveyQuestion {
+        HarnessSurveyQuestion {
+            header: header.to_string(),
+            question: prompt.to_string(),
+            options: options
+                .iter()
+                .map(|(label, description)| HarnessSurveyOption {
+                    label: label.to_string(),
+                    description: description.to_string(),
+                })
+                .collect(),
+            allow_other,
+        }
+    }
+
+    fn survey() -> QuestionSurvey {
+        QuestionSurvey {
+            answers_cursor: None,
+            questions: vec![
+                question(
+                    "Approach",
+                    "Poll or channel?",
+                    &[("Poll", "watch the file"), ("Channel", "read the pipe")],
+                    true,
+                ),
+                question("Scope", "Include tests?", &[("Yes", "with tests"), ("No", "without")], false),
+            ],
+        }
+    }
+
+    fn plain(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|row| crate::watch::ansi::strip_ansi(row)).collect()
+    }
+
+    fn type_text(app: &mut TuiApp, text: &str) {
+        app.apply_edit(text.to_string(), text.chars().count());
+    }
+
+    #[test]
+    fn question_overlays_render_through_the_survey_layout() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        let rows = plain(&fixture.app.live_region());
+        assert!(rows.iter().any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
+        assert!(rows.iter().any(|row| row.contains("Poll or channel?")));
+        assert!(rows.iter().any(|row| row.contains("❯ 1. Poll")));
+        assert!(rows.iter().any(|row| row.contains("   watch the file")));
+        assert!(rows.iter().any(|row| row.contains("3. Type something.")));
+        assert!(rows.iter().any(|row| row.contains("4. Chat about this")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+    }
+
+    #[test]
+    fn a_digit_key_confirms_that_option_immediately() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text("2".to_string()));
+        let state = fixture.app.survey.as_ref().expect("survey still open");
+        assert_eq!(state.current, 1, "advanced to the next question");
+        assert_eq!(state.answers.len(), 1);
+        assert_eq!(state.answers[0].choice.as_deref(), Some("Channel"));
+        // Question 2 has no allow_other, so its chat row is the last item.
+        let rows = plain(&fixture.app.live_region());
+        assert!(rows.iter().any(|row| row.contains("Scope") && row.contains("question 2 of 2")));
+        assert!(rows.iter().any(|row| row.contains("3. Chat about this")));
+    }
+
+    #[test]
+    fn choosing_chat_then_submitting_writes_a_chat_record_and_clears_the_survey() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        // The chat row is last: 2 listed options + "Type something." + chat.
+        fixture.app.on_key(Key::Text("4".to_string()));
+        assert!(fixture.app.overlay.is_none(), "the overlay closes");
+        assert!(fixture.app.survey.as_ref().is_some_and(|state| state.chat_mode));
+        assert!(fixture.app.cells.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Info(note)
+                if note.text.contains("answers all 2 questions")
+                    && note.text.contains("Poll or channel?")
+                    && note.text.contains("Include tests?")
+                    && note.text.contains("watch the file")
+        )));
+
+        type_text(&mut fixture.app, "use the channel, no tests");
+        fixture.app.submit();
+        assert!(fixture.app.survey.is_none(), "the survey clears");
+        assert!(fixture.app.cells.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Info(note) if note.text == "chat reply recorded — the run continues"
+        )));
+        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
+        assert!(written.contains("\"chat\":\"use the channel, no tests\""), "{written}");
+        assert!(written.contains("\"answers\":[]"), "{written}");
+    }
+
+    #[test]
+    fn escape_in_chat_mode_dismisses_the_survey_without_writing() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text("4".to_string()));
+        fixture.app.on_key(Key::Escape);
+        assert!(fixture.app.survey.is_none());
+        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        assert!(!path.exists(), "a dismissal writes nothing");
+    }
+
+    #[test]
+    fn a_failed_chat_write_keeps_chat_mode_and_restores_the_reply() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text("1".to_string()));
+        fixture.app.on_key(Key::Text("3".to_string()));
+        assert!(fixture.app.survey.as_ref().is_some_and(|state| state.chat_mode));
+        // The answers path now names a directory, so every append fails.
+        let blocked = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let _ = std::fs::remove_file(&blocked);
+        std::fs::create_dir_all(&blocked).expect("block the answers path");
+        type_text(&mut fixture.app, "still thinking");
+        fixture.app.submit();
+        let state = fixture.app.survey.as_ref().expect("survey survives the failure");
+        assert!(state.chat_mode, "chat mode stays on for the retry");
+        assert_eq!(fixture.app.text, "still thinking", "the reply is back in the composer");
+        assert!(fixture.app.cells.iter().any(|entry| matches!(
+            entry,
+            TranscriptEntry::Error(note) if note.text.contains("press Enter to retry")
+        )));
+        // Unblock and retry with Enter: the same text lands as the chat record.
+        std::fs::remove_dir_all(&blocked).expect("unblock the answers path");
+        fixture.app.on_key(Key::Return);
+        assert!(fixture.app.survey.is_none(), "the retry clears the survey");
+        let written = std::fs::read_to_string(&blocked).expect("answers.jsonl written");
+        assert!(written.contains("\"chat\":\"still thinking\""), "{written}");
+    }
+
+    /// The real keystroke path: characters typed through on_key reach the
+    /// composer while chat mode is on, and Enter submits them as the reply.
+    #[test]
+    fn chat_mode_typing_through_on_key_reaches_the_composer_and_enter_submits() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.begin_survey(survey());
+        fixture.app.on_key(Key::Text("4".to_string()));
+        for ch in ["u", "s", "e", " ", "p", "o", "l", "l"] {
+            fixture.app.on_key(Key::Text(ch.to_string()));
+        }
+        assert_eq!(fixture.app.text, "use poll", "typed text reaches the composer in chat mode");
+        fixture.app.on_key(Key::Backspace);
+        assert_eq!(fixture.app.text, "use pol");
+        fixture.app.on_key(Key::Return);
+        assert!(fixture.app.survey.is_none(), "Enter records the reply and clears the survey");
+        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
+        assert!(written.contains("\"chat\":\"use pol\""), "{written}");
     }
 }

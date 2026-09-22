@@ -716,6 +716,10 @@ impl ReviewContext<'_> {
             // Review children are read-only fan-out workers; never interactive.
             ask_user_enabled: false,
             ask_user_timeout_seconds: None,
+            // Review children stay on the explicit skills only: a classifier
+            // pass per child would multiply latency for no benefit.
+            classifier: None,
+            skill_pool: Vec::new(),
             cwd: args.cwd.clone(),
             goal,
             goal_context: None,

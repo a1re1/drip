@@ -82,6 +82,10 @@ pub struct DripHome {
     pub projects_dir: String,
     /// <home>/skills/ — the user's skill library, shared by every project.
     pub skills_dir: String,
+    /// <home>/skill-requirements.sqlite — the cached per-skill capability
+    /// requirements the optional skill classifier keeps (incremental; safe to
+    /// delete).
+    pub skill_requirements_db_path: String,
     /// The ~/.drip root this home lives under.
     pub root: String,
 }
@@ -202,6 +206,7 @@ pub fn open_drip_home(root: &str) -> DripHome {
         home_root: root.to_string(),
         projects_dir: join(root, "projects").to_string_lossy().into_owned(),
         skills_dir: join(root, "skills").to_string_lossy().into_owned(),
+        skill_requirements_db_path: join(root, "skill-requirements.sqlite").to_string_lossy().into_owned(),
         root: root.to_string(),
     };
 

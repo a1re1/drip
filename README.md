@@ -931,8 +931,9 @@ queue alone; with an empty composer it steers with the **whole queue**, in
 order, and flushes it. Whatever fails to reach the inbox stays queued, so a
 steer is never lost silently.
 
-`Ctrl+S` is one raw-mode byte that every terminal delivers; shift+enter is
-deliberately not a binding because most terminals report it as plain Enter.
+The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
+arrives as a single byte instead of pausing output; shift+enter is deliberately
+not a binding because most terminals report it as plain Enter.
 
 ## Watch TUI (`dripw`)
 

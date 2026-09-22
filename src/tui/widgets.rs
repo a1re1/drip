@@ -246,6 +246,72 @@ pub fn render_picker(title: &str, items: &[PickerItem], selected_index: usize, w
     boxed(rows, width, ACCENT_COLOR)
 }
 
+/// Stepped clarification survey (Claude-Code-style): the question's header as
+/// an inverse accent chip with `question N of M`, the question in bold, one
+/// numbered row per option with its description indented underneath, an
+/// optional `Type something.` row, and always a final `Chat about this` row.
+/// `options` are the listed choices only — the two escape-hatch rows are
+/// generated here so their numbering always matches the app's `PickerItem`
+/// list (`allow_other` controls whether the first of them exists).
+pub fn render_survey(
+    header: &str,
+    question: &str,
+    options: &[PickerItem],
+    allow_other: bool,
+    selected_index: usize,
+    question_number: usize,
+    question_total: usize,
+    width: usize,
+) -> Vec<String> {
+    use crate::watch::ansi::c::{bold, reverse};
+
+    let accent = paint(ACCENT_COLOR);
+    let dim = paint(DIM_COLOR);
+    let inner = width.saturating_sub(4).max(1);
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!(
+        "{}{}",
+        accent(&reverse(&bold(header))),
+        dim(&format!(" question {question_number} of {question_total}"))
+    ));
+    rows.push(String::new());
+    rows.extend(wrap_ansi(&bold(question), inner));
+    rows.push(String::new());
+    for (index, item) in options.iter().enumerate() {
+        let selected = index == selected_index;
+        let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
+        let label = if selected { accent(&item.label) } else { item.label.clone() };
+        rows.push(format!("{prefix}{}. {label}", index + 1));
+        if let Some(description) = &item.detail {
+            rows.push(format!("   {}", dim(description)));
+        }
+    }
+    let mut number = options.len();
+    if allow_other {
+        number += 1;
+        let selected = selected_index == number - 1;
+        let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
+        let label = if selected {
+            accent("Type something.")
+        } else {
+            "Type something.".to_string()
+        };
+        rows.push(format!("{prefix}{number}. {label}"));
+    }
+    number += 1;
+    let selected = selected_index == number - 1;
+    let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
+    let label = if selected {
+        accent("Chat about this")
+    } else {
+        "Chat about this".to_string()
+    };
+    rows.push(format!("{prefix}{number}. {label}"));
+    rows.push(String::new());
+    rows.push(dim("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel"));
+    boxed(rows, width, ACCENT_COLOR)
+}
+
 fn paint_bold_title(title: &str) -> String {
     crate::watch::ansi::c::bold(title)
 }
@@ -497,6 +563,50 @@ mod tests {
                 .any(|row| row.contains("shift+enter steers the running goal")),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn survey_renders_numbered_options_descriptions_and_the_footer() {
+        let items = vec![
+            PickerItem {
+                detail: Some("watch the file".to_string()),
+                id: "poll".to_string(),
+                label: "Poll".to_string(),
+            },
+            PickerItem {
+                detail: Some("read the pipe".to_string()),
+                id: "chan".to_string(),
+                label: "Channel".to_string(),
+            },
+        ];
+        let rows = plain(&render_survey("Approach", "Poll or channel?", &items, true, 0, 1, 2, 72));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
+        assert!(rows.iter().any(|row| row.contains("Poll or channel?")));
+        assert!(rows.iter().any(|row| row.contains("❯ 1. Poll")));
+        assert!(rows.iter().any(|row| row.contains("2. Channel")));
+        assert!(rows.iter().any(|row| row.contains("   watch the file")));
+        assert!(rows.iter().any(|row| row.contains("   read the pipe")));
+        assert!(rows.iter().any(|row| row.contains("3. Type something.")));
+        assert!(rows.iter().any(|row| row.contains("4. Chat about this")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+        assert!(rows.first().unwrap().starts_with('╭'));
+        assert!(rows.last().unwrap().starts_with('╰'));
+    }
+
+    #[test]
+    fn survey_hides_type_something_and_marks_the_chat_row_when_selected() {
+        let items = vec![PickerItem {
+            detail: None,
+            id: "yes".to_string(),
+            label: "Yes".to_string(),
+        }];
+        let rows = plain(&render_survey("Scope", "Include tests?", &items, false, 1, 2, 2, 72));
+        assert!(rows.iter().any(|row| row.contains("❯ 2. Chat about this")));
+        assert!(!rows.iter().any(|row| row.contains("Type something.")));
     }
 
     #[test]

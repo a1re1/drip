@@ -4167,6 +4167,10 @@ pub struct HarnessRun {
     /// The direct-plan decision runs once per run, before the first loop.
     pub direct_plan_checked: bool,
     pub ask_user_awaiting: bool,
+    /// Planning ask window: true at run start and again right after a fresh
+    /// operator message, false once a task loop starts (ask_user is useless
+    /// while a plan already executes).
+    pub ask_window_open: bool,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
     pub aborted: bool,
@@ -4752,6 +4756,7 @@ impl HarnessRun {
             replan_escalated: false,
             direct_plan_checked: false,
             ask_user_awaiting: false,
+            ask_window_open: true,
             answers_path: run_answers_path,
             continue_command: None,
             aborted: false,
@@ -6277,6 +6282,11 @@ impl HarnessRun {
             }
         }
 
+        // A task loop shuts the ask window: only planning loops — the ones
+        // the operator's goal or message just opened — may ask questions.
+        if current_task_id.is_some() {
+            self.ask_window_open = false;
+        }
         // this loop's capability profile.
         let current_task = current_task_id
             .as_deref()
@@ -6653,6 +6663,11 @@ impl HarnessRun {
             }
 
             fresh_operator_messages.retain(|entry| !entry.text.trim().is_empty());
+            // A fresh operator message reopens the planning ask window: the
+            // model may clarify before it replans.
+            if !fresh_operator_messages.is_empty() {
+                self.ask_window_open = true;
+            }
         }
 
         // Operator review/verify opt-out (sticky). Explicit --no-review/--lite
@@ -7188,7 +7203,19 @@ impl HarnessRun {
                 .as_ref()
                 .and_then(|role| role.route.as_ref())
                 .map(model_route_from_role_route),
-            transport_tools: Some(scope.loop_transport_tools.clone()),
+            transport_tools: Some(if self.ask_window_open {
+                scope.loop_transport_tools.clone()
+            } else {
+                // A closed ask window drops the ask_user spec from the model's
+                // tool list: the op handler refuses it either way, but the
+                // model should not be invited to call it.
+                scope
+                    .loop_transport_tools
+                    .iter()
+                    .filter(|tool| tool.function.name != "ask_user")
+                    .cloned()
+                    .collect()
+            }),
             usage_task_id: task_id.clone(),
             max_tokens: forced_tool_call.then_some(TRUNCATION_RETRY_MAX_TOKENS),
             tool_choice: forced_tool_call.then(|| "required".to_string()),
@@ -7829,6 +7856,7 @@ impl HarnessRun {
                             disabled: true,
                         }),
                     ask_user_enabled: self.options.ask_user_enabled,
+                    ask_window_open: self.ask_window_open,
                     // Sticky opt-out decided at the cycle boundary (goal
                     // phrase, operator message, --no-review, --lite); also
                     // rejects delayed Review*/reviewer task work mid-run.
@@ -9000,6 +9028,22 @@ fn render_survey_answers(
     survey: &crate::core::types::QuestionSurvey,
     answers: &crate::core::types::HarnessSurveyAnswers,
 ) -> String {
+    if let Some(chat) = answers.chat.as_deref().filter(|text| !text.trim().is_empty()) {
+        // "Chat about this": the operator answered the WHOLE survey in one
+        // free-form message, so echo every question (and its options) back
+        // before the message itself.
+        let mut lines = vec![
+            "The operator chose to chat about your clarification questions instead of answering them one by one. Their message follows; take it as the answer to the whole survey, ask ONE refined survey only if something essential is still open, then revise the plan with plan_tasks/revise_task before continuing.".to_string(),
+        ];
+        for (index, question) in survey.questions.iter().enumerate() {
+            lines.push(format!("Q{} [{}]: {}", index + 1, question.header, question.question));
+            for option in &question.options {
+                lines.push(format!("  - {}", option.label));
+            }
+        }
+        lines.push(format!("Operator: {chat}"));
+        return lines.join("\n");
+    }
     let mut lines = vec![
         crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE.to_string(),
     ];
@@ -9094,6 +9138,7 @@ mod ask_user_survey_tests {
                 choice: Some(choice.into()),
                 other: None,
             }],
+            chat: None,
         }
     }
 
@@ -9105,7 +9150,50 @@ mod ask_user_survey_tests {
                 choice: None,
                 other: Some(text.into()),
             }],
+            chat: None,
         }
+    }
+
+    /// The planning ask window: open at run start, shut as soon as begin_loop
+    /// picks up a task, and reopened by a fresh operator message at the next
+    /// cycle boundary.
+    #[tokio::test]
+    async fn the_ask_window_opens_at_start_shuts_for_a_task_and_reopens_on_an_operator_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |options| {
+            options.collect_operator_messages = Some(Box::new(|_| Vec::new()));
+        })
+        .await;
+        assert!(run.ask_window_open, "the window starts open for planning");
+        crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from("do the work")],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        let _scope = run.begin_loop();
+        assert!(!run.ask_window_open, "a task loop must shut the ask window");
+        // A fresh operator message reopens it at the next cycle boundary. The
+        // collector answers once, then reports nothing more.
+        let once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        run.options.collect_operator_messages = Some(Box::new(move |_| {
+            if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                Vec::new()
+            } else {
+                vec![OperatorInboxEntry { at: None, text: "use the other crate".into() }]
+            }
+        }));
+        let mut scope = run.begin_loop();
+        assert!(!run.ask_window_open, "a task loop starts with the window shut");
+        let _ = run.begin_cycle(&mut scope, 1);
+        assert!(run.ask_window_open, "the operator message reopens the window");
+        // An empty message is not a fresh instruction and must not reopen it.
+        run.ask_window_open = false;
+        run.options.collect_operator_messages = Some(Box::new(|_| {
+            vec![OperatorInboxEntry { at: None, text: "   ".into() }]
+        }));
+        let mut empty_scope = run.begin_loop();
+        let _ = run.begin_cycle(&mut empty_scope, 1);
+        assert!(!run.ask_window_open, "a blank operator message leaves it shut");
     }
 
     /// A HarnessRun against a temp session dir with fake monotonic clock
@@ -9293,6 +9381,7 @@ mod ask_user_survey_tests {
                 HarnessSurveyAnswer { index: 0, choice: Some("Poll".into()), other: None },
                 HarnessSurveyAnswer { index: 0, choice: Some("Channel".into()), other: None },
             ],
+            chat: None,
         };
         assert!(crate::harness::harness_tools::validate_survey_answers(&survey, &duplicate).is_err());
     }
@@ -9308,6 +9397,7 @@ mod ask_user_survey_tests {
         let pair = |first: HarnessSurveyAnswer, second: HarnessSurveyAnswer| HarnessSurveyAnswers {
             at: "2026-01-01T00:00:00Z".into(),
             answers: vec![first, second],
+            chat: None,
         };
         let other = |index: i64, text: &str| HarnessSurveyAnswer { index, choice: None, other: Some(text.into()) };
         let pick = |index: i64, label: &str| HarnessSurveyAnswer { index, choice: Some(label.into()), other: None };
@@ -9317,13 +9407,37 @@ mod ask_user_survey_tests {
         // Choices must be listed labels.
         assert!(validate(&survey, &pair(pick(0, "Poll"), pick(1, "NotListed"))).is_err());
         assert!(validate(&survey, &pair(pick(0, "Channel"), pick(1, "No"))).is_ok());
-        let empty = HarnessSurveyAnswers { at: "2026-01-01T00:00:00Z".into(), answers: vec![] };
+        let empty = HarnessSurveyAnswers { at: "2026-01-01T00:00:00Z".into(), answers: vec![], chat: None };
         assert!(validate(&survey, &empty).is_err());
     }
 
     /// The injected operator feedback must carry the exact mandated
     /// plan-revision directive.
     #[test]
+    /// A chat record renders the whole-survey directive, every question and
+    /// option, and the operator's message — never the per-answer directive.
+    #[test]
+    fn render_survey_answers_echoes_a_chat_record_with_every_question() {
+        let survey = two_question_survey();
+        let answers = HarnessSurveyAnswers {
+            at: "2026-01-01T00:00:00Z".into(),
+            answers: Vec::new(),
+            chat: Some("Let us talk this through: polls please".into()),
+        };
+        let rendered = render_survey_answers(&survey, &answers);
+        assert!(!rendered.contains(crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE));
+        assert!(rendered.contains("chose to chat about your clarification questions"));
+        assert!(rendered.contains("ONE refined survey"));
+        for question in &survey.questions {
+            assert!(rendered.contains(&question.header), "header missing: {}", question.header);
+            assert!(rendered.contains(&question.question), "question missing: {}", question.question);
+            for option in &question.options {
+                assert!(rendered.contains(&option.label), "option missing: {}", option.label);
+            }
+        }
+        assert!(rendered.contains("Operator: Let us talk this through: polls please"));
+    }
+
     fn ask_user_answer_directive_matches_the_mandated_text() {
         assert_eq!(
             crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE,

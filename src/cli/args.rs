@@ -88,6 +88,8 @@ pub struct ParsedCliArgs {
     pub no_mcp: bool,
     /// Opt this run into operator clarification surveys (enables the ask_user tool).
     pub ask: bool,
+    /// Opt this run out of the clarification surveys the config default turns on.
+    pub no_ask: bool,
     /// Seconds a blocked ask_user survey waits for answers before ending the run (default 900).
     pub ask_timeout_secs: Option<i64>,
     /// oasis corpus roots for the REFERENCE tool (repeatable --reference-root).
@@ -247,6 +249,7 @@ impl Default for ParsedCliArgs {
             mcp: Vec::new(),
             no_mcp: false,
             ask: false,
+            no_ask: false,
             ask_timeout_secs: None,
             reference_roots: Vec::new(),
             enqueue: false,
@@ -698,6 +701,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             "--ask" => {
                 parsed.ask = true;
             }
+            "--no-ask" => {
+                parsed.no_ask = true;
+            }
             "--ask-timeout" => {
                 if let Some(raw) = take_required_value(argv, index, "--ask-timeout", &mut parsed.errors) {
                     match parse_positive_int(&raw) {
@@ -1055,6 +1061,14 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
         }
     }
 
+    // --ask and --no-ask are two sides of one opt-in: supplying both is a
+    // contradiction, not a last-one-wins flag.
+    if parsed.ask && parsed.no_ask {
+        parsed.errors.push(
+            "--ask and --no-ask cannot be combined: pass at most one of them.".to_string(),
+        );
+    }
+
     // Draft mode is mutually exclusive with the lanes built on the reviewed
     // machinery: the holistic diff review, the praeparare planning run, the
     // dry-run plan, and every explicit roles preset (lite IS a preset).
@@ -1224,6 +1238,13 @@ mod tests {
         assert!(!parse(&["--ask-timeout", "0", "goal"]).errors.is_empty());
         assert!(!parse(&["--ask-timeout", "abc", "goal"]).errors.is_empty());
         assert!(!parse(&["--ask-timeout"]).errors.is_empty());
+
+        let off = parse(&["--no-ask", "goal"]);
+        assert!(off.no_ask);
+        assert!(!off.ask);
+        // The pair contradicts itself: a parse error, never a silent winner.
+        let both = parse(&["--ask", "--no-ask", "goal"]);
+        assert!(both.errors.iter().any(|error| error.contains("cannot be combined")), "{:?}", both.errors);
     }
 
     // --reference-root is repeatable and ordered: oasis searches the roots in

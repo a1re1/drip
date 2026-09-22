@@ -452,14 +452,20 @@ entirely — the model never sees a tool that cannot work. Pair it with
 quality and its effect on answers are measured by the benchmark in
 [`evals/reference/`](evals/reference/README.md).
 
-### Clarification questions (`--ask`)
+### Clarification questions (`--ask` / `--no-ask`)
 
-`--ask` opts a run into the `ask_user` harness tool: when the goal is ambiguous or an
-approach tradeoff needs the operator's call, the model asks a staged survey of
-multiple-choice questions (each with suggested options plus a free-text "other"),
-then revises its plan around the answers before implementing. Off by default — most
-goals should one-shot; enable it when accuracy matters more than autonomy. The opt-in
-is pinned on the session, so `--resume` keeps it.
+Clarification surveys are on by default: the `ask_user` harness tool lets the model
+ask a staged survey of multiple-choice questions (each with suggested options, a
+free-text "Type something" answer, and "Chat about this" for one free-form reply to
+the whole survey) when the goal is ambiguous or an approach tradeoff needs the
+operator's call, then revise its plan around the answers before implementing. The
+model may only ask while planning — right after the goal or a fresh operator message
+(`--send`, or a queued/steered TUI message) and before the first task loop starts;
+once the plan is executing the tool is withheld and the run finishes on its own.
+The defaults live in `~/.drip/config.json`: `runtime.ask_user_interactive` (the TUI)
+and `runtime.ask_user_headless` (headless runs), each `"true"` unless set to `"false"`.
+`--no-ask` turns surveys off for a run and `--ask` forces them on; either explicit
+choice is pinned on the session, so `--resume` keeps it.
 
 Headless, the survey arrives as a `question` event and the run blocks until answers
 land (or `--ask-timeout`, default 900s, ends it with reason `awaiting-input` — answer

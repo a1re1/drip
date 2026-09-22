@@ -5296,6 +5296,7 @@ impl HarnessRun {
                     },
                 ],
                 allow_other: true,
+                multiple: false,
             })
             .collect();
         let survey = crate::core::types::QuestionSurvey {
@@ -9596,6 +9597,7 @@ mod ask_user_survey_tests {
                     },
                 ],
                 allow_other: true,
+                multiple: false,
             }],
         }
     }
@@ -9612,6 +9614,7 @@ mod ask_user_survey_tests {
                         HarnessSurveyOption { label: "Channel".into(), description: "pipe".into() },
                     ],
                     allow_other: true,
+                    multiple: false,
                 },
                 HarnessSurveyQuestion {
                     header: "Scope".into(),
@@ -9621,6 +9624,7 @@ mod ask_user_survey_tests {
                         HarnessSurveyOption { label: "No".into(), description: "without tests".into() },
                     ],
                     allow_other: false,
+                    multiple: false,
                 },
             ],
         }

@@ -402,7 +402,7 @@
       "parameters": {
         "properties": {
           "questions": {
-            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first).",
+            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first). Set multiple: true for a select-all-that-apply question.",
             "items": {
               "properties": {
                 "allow_other": {
@@ -412,6 +412,10 @@
                 "header": {
                   "description": "Short label shown above the question.",
                   "type": "string"
+                },
+                "multiple": {
+                  "description": "When true this question is a select-all-that-apply: the operator toggles several options before confirming, and the answer arrives as the picked labels joined with a comma.",
+                  "type": "boolean"
                 },
                 "options": {
                   "description": "2-4 choices; put your best guess first.",

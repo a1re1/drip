@@ -204,6 +204,7 @@ pub const ASK_USER_GUIDANCE_FRAGMENT: &str = concat!(
     " ask_user is enabled for this run and answers while you are planning: ask right after the operator's goal or a new operator message, BEFORE the first task starts. Never ask mid-task — once the plan is executing, decide from the goal, the operator's messages and the repository and continue. (One exception: when nothing workable is left and a task is blocked on operator input, the harness itself offers the operator a final survey drawn from the blocked tasks, so a blocker you cannot resolve should be finished with finish_task status blocked blockedOn operator rather than an ask_user call.)",
     " Batch ALL of your questions into a single ask_user call as one survey, and put your best-guess option FIRST in each option list.",
     " Never ask what the repo itself answers: read files and run tools first.",
+    " Set \"multiple\": true on a question whose answer is a set rather than a pick-one (a select-all-that-apply step); the operator's answer then arrives as the chosen labels joined with \", \".",
     " After the operator's answers arrive, revise the plan with plan_tasks/revise_task to reflect them before implementing.",
     " If the operator chose \"chat about this\", their reply is free-form discussion of the whole survey: take it as the answer to your questions, and you may ask ONE refined survey before you replan."
 );

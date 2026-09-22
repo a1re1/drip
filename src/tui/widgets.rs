@@ -506,13 +506,16 @@ pub fn render_picker(title: &str, items: &[PickerItem], selected_index: usize, w
 /// an inverse accent chip with `question N of M`, the question in bold, one
 /// numbered row per option with its description indented underneath, an
 /// optional `Type something.` row, and always a final `Chat about this` row.
-/// `options` are the listed choices only — the two escape-hatch rows are
-/// generated here so their numbering always matches the app's `PickerItem`
-/// list (`allow_other` controls whether the first of them exists).
+/// `options` are the listed choices only — the escape-hatch rows (a confirm
+/// row for a "select all that apply" question, `Type something.`, and the
+/// final `Chat about this`) are generated here so their numbering always
+/// matches the app's `PickerItem` list. `toggled` marks the option rows the
+/// operator ticked with space; an empty slice renders a plain question.
 pub fn render_survey(
     header: &str,
     question: &str,
     options: &[PickerItem],
+    toggled: &[bool],
     allow_other: bool,
     selected_index: usize,
     question_number: usize,
@@ -533,16 +536,55 @@ pub fn render_survey(
     rows.push(String::new());
     rows.extend(wrap_ansi(&bold(question), inner));
     rows.push(String::new());
+    let multiple = !toggled.is_empty();
     for (index, item) in options.iter().enumerate() {
         let selected = index == selected_index;
-        let prefix = if selected { accent("❯ ") } else { "  ".to_string() };
-        let label = if selected { accent(&item.label) } else { item.label.clone() };
-        rows.push(format!("{prefix}{}. {label}", index + 1));
+        let prefix = if selected {
+            accent("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let mark = if multiple {
+            if toggled.get(index).copied().unwrap_or(false) {
+                "[x] "
+            } else {
+                "[ ] "
+            }
+        } else {
+            ""
+        };
+        let label = if selected {
+            accent(&item.label)
+        } else {
+            item.label.clone()
+        };
+        rows.push(format!("{prefix}{mark}{}. {label}", index + 1));
         if let Some(description) = &item.detail {
             rows.push(format!("   {}", dim(description)));
         }
     }
     let mut number = options.len();
+    if multiple {
+        // Exactly where open_survey_question appends it: after the option
+        // rows, before `Type something.` and `Chat about this`.
+        number += 1;
+        let selected = selected_index == number - 1;
+        let prefix = if selected {
+            accent("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let label = if selected {
+            accent("Confirm selection")
+        } else {
+            "Confirm selection".to_string()
+        };
+        rows.push(format!("{prefix}{number}. {label}"));
+        rows.push(format!(
+            "   {}",
+            dim("enter records the options marked [x]")
+        ));
+    }
     if allow_other {
         number += 1;
         let selected = selected_index == number - 1;
@@ -564,7 +606,11 @@ pub fn render_survey(
     };
     rows.push(format!("{prefix}{number}. {label}"));
     rows.push(String::new());
-    rows.push(dim("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel"));
+    rows.push(dim(if multiple {
+        "Space toggles · Enter confirms the selection · ↑/↓ to navigate · Esc to cancel"
+    } else {
+        "Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel"
+    }));
     boxed(rows, width, ACCENT_COLOR)
 }
 
@@ -1167,7 +1213,7 @@ mod tests {
                 label: "Channel".to_string(),
             },
         ];
-        let rows = plain(&render_survey("Approach", "Poll or channel?", &items, true, 0, 1, 2, 72));
+        let rows = plain(&render_survey("Approach", "Poll or channel?", &items, &[], true, 0, 1, 2, 72));
         assert!(rows
             .iter()
             .any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
@@ -1186,13 +1232,62 @@ mod tests {
     }
 
     #[test]
+    fn survey_marks_toggled_options_and_shows_the_confirm_row() {
+        let items = vec![
+            PickerItem {
+                detail: Some("with tests".to_string()),
+                id: "yes".to_string(),
+                label: "Yes".to_string(),
+            },
+            PickerItem {
+                detail: None,
+                id: "no".to_string(),
+                label: "No".to_string(),
+            },
+        ];
+        let rows = plain(&render_survey(
+            "Scope",
+            "Which parts?",
+            &items,
+            &[true, false],
+            false,
+            1,
+            1,
+            1,
+            72,
+        ));
+        assert!(
+            rows.iter().any(|row| row.contains("[x] 1. Yes")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("[ ] 2. No")), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("3. Confirm selection")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("4. Chat about this")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Type something.")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Space toggles · Enter confirms the selection")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
     fn survey_hides_type_something_and_marks_the_chat_row_when_selected() {
         let items = vec![PickerItem {
             detail: None,
             id: "yes".to_string(),
             label: "Yes".to_string(),
         }];
-        let rows = plain(&render_survey("Scope", "Include tests?", &items, false, 1, 2, 2, 72));
+        let rows = plain(&render_survey("Scope", "Include tests?", &items, &[], false, 1, 2, 2, 72));
         assert!(rows.iter().any(|row| row.contains("❯ 2. Chat about this")));
         assert!(!rows.iter().any(|row| row.contains("Type something.")));
     }

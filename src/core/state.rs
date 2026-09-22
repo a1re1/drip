@@ -2107,6 +2107,7 @@ mod tests {
                     HarnessSurveyOption { label: "Channel".into(), description: "More plumbing".into() },
                 ],
                 allow_other: true,
+                multiple: false,
             }],
         }
     }

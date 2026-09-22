@@ -69,14 +69,30 @@ pub fn validate_survey_answers(
                 ));
             }
             (Some(choice), None) => {
-                let listed = question
-                    .options
-                    .iter()
-                    .any(|option| &option.label == choice);
-                if !listed && !question.allow_other {
-                    return Err(format!(
-                        "question {slot}: \"{choice}\" is not one of the listed options"
-                    ));
+                // A "select all that apply" answer joins its picked labels with
+                // ", "; every part must resolve exactly like a single choice.
+                let candidates: Vec<&str> = if question.multiple {
+                    choice
+                        .split(", ")
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .collect()
+                } else {
+                    vec![choice.as_str()]
+                };
+                if candidates.is_empty() {
+                    return Err(format!("question {slot}: answer selects no options"));
+                }
+                for candidate in candidates {
+                    let listed = question
+                        .options
+                        .iter()
+                        .any(|option| option.label == candidate);
+                    if !listed && !question.allow_other {
+                        return Err(format!(
+                            "question {slot}: \"{candidate}\" is not one of the listed options"
+                        ));
+                    }
                 }
             }
             (None, None) => {
@@ -580,7 +596,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                 "parameters": {
                     "properties": {
                         "questions": {
-                            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first).",
+                            "description": "One to four questions, each with a short header, the question, and 2-4 options (best guess first). Set multiple: true for a select-all-that-apply question.",
                             "items": {
                                 "properties": {
                                     "allow_other": {
@@ -590,6 +606,10 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                                     "header": {
                                         "description": "Short label shown above the question.",
                                         "type": "string"
+                                    },
+                                    "multiple": {
+                                        "description": "When true this question is a select-all-that-apply: the operator toggles several options before confirming, and the answer arrives as the picked labels joined with a comma.",
+                                        "type": "boolean"
                                     },
                                     "options": {
                                         "description": "2-4 choices; put your best guess first.",
@@ -1864,7 +1884,8 @@ pub fn parse_harness_op_with_gate(
 
 /// ask_user: the operator-clarification survey. Validates 1-4 questions, each
 /// with a non-empty question/header and 2-4 label/description options;
-/// allow_other defaults to true when omitted. The blocking/answer half lives
+/// allow_other defaults to true and multiple (select all that apply) to false
+/// when omitted. The blocking/answer half lives
 /// in the run loop; this only builds the parsed survey.
 fn parse_ask_user_op(input: &serde_json::Value) -> Result<HarnessOp, String> {
     let questions_array = input
@@ -1935,11 +1956,18 @@ fn parse_ask_user_op(input: &serde_json::Value) -> Result<HarnessOp, String> {
             .get("allow_other")
             .and_then(|value| value.as_bool())
             .unwrap_or(true);
+        // A "select all that apply" question: the operator toggles several
+        // options and the answer joins their labels with ", ".
+        let multiple = entry
+            .get("multiple")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         questions.push(HarnessSurveyQuestion {
             header: header.to_string(),
             question: question.to_string(),
             options,
             allow_other,
+            multiple,
         });
     }
     Ok(HarnessOp::AskUser {
@@ -5103,6 +5131,7 @@ mod apply_harness_op_tests {
                     crate::core::types::HarnessSurveyOption { label: "b".to_string(), description: "d".to_string() },
                 ],
                 allow_other: false,
+                multiple: false,
             }],
             answers_cursor: None,
         };

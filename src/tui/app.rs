@@ -142,7 +142,7 @@ fn help_text() -> String {
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
-            "  while a goal runs — enter queues the message for the next run; shift+enter steers the running goal with the next queued message",
+            "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); shift+enter steers the running goal with what you typed, or with the whole queue when the input is empty",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
             "  esc — clear the composer, or stop the running goal",
             "  ctrl+c — exit",
@@ -501,8 +501,9 @@ struct TuiApp {
     pending_cells: Vec<TranscriptEntry>,
     prompt_history: PromptHistory,
     /// Prompts typed while a run was in flight. `enter` stacks them for the
-    /// NEXT run; `shift+enter` pops the head and steers the running goal with
-    /// it immediately (the inbox handoff), so a queue never becomes a dead end.
+    /// NEXT run and the composer lists them; `shift+enter` on an empty
+    /// composer steers the running goal with the whole queue at once (the
+    /// inbox handoff), so a queue never becomes a dead end.
     queued_prompts: VecDeque<String>,
     pending_detail: Option<String>,
     quit: bool,
@@ -807,6 +808,7 @@ impl TuiApp {
             rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
         } else {
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
+            let queued: Vec<String> = self.queued_prompts.iter().cloned().collect();
             rows.extend(render_composer(
                 &ComposerProps {
                     attachments: &self.attachments,
@@ -818,7 +820,7 @@ impl TuiApp {
                     skill_suggestions: &self.skill_suggestions,
                     slash_suggestions: &slash,
                     text: &self.text,
-                    queued_count: self.queued_prompts.len(),
+                    queued: &queued,
                     session_name: self.session_name.as_deref(),
                 },
                 self.cols,
@@ -1211,59 +1213,75 @@ impl TuiApp {
     /// deliberately not written to the session inbox — that handoff is what
     /// steering is — so a queued message only reaches the agent once the
     /// running goal has ended (or the operator promotes it with shift+enter).
+    /// The queue is shown above the composer, not in the timeline, so nothing
+    /// is logged here.
     fn queue_prompt(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
         }
         self.prompt_history.record(&text);
-        self.queued_prompts.push_back(text.clone());
-        self.push_info(format!(
-            "queued for the next run: {text} (shift+enter steers the running goal with it now)"
-        ));
+        self.queued_prompts.push_back(text);
         self.repaint();
     }
 
-    /// Shift+enter while a run is in flight: promote the next queued prompt
-    /// (or, with an empty queue, whatever is in the composer) into the live
-    /// session's inbox. The harness picks it up at its next cycle boundary and
-    /// treats it as steering that outranks the original goal, so a queue is
+    /// Shift+enter while a run is in flight: steer the live session through
+    /// its inbox. Typed text steers on its own and leaves the queue alone; an
+    /// empty composer steers with the WHOLE queue, in order, and flushes it.
+    /// The harness picks the messages up at its next cycle boundary and
+    /// treats them as steering that outranks the original goal, so a queue is
     /// never a dead end while the run is still going.
     fn steer_running_goal(&mut self) {
-        let next = match self.queued_prompts.pop_front() {
-            Some(queued) if !queued.trim().is_empty() => Some(queued),
-            Some(_) => None,
-            None => {
-                let typed = self.text.trim().to_string();
-                if typed.is_empty() {
-                    None
-                } else {
-                    self.apply_edit(String::new(), 0);
-                    self.prompt_history.record(&typed);
-                    Some(typed)
+        let typed = self.text.trim().to_string();
+        if !typed.is_empty() {
+            self.apply_edit(String::new(), 0);
+            self.prompt_history.record(&typed);
+            match append_operator_message(Path::new(&self.paths.inbox_path), &typed) {
+                Ok(()) => self.push_info(format!(
+                    "steering the running goal: {typed} (it lands at the next cycle boundary)"
+                )),
+                Err(error) => {
+                    // Losing the message silently would be the worst outcome:
+                    // put it at the head of the queue and say so loudly.
+                    self.push_error(format!(
+                        "could not steer the running goal ({error}) — kept in the queue"
+                    ));
+                    self.queued_prompts.push_front(typed);
                 }
             }
-        };
+            self.repaint();
+            return;
+        }
 
-        let Some(text) = next else {
+        if self.queued_prompts.iter().all(|queued| queued.trim().is_empty()) {
+            self.queued_prompts.clear();
             self.push_info(
                 "nothing to steer with — type a message, or queue one with enter first.",
             );
             self.repaint();
             return;
-        };
+        }
 
-        match append_operator_message(Path::new(&self.paths.inbox_path), &text) {
-            Ok(()) => self.push_info(format!(
-                "steering the running goal: {text} (it lands at the next cycle boundary)"
-            )),
-            Err(error) => {
-                // Losing the message silently would be the worst outcome: put
-                // it back at the head of the queue and say so loudly.
-                self.push_error(format!(
-                    "could not steer the running goal ({error}) — kept in the queue"
-                ));
-                self.queued_prompts.push_front(text);
+        let mut sent = 0usize;
+        while let Some(text) = self.queued_prompts.pop_front() {
+            if text.trim().is_empty() {
+                continue;
             }
+            if let Err(error) = append_operator_message(Path::new(&self.paths.inbox_path), &text) {
+                // Whatever did not reach the inbox stays queued, in order.
+                self.queued_prompts.push_front(text);
+                self.push_error(format!(
+                    "could not steer the running goal ({error}) — {} kept in the queue",
+                    self.queued_prompts.len()
+                ));
+                break;
+            }
+            sent += 1;
+        }
+        if sent > 0 {
+            let noun = if sent == 1 { "message" } else { "messages" };
+            self.push_info(format!(
+                "steering the running goal with {sent} queued {noun} (they land at the next cycle boundary)"
+            ));
         }
         self.repaint();
     }
@@ -1348,8 +1366,8 @@ impl TuiApp {
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
-                // Enter queues for the next run; shift+enter promotes the head
-                // of that queue into the LIVE run as steering.
+                // Enter queues for the next run; shift+enter steers the LIVE
+                // run with the typed text, or with the whole queue when empty.
                 Key::Return => self.submit(),
                 Key::ShiftReturn => self.steer_running_goal(),
                 // The composer stays editable while a run is in flight, so a
@@ -4648,7 +4666,21 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_while_running_steers_with_the_next_queued_message() {
+    fn queued_prompts_stay_out_of_the_timeline() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "next goal".to_string();
+        fixture.app.on_key(Key::Return);
+        assert!(
+            !fixture.app.cells.iter().chain(fixture.app.pending_cells.iter()).any(
+                |entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("queued"))
+            ),
+            "the queue is listed above the composer, never logged as history"
+        );
+    }
+
+    #[test]
+    fn shift_enter_on_an_empty_composer_steers_with_the_whole_queue_and_flushes_it() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "first".to_string();
@@ -4659,22 +4691,44 @@ mod skill_activation_tests {
 
         fixture.app.on_key(Key::ShiftReturn);
 
-        assert_eq!(
-            fixture.app.queued_prompts.len(),
-            1,
-            "shift+enter consumes exactly one queued message"
+        assert!(
+            fixture.app.queued_prompts.is_empty(),
+            "an empty shift+enter flushes the whole queue"
         );
-        assert_eq!(fixture.app.queued_prompts[0], "second");
+        let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
+            .expect("steering writes the session inbox");
+        let texts: Vec<String> = raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(texts, vec!["first", "second"], "every queued message steers, in order");
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("2 queued messages"))
+            ),
+            "the steer is reported once"
+        );
+    }
+
+    #[test]
+    fn shift_enter_with_typed_text_steers_only_that_text_and_keeps_the_queue() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "queued".to_string();
+        fixture.app.on_key(Key::Return);
+        fixture.app.text = "steer me now".to_string();
+        fixture.app.on_key(Key::ShiftReturn);
+
+        assert_eq!(fixture.app.queued_prompts.len(), 1, "the queue is untouched");
+        assert_eq!(fixture.app.queued_prompts[0], "queued");
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(
-            parsed["text"], "first",
-            "the head of the queue is the message that steers"
-        );
+        assert_eq!(parsed["text"], "steer me now");
         assert!(parsed["at"].as_str().is_some(), "{parsed}");
+        assert!(fixture.app.text.is_empty());
     }
 
     #[test]

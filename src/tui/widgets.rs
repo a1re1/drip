@@ -249,7 +249,9 @@ pub struct ComposerProps<'a> {
     pub selected_skill_index: usize,
     pub selected_suggestion_index: usize,
     pub skill_suggestions: &'a [(String, String)],
-    pub queued_count: usize,
+    /// Prompts waiting for the next run, oldest first. They are listed above
+    /// the composer (never in the timeline) so the whole queue stays visible.
+    pub queued: &'a [String],
     /// The session's explicit `/rename` name, captioned into the box's top
     /// rule; `None` (never renamed) draws the plain rule.
     pub session_name: Option<&'a str>,
@@ -267,9 +269,34 @@ fn composer_hint_row(text: &str, width: usize) -> String {
     row
 }
 
+/// One dim row per queued prompt, listed in send order above the composer.
+/// Multi-line prompts show their first line, and long ones clip with an
+/// ellipsis, so the queue reads as a compact "what's next" list.
+fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
+    if queued.is_empty() {
+        return Vec::new();
+    }
+    let dim = paint(DIM_COLOR);
+    let line_width = width.max(6).saturating_sub(4).max(1);
+    let mut rows = Vec::with_capacity(queued.len() + 1);
+    let noun = if queued.len() == 1 { "message" } else { "messages" };
+    rows.push(dim(&fit(
+        &format!("{} queued {noun} for the next run", queued.len()),
+        width.max(1),
+        true,
+    )));
+    for (index, text) in queued.iter().enumerate() {
+        let first_line = text.lines().next().unwrap_or("").trim();
+        let more = if text.lines().count() > 1 { " …" } else { "" };
+        let line = fit(&format!("{}. {first_line}{more}", index + 1), line_width, true);
+        rows.push(dim(&format!("  {line}")));
+    }
+    rows
+}
+
 /// Port of the Ink `Composer` component.
 pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
+    let mut rows: Vec<String> = queued_rows(props.queued, width);
 
     if !props.attachments.is_empty() {
         let yellow = paint("yellow");
@@ -309,7 +336,13 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     let dim = paint(DIM_COLOR);
     // A disabled composer with empty text shows the run placeholder instead.
     let placeholder = props.disabled && props.text.is_empty();
-    let display: &str = if placeholder {
+    let queued_placeholder = format!(
+        "{} queued — shift+enter steers the run with them all",
+        props.queued.len()
+    );
+    let display: &str = if placeholder && !props.queued.is_empty() {
+        &queued_placeholder
+    } else if placeholder {
         "running — press esc to stop the run"
     } else {
         props.text
@@ -366,7 +399,9 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
             }
         }
         let body = cells.concat();
-        let body = if props.disabled { dim(&body) } else { body };
+        // Only the placeholder is dimmed: a draft typed while a goal runs
+        // reads in the same colour as any other typing.
+        let body = if placeholder { dim(&body) } else { body };
         rows.push(format!("{lead}{body}"));
     }
     rows.push(rule);
@@ -413,16 +448,13 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     let dim = paint(DIM_COLOR);
     // Kept short enough to survive one line at a normal terminal width.
     let hint = if props.disabled {
-        if props.queued_count > 0 {
-            "enter queues · shift+enter steers with next queued message".to_string()
+        if !props.queued.is_empty() {
+            "enter queues · empty shift+enter steers with the whole queue".to_string()
         } else {
             "enter queues · shift+enter steers the run".to_string()
         }
-    } else if props.queued_count > 0 {
-        format!(
-            "{} queued — shift+enter steers the running goal with one",
-            props.queued_count
-        )
+    } else if !props.queued.is_empty() {
+        format!("{} queued — shift+enter runs the next one", props.queued.len())
     } else {
         "enter sends · shift+enter steers with a queued message".to_string()
     };
@@ -558,7 +590,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: Some("test"),
             slash_suggestions: &[],
             text: "",
@@ -582,7 +614,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "abc",
@@ -601,7 +633,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "line one\nline two",
@@ -628,7 +660,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "aaaa bbbb cccc dddd eeee",
@@ -735,7 +767,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "@hel",
@@ -759,7 +791,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/na",
@@ -797,7 +829,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/navi",
@@ -817,7 +849,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -839,7 +871,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "queued draft",
@@ -859,7 +891,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -877,7 +909,67 @@ mod tests {
     }
 
     #[test]
+    fn composer_lists_the_whole_queue_above_the_top_rule() {
+        let queued = vec![
+            "first queued".to_string(),
+            "second line one\nsecond line two".to_string(),
+        ];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &queued,
+            session_name: None,
+            slash_suggestions: &[],
+            text: "",
+        };
+        let rows = plain(&render_composer(&props, 60));
+        assert_eq!(rows[0].trim_end(), "2 queued messages for the next run", "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "  1. first queued", "{rows:?}");
+        assert_eq!(rows[2].trim_end(), "  2. second line one …", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(60), "the rule follows the queue");
+        // With nothing typed the composer itself carries the steer-all hint,
+        // and no per-message hint is repeated anywhere.
+        assert!(
+            rows[4].contains("2 queued — shift+enter steers the run with them all"),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("steers the running goal with it now")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn composer_draft_typed_mid_run_is_not_dimmed() {
+        let queued = vec!["first".to_string()];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 5,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &queued,
+            session_name: None,
+            slash_suggestions: &[],
+            text: "draft",
+        };
+        let rows = render_composer(&props, 60);
+        let gray = paint(DIM_COLOR)("draft");
+        let body = rows.iter().find(|row| row.contains("draft")).unwrap();
+        assert!(!body.contains(&gray), "typed text must not be dimmed: {body:?}");
+        assert!(body.contains(&format!("draft{INVERSE_ON} {INVERSE_OFF}")), "{body:?}");
+    }
+
+    #[test]
     fn composer_counts_queued_prompts_once_idle() {
+        let queued = vec!["first".to_string(), "second".to_string()];
         let props = ComposerProps {
             attachments: &[],
             cursor: 0,
@@ -886,7 +978,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 2,
+            queued: &queued,
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -895,7 +987,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("2 queued")), "{rows:?}");
         assert!(
             rows.iter()
-                .any(|row| row.contains("shift+enter steers the running goal")),
+                .any(|row| row.contains("shift+enter runs the next one")),
             "{rows:?}"
         );
     }
@@ -951,7 +1043,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/an",
@@ -977,7 +1069,7 @@ mod tests {
             selected_skill_index: 2,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/na",
@@ -1003,7 +1095,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &builtins,
             text: "/",
@@ -1032,7 +1124,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/navis",

@@ -81,7 +81,7 @@ pub fn parse_sgr_mouse(chunk: &str) -> Option<MouseScroll> {
 /// `Cb ; Cx ; Cy` plus the terminating `M` (press) / `m` (release).
 fn parse_sgr_body(chunk: &str) -> Option<(u32, usize, usize, char)> {
     let rest = chunk.strip_prefix(SGR_PREFIX)?;
-    let end = rest.find(|c: char| c == 'M' || c == 'm')?;
+    let end = rest.find(['M', 'm'])?;
     let terminator = rest[end..].chars().next()?;
     let body = &rest[..end];
     let mut parts = body.split(';');

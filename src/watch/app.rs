@@ -663,6 +663,13 @@ impl WatchApp {
     /// so the wheel keeps its scroll-only meaning.
     fn on_mouse_click(&mut self, col: usize, row: usize) {
         let (cols, rows) = terminal_size();
+        self.click_at(col, row, cols, rows);
+    }
+
+    /// The click handler proper, with the frame size the click was measured in.
+    /// Split from `on_mouse_click` so the navigation a click performs can be
+    /// unit-tested at a fixed terminal size.
+    fn click_at(&mut self, col: usize, row: usize, cols: usize, rows: usize) {
         let Some((panel, index)) = list_row_at(&self.vm, cols, rows, col, row) else {
             return;
         };
@@ -936,6 +943,58 @@ mod tests {
         // A process that exited leaves the index alone rather than panicking.
         app.vm.shells.retain(|p| p.pid != 22);
         assert_eq!(app.painted_shell_row(1), 1);
+    }
+
+    #[test]
+    fn a_session_click_focuses_the_pane_and_selects_that_session() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.sessions = vec![record("s-1"), record("s-2"), record("s-3")];
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[0];
+
+        app.click_at(c0 + 3, r0 + 2, cols, rows);
+        assert_eq!(app.vm.focus, 1);
+        assert_eq!(app.vm.sel_session, 1);
+        assert_eq!(app.focused_id, "s-2", "the transcript follows the clicked session");
+
+        // A border row is not a row: the selection stays put.
+        app.click_at(c0 + 3, r0, cols, rows);
+        assert_eq!(app.vm.sel_session, 1);
+        // Nor is a cell outside the pane.
+        app.click_at(c0.saturating_sub(1), r0 + 2, cols, rows);
+        assert_eq!(app.vm.sel_session, 1);
+    }
+
+    #[test]
+    fn a_task_click_focuses_the_tasks_pane_and_follows_the_painted_row() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.tasks = vec![task("task-1", HarnessTaskStatus::Pending), task("task-2", HarnessTaskStatus::Pending)];
+        app.snapshot_panes();
+        // task-2 goes in progress after the paint and sorts to the top.
+        app.vm.tasks[1].status = HarnessTaskStatus::InProgress;
+
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[1];
+        app.click_at(c0 + 3, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 2);
+        let ordered = crate::watch::render::ordered_tasks(&app.vm.tasks);
+        assert_eq!(ordered[app.vm.sel_task].id, "task-1", "the row painted there, not the row number");
+    }
+
+    #[test]
+    fn a_shell_click_focuses_the_shells_pane_and_follows_the_painted_pid() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.shells = vec![proc(11, "one"), proc(22, "two")];
+        app.snapshot_panes();
+        // A child appears above the painted rows before the click arrives.
+        app.vm.shells = vec![proc(33, "new"), proc(11, "one"), proc(22, "two")];
+
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[2];
+        app.click_at(c0 + 3, r0 + 2, cols, rows);
+        assert_eq!(app.vm.focus, 3);
+        assert_eq!(app.vm.sel_shell, 2, "the pid painted on that row, not the row number");
+        assert_eq!(app.vm.shells[app.vm.sel_shell].pid, 22);
     }
 
     #[test]

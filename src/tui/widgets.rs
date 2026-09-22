@@ -16,11 +16,24 @@ const INVERSE_OFF: &str = "\u{1b}[27m";
 /// padded or wrapped to `width - 4`, bottom `╰─...─╯`. The border glyphs are
 /// painted with `theme::paint(color)`.
 pub fn boxed(rows: Vec<String>, width: usize, color: &str) -> Vec<String> {
+    boxed_titled(rows, width, color, None)
+}
+
+/// `boxed` with an optional caption set into the top rule, right-aligned
+/// one dash in from the corner (Claude Code's session-name placement):
+/// `╭──── name ─╮`. The caption is dimmed and clipped so the rule always
+/// stays exactly `width` wide; `None` draws the plain rule.
+pub fn boxed_titled(
+    rows: Vec<String>,
+    width: usize,
+    color: &str,
+    title: Option<&str>,
+) -> Vec<String> {
     let width = width.max(6);
     let paint = paint(color);
     let horizontal: String = std::iter::repeat('─').take(width - 2).collect();
     let mut out = Vec::with_capacity(rows.len() + 2);
-    out.push(paint(&format!("╭{horizontal}╮")));
+    out.push(top_rule(&horizontal, &paint, title));
     let inner = width - 4;
     for row in rows {
         let visible_width = string_width(&row);
@@ -173,11 +186,58 @@ fn display_columns(text: &str, start: usize, end: usize) -> usize {
         .sum()
 }
 
+/// The composer's top rule: a plain dim `─` line, or with a `/rename`
+/// caption, the name set into it right-aligned one dash in from the edge
+/// (`──── name ─`, the same placement the boxed picker uses). The caption is
+/// clipped so the rule always stays exactly `width` wide; a caption that
+/// cannot fit at all yields the plain rule.
+fn composer_rule(width: usize, title: Option<&str>) -> String {
+    let dim = paint(DIM_COLOR);
+    let plain = dim(&"─".repeat(width));
+    let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
+        return plain;
+    };
+    // One leading dash, the spaces around the caption, and the trailing dash.
+    let Some(caption_room) = width.checked_sub(4).filter(|room| *room > 0) else {
+        return plain;
+    };
+    let caption = fit(title, caption_room, true).trim_end().to_string();
+    let lead = "─".repeat(width - string_width(&caption) - 3);
+    dim(&format!("{lead} {caption} ─"))
+}
+
 /// Display columns the composer body gets at terminal `width`: the two-column
 /// `❯ `/indent prefix and one spare column for the inverse cursor cell at the
 /// end of a full line are reserved, so a body row never exceeds `width`.
 pub fn composer_text_width(width: usize) -> usize {
     width.max(6) - 3
+}
+
+/// The box's top rule: the plain `╭─...─╮` when there is no caption; with
+/// one, `╭` + leading dashes + ` caption ` + `─╮`, the caption clipped to the
+/// rule's interior so the row never grows past the box width. A caption that
+/// cannot fit at all (very narrow terminal) yields the plain rule.
+fn top_rule(horizontal: &str, paint: &dyn Fn(&str) -> String, title: Option<&str>) -> String {
+    let rule_width = horizontal.chars().count();
+    let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
+        return paint(&format!("╭{horizontal}╮"));
+    };
+    // Reserve one leading dash, the spaces around the caption, and the
+    // trailing dash so the caption always sits inside the rule.
+    let Some(caption_room) = rule_width.checked_sub(4).filter(|room| *room > 0) else {
+        return paint(&format!("╭{horizontal}╮"));
+    };
+    // fit pads to the full room; the caption keeps only its own width so the
+    // dashes, not trailing spaces, fill the rule to its left.
+    let caption = fit(title, caption_room, true).trim_end().to_string();
+    let lead = "─".repeat(rule_width - string_width(&caption) - 3);
+    let dim = crate::tui::theme::paint(DIM_COLOR);
+    format!(
+        "{}{}{}",
+        paint(&format!("╭{lead} ")),
+        dim(&caption),
+        paint(" ─╮")
+    )
 }
 
 /// Composer render inputs.
@@ -190,6 +250,9 @@ pub struct ComposerProps<'a> {
     pub selected_suggestion_index: usize,
     pub skill_suggestions: &'a [(String, String)],
     pub queued_count: usize,
+    /// The session's explicit `/rename` name, captioned into the box's top
+    /// rule; `None` (never renamed) draws the plain rule.
+    pub session_name: Option<&'a str>,
     pub slash_suggestions: &'a [&'a SlashCommandSpec],
     pub text: &'a str,
 }
@@ -266,7 +329,7 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     let text_chars: Vec<char> = display.chars().collect();
 
     let rule = dim(&"─".repeat(width));
-    rows.push(rule.clone());
+    rows.push(composer_rule(width, props.session_name));
     for (index, line) in lines.iter().enumerate() {
         let lead = if index == 0 {
             prefix_paint("❯ ")
@@ -469,6 +532,46 @@ mod tests {
     }
 
     #[test]
+    fn boxed_titled_sets_the_caption_into_the_top_rule() {
+        let rows = boxed_titled(vec!["ab".to_string()], 16, DIM_COLOR, Some("test"));
+        let plain_rows = plain(&rows);
+        assert_eq!(plain_rows[0], "╭─────── test ─╮");
+        assert_eq!(plain_rows[0].chars().count(), 16, "the rule stays box-wide");
+        assert_eq!(plain_rows[1], "│ ab           │");
+        // Blank captions draw the plain rule; long ones clip to the interior.
+        let blank = plain(&boxed_titled(vec![], 16, DIM_COLOR, Some("   ")));
+        assert_eq!(blank[0], "╭──────────────╮");
+        let long = plain(&boxed_titled(vec![], 16, DIM_COLOR, Some("a much longer session name")));
+        assert_eq!(long[0].chars().count(), 16);
+        assert!(long[0].starts_with("╭─ a much"), "{}", long[0]);
+        assert!(long[0].ends_with("… ─╮"), "{}", long[0]);
+    }
+
+    #[test]
+    fn composer_captions_the_session_name_on_the_top_rule() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued_count: 0,
+            session_name: Some("test"),
+            slash_suggestions: &[],
+            text: "",
+        };
+        let rows = plain(&render_composer(&props, 40));
+        assert_eq!(rows[0], format!("{} test ─", "─".repeat(33)));
+        assert_eq!(rows[0].chars().count(), 40, "the rule stays terminal-wide");
+        // While a run owns the composer the caption stays on the top rule.
+        let running = ComposerProps { disabled: true, ..props };
+        let rows = plain(&render_composer(&running, 40));
+        assert!(rows[0].ends_with(" test ─"), "{}", rows[0]);
+    }
+
+    #[test]
     fn composer_shows_cursor_block() {
         let props = ComposerProps {
             attachments: &[],
@@ -479,6 +582,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "abc",
         };
@@ -497,6 +601,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "line one\nline two",
         };
@@ -523,6 +628,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "aaaa bbbb cccc dddd eeee",
         };
@@ -629,6 +735,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "@hel",
         };
@@ -652,6 +759,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "/na",
         };
@@ -689,6 +797,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "/navi",
         };
@@ -708,6 +817,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "",
         };
@@ -729,6 +839,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "",
         };
@@ -755,6 +866,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &[],
             queued_count: 2,
+            session_name: None,
             slash_suggestions: &[],
             text: "",
         };
@@ -819,6 +931,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "/an",
         };
@@ -844,6 +957,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "/na",
         };
@@ -869,6 +983,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &builtins,
             text: "/",
         };
@@ -897,6 +1012,7 @@ mod tests {
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
             queued_count: 0,
+            session_name: None,
             slash_suggestions: &[],
             text: "/navis",
         };

@@ -708,7 +708,7 @@ warns on stderr and runs with the explicit skills only.
 
 - `--classifier <profile-id>` — classify with this profile for this run
   (overrides the setting).
-- `--no-classifier` — hard off, whichever flag comes last.
+- `--no-classifier` — hard off, regardless of flag order.
 
 ### Model profiles
 

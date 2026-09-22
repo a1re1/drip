@@ -983,7 +983,13 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     if let Some(route) = &classifier {
         let active_names: std::collections::HashSet<&str> =
             active_skills.iter().map(|skill| skill.name.as_str()).collect();
-        let discovered = discover_all_skills(Path::new(args.cwd), args.home).unwrap_or_default();
+        let discovered = match discover_all_skills(Path::new(args.cwd), args.home) {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                eprintln!("classifier: skill discovery failed ({error}) — the pool is empty for this run");
+                Vec::new()
+            }
+        };
         let mut candidates: Vec<(
             crate::cli::skills::CliSkill,
             String,

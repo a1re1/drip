@@ -3996,6 +3996,15 @@ pub struct LoopToolScope {
     pub mcp_servers: Option<Vec<String>>,
 }
 
+/// A comma-joined name list, capped at `max` names with an "…+N more" tail so a
+/// loop-start detail line stays readable when a loop advertises many tools.
+fn summarize_names(names: &[String], max: usize) -> String {
+    if names.len() <= max {
+        return names.join(", ");
+    }
+    format!("{}, …+{} more", names[..max].join(", "), names.len() - max)
+}
+
 /// Resolves a loop's tool surface from a tool-name list, the loop's role, and
 /// the run-level MCP gate. `begin_loop` builds its tool set from this and the
 /// classifier's requirements gate asks the same question, so the two can never
@@ -4265,6 +4274,27 @@ mod dynamic_skills_tests {
         assert_eq!(skills.as_slice(), ["navis", "verify-before-done"]);
         assert!(
             start.detail.contains("[skills: navis, verify-before-done]"),
+            "the prose suffix must mirror the field: {}",
+            start.detail
+        );
+        // The loop's tool surface rides the same event: the harness tools are
+        // always offered, so the set is never empty, and it is sorted by name.
+        let tools = start
+            .data
+            .as_ref()
+            .expect("loop-start carries data")
+            .tools
+            .as_ref()
+            .expect("a loop must record its tool surface");
+        assert!(
+            tools.iter().any(|name| name == "finish_task"),
+            "harness tools are part of the surface: {tools:?}"
+        );
+        let mut sorted = tools.clone();
+        sorted.sort();
+        assert_eq!(tools, &sorted, "the surface is recorded sorted by name");
+        assert!(
+            start.detail.contains("[tools: "),
             "the prose suffix must mirror the field: {}",
             start.detail
         );
@@ -6966,6 +6996,15 @@ impl HarnessRun {
         // into the base prompt) followed by this loop's classifier selection,
         // deduped by name: a --skill-driven run composes no dynamic skills, so
         // without the base set its telemetry field would be empty.
+        // The tools this loop can actually call: the same narrowed surface its
+        // request carries (role allowlist + MCP gate) plus the harness tools,
+        // sorted by name so the telemetry reads the same frame to frame.
+        let mut loaded_tools: Vec<String> = loop_transport_tools
+            .iter()
+            .map(|tool| tool.function.name.clone())
+            .collect();
+        loaded_tools.sort();
+        loaded_tools.dedup();
         let mut loaded_skills: Vec<String> = self.options.base_skills.clone();
         for skill in &self.dynamic_skills {
             if !loaded_skills.contains(&skill.name) {
@@ -6977,10 +7016,16 @@ impl HarnessRun {
         } else {
             format!(" [skills: {}]", loaded_skills.join(", "))
         };
+        let tools_suffix = if loaded_tools.is_empty() {
+            String::new()
+        } else {
+            format!(" [tools: {}]", summarize_names(&loaded_tools, 12))
+        };
         let detail = format!(
-            "loop {}{}{} — {}",
+            "loop {}{}{}{} — {}",
             self.state.r#loop,
             skills_suffix,
+            tools_suffix,
             role.as_ref()
                 .map(|r| format!(" [role: {}]", r.name))
                 .unwrap_or_default(),
@@ -6999,6 +7044,7 @@ impl HarnessRun {
             data: Some(HarnessEventData {
                 r#loop: Some(self.state.r#loop),
                 skills: if loaded_skills.is_empty() { None } else { Some(loaded_skills) },
+                tools: if loaded_tools.is_empty() { None } else { Some(loaded_tools) },
                 task_id: current_task_id.clone(),
                 ..Default::default()
             }),

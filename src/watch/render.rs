@@ -612,22 +612,26 @@ fn transcript_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<R
     flat[start..end].to_vec()
 }
 
-// ── Skill rows (the [4] Skills pane) ─────────────────────────────────────────
+// ── Loop surface rows (the [4] Skills & Tools pane) ─────────────────────────
 
-/// One loop's loaded skills, exactly as the harness recorded them on its
-/// loop-start telemetry: the classifier-selected skills plus the run's
-/// base-prompt `--skill` activations, deduped in composition order.
+/// One loop's capability surface, exactly as the harness recorded it on its
+/// loop-start telemetry: the skills composed into its prompt (the
+/// classifier-selected ones plus the run's base-prompt `--skill` activations,
+/// deduped in composition order) and every tool it could actually call — the
+/// packed tools its role allowlist and the MCP gate leave reachable, plus the
+/// harness tools (`plan_tasks`, `finish_task`, `ask_user`, …).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillLoad {
     /// The loop iteration the skills were composed for.
     pub iteration: i64,
     pub skills: Vec<String>,
+    pub tools: Vec<String>,
 }
 
-/// Every loop-start event in `transcript` that recorded a loaded-skill set, in
-/// transcript (chronological) order. Events from before the field existed — or
-/// loops that ran with no skills of their own — carry no `skills` and are
-/// skipped, so an old session simply shows the pane's empty state.
+/// Every loop-start event in `transcript` that recorded a capability surface
+/// (skills, tools, or both), in transcript (chronological) order. Events from
+/// before the fields existed — or loops that ran with neither — carry neither
+/// and are skipped, so an old session simply shows the pane's empty state.
 pub fn skill_loads(transcript: &[TranscriptEntry]) -> Vec<SkillLoad> {
     transcript
         .iter()
@@ -638,25 +642,28 @@ pub fn skill_loads(transcript: &[TranscriptEntry]) -> Vec<SkillLoad> {
             if event.kind != HarnessEventType::LoopStart {
                 return None;
             }
-            let skills = event.data.as_ref()?.skills.clone()?;
-            if skills.is_empty() {
+            let data = event.data.as_ref()?;
+            let skills = data.skills.clone().unwrap_or_default();
+            let tools = data.tools.clone().unwrap_or_default();
+            if skills.is_empty() && tools.is_empty() {
                 return None;
             }
             Some(SkillLoad {
                 iteration: event.iteration,
                 skills,
+                tools,
             })
         })
         .collect()
 }
 
-/// The union of every loaded skill across `loads`, with the number of loops
-/// that loaded it, ordered by count (descending) then name so the roll-up is
-/// stable frame to frame. This is the pane's "all loaded skills" section.
-pub fn all_loaded_skills(loads: &[SkillLoad]) -> Vec<(String, usize)> {
+/// The union of every entry `pick` selects from each load, with the number of
+/// loops that carried it, ordered by count (descending) then name so the
+/// roll-up is stable frame to frame.
+fn roll_up(loads: &[SkillLoad], pick: impl Fn(&SkillLoad) -> &[String]) -> Vec<(String, usize)> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for load in loads {
-        for name in &load.skills {
+        for name in pick(load) {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
     }
@@ -665,38 +672,82 @@ pub fn all_loaded_skills(loads: &[SkillLoad]) -> Vec<(String, usize)> {
     out
 }
 
-/// Rows for the [4] Skills pane: the roll-up of every skill the focused
-/// session loaded, then each loop's own set in load order. The pane answers
-/// both "what does this run have access to right now" (its newest loop is the
-/// last block) and "how were the skills spread across the run".
+/// The union of every loaded skill across `loads`, with the number of loops
+/// that loaded it. This is the pane's "all loaded skills" section.
+pub fn all_loaded_skills(loads: &[SkillLoad]) -> Vec<(String, usize)> {
+    roll_up(loads, |load| &load.skills)
+}
+
+/// The union of every tool the loops could call across `loads`, with the number
+/// of loops that had it. This is the pane's "all available tools" section.
+pub fn all_loaded_tools(loads: &[SkillLoad]) -> Vec<(String, usize)> {
+    roll_up(loads, |load| &load.tools)
+}
+
+/// Rows for the [4] Skills & Tools pane: the roll-up of every skill and every
+/// tool the focused session's loops had, then each loop's own surface in load
+/// order. The pane answers both "what could this run reach for right now" (its
+/// newest loop is the last block) and "how did the surface move across the
+/// run".
 fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
     if vm.skill_loads.is_empty() {
-        return vec![plain("  no skill telemetry yet", c::dim)];
+        return vec![plain("  no loop telemetry yet", c::dim)];
     }
-    let all = all_loaded_skills(&vm.skill_loads);
+    let skills = all_loaded_skills(&vm.skill_loads);
+    let tools = all_loaded_tools(&vm.skill_loads);
     let mut rows = vec![plain(
-        format!("all loaded skills ({})", all.len()),
+        format!("all loaded skills ({})", skills.len()),
         c::accent,
     )];
-    for (name, count) in all {
-        let suffix = if count > 1 {
-            format!(" · {count} loops")
-        } else {
-            String::new()
-        };
-        rows.push(plain(format!("  {name}{suffix}"), c::white));
+    for (name, count) in skills {
+        rows.push(plain(format!("  {name}{}", loops_suffix(count)), c::white));
+    }
+    rows.push(plain(
+        format!("all available tools ({})", tools.len()),
+        c::accent,
+    ));
+    for (name, count) in tools {
+        rows.push(plain(format!("  {name}{}", loops_suffix(count)), c::white));
     }
     rows.push(plain("", c::dim));
     for load in &vm.skill_loads {
         rows.push(plain(
-            format!("loop {} · {}", load.iteration, load.skills.len()),
+            format!(
+                "loop {} · {} skill{} · {} tool{}",
+                load.iteration,
+                load.skills.len(),
+                plural(load.skills.len()),
+                load.tools.len(),
+                plural(load.tools.len()),
+            ),
             c::accent,
         ));
         for name in &load.skills {
-            rows.push(plain(format!("  {name}"), c::gray));
+            rows.push(plain(format!("  skill · {name}"), c::gray));
+        }
+        for name in &load.tools {
+            rows.push(plain(format!("  tool · {name}"), c::gray));
         }
     }
     rows
+}
+
+/// ` · N loops` when a roll-up entry was carried by more than one loop.
+fn loops_suffix(count: usize) -> String {
+    if count > 1 {
+        format!(" · {count} loops")
+    } else {
+        String::new()
+    }
+}
+
+/// "s" for anything but one, so "1 skill" and "2 skills" both read right.
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// How many real rows the [4] pane seats — the layout hugs the pane to its
@@ -723,10 +774,10 @@ fn shells_title(vm: &WatchViewModel) -> String {
     format!("[3] Shells ({})", vm.shells.len())
 }
 
-/// `[4] Skills (n)` — n distinct skills loaded across the focused session's
-/// loops, the count the pane's roll-up section lists.
-fn skills_title(vm: &WatchViewModel) -> String {
-    format!("[4] Skills ({})", all_loaded_skills(&vm.skill_loads).len())
+/// `[4] Skills & Tools` — the pane's roll-up sections list the counts (top of
+/// the box: distinct skills, then the tools the loops had at their disposal).
+fn skills_title() -> String {
+    "[4] Skills & Tools".to_string()
 }
 
 fn shell_detail_title(vm: &WatchViewModel) -> String {
@@ -759,7 +810,7 @@ const FOOTER_HINT: &str = "1/2/3/4 focus · tab cycle · r mode · click/j/k mov
 /// The pane geometry `render_frame` paints with, read by every hit test so the
 /// rectangles a click is measured against cannot drift from the frame.
 struct PaneLayout {
-    /// Sessions / Tasks / Shells / Skills heights, top to bottom.
+    /// Sessions / Tasks / Shells / Skills & Tools heights, top to bottom.
     heights: [usize; 4],
     /// Width of the list column (portrait: the full frame).
     list_w: usize,
@@ -858,7 +909,7 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 
     let mk_skills = |w: usize, height: usize| -> Vec<String> {
         let note = if vm.skill_loads.is_empty() { None } else { Some(format!("{} loops", vm.skill_loads.len())) };
-        render_pane(w, height, &skills_title(vm), vm.focus == 4, &skill_rows(vm), note.as_deref())
+        render_pane(w, height, &skills_title(), vm.focus == 4, &skill_rows(vm), note.as_deref())
     };
 
     // The [0] column: the transcript normally; a shell-detail box over a raw
@@ -953,7 +1004,7 @@ pub fn transcript_region(vm: &WatchViewModel, cols: usize, rows: usize) -> Optio
 }
 
 /// The 1-based inclusive rectangle of each list pane, in panel order — `[0]`
-/// Sessions, `[1]` Tasks, `[2]` Shells, `[3]` Skills — as `(row_start,
+/// Sessions, `[1]` Tasks, `[2]` Shells, `[3]` Skills & Tools — as `(row_start,
 /// row_end, col_start, col_end)`.
 ///
 /// Read from `pane_layout`, the same geometry `render_frame` paints with
@@ -980,7 +1031,7 @@ pub fn panel_regions(vm: &WatchViewModel, cols: usize, rows: usize) -> Vec<(usiz
 ///
 /// `None` for a cell on a border, on a pane's empty-state message, past the
 /// last row, or when the terminal is too small to paint the frame. Panel 3 (the
-/// Skills pane) has no selection of its own, so it reports the row's position
+/// Skills & Tools pane) has no selection of its own, so it reports the row's position
 /// only to tell a click it landed on the pane rather than on a border.
 pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, row: usize) -> Option<(usize, usize)> {
     for (panel, &(r0, r1, c0, c1)) in panel_regions(vm, cols, rows).iter().enumerate() {
@@ -1212,7 +1263,7 @@ mod tests {
             assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0), None, "skills top border");
             assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), None, "the empty state is not a row");
             if seated(regions[3]) >= 1 {
-                vm.skill_loads = vec![SkillLoad { iteration: 2, skills: vec!["navis".into()] }];
+                vm.skill_loads = vec![SkillLoad { iteration: 2, skills: vec!["navis".into()], tools: vec![] }];
                 let (sk0, _, skc0, _) = panel_regions(&vm, cols, rows)[3];
                 assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), Some((3, 0)), "first skills row");
                 vm.skill_loads.clear();
@@ -1432,15 +1483,20 @@ mod tests {
     }
 
     #[test]
-    fn skill_loads_read_the_loop_start_telemetry_in_order() {
+    fn loop_start_telemetry_reads_skills_and_tools_in_order() {
         use crate::cli::transcript::{TranscriptEntry, TranscriptEventEntry};
         use crate::core::types::HarnessEventData;
 
-        fn loop_start(iteration: i64, skills: Option<Vec<&str>>) -> TranscriptEntry {
+        fn loop_start(
+            iteration: i64,
+            skills: Option<Vec<&str>>,
+            tools: Option<Vec<&str>>,
+        ) -> TranscriptEntry {
             TranscriptEntry::Event(TranscriptEventEntry {
                 at: "2026-01-01T00:00:00Z".into(),
                 data: Some(HarnessEventData {
                     skills: skills.map(|s| s.into_iter().map(str::to_string).collect()),
+                    tools: tools.map(|t| t.into_iter().map(str::to_string).collect()),
                     ..Default::default()
                 }),
                 detail: "loop 1".into(),
@@ -1450,12 +1506,13 @@ mod tests {
             })
         }
 
-        // A non-loop-start event carrying skills (never emitted today) is
+        // A non-loop-start event carrying a surface (never emitted today) is
         // ignored: the pane reads loop-start telemetry only.
         let other = TranscriptEntry::Event(TranscriptEventEntry {
             at: "2026-01-01T00:00:00Z".into(),
             data: Some(HarnessEventData {
                 skills: Some(vec!["bogus".into()]),
+                tools: Some(vec!["BOGUS".into()]),
                 ..Default::default()
             }),
             detail: "tool".into(),
@@ -1466,10 +1523,14 @@ mod tests {
 
         let transcript = vec![
             other,
-            loop_start(1, Some(vec!["navis"])),
-            loop_start(2, None),
-            loop_start(3, Some(vec![])),
-            loop_start(4, Some(vec!["navis", "verify-before-done"])),
+            loop_start(1, Some(vec!["navis"]), Some(vec!["BASH", "READ"])),
+            loop_start(2, None, None),
+            loop_start(3, Some(vec![]), Some(vec![])),
+            loop_start(
+                4,
+                Some(vec!["navis", "verify-before-done"]),
+                Some(vec!["PATCH", "READ"]),
+            ),
         ];
         let loads = skill_loads(&transcript);
         assert_eq!(
@@ -1477,15 +1538,26 @@ mod tests {
             vec![
                 SkillLoad {
                     iteration: 1,
-                    skills: vec!["navis".into()]
+                    skills: vec!["navis".into()],
+                    tools: vec!["BASH".into(), "READ".into()],
                 },
                 SkillLoad {
                     iteration: 4,
-                    skills: vec!["navis".into(), "verify-before-done".into()]
+                    skills: vec!["navis".into(), "verify-before-done".into()],
+                    tools: vec!["PATCH".into(), "READ".into()],
                 },
             ]
         );
-        // The roll-up counts loops per skill, most-loaded first (ties by name).
+        // A loop that recorded tools but no skills is still a surface.
+        assert_eq!(
+            skill_loads(&[loop_start(5, None, Some(vec!["READ"]))]),
+            vec![SkillLoad {
+                iteration: 5,
+                skills: vec![],
+                tools: vec!["READ".into()],
+            }]
+        );
+        // The roll-up counts loops per skill/tool, most-loaded first (ties by name).
         assert_eq!(
             all_loaded_skills(&loads),
             vec![
@@ -1493,29 +1565,40 @@ mod tests {
                 ("verify-before-done".to_string(), 1)
             ]
         );
+        assert_eq!(
+            all_loaded_tools(&loads),
+            vec![
+                ("READ".to_string(), 2),
+                ("BASH".to_string(), 1),
+                ("PATCH".to_string(), 1)
+            ]
+        );
         assert!(skill_loads(&[]).is_empty());
         assert!(all_loaded_skills(&[]).is_empty());
+        assert!(all_loaded_tools(&[]).is_empty());
     }
 
     #[test]
-    fn the_skills_pane_rolls_up_then_lists_each_loop() {
+    fn the_skills_and_tools_pane_rolls_up_then_lists_each_loop() {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
-        assert_eq!(skills_title(&vm), "[4] Skills (0)");
-        assert_eq!(skill_rows(&vm)[0].text, "  no skill telemetry yet");
+        assert_eq!(skills_title(), "[4] Skills & Tools");
+        assert_eq!(skill_rows(&vm)[0].text, "  no loop telemetry yet");
 
         vm.skill_loads = vec![
             SkillLoad {
                 iteration: 1,
                 skills: vec!["navis".into()],
+                tools: vec!["READ".into()],
             },
             SkillLoad {
                 iteration: 2,
                 skills: vec!["navis".into(), "tdd".into()],
+                tools: vec!["READ".into(), "PATCH".into()],
             },
         ];
-        assert_eq!(skills_title(&vm), "[4] Skills (2)");
+        assert_eq!(skills_title(), "[4] Skills & Tools");
         let texts: Vec<String> = skill_rows(&vm).iter().map(|r| r.text.clone()).collect();
         assert_eq!(
             texts,
@@ -1523,35 +1606,43 @@ mod tests {
                 "all loaded skills (2)",
                 "  navis · 2 loops",
                 "  tdd",
+                "all available tools (2)",
+                "  READ · 2 loops",
+                "  PATCH",
                 "",
-                "loop 1 · 1",
-                "  navis",
-                "loop 2 · 2",
-                "  navis",
-                "  tdd",
+                "loop 1 · 1 skill · 1 tool",
+                "  skill · navis",
+                "  tool · READ",
+                "loop 2 · 2 skills · 2 tools",
+                "  skill · navis",
+                "  skill · tdd",
+                "  tool · READ",
+                "  tool · PATCH",
             ]
         );
     }
 
     #[test]
-    fn the_skills_pane_paints_a_titled_box() {
+    fn the_skills_and_tools_pane_paints_a_titled_box() {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
         vm.skill_loads = vec![SkillLoad {
             iteration: 7,
             skills: vec!["navis".into()],
+            tools: vec!["READ".into()],
         }];
         let frame = render_frame(&vm, 120, 40);
         let plain: Vec<String> = frame.split('\n').map(strip_ansi).collect();
         assert!(
-            plain.iter().any(|l| l.contains("[4] Skills (1)")),
+            plain.iter().any(|l| l.contains("[4] Skills & Tools")),
             "the frame titles the pane"
         );
         assert!(plain.iter().any(|l| l.contains("all loaded skills (1)")));
+        assert!(plain.iter().any(|l| l.contains("all available tools (1)")));
         assert!(
-            plain.iter().any(|l| l.contains("loop 7 · 1")),
-            "the loop's own set is listed"
+            plain.iter().any(|l| l.contains("loop 7 · 1 skill · 1 tool")),
+            "the loop's own surface is listed"
         );
         assert!(
             widths(&frame).iter().all(|&w| w == 120),

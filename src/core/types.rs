@@ -925,6 +925,12 @@ pub struct HarnessEventData {
 	// last when both are present).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub tool_name: Option<String>,
+	/// "loop-start" events: every tool the loop could call — the packed tool
+	/// surface left by the role's allowlist and the MCP gate, plus the harness
+	/// tools (plan_tasks, finish_task, ask_user, …) — sorted by name. Absent
+	/// when the loop advertised none.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub tools: Option<Vec<String>>,
 	/// "loop-start" events: the skills composed into this loop's system prompt,
 	/// in composition order. Absent when the loop ran with none of its own
 	/// (base-prompt `--skill` activations are not repeated here).

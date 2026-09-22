@@ -525,6 +525,9 @@ struct TuiApp {
     /// OSC 2 title state while an interactive TTY owns stdout; None keeps
     /// headless/redirected runs silent. Pure state lives in pane_title.rs.
     pane_title: Option<PaneTitle>,
+    /// The session's explicit /rename name (manual or generated), mirrored
+    /// from session.json so the composer can caption it. None until renamed.
+    session_name: Option<String>,
     /// One-shot guard: title generation is requested at most once per session.
     title_requested: bool,
     /// Bumped on session switch; in-flight generations from older epochs are
@@ -603,6 +606,7 @@ impl TuiApp {
     fn new(bootstrap: TuiBootstrap, tx: Sender<Msg>, mention_tx: Sender<(u64, String)>) -> Self {
         let paths = session_paths_for(&bootstrap.project, &bootstrap.session);
         let cells = read_transcript(Path::new(&paths.transcript_path));
+        let session_name = read_session_name(Path::new(&paths.meta_path));
         let (cols, rows) = terminal_size();
         let config = bootstrap.config.clone();
         let session = bootstrap.session.clone();
@@ -659,6 +663,7 @@ impl TuiApp {
             session,
             status_line_next_refresh: None,
             pane_title: None,
+            session_name,
             title_requested: false,
             title_epoch: 0,
             rename_epoch: 0,
@@ -810,6 +815,7 @@ impl TuiApp {
                     slash_suggestions: &slash,
                     text: &self.text,
                     queued_count: self.queued_prompts.len(),
+                    session_name: self.session_name.as_deref(),
                 },
                 self.cols,
             ));
@@ -1797,7 +1803,8 @@ impl TuiApp {
         // Restore this session's explicit /rename name, if it has one —
         // materializing the pane title when no goal has created it yet, so
         // a resumed session shows its persisted name immediately.
-        if let Some(name) = read_session_name(Path::new(&self.paths.meta_path)) {
+        self.session_name = read_session_name(Path::new(&self.paths.meta_path));
+        if let Some(name) = self.session_name.clone() {
             apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
         }
         // Replay the new transcript from the top, like remounting <Static>:
@@ -2737,6 +2744,7 @@ impl TuiApp {
             return;
         }
         apply_rename_label(&mut self.pane_title, name, stdout_is_tty());
+        self.session_name = Some(name.to_string());
         self.push_info(format!("Session renamed to \"{name}\"."));
     }
 
@@ -2759,6 +2767,7 @@ impl TuiApp {
             return;
         }
         apply_rename_label(&mut self.pane_title, &name, stdout_is_tty());
+        self.session_name = Some(name.clone());
         self.push_info(format!("Session renamed to \"{name}\"."));
     }
 

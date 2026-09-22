@@ -34,7 +34,7 @@ use crate::cli::mentions::{get_active_chat_file_mention, replace_active_chat_fil
 use crate::cli::paste::{sanitize_pasted_input, DISABLE_BRACKETED_PASTE, ENABLE_BRACKETED_PASTE};
 use crate::cli::roles::{load_skill_content, resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource};
 use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
-use crate::cli::skills::LoadedCliSkill;
+use crate::cli::skills::{CliSkill, LoadedCliSkill, SkillSource};
 use crate::cli::state_summary::format_state_summary;
 use crate::cli::transcript::{
     append_transcript_entry, read_transcript, TranscriptEntry, TranscriptEventEntry, TranscriptGoalEntry, TranscriptNoteEntry,
@@ -69,8 +69,8 @@ use crate::tui::compact::{
 };
 use crate::tui::widgets::{
     composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
-    render_composer, render_picker, render_status_bar, render_survey, ComposerProps, PickerItem,
-    StatusBarProps,
+    render_composer, render_picker, render_skill_picker, render_status_bar, render_survey, ComposerProps,
+    PickerItem, SkillPickerItem, StatusBarProps,
 };
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -190,19 +190,112 @@ fn short_id(id: &str) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum OverlayKind {
     Model,
     Prompt,
     Question,
     Sessions,
+    Skills,
     ToolModel,
 }
 
 struct Overlay {
+    /// Live search text for the `/skills` picker; empty for every other
+    /// overlay (they have no search line).
+    filter: String,
     items: Vec<PickerItem>,
     kind: OverlayKind,
     selected: usize,
     title: String,
+}
+
+/// One discovered skill as the `/skills` picker shows it: display metadata
+/// only (name, description, origin, rough size), never loaded content.
+#[derive(Clone, Debug)]
+struct SkillRow {
+    description: String,
+    /// Marketplace enable/disable key; None for project/user/builtin rows.
+    key: Option<String>,
+    /// True for a marketplace skill the registry currently gates: shown so the
+    /// picker can explain what is installed, never toggled here.
+    locked: bool,
+    name: String,
+    source: SkillSource,
+    /// Rough token size (byte length / 4).
+    tokens: usize,
+}
+
+/// The origin label a picker row shows: the marketplace key when the skill has
+/// one, otherwise the skill's source directory.
+fn skill_origin(row: &SkillRow) -> String {
+    row.key
+        .clone()
+        .unwrap_or_else(|| source_label(&row.source).to_string())
+}
+
+fn source_label(source: &SkillSource) -> &'static str {
+    match source {
+        SkillSource::Builtin => "builtin",
+        SkillSource::Marketplace => "marketplace",
+        SkillSource::Project => "project",
+        SkillSource::User => "user",
+    }
+}
+
+/// Rough token size of a skill file: byte length / 4, the same order of
+/// magnitude Claude Code prints. Built-in skills have no file on disk, so
+/// their embedded content is measured through the skills loader.
+fn skill_tokens(skill: &CliSkill) -> usize {
+    if skill.path.starts_with("<builtin>") {
+        return crate::cli::skills::load_skill_content(skill, None)
+            .map(|loaded| (loaded.content.len() / 4).max(1))
+            .unwrap_or(1);
+    }
+    path_tokens(&skill.path)
+}
+
+fn path_tokens(path: &str) -> usize {
+    std::fs::read(path)
+        .map(|raw| (raw.len() / 4).max(1))
+        .unwrap_or(1)
+}
+
+/// Build the picker's row cache: every enabled project/user/builtin and
+/// marketplace skill plus the marketplace skills the registry currently gates
+/// (shown locked). Files are read here only, on dispatch; the paint path
+/// always renders from this cache.
+fn collect_skill_rows(cwd: &Path, home: &crate::core::home::DripHome) -> Vec<SkillRow> {
+    let registry = load_marketplaces_file(Path::new(&home.marketplaces_path)).unwrap_or_default();
+    let overrides = load_project_plugin_overrides(cwd);
+    let mut rows: Vec<SkillRow> = discover_all_skills(cwd, home)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|skill| SkillRow {
+            tokens: skill_tokens(&skill),
+            description: skill.description,
+            key: skill.key,
+            locked: false,
+            name: skill.name,
+            source: skill.source,
+        })
+        .collect();
+    for plugin in list_marketplace_plugins(home, &registry).plugins {
+        for skill in plugin.skills {
+            if is_marketplace_key_enabled(&plugin.key, &skill.key, &registry, &overrides) {
+                continue;
+            }
+            rows.push(SkillRow {
+                tokens: path_tokens(&skill.path),
+                description: skill.description,
+                key: Some(skill.key),
+                locked: true,
+                name: skill.name,
+                source: SkillSource::Marketplace,
+            });
+        }
+    }
+    rows
 }
 
 /// Sentinel PickerItem id for the survey's free-text escape hatch — a NUL
@@ -510,6 +603,10 @@ struct TuiApp {
     selected_skill_index: usize,
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
+    /// Display rows for the interactive `/skills` picker (source, rough size,
+    /// locked-in-marketplace flag). Kept beside `skill_catalog` so the
+    /// composer suggestion menu keeps its exact tuple shape.
+    skill_rows: Vec<SkillRow>,
     skill_suggestions: Vec<(String, String)>,
     /// Live ask_user clarification survey (staged multiple-choice overlay).
     survey: Option<SurveyState>,
@@ -626,6 +723,7 @@ impl TuiApp {
                 .into_iter()
                 .map(|skill| (skill.name, skill.description))
                 .collect();
+        let skill_rows = collect_skill_rows(Path::new(&bootstrap.cwd), &bootstrap.home);
 
         Self {
             abort: None,
@@ -660,6 +758,7 @@ impl TuiApp {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_catalog,
+            skill_rows,
             skill_suggestions: Vec::new(),
             session,
             status_line_next_refresh: None,
@@ -832,6 +931,8 @@ impl TuiApp {
             // picker keeps the generic renderer (and its exact output).
             if overlay.kind == OverlayKind::Question {
                 rows.extend(self.survey_rows(overlay));
+            } else if overlay.kind == OverlayKind::Skills {
+                rows.extend(self.skill_picker_rows(overlay));
             } else {
                 rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
             }
@@ -1399,6 +1500,14 @@ impl TuiApp {
             return;
         }
 
+        // The skills picker owns its keys: typing edits the search filter,
+        // enter/space toggles the highlighted skill, arrows slide the
+        // selection, and esc closes it without writing anything to the
+        // transcript. Every other overlay keeps the shared arms below.
+        if self.on_skill_picker_key(&key) {
+            return;
+        }
+
         if let Some(overlay) = self.overlay.as_mut() {
             match key {
                 Key::Escape => {
@@ -1661,6 +1770,9 @@ impl TuiApp {
             // Question overlays carry live survey data — opened by
             // open_survey_question, never through this static menu path.
             OverlayKind::Question => return,
+            // The skills picker carries live rows and a search filter — opened
+            // by open_skill_picker, never through this static menu path.
+            OverlayKind::Skills => return,
             OverlayKind::Model => (
                 "model profiles",
                 list_cli_model_profiles(settings)
@@ -1737,7 +1849,7 @@ impl TuiApp {
                     .collect(),
             ),
         };
-        self.overlay = Some(Overlay { items, kind, selected: 0, title: title.to_string() });
+        self.overlay = Some(Overlay { filter: String::new(), items, kind, selected: 0, title: title.to_string() });
     }
 
     // ----- ask_user surveys ----------------------------------------------
@@ -1799,7 +1911,7 @@ impl TuiApp {
             question.header,
             question.question
         );
-        self.overlay = Some(Overlay { items, kind: OverlayKind::Question, selected: 0, title });
+        self.overlay = Some(Overlay { filter: String::new(), items, kind: OverlayKind::Question, selected: 0, title });
     }
 
     fn record_survey_answer(&mut self, choice: Option<String>, other: Option<String>) {
@@ -1931,6 +2043,12 @@ impl TuiApp {
                 Ok(next) => self.save_config(next, format!("system prompt set to {}", item.id)),
                 Err(error) => self.push_error(error.to_string()),
             },
+            OverlayKind::Skills => {
+                // The picker's own key handling toggles and stays open; this
+                // arm keeps the match exhaustive for any future caller.
+                let name = item.id.clone();
+                self.skills_toggle(&name);
+            }
             OverlayKind::Sessions => {
                 if let Some(record) = resolve_any_session_ref(&self.bootstrap.project, Some(&item.id)) {
                     self.switch_session(record);
@@ -2018,6 +2136,184 @@ impl TuiApp {
                 .into_iter()
                 .map(|skill| (skill.name, skill.description))
                 .collect();
+        self.skill_rows = collect_skill_rows(Path::new(&self.bootstrap.cwd), &self.bootstrap.home);
+    }
+
+    /// The picker rows the live search filter currently keeps.
+    fn visible_skill_rows(&self) -> Vec<SkillRow> {
+        let Some(overlay) = self
+            .overlay
+            .as_ref()
+            .filter(|overlay| overlay.kind == OverlayKind::Skills)
+        else {
+            return Vec::new();
+        };
+        let query = overlay.filter.to_ascii_lowercase();
+        self.skill_rows
+            .iter()
+            .filter(|row| {
+                query.is_empty()
+                    || row.name.to_ascii_lowercase().contains(&query)
+                    || row.description.to_ascii_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Open the interactive `/skills` picker from the cached catalog: nothing
+    /// is written to the transcript, the filter starts empty and the rows keep
+    /// the live enabled state.
+    fn open_skill_picker(&mut self) {
+        self.overlay = Some(Overlay {
+            filter: String::new(),
+            items: Vec::new(),
+            kind: OverlayKind::Skills,
+            selected: 0,
+            title: "Skills".to_string(),
+        });
+        self.refresh_skill_picker_items();
+        self.repaint();
+    }
+
+    /// Re-derive the picker's selectable rows from `skill_rows` and the live
+    /// filter, keeping the highlight inside the new list.
+    fn refresh_skill_picker_items(&mut self) {
+        let items: Vec<PickerItem> = self
+            .visible_skill_rows()
+            .iter()
+            .map(|row| PickerItem {
+                detail: Some(format!(
+                    "{} · ~{} tok{}",
+                    skill_origin(row),
+                    row.tokens,
+                    if row.locked {
+                        " · locked by plugin"
+                    } else {
+                        ""
+                    }
+                )),
+                id: row.name.clone(),
+                label: row.name.clone(),
+            })
+            .collect();
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.selected = overlay.selected.min(items.len().saturating_sub(1));
+            overlay.items = items;
+        }
+    }
+
+    /// Painted rows for the skills picker: the cached rows joined with the
+    /// live enabled state, handed to the pure renderer.
+    fn skill_picker_rows(&self, overlay: &Overlay) -> Vec<String> {
+        let active: HashSet<&str> = self
+            .active_skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
+        let items: Vec<SkillPickerItem> = self
+            .visible_skill_rows()
+            .iter()
+            .map(|row| SkillPickerItem {
+                description: row.description.clone(),
+                enabled: active.contains(row.name.as_str()),
+                locked: row.locked,
+                name: row.name.clone(),
+                source: skill_origin(row),
+                tokens: row.tokens,
+            })
+            .collect();
+        render_skill_picker(
+            &overlay.filter,
+            &items,
+            overlay.selected,
+            self.skill_rows.len(),
+            self.cols,
+        )
+    }
+
+    /// Key handling for the live `/skills` picker. Returns true when the key
+    /// was consumed; every consumed branch repaints, so the picker stays live
+    /// without writing a single row to the transcript.
+    fn on_skill_picker_key(&mut self, key: &Key) -> bool {
+        if self.overlay.as_ref().map(|overlay| overlay.kind) != Some(OverlayKind::Skills) {
+            return false;
+        }
+        match key {
+            Key::Escape => {
+                self.overlay = None;
+                self.repaint();
+            }
+            Key::Return => {
+                if let Some(name) = self.selected_skill_name() {
+                    self.skills_toggle(&name);
+                }
+            }
+            Key::Text(text) if text.as_str() == " " => {
+                if let Some(name) = self.selected_skill_name() {
+                    self.skills_toggle(&name);
+                }
+            }
+            Key::Text(text) => self.push_skill_query(text),
+            Key::Paste(text) => self.push_skill_query(text),
+            Key::Backspace | Key::Delete => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.filter.pop();
+                }
+                self.refresh_skill_picker_items();
+                self.repaint();
+            }
+            Key::Up => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+                self.repaint();
+            }
+            Key::Down | Key::Tab => {
+                let last = self
+                    .overlay
+                    .as_ref()
+                    .map(|overlay| overlay.items.len())
+                    .unwrap_or(0);
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.selected = (overlay.selected + 1).min(last.saturating_sub(1));
+                }
+                self.repaint();
+            }
+            Key::Ctrl('c') => self.quit = true,
+            _ => return false,
+        }
+        true
+    }
+
+    fn push_skill_query(&mut self, text: &str) {
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.filter.push_str(text);
+        }
+        self.refresh_skill_picker_items();
+        self.repaint();
+    }
+
+    fn selected_skill_name(&self) -> Option<String> {
+        let overlay = self.overlay.as_ref()?;
+        overlay
+            .items
+            .get(overlay.selected)
+            .map(|item| item.id.clone())
+    }
+
+    /// Toggle one picker row. A locked marketplace row never toggles — the
+    /// picker already shows its `×` mark, `locked by plugin` detail and the
+    /// `/marketplace` footer, so refusing here keeps the picker from writing
+    /// anything into the transcript — and the picker stays open either way.
+    fn skills_toggle(&mut self, skill_name: &str) {
+        if self
+            .skill_rows
+            .iter()
+            .any(|row| row.name == skill_name && row.locked)
+        {
+            return;
+        }
+        self.toggle_skill(skill_name);
     }
 
     fn toggle_skill(&mut self, skill_name: &str) {
@@ -2180,34 +2476,18 @@ impl TuiApp {
                 }
             }
             "skills" => {
+                // Interactive picker instead of a transcript dump: search,
+                // cursor movement and on/off toggles, and nothing lands in
+                // scrollback when it closes.
                 self.refresh_skill_catalog();
-                let discovered = discover_all_skills(Path::new(&self.bootstrap.cwd), &self.bootstrap.home).unwrap_or_default();
-                let active_names: HashSet<String> = self.active_skills.iter().map(|skill| skill.name.clone()).collect();
-                let text = if discovered.is_empty() {
-                    format!(
+                if self.skill_rows.is_empty() {
+                    self.push_info(format!(
                         "no skills found. Add SKILL.md files under {}/<name>/ or ./.drip/skills/<name>/, or register a marketplace with /marketplace add.",
                         self.bootstrap.home.skills_dir
-                    )
+                    ));
                 } else {
-                    discovered
-                        .iter()
-                        .map(|skill| {
-                            let source = skill
-                                .key
-                                .clone()
-                                .unwrap_or_else(|| format!("{:?}", skill.source).to_lowercase());
-                            format!(
-                                "{} {} ({}) — {}",
-                                if active_names.contains(&skill.name) { "●" } else { "○" },
-                                skill.name,
-                                source,
-                                skill.description
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                self.push_info(text);
+                    self.open_skill_picker();
+                }
             }
             "skill" => {
                 if args.is_empty() {
@@ -4496,8 +4776,14 @@ mod skill_activation_tests {
         fixture.app.dispatch_command("skills", "");
         assert!(
             fixture.app.active_skills.is_empty(),
-            "/skills must keep its list behavior"
+            "/skills must open the picker, never activate the same-named skill"
         );
+        assert_eq!(
+            fixture.app.overlay.as_ref().map(|overlay| overlay.kind),
+            Some(OverlayKind::Skills),
+            "/skills must open the interactive picker"
+        );
+        fixture.app.overlay = None;
         fixture.app.dispatch_command("help", "");
         assert!(
             fixture.app.active_skills.is_empty(),
@@ -4508,6 +4794,92 @@ mod skill_activation_tests {
         fixture.app.dispatch_command("skill", "help");
         assert_eq!(fixture.app.active_skills.len(), 1);
         assert_eq!(fixture.app.active_skills[0].name, "help");
+    }
+
+    #[test]
+    fn slash_skills_opens_an_interactive_picker_without_writing_history() {
+        let mut fixture = make_app_with_skills(&["navis", "nada"]);
+        let roots = fixture.app.cells.len();
+        fixture.app.dispatch_command("skills", "");
+        assert_eq!(
+            fixture.app.overlay.as_ref().map(|overlay| overlay.kind),
+            Some(OverlayKind::Skills),
+            "/skills opens the picker"
+        );
+        assert_eq!(
+            fixture.app.cells.len(),
+            roots,
+            "the picker must not dump a skill list into the transcript"
+        );
+        assert!(
+            fixture.app.overlay.as_ref().unwrap().items.len() >= 2,
+            "the project skills are listed"
+        );
+
+        // typing filters the list live
+        fixture.app.on_key(Key::Text("nad".to_string()));
+        let items = &fixture.app.overlay.as_ref().unwrap().items;
+        assert_eq!(items.len(), 1, "only the nada row matches: {items:?}");
+        assert_eq!(items[0].id, "nada");
+        for _ in 0..3 {
+            fixture.app.on_key(Key::Backspace);
+        }
+        assert!(
+            fixture.app.overlay.as_ref().unwrap().items.len() >= 2,
+            "backspace widens the list again"
+        );
+
+        // enter toggles the highlighted skill on and keeps the picker open
+        fixture.app.on_key(Key::Text("navis".to_string()));
+        assert_eq!(
+            fixture.app.overlay.as_ref().unwrap().items.len(),
+            1,
+            "navis is the only match"
+        );
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.active_skills.len(), 1);
+        assert_eq!(fixture.app.active_skills[0].name, "navis");
+        assert!(
+            fixture.app.overlay.is_some(),
+            "toggling keeps the picker open"
+        );
+
+        // space toggles it back off, still without closing
+        fixture.app.on_key(Key::Text(" ".to_string()));
+        assert!(fixture.app.active_skills.is_empty());
+        assert!(fixture.app.overlay.is_some());
+
+        // esc closes leaving no list in the transcript
+        fixture.app.on_key(Key::Escape);
+        assert!(fixture.app.overlay.is_none());
+        let dumps = fixture
+            .app
+            .cells
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("test skill")))
+            .count();
+        assert_eq!(dumps, 0, "no skill list may land in the transcript");
+    }
+
+    #[test]
+    fn skill_picker_rows_carry_origin_and_rough_size() {
+        let fixture = make_app_with_skills(&["navis"]);
+        let row = fixture
+            .app
+            .skill_rows
+            .iter()
+            .find(|row| row.name == "navis")
+            .expect("the project skill has a picker row");
+        assert_eq!(row.source, SkillSource::Project);
+        assert!(row.tokens >= 1, "every row carries a size estimate");
+        assert!(
+            fixture
+                .app
+                .skill_rows
+                .iter()
+                .any(|row| row.source == SkillSource::Builtin),
+            "built-in skills are listed too"
+        );
     }
 
     #[test]

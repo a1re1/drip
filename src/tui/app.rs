@@ -67,7 +67,11 @@ use crate::tui::compact::{
 	render_compact_cell, render_tool_group, select_compact_tail_start,
 	CompactCell, CompactEmitter,
 };
-use crate::tui::widgets::{render_composer, render_picker, render_status_bar, render_survey, ComposerProps, PickerItem, StatusBarProps};
+use crate::tui::widgets::{
+    composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
+    render_composer, render_picker, render_status_bar, render_survey, ComposerProps, PickerItem,
+    StatusBarProps,
+};
 use crate::watch::ansi::{string_width, wrap_ansi};
 
 /// What `drip --tui` needs from entry.rs to start.
@@ -139,7 +143,7 @@ fn help_text() -> String {
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
-            "  while a goal runs — enter queues the message for the next run; shift+enter steers the running goal with the next queued message",
+            "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
             "  esc — clear the composer, or stop the running goal",
             "  ctrl+c — exit",
@@ -255,7 +259,6 @@ enum Key {
     Paste(String),
     Return,
     Right,
-    ShiftReturn,
     Tab,
     Text(String),
     Up,
@@ -264,6 +267,7 @@ enum Key {
 
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
+
 
 /// Splits a raw stdin chunk into keys. Bracketed pastes may span chunks, so
 /// the caller keeps `paste_buffer` between calls.
@@ -315,13 +319,6 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         return Vec::new();
     }
 
-    // Shift+enter has no portable byte of its own: terminals send either the
-    // kitty/xterm modifyOtherKeys form (ESC 13;2u) or the classic ESC CR.
-    // Checked before the generic CSI branch, which would drop both.
-    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
-        return vec![Key::ShiftReturn];
-    }
-
     if chunk[0] == 0x1b {
         if chunk.len() == 1 {
             return vec![Key::Escape];
@@ -365,14 +362,6 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         }];
     }
 
-    // Shift+enter has no portable byte of its own: terminals either send the
-    // kitty/xterm modifyOtherKeys form (ESC 13;2u), the classic ESC CR, or a
-    // bare LF for ctrl+enter. Only the first two are shift+enter (a ctrl+enter
-    // LF is not; it decodes as Return so a stray LF cannot silently steer).
-    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
-        return vec![Key::ShiftReturn];
-    }
-
     let text = String::from_utf8_lossy(chunk).into_owned();
     if text.chars().count() == 1 {
         return vec![Key::Text(text)];
@@ -414,6 +403,7 @@ impl PromptHistory {
     }
 
     /// Whether a navigation walk is in progress (Up started, not yet ended).
+    #[cfg(test)]
     fn is_browsing(&self) -> bool {
         self.browsing.is_some()
     }
@@ -507,8 +497,9 @@ struct TuiApp {
     pending_cells: Vec<TranscriptEntry>,
     prompt_history: PromptHistory,
     /// Prompts typed while a run was in flight. `enter` stacks them for the
-    /// NEXT run; `shift+enter` pops the head and steers the running goal with
-    /// it immediately (the inbox handoff), so a queue never becomes a dead end.
+    /// NEXT run and the composer lists them; `ctrl+s` on an empty
+    /// composer steers the running goal with the whole queue at once (the
+    /// inbox handoff), so a queue never becomes a dead end.
     queued_prompts: VecDeque<String>,
     pending_detail: Option<String>,
     quit: bool,
@@ -846,6 +837,7 @@ impl TuiApp {
             }
         } else {
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
+            let queued: Vec<String> = self.queued_prompts.iter().cloned().collect();
             rows.extend(render_composer(
                 &ComposerProps {
                     attachments: &self.attachments,
@@ -857,7 +849,7 @@ impl TuiApp {
                     skill_suggestions: &self.skill_suggestions,
                     slash_suggestions: &slash,
                     text: &self.text,
-                    queued_count: self.queued_prompts.len(),
+                    queued: &queued,
                     session_name: self.session_name.as_deref(),
                 },
                 self.cols,
@@ -1054,17 +1046,24 @@ impl TuiApp {
         self.refresh_mentions();
     }
 
-    /// Recalls the previous prompt into the composer. Navigation is entered
-    /// only when the cursor sits on the first line (the unsent composer text
-    /// is saved as the draft); once browsing, repeated Up presses walk older
-    /// entries regardless of the cursor line.
+    /// Display columns the composer body has at this terminal width, the
+    /// same layout `render_composer` draws.
+    fn composer_text_width(&self) -> usize {
+        composer_text_width(self.cols)
+    }
+
+    /// Up arrow. Moving one VISUAL line up inside the wrapped text takes
+    /// precedence, keeping the column (clamped to the shorter line); only on
+    /// the top visual line does Up recall the previous prompt, saving the
+    /// unsent composer text as the draft. Once browsing, repeated Up presses
+    /// keep walking older entries from the top line.
     fn recall_older_prompt(&mut self) {
-        if !self.prompt_history.is_browsing() {
-            let chars: Vec<char> = self.text.chars().collect();
-            let cursor = self.cursor.min(chars.len());
-            if chars[..cursor].iter().any(|&c| c == '\n') {
-                return;
-            }
+        let width = self.composer_text_width();
+        let (line, column) = composer_cursor_position(&self.text, width, self.cursor);
+        if line > 0 {
+            let cursor = composer_cursor_at(&self.text, width, line - 1, column);
+            self.apply_edit(self.text.clone(), cursor);
+            return;
         }
         if let Some(text) = self.prompt_history.older(&self.text) {
             let cursor = text.chars().count();
@@ -1072,18 +1071,19 @@ impl TuiApp {
         }
     }
 
-    /// Steps toward newer prompts while browsing, restoring the exact draft
-    /// past the newest entry. Navigation is entered only from the last line;
-    /// once browsing, Down walks newer regardless of the cursor line, and it
-    /// stays a no-op when not browsing.
+    /// Down arrow. Moving one VISUAL line down inside the wrapped text takes
+    /// precedence, so a multi-line recalled entry keeps the cursor inside it;
+    /// only from the last visual line does Down step to the newer entry, or
+    /// restore the exact draft past the newest one (`newer()` is itself a
+    /// no-op returning None when not browsing).
     fn recall_newer_prompt(&mut self) {
-        // `newer()` itself is a no-op returning None when not browsing.
-        if !self.prompt_history.is_browsing() {
-            let chars: Vec<char> = self.text.chars().collect();
-            let cursor = self.cursor.min(chars.len());
-            if chars[cursor..].iter().any(|&c| c == '\n') {
-                return;
-            }
+        let width = self.composer_text_width();
+        let (line, column) = composer_cursor_position(&self.text, width, self.cursor);
+        let last_line = composer_lines(&self.text, width).len() - 1;
+        if line < last_line {
+            let cursor = composer_cursor_at(&self.text, width, line + 1, column);
+            self.apply_edit(self.text.clone(), cursor);
+            return;
         }
         if let Some(text) = self.prompt_history.newer() {
             let cursor = text.chars().count();
@@ -1284,60 +1284,76 @@ impl TuiApp {
     /// Enter while a run is in flight: hold the prompt for the NEXT run. It is
     /// deliberately not written to the session inbox — that handoff is what
     /// steering is — so a queued message only reaches the agent once the
-    /// running goal has ended (or the operator promotes it with shift+enter).
+    /// running goal has ended (or the operator promotes it with ctrl+s).
+    /// The queue is shown above the composer, not in the timeline, so nothing
+    /// is logged here.
     fn queue_prompt(&mut self, text: String) {
         if text.trim().is_empty() {
             return;
         }
         self.prompt_history.record(&text);
-        self.queued_prompts.push_back(text.clone());
-        self.push_info(format!(
-            "queued for the next run: {text} (shift+enter steers the running goal with it now)"
-        ));
+        self.queued_prompts.push_back(text);
         self.repaint();
     }
 
-    /// Shift+enter while a run is in flight: promote the next queued prompt
-    /// (or, with an empty queue, whatever is in the composer) into the live
-    /// session's inbox. The harness picks it up at its next cycle boundary and
-    /// treats it as steering that outranks the original goal, so a queue is
+    /// Ctrl+s while a run is in flight: steer the live session through
+    /// its inbox. Typed text steers on its own and leaves the queue alone; an
+    /// empty composer steers with the WHOLE queue, in order, and flushes it.
+    /// The harness picks the messages up at its next cycle boundary and
+    /// treats them as steering that outranks the original goal, so a queue is
     /// never a dead end while the run is still going.
     fn steer_running_goal(&mut self) {
-        let next = match self.queued_prompts.pop_front() {
-            Some(queued) if !queued.trim().is_empty() => Some(queued),
-            Some(_) => None,
-            None => {
-                let typed = self.text.trim().to_string();
-                if typed.is_empty() {
-                    None
-                } else {
-                    self.apply_edit(String::new(), 0);
-                    self.prompt_history.record(&typed);
-                    Some(typed)
+        let typed = self.text.trim().to_string();
+        if !typed.is_empty() {
+            self.apply_edit(String::new(), 0);
+            self.prompt_history.record(&typed);
+            match append_operator_message(Path::new(&self.paths.inbox_path), &typed) {
+                Ok(()) => self.push_info(format!(
+                    "steering the running goal: {typed} (it lands at the next cycle boundary)"
+                )),
+                Err(error) => {
+                    // Losing the message silently would be the worst outcome:
+                    // put it at the head of the queue and say so loudly.
+                    self.push_error(format!(
+                        "could not steer the running goal ({error}) — kept in the queue"
+                    ));
+                    self.queued_prompts.push_front(typed);
                 }
             }
-        };
+            self.repaint();
+            return;
+        }
 
-        let Some(text) = next else {
+        if self.queued_prompts.iter().all(|queued| queued.trim().is_empty()) {
+            self.queued_prompts.clear();
             self.push_info(
                 "nothing to steer with — type a message, or queue one with enter first.",
             );
             self.repaint();
             return;
-        };
+        }
 
-        match append_operator_message(Path::new(&self.paths.inbox_path), &text) {
-            Ok(()) => self.push_info(format!(
-                "steering the running goal: {text} (it lands at the next cycle boundary)"
-            )),
-            Err(error) => {
-                // Losing the message silently would be the worst outcome: put
-                // it back at the head of the queue and say so loudly.
-                self.push_error(format!(
-                    "could not steer the running goal ({error}) — kept in the queue"
-                ));
-                self.queued_prompts.push_front(text);
+        let mut sent = 0usize;
+        while let Some(text) = self.queued_prompts.pop_front() {
+            if text.trim().is_empty() {
+                continue;
             }
+            if let Err(error) = append_operator_message(Path::new(&self.paths.inbox_path), &text) {
+                // Whatever did not reach the inbox stays queued, in order.
+                self.queued_prompts.push_front(text);
+                self.push_error(format!(
+                    "could not steer the running goal ({error}) — {} kept in the queue",
+                    self.queued_prompts.len()
+                ));
+                break;
+            }
+            sent += 1;
+        }
+        if sent > 0 {
+            let noun = if sent == 1 { "message" } else { "messages" };
+            self.push_info(format!(
+                "steering the running goal with {sent} queued {noun} (they land at the next cycle boundary)"
+            ));
         }
         self.repaint();
     }
@@ -1447,10 +1463,12 @@ impl TuiApp {
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
-                // Enter queues for the next run; shift+enter promotes the head
-                // of that queue into the LIVE run as steering.
+                // Enter queues for the next run; ctrl+s steers the LIVE run
+                // with the typed text, or with the whole queue when empty.
+                // Ctrl+s is one raw-mode byte every terminal delivers, unlike
+                // shift+enter, which most terminals report as plain enter.
                 Key::Return => self.submit(),
-                Key::ShiftReturn => self.steer_running_goal(),
+                Key::Ctrl('s') => self.steer_running_goal(),
                 // The composer stays editable while a run is in flight, so a
                 // message can be composed (and corrected) before queueing.
                 Key::Backspace | Key::Delete => {
@@ -1484,7 +1502,11 @@ impl TuiApp {
                 Key::Ctrl('u') => self.apply_edit(String::new(), 0),
                 Key::Paste(raw) => self.on_paste(&raw),
                 Key::Text(text) => self.insert_text(&text),
-                Key::Up | Key::Down | Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
+                // A draft typed mid-run gets the same visual-line cursor
+                // movement and history recall as an idle composer.
+                Key::Up => self.recall_older_prompt(),
+                Key::Down => self.recall_newer_prompt(),
+                Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
             }
             return;
         }
@@ -1501,9 +1523,9 @@ impl TuiApp {
 
         match key {
             Key::Escape => self.apply_edit(String::new(), 0),
-            // Idle shift+enter: drain the queue into a run, else it just sends
-            // what is typed (the idle composer has no running goal to steer).
-            Key::ShiftReturn => match self.queued_prompts.pop_front() {
+            // Idle ctrl+s: drain the queue into a run, else it just sends
+            // what is typed (there is no running goal to steer).
+            Key::Ctrl('s') => match self.queued_prompts.pop_front() {
                 Some(next) if !next.trim().is_empty() => self.run_goal(next),
                 Some(_) => {}
                 None => self.submit(),
@@ -2763,7 +2785,7 @@ impl TuiApp {
         self.finish_run();
         // A prompt queued while the run was in flight is what the operator
         // wanted next: the run ending is the moment the queue drains into a
-        // fresh goal. Steering (shift+enter) is the other way out of it.
+        // fresh goal. Steering (ctrl+s) is the other way out of it.
         if let Some(next) = self.queued_prompts.pop_front() {
             if !next.trim().is_empty() {
                 self.run_goal(next);
@@ -3482,7 +3504,6 @@ mod tests {
                 Key::Paste(_) => "paste",
                 Key::Return => "return",
                 Key::Right => "right",
-                Key::ShiftReturn => "shift-return",
                 Key::Tab => "tab",
                 Key::Text(_) => "text",
                 Key::Up => "up",
@@ -3505,16 +3526,14 @@ mod tests {
             _ => panic!("ctrl+v expected"),
         }
         assert_eq!(kinds(&decode_input("é".as_bytes(), &mut paste)), vec!["text"]);
-        // shift+enter arrives as a modifyOtherKeys sequence or the classic
-        // ESC CR; a multi-byte chunk is never reinterpreted as shift+enter.
-        assert_eq!(
-            kinds(&decode_input(b"\x1b[13;2u", &mut paste)),
-            vec!["shift-return"]
-        );
-        assert_eq!(
-            kinds(&decode_input(b"\x1b\r", &mut paste)),
-            vec!["shift-return"]
-        );
+        // Ctrl+s is the steer key: a single raw-mode byte on every terminal.
+        match &decode_input(b"\x13", &mut paste)[0] {
+            Key::Ctrl(c) => assert_eq!(*c, 's'),
+            _ => panic!("ctrl+s expected"),
+        }
+        // A bare LF (ctrl+enter on some terminals) stays a plain return so a
+        // stray newline can never steer.
+        assert_eq!(kinds(&decode_input(b"\n", &mut paste)), vec!["return"]);
         assert_eq!(kinds(&decode_input(b"a\r", &mut paste)), vec!["paste"]);
     }
 
@@ -4789,7 +4808,21 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_while_running_steers_with_the_next_queued_message() {
+    fn queued_prompts_stay_out_of_the_timeline() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "next goal".to_string();
+        fixture.app.on_key(Key::Return);
+        assert!(
+            !fixture.app.cells.iter().chain(fixture.app.pending_cells.iter()).any(
+                |entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("queued"))
+            ),
+            "the queue is listed above the composer, never logged as history"
+        );
+    }
+
+    #[test]
+    fn ctrl_s_on_an_empty_composer_steers_with_the_whole_queue_and_flushes_it() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "first".to_string();
@@ -4798,32 +4831,54 @@ mod skill_activation_tests {
         fixture.app.on_key(Key::Return);
         assert_eq!(fixture.app.queued_prompts.len(), 2);
 
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
 
-        assert_eq!(
-            fixture.app.queued_prompts.len(),
-            1,
-            "shift+enter consumes exactly one queued message"
+        assert!(
+            fixture.app.queued_prompts.is_empty(),
+            "an empty steer flushes the whole queue"
         );
-        assert_eq!(fixture.app.queued_prompts[0], "second");
+        let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
+            .expect("steering writes the session inbox");
+        let texts: Vec<String> = raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(texts, vec!["first", "second"], "every queued message steers, in order");
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("2 queued messages"))
+            ),
+            "the steer is reported once"
+        );
+    }
+
+    #[test]
+    fn ctrl_s_with_typed_text_steers_only_that_text_and_keeps_the_queue() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.text = "queued".to_string();
+        fixture.app.on_key(Key::Return);
+        fixture.app.text = "steer me now".to_string();
+        fixture.app.on_key(Key::Ctrl('s'));
+
+        assert_eq!(fixture.app.queued_prompts.len(), 1, "the queue is untouched");
+        assert_eq!(fixture.app.queued_prompts[0], "queued");
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 1);
         let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(
-            parsed["text"], "first",
-            "the head of the queue is the message that steers"
-        );
+        assert_eq!(parsed["text"], "steer me now");
         assert!(parsed["at"].as_str().is_some(), "{parsed}");
+        assert!(fixture.app.text.is_empty());
     }
 
     #[test]
-    fn shift_enter_while_running_with_an_empty_queue_steers_the_typed_message() {
+    fn ctrl_s_while_running_with_an_empty_queue_steers_the_typed_message() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
         fixture.app.text = "steer me now".to_string();
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
         let parsed: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
@@ -4833,10 +4888,10 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn shift_enter_with_nothing_to_steer_reports_it_and_writes_no_inbox() {
+    fn ctrl_s_with_nothing_to_steer_reports_it_and_writes_no_inbox() {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.running = true;
-        fixture.app.on_key(Key::ShiftReturn);
+        fixture.app.on_key(Key::Ctrl('s'));
         assert!(!Path::new(&fixture.app.paths.inbox_path).exists());
         assert!(
             fixture
@@ -4844,7 +4899,7 @@ mod skill_activation_tests {
                 .cells
                 .iter()
                 .any(|entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("nothing to steer"))),
-            "an empty shift+enter must say so"
+            "an empty steer must say so"
         );
     }
 
@@ -4979,6 +5034,76 @@ mod prompt_history_wiring_tests {
     }
 
     #[test]
+    fn up_on_a_wrapped_continuation_line_moves_the_cursor_and_does_not_recall() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 20;
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        let wrapped = "aaaa bbbb cccc dddd eeee";
+        type_into(&mut fixture.app, wrapped);
+        // Body width 17 at 20 columns: the draft wraps into "aaaa bbbb cccc " +
+        // the tail, so the end-of-text cursor sits on the second visual line.
+        assert_eq!(composer_text_width(20), 17);
+        assert_eq!(composer_lines(wrapped, 17), vec![0..15, 15..24]);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, wrapped, "no recall from a lower line");
+        assert!(!fixture.app.prompt_history.is_browsing());
+        assert_eq!(fixture.app.cursor, 9, "same column on the line above");
+
+        // From the top visual line the same key recalls the older prompt.
+        fixture.app.apply_edit(wrapped.to_string(), 3);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "recorded goal");
+    }
+
+    #[test]
+    fn up_on_a_lower_line_of_a_multiline_draft_moves_instead_of_recalling() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 40;
+        type_into(&mut fixture.app, "recorded goal");
+        fixture.app.submit();
+        let draft = "first line\nsecond line";
+        type_into(&mut fixture.app, draft);
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, draft, "no recall from the second line");
+        assert!(!fixture.app.prompt_history.is_browsing());
+        assert_eq!(fixture.app.cursor, 10, "column clamped to the shorter line");
+
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, "recorded goal", "top line recalls");
+    }
+
+    #[test]
+    fn down_moves_within_a_recalled_entry_before_stepping_newer() {
+        let mut fixture = make_history_app(&[]);
+        fixture.app.cols = 40;
+        type_into(&mut fixture.app, "newest line");
+        fixture.app.submit();
+        let older = "alpha\nbeta\ngamma";
+        type_into(&mut fixture.app, older);
+        fixture.app.submit();
+        type_into(&mut fixture.app, "unsent draft");
+
+        fixture.app.on_key(Key::Up);
+        assert_eq!(fixture.app.text, older);
+        // Cursor at the end of "alpha": Down stays inside the entry.
+        fixture.app.apply_edit(older.to_string(), 5);
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, older, "still inside the recalled entry");
+        assert_eq!(fixture.app.cursor, 10, "one visual line down");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, older, "still inside the recalled entry");
+        assert_eq!(fixture.app.cursor, 15, "second line down, column clamped");
+
+        // On the last visual line Down leaves the entry: this entry IS the
+        // newest, so it restores the exact draft in one step.
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "exact draft restored");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(fixture.app.text, "unsent draft", "browsing ended: no-op");
+    }
+
+    #[test]
     fn down_restores_exact_draft_and_noops_outside_browsing() {
         let mut fixture = make_history_app(&[]);
         type_into(&mut fixture.app, "recorded goal");
@@ -5022,22 +5147,27 @@ mod prompt_history_wiring_tests {
 
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, older_multiline, "first Up recalls newest");
-        // Recall leaves the cursor at the end of the multiline entry, but the
-        // walk continues: browsing bypasses the first-line entry gate.
+        // Recall leaves the cursor at the end of the multiline entry, which is
+        // its LAST visual line: one Up moves to the first line before the walk
+        // continues older.
+        fixture.app.on_key(Key::Up);
+        assert_eq!(
+            fixture.app.text, older_multiline,
+            "second Up moves inside the entry"
+        );
+        assert_eq!(fixture.app.cursor, 12, "top line, column clamped to its end");
         fixture.app.on_key(Key::Up);
         assert_eq!(
             fixture.app.text, "newest single line",
-            "second Up walks past a multiline entry"
+            "Up from the first line walks older"
         );
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, "newest single line", "clamped at oldest");
 
         fixture.app.on_key(Key::Down);
-        assert_eq!(fixture.app.text, older_multiline);
-        // Off the last line mid-browsing, Down still walks newer.
-        for _ in 0..25 {
-            fixture.app.on_key(Key::Left);
-        }
+        assert_eq!(fixture.app.text, older_multiline, "Down steps newer");
+        // A recalled multiline entry leaves the cursor on its last visual line,
+        // so the next Down restores the exact draft.
         fixture.app.on_key(Key::Down);
         assert_eq!(
             fixture.app.text, "draft being typed",
@@ -5066,13 +5196,20 @@ mod prompt_history_wiring_tests {
         fixture.app.apply_edit(multiline.to_string(), 0);
         fixture.app.on_key(Key::Up);
         assert_eq!(fixture.app.text, "alpha\nbeta");
-        // While browsing, the last-line gate no longer applies: a mid-text
-        // Down still walks newer and restores the exact draft.
+        // While browsing, Down first walks the cursor down the recalled entry;
+        // only from its last visual line does it step newer and restore the
+        // exact draft.
         fixture.app.apply_edit("alpha\nbeta".to_string(), 2);
         fixture.app.on_key(Key::Down);
         assert_eq!(
+            fixture.app.text, "alpha\nbeta",
+            "browsing Down mid-entry: stays inside"
+        );
+        assert_eq!(fixture.app.cursor, 8, "second visual line, column kept");
+        fixture.app.on_key(Key::Down);
+        assert_eq!(
             fixture.app.text, multiline,
-            "browsing Down mid-text: draft restored"
+            "last line steps newer: draft restored"
         );
         fixture.app.on_key(Key::Down);
         assert_eq!(fixture.app.text, multiline, "browsing ended: Down no-op");

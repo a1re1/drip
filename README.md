@@ -927,18 +927,19 @@ projection, so raw tool rows are not re-revealed.
 
 While a run is in flight the TUI composer stays editable. `Enter` does not
 start a second run against the same session: it **queues** the composer text,
-shown as a `N queued — shift+enter steers the running goal with one` hint row
-under the box. Queued messages are drained into the next goal once the running
-run finishes.
+listed above the input in send order (never in the timeline). Queued messages
+are drained into the next goal once the running run finishes.
 
-`Shift+Enter` **steers** the run that is going right now: it writes the next
-queued message to the session inbox — the same handoff `drip --send` uses —
-which the harness consumes as operator steering. The message stays queued if
-that write fails, so a steer is never lost silently.
+`Ctrl+S` **steers** the run that is going right now through the session inbox
+— the same handoff `drip --send` uses — which the harness consumes as operator
+steering. With text in the composer it steers with that text and leaves the
+queue alone; with an empty composer it steers with the **whole queue**, in
+order, and flushes it. Whatever fails to reach the inbox stays queued, so a
+steer is never lost silently.
 
-Shift+Enter is only distinguishable from Enter in terminals that report
-modified keys natively (`ESC[13;2u` or `ESC` `CR`); elsewhere it behaves like
-plain Enter and the message is queued instead.
+The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
+arrives as a single byte instead of pausing output; shift+enter is deliberately
+not a binding because most terminals report it as plain Enter.
 
 ## Watch TUI (`dripw`)
 

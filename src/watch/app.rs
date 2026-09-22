@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::core::home::DripProject;
 use crate::core::lease::{check_lease, LeaseStatus};
@@ -18,7 +18,7 @@ use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRe
 use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, sessions_under_dir, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
-use crate::watch::render::{diff_lines, render_frame, WatchViewModel};
+use crate::watch::render::{diff_lines, render_frame, SessionsMode, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
@@ -48,13 +48,11 @@ fn now_ms() -> i64 {
 fn empty_vm(now: i64) -> WatchViewModel {
     WatchViewModel {
         now,
-        running: Vec::new(),
-        recent: Vec::new(),
+        mode: SessionsMode::Running,
+        sessions: Vec::new(),
         started_at_ms: HashMap::new(),
         focus: 1,
-        session_focus: 1,
-        sel_running: 0,
-        sel_recent: 0,
+        sel_session: 0,
         transcript: Vec::new(),
         following: true,
         transcript_scroll: 0,
@@ -62,6 +60,8 @@ fn empty_vm(now: i64) -> WatchViewModel {
         sel_shell: 0,
         shell_log_lines: Vec::new(),
         shell_log_files: Vec::new(),
+        tasks: Vec::new(),
+        sel_task: 0,
     }
 }
 
@@ -92,12 +92,35 @@ fn same_list(a: &[String], b: &[String]) -> bool {
     a == b
 }
 
+/// The rows visible under `mode`: Running → running only, Recent → recent
+/// only, All → running followed by recent. Both inputs are already sorted
+/// newest-first, so All is a plain concatenation with no re-sort.
+fn visible_sessions(mode: SessionsMode, running: &[SessionRecord], recent: &[SessionRecord]) -> Vec<SessionRecord> {
+    match mode {
+        SessionsMode::Running => running.to_vec(),
+        SessionsMode::Recent => recent.to_vec(),
+        SessionsMode::All => {
+            let mut out = running.to_vec();
+            out.extend_from_slice(recent);
+            out
+        }
+    }
+}
+
 pub struct WatchApp {
     project: DripProject,
     /// Directory dripw was launched from; the only visibility rule there is.
     watch_dir: String,
     vm: WatchViewModel,
     running: bool,
+    /// Sessions with a live lease, newest-first. Cached so `r` can re-filter
+    /// the Sessions pane without re-listing every home registry.
+    running_sessions: Vec<SessionRecord>,
+    /// Every other visible session, newest-first.
+    recent_sessions: Vec<SessionRecord>,
+    /// state.json path and mtime behind `vm.tasks`, so an unchanged ledger is
+    /// not reparsed on every tail tick.
+    tasks_src: Option<(String, SystemTime)>,
     tail: Option<TranscriptTail>,
     focused_id: String,
     /// Lease pid per running session id, refreshed with the session list.
@@ -106,7 +129,6 @@ pub struct WatchApp {
     /// Pid whose stdout/stderr is currently seeded/followed (focus == 3).
     cur_shell_pid: i64,
     shell_followers: Vec<LineFollower>,
-    auto_focused: bool,
     last_frame: String,
     last_lines: Vec<String>,
     force_full: bool, // first paint + resize
@@ -125,13 +147,15 @@ impl WatchApp {
             watch_dir,
             vm,
             running: false,
+            running_sessions: Vec::new(),
+            recent_sessions: Vec::new(),
+            tasks_src: None,
             tail: None,
             focused_id: String::new(),
             pid_by_id: HashMap::new(),
             ps_in_flight: false,
             cur_shell_pid: 0,
             shell_followers: Vec::new(),
-            auto_focused: false,
             last_frame: String::new(),
             last_lines: Vec::new(),
             force_full: true,
@@ -315,6 +339,15 @@ impl WatchApp {
             }
         }
 
+        // A running session's ledger grows with no transcript line appended, so
+        // re-read it every tail tick and repaint when it moved.
+        let selected = self.selected_record();
+        let before = self.vm.tasks.clone();
+        self.load_tasks(selected.as_ref());
+        if self.vm.tasks != before {
+            dirty = true;
+        }
+
         if !dirty {
             return;
         }
@@ -341,9 +374,19 @@ impl WatchApp {
         }) {
             Ok(records) => records,
             Err(_) => {
-                self.vm.running = Vec::new();
-                self.vm.recent = Vec::new();
+                // Drop every cached view of the sessions that just vanished:
+                // rows, timers, pids, and the focused transcript/ledger.
+                self.running_sessions = Vec::new();
+                self.recent_sessions = Vec::new();
+                self.vm.sessions = Vec::new();
                 self.vm.started_at_ms = HashMap::new();
+                self.pid_by_id = HashMap::new();
+                self.vm.shells = Vec::new();
+                self.vm.transcript = Vec::new();
+                self.vm.tasks = Vec::new();
+                self.tasks_src = None;
+                self.focused_id = String::new();
+                self.tail = None;
                 self.clamp_selections();
                 return;
             }
@@ -372,48 +415,75 @@ impl WatchApp {
         self.pid_by_id = pid_by_id;
 
         let classified = classify_sessions(&records, &|r: &SessionRecord| alive.contains(&r.id));
-        self.vm.running = classified.running.clone();
-        self.vm.recent = classified.recent.clone();
+        self.running_sessions = classified.running;
+        self.recent_sessions = classified.recent;
         self.vm.started_at_ms = started_at_ms;
+        self.rebuild_sessions();
 
-        // Opening with nothing running would focus an empty Running panel; start on
-        // Recent instead so the bottom pane shows something immediately. Once only.
-        if !self.auto_focused && (!classified.running.is_empty() || !classified.recent.is_empty()) {
-            self.auto_focused = true;
-            if classified.running.is_empty() {
-                self.vm.focus = 2;
-                self.vm.session_focus = 2;
-            }
-        }
-
+        // The Sessions pane opens in Running mode and stays there even when
+        // nothing is running — an empty pane beats a pane that moves the
+        // selection out from under the user.
         self.clamp_selections();
         self.sync_focused();
     }
 
+    /// Rebuild the visible Sessions rows from the cached classified lists.
+    fn rebuild_sessions(&mut self) {
+        self.vm.sessions = visible_sessions(self.vm.mode, &self.running_sessions, &self.recent_sessions);
+    }
+
     fn clamp_selections(&mut self) {
-        self.vm.sel_running = clamp_sel(self.vm.sel_running as i64, self.vm.running.len());
-        self.vm.sel_recent = clamp_sel(self.vm.sel_recent as i64, self.vm.recent.len());
+        self.vm.sel_session = clamp_sel(self.vm.sel_session as i64, self.vm.sessions.len());
+        self.vm.sel_task = clamp_sel(self.vm.sel_task as i64, self.vm.tasks.len());
         self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64, self.vm.shells.len());
     }
 
     fn selected_record(&self) -> Option<SessionRecord> {
-        if self.vm.session_focus == 1 {
-            return self.vm.running.get(self.vm.sel_running).cloned();
+        self.vm.sessions.get(self.vm.sel_session).cloned()
+    }
+
+    /// Read `record`'s task ledger into the view model. Called on every list
+    /// refresh, tail tick and selection change so a live ledger tracks the
+    /// session; a missing, unreadable or invalid state file leaves it empty.
+    fn load_tasks(&mut self, record: Option<&SessionRecord>) {
+        // Reparsing a large state.json every tail tick is wasted work: skip
+        // when the same file is unchanged since the last load. A missing file
+        // (no mtime) clears the cache so its later appearance is picked up.
+        let src = record.map(|r| {
+            let state_path = session_paths_for(&self.project, r).state_path;
+            let mtime = std::fs::metadata(&state_path).and_then(|m| m.modified()).ok();
+            (state_path, mtime)
+        });
+        if let Some((path, Some(mtime))) = &src {
+            if self.tasks_src.as_ref().is_some_and(|(p, m)| p == path && m == mtime) {
+                return;
+            }
         }
-        self.vm.recent.get(self.vm.sel_recent).cloned()
+        let tasks = src
+            .as_ref()
+            .and_then(|(path, _)| crate::core::state::load_harness_state(Path::new(path)).ok().flatten())
+            .map(|state| state.tasks)
+            .unwrap_or_default();
+        self.tasks_src = src.and_then(|(path, mtime)| mtime.map(|m| (path, m)));
+        self.vm.tasks = tasks;
+        self.vm.sel_task = clamp_sel(self.vm.sel_task as i64, self.vm.tasks.len());
     }
 
     fn sync_focused(&mut self) {
         let next = self.selected_record();
         let next_id = next.as_ref().map(|r| r.id.clone()).unwrap_or_default();
-        if next_id == self.focused_id {
-            return;
+        if next_id != self.focused_id {
+            self.focused_id = next_id;
+            // A new session owns a new ledger: start at its first task.
+            self.vm.sel_task = 0;
+            self.switch_transcript(next.as_ref());
+            // Don't show the previous session's processes while the next ps runs.
+            self.vm.shells = Vec::new();
+            self.refresh_shells();
         }
-        self.focused_id = next_id;
-        self.switch_transcript(next.as_ref());
-        // Don't show the previous session's processes while the next ps runs.
-        self.vm.shells = Vec::new();
-        self.refresh_shells();
+        // Reload even when the transcript did not move: a task-only ledger
+        // change must still reach the pane.
+        self.load_tasks(next.as_ref());
     }
 
     fn switch_transcript(&mut self, record: Option<&SessionRecord>) {
@@ -475,18 +545,15 @@ impl WatchApp {
             return;
         }
 
-        // Focus panel 1 / 2
+        // Focus panel 1 / 2 — the session selection (and the transcript it
+        // owns) is untouched: the Sessions pane owns it whatever the focus is.
         if key == "1" {
             self.vm.focus = 1;
-            self.vm.session_focus = 1;
-            self.sync_focused();
             self.draw();
             return;
         }
         if key == "2" {
             self.vm.focus = 2;
-            self.vm.session_focus = 2;
-            self.sync_focused();
             self.draw();
             return;
         }
@@ -501,7 +568,7 @@ impl WatchApp {
             return;
         }
 
-        // Tab cycles Running → Recent → Shells
+        // Tab cycles Sessions → Tasks → Shells
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
@@ -510,10 +577,17 @@ impl WatchApp {
             };
             if self.vm.focus == 3 {
                 self.sync_shell_log();
-            } else {
-                self.vm.session_focus = self.vm.focus;
-                self.sync_focused();
             }
+            self.draw();
+            return;
+        }
+
+        // r cycles the Sessions filter: running → recent → all.
+        if key == "r" {
+            self.vm.mode = self.vm.mode.next();
+            self.rebuild_sessions();
+            self.vm.sel_session = clamp_sel(self.vm.sel_session as i64, self.vm.sessions.len());
+            self.sync_focused();
             self.draw();
             return;
         }
@@ -544,15 +618,15 @@ impl WatchApp {
 
     fn mv(&mut self, delta: i64) {
         if self.vm.focus == 1 {
-            self.vm.sel_running = clamp_sel(self.vm.sel_running as i64 + delta, self.vm.running.len());
+            self.vm.sel_session = clamp_sel(self.vm.sel_session as i64 + delta, self.vm.sessions.len());
+            self.sync_focused();
         } else if self.vm.focus == 2 {
-            self.vm.sel_recent = clamp_sel(self.vm.sel_recent as i64 + delta, self.vm.recent.len());
+            // Selecting a task only moves the highlight.
+            self.vm.sel_task = clamp_sel(self.vm.sel_task as i64 + delta, self.vm.tasks.len());
         } else {
             self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64 + delta, self.vm.shells.len());
             self.sync_shell_log();
-            return;
         }
-        self.sync_focused();
     }
 
     // +delta scrolls toward newer lines (down), -delta toward older.
@@ -621,4 +695,52 @@ impl WatchApp {
 pub fn run_watch_app(project: DripProject, watch_dir: String) {
     let mut app = WatchApp::new(project, watch_dir);
     app.start();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str) -> SessionRecord {
+        SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            cwd: "/r".into(),
+            goal_count: 1,
+            id: id.into(),
+            last_goal: Some("a goal".into()),
+            project_slug: "p".into(),
+            status: "idle".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    fn ids(list: &[SessionRecord]) -> Vec<String> {
+        list.iter().map(|r| r.id.clone()).collect()
+    }
+
+    #[test]
+    fn all_mode_concatenates_running_then_recent_in_order() {
+        let running = vec![record("run-1"), record("run-2")];
+        let recent = vec![record("old-1"), record("old-2")];
+
+        assert_eq!(ids(&visible_sessions(SessionsMode::Running, &running, &recent)), vec!["run-1", "run-2"]);
+        assert_eq!(ids(&visible_sessions(SessionsMode::Recent, &running, &recent)), vec!["old-1", "old-2"]);
+        assert_eq!(
+            ids(&visible_sessions(SessionsMode::All, &running, &recent)),
+            vec!["run-1", "run-2", "old-1", "old-2"]
+        );
+        assert!(visible_sessions(SessionsMode::Running, &[], &recent).is_empty());
+        assert_eq!(ids(&visible_sessions(SessionsMode::All, &[], &recent)), vec!["old-1", "old-2"]);
+    }
+
+    #[test]
+    fn empty_vm_opens_on_running_with_empty_panes() {
+        let vm = empty_vm(0);
+        assert_eq!(vm.mode, SessionsMode::Running);
+        assert!(vm.sessions.is_empty());
+        assert!(vm.tasks.is_empty());
+        assert_eq!(vm.sel_session, 0);
+        assert_eq!(vm.sel_task, 0);
+    }
 }

@@ -966,7 +966,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         ) {
             Ok(route) => route,
             Err(error) => {
-                eprintln!("classifier: {error} — skill classification is disabled for this run");
+                eprintln!("{error} — skill classification is disabled for this run");
                 None
             }
         }
@@ -1061,7 +1061,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         .await;
 
         for warning in &warnings {
-            eprintln!("classifier: {warning}");
+            eprintln!("{warning}");
         }
 
         let pool_count = candidates.len();

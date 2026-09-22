@@ -207,9 +207,16 @@ pub async fn ask(
     // Both awaits below are bounded by an explicit `tokio::time::timeout`,
     // so the client carries no timeout of its own: a request-level timeout
     // here would race the outer one and make the error text nondeterministic.
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|error| format!("classifier: could not build the HTTP client: {error}"))?;
+    // One shared client: a loop can fan out one request per authored skill,
+    // and each fresh client would otherwise carry its own connection pool.
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .build()
+                .map_err(|error| format!("classifier: could not build the HTTP client: {error}"))
+        })
+        .clone()?;
 
     let mut request = client.post(&route.url).json(&body);
     for (key, value) in &route.headers {
@@ -773,6 +780,10 @@ async fn select_unauthored_batch(
     for (index, name, description) in &batch {
         questions.insert(
             format!("skill_{index}"),
+            // Structured instructions, per the typesafe guidance: the question
+            // names the sibling `skill` field in backticks and the model reads
+            // the referenced object, so the identity travels as data, not as
+            // text spliced into the sentence.
             serde_json::json!({
                 "type": "noul",
                 "instructions": {
@@ -1369,7 +1380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_request_warns_and_selects_nothing() {
+    async fn an_answerless_response_selects_nothing_without_a_warning() {
         let body = "{}";
         let (base, server) = spawn_mock(vec![leak(body.to_string()); 2]);
         let route = hand_route(&base, 10_000);

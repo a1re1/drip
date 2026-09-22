@@ -4165,6 +4165,31 @@ mod dynamic_skills_tests {
         assert!(run.dynamic_skill_cache.is_empty());
     }
 
+    // An outage is a one-loop miss, never a whole-task one: the failed
+    // selection composes nothing now, but it is not cached, so the next loop
+    // on the same task asks the classifier again.
+    #[tokio::test]
+    async fn a_failed_selection_is_not_cached_for_the_task() {
+        let mut run = test_run_for_dynamic_skills().await;
+        run.tools = Vec::new();
+        run.options.classifier = Some(crate::harness::classifier::ClassifierRoute {
+            // Nothing listens on port 1: the request fails at connect.
+            url: "http://127.0.0.1:1/alpha/decisions".to_string(),
+            model: "jev-test".to_string(),
+            headers: Vec::new(),
+            timeout_ms: 500,
+        });
+        run.options.skill_pool = vec![dynamic("offered", &[], true)];
+
+        run.select_dynamic_skills().await;
+
+        assert!(run.dynamic_skills.is_empty());
+        assert!(
+            run.dynamic_skill_cache.is_empty(),
+            "a warning-tainted selection must not be remembered for the task"
+        );
+    }
+
     #[tokio::test]
     async fn a_pool_with_a_route_but_no_satisfiable_skill_composes_none() {
         let mut run = test_run_for_dynamic_skills().await;
@@ -6547,22 +6572,19 @@ impl HarnessRun {
             return;
         }
 
-        // The state the classifier sees: the goal, this task's id/title/
-        // description and its last three notes, the phase, the role, and the
+        // The state the classifier sees: the goal, this task's id and title
+        // and its last three notes, the phase, the role, and the
         // tool names. No repository contents, no transcript.
         let task = task_id.as_deref().and_then(|id| core_state::get_task_by_id(&self.state, id));
         let notes: Vec<String> = task
             .map(|task| task.notes.iter().rev().take(3).rev().cloned().collect())
             .unwrap_or_default();
+        // A task carries no description of its own: its title is the brief
+        // and its notes are the accumulated context.
         let task_json = task.map(|task| {
-            let description = serde_json::to_value(task)
-                .ok()
-                .and_then(|value| value.get("description").cloned())
-                .unwrap_or(Value::Null);
             serde_json::json!({
                 "id": task.id.clone(),
                 "title": task.title.clone(),
-                "description": description,
                 "notes": notes.clone(),
             })
         });
@@ -6586,8 +6608,13 @@ impl HarnessRun {
             });
         }
 
+        // Only a name this loop actually offered can be composed: the gate is
+        // structural, not a property of what the classifier happened to return.
         let mut selected: Vec<crate::cli::skills::LoadedCliSkill> = Vec::new();
         for (name, _score) in &selection.selected {
+            if !candidates.iter().any(|candidate| &candidate.name == name) {
+                continue;
+            }
             if let Some(skill) = self.options.skill_pool.iter().find(|skill| &skill.name == name) {
                 selected.push(crate::cli::skills::LoadedCliSkill {
                     name: skill.name.clone(),
@@ -6597,7 +6624,13 @@ impl HarnessRun {
             }
         }
 
-        self.dynamic_skill_cache.insert(task_id, selected.clone());
+        // A selection the classifier could not fully answer (timeout, HTTP
+        // error, dropped skill) is used for this loop but never cached: the
+        // next loop on this task asks again, so an outage hides a skill for
+        // one loop at most.
+        if selection.warnings.is_empty() {
+            self.dynamic_skill_cache.insert(task_id, selected.clone());
+        }
         self.dynamic_skills = selected;
     }
 

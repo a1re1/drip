@@ -1,10 +1,11 @@
 //! Shared skill-classifier pool construction.
 //!
-//! Both the headless CLI (`src/cli/entry.rs`) and the interactive TUI
-//! (`src/tui/app.rs`) resolve the classifier route, discover the candidate
-//! skills, run the cached capability-requirements pass, and hand the harness a
-//! route plus a pool of `DynamicSkill`s. This module owns that one sequence so
-//! the two callers cannot drift apart.
+//! The interactive TUI (`src/tui/app.rs`) builds its route, skill pool and
+//! cached capability-requirements state through this module. The headless CLI
+//! (`src/cli/entry.rs`, `run_headless`) still carries an equivalent inline copy
+//! of the same sequence: behaviorally identical and covered by the headless
+//! tests, but moving it here is a known follow-up so the two surfaces cannot
+//! drift apart.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;

@@ -3098,7 +3098,9 @@ impl TuiApp {
         // exactly as it does headless, and `runtime.classifier_in_tui = "false"`
         // keeps the TUI on its explicit /skill toggles only. Resolved before
         // the run thread starts so the announce line and any warnings land in
-        // this run's transcript.
+        // this run's transcript — at the cost of a one-time stall before the
+        // first paint on a cold requirements cache (one HTTP round-trip per
+        // unknown skill); moving the build behind the run task is a follow-up.
         let classifier_pool = {
             let settings = self.config.settings.clone();
             if crate::cli::classifier_pool::tui_classifier_pool_enabled(
@@ -3115,6 +3117,12 @@ impl TuiApp {
                     disabled: false,
                     env: &env,
                     home: &self.bootstrap.home,
+                    // The TUI tool pack carries no MCP tools at all, so the
+                    // requirements pass sees no MCP capabilities here. The
+                    // headless path adds one entry per server it spawned; a
+                    // skill whose requirements need MCP is classified as
+                    // unsatisfiable in the TUI, which matches what the run can
+                    // actually invoke.
                     mcp_servers: Vec::new(),
                     profile_override: self.bootstrap.classifier.as_deref(),
                     settings: &settings,
@@ -3127,7 +3135,15 @@ impl TuiApp {
                     Ok(runtime) => runtime.block_on(
                         crate::cli::classifier_pool::build_classifier_pool(pool_args),
                     ),
-                    Err(_) => Default::default(),
+                    // Every other failure in this sequence reports through the
+                    // transcript; a runtime that cannot be built must not be the
+                    // one exception, or classification silently disappears.
+                    Err(error) => {
+                        self.push_error(format!(
+                            "classifier: tokio runtime unavailable ({error}) — skill classification is off for this run"
+                        ));
+                        Default::default()
+                    }
                 }
             } else {
                 Default::default()

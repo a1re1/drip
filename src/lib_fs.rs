@@ -109,7 +109,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         // Only the destination file should exist, no .drip-tmp files
-        let tmp_files: Vec<_> = entries.iter().filter(|e| e.ends_with(".drip-tmp")).collect();
+        let tmp_files: Vec<_> = entries
+            .iter()
+            .filter(|e| e.ends_with(".drip-tmp"))
+            .collect();
         assert!(tmp_files.is_empty());
         assert!(entries.contains(&"output.json".to_string()));
     }
@@ -157,9 +160,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("torn.jsonl");
         // Two complete lines + torn tail (no trailing newline after third entry)
-        fs::write(&path, r#"{"a":1}
+        fs::write(
+            &path,
+            r#"{"a":1}
 {"b":2}
-{"c":3}"#)
+{"c":3}"#,
+        )
         .unwrap();
         let records = read_jsonl_records::<serde_json::Value>(&path);
         assert_eq!(records.len(), 2);
@@ -173,11 +179,7 @@ mod tests {
     fn malformed_line_returns_parsed_none_with_raw_preserved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("malformed.jsonl");
-        fs::write(
-            &path,
-            "{\"good\":1}\nnot valid json\n{\"also_good\":2}\n",
-        )
-        .unwrap();
+        fs::write(&path, "{\"good\":1}\nnot valid json\n{\"also_good\":2}\n").unwrap();
         let records = read_jsonl_records::<serde_json::Value>(&path);
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].parsed.as_ref().unwrap()["good"], 1);

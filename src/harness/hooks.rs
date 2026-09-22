@@ -531,12 +531,21 @@ mod tests {
     #[test]
     fn run_hook_command_success_and_failure_exit_codes() {
         let payload = "{}";
-        let ok = run_hook_command("cat > /dev/null; exit 0", ".", payload, Duration::from_secs(5));
+        let ok = run_hook_command(
+            "cat > /dev/null; exit 0",
+            ".",
+            payload,
+            Duration::from_secs(5),
+        );
         assert_eq!(ok.exit_code, Some(0));
         assert!(ok.succeeded());
 
-        let failed =
-            run_hook_command("cat > /dev/null; exit 3", ".", payload, Duration::from_secs(5));
+        let failed = run_hook_command(
+            "cat > /dev/null; exit 3",
+            ".",
+            payload,
+            Duration::from_secs(5),
+        );
         assert_eq!(failed.exit_code, Some(3));
         assert!(!failed.succeeded());
 
@@ -632,7 +641,11 @@ mod tests {
         assert_eq!(value["tool_name"], "remember");
         assert_eq!(value["tool_input"], r#"{"note":"hi"}"#);
 
-        for event in [HookEvent::RelayStart, HookEvent::RelayFinish, HookEvent::PRReady] {
+        for event in [
+            HookEvent::RelayStart,
+            HookEvent::RelayFinish,
+            HookEvent::PRReady,
+        ] {
             let payload = build_hook_payload(event, "/tmp/proj", None, "t");
             let value: serde_json::Value = serde_json::from_str(&payload).expect("payload is JSON");
             assert!(value["tool_name"].is_null());
@@ -689,7 +702,12 @@ mod tests {
     #[test]
     fn run_hook_command_returns_when_backgrounded_grandchild_holds_pipes() {
         let started = std::time::Instant::now();
-        let outcome = run_hook_command("sleep 10 & echo done", ".", "{}", Duration::from_millis(500));
+        let outcome = run_hook_command(
+            "sleep 10 & echo done",
+            ".",
+            "{}",
+            Duration::from_millis(500),
+        );
         assert_eq!(outcome.exit_code, Some(0));
         assert!(outcome.succeeded());
         assert!(started.elapsed() < Duration::from_secs(5));

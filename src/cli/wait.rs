@@ -7,7 +7,9 @@ use crate::core::lease::check_lease;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WaitOutcome {
-    Result { record: RunRecord },
+    Result {
+        record: RunRecord,
+    },
     /// The lease died without a new run record — the run crashed mid-flight.
     Crashed,
     /// No run is live and none has ever recorded a result.
@@ -52,8 +54,10 @@ pub fn wait_for_run_end(args: WaitForRunEndArgs<'_>) -> WaitOutcome {
         // run_drip_goal's teardown — but poll a short grace window anyway so a
         // record landing between our lease check and record read isn't misread
         // as a crash.
-        let grace_deadline =
-            now().timestamp_millis() + (args.grace_ms.unwrap_or_else(|| std::cmp::max(poll_ms * 4, 2000)) as i64);
+        let grace_deadline = now().timestamp_millis()
+            + (args
+                .grace_ms
+                .unwrap_or_else(|| std::cmp::max(poll_ms * 4, 2000)) as i64);
 
         loop {
             let record = load_run_record(args.result_path);

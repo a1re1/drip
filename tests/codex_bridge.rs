@@ -90,17 +90,25 @@ async fn spawn_bridge(script: &str) -> (CodexBridge, PathBuf, tempfile::TempDir)
 
 fn read_log(cwd: &PathBuf) -> Vec<serde_json::Value> {
     let path = cwd.join("codex_mock_log.jsonl");
-    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read log {:?}: {}", path, e));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read log {:?}: {}", path, e));
     raw.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap_or_else(|e| panic!("bad log line {:?}: {}", l, e)))
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .unwrap_or_else(|e| panic!("bad log line {:?}: {}", l, e))
+        })
         .collect()
 }
 
 fn assert_request(log: &[serde_json::Value], method: &str) -> serde_json::Value {
     log.iter()
         .find_map(|e| {
-            if e.get("received").and_then(|f| f.get("method")).and_then(|m| m.as_str()) == Some(method) {
+            if e.get("received")
+                .and_then(|f| f.get("method"))
+                .and_then(|m| m.as_str())
+                == Some(method)
+            {
                 e.get("received").cloned()
             } else {
                 None
@@ -115,7 +123,10 @@ fn text_of(resp: &drip::harness::model_call::OpenAICompatibleResponse) -> String
         .as_ref()
         .and_then(|c| c.first())
         .unwrap_or_else(|| panic!("no choices in response"));
-    let msg = choice.message.as_ref().unwrap_or_else(|| panic!("no message"));
+    let msg = choice
+        .message
+        .as_ref()
+        .unwrap_or_else(|| panic!("no message"));
     match msg.content.as_ref() {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(items)) => items
@@ -132,9 +143,21 @@ fn assert_usage_not_double_counted(resp: &drip::harness::model_call::OpenAICompa
         .usage
         .as_ref()
         .unwrap_or_else(|| panic!("response missing usage"));
-    assert_eq!(usage.prompt_tokens, Some(10), "inputTokens must not be double-counted");
-    assert_eq!(usage.completion_tokens, Some(5), "outputTokens must not be double-counted");
-    assert_eq!(usage.total_tokens, Some(15), "totalTokens must not be double-counted");
+    assert_eq!(
+        usage.prompt_tokens,
+        Some(10),
+        "inputTokens must not be double-counted"
+    );
+    assert_eq!(
+        usage.completion_tokens,
+        Some(5),
+        "outputTokens must not be double-counted"
+    );
+    assert_eq!(
+        usage.total_tokens,
+        Some(15),
+        "totalTokens must not be double-counted"
+    );
 }
 
 #[tokio::test]
@@ -155,7 +178,8 @@ async fn happy_path_initializes_reads_account_starts_thread_and_turn() {
     // account read with chatgpt type served before thread/start
     let account = assert_request(&log, "account/read");
     let as_id = |v: &serde_json::Value| {
-        v.as_i64().unwrap_or_else(|| panic!("non-integer JSON-RPC id: {}", v))
+        v.as_i64()
+            .unwrap_or_else(|| panic!("non-integer JSON-RPC id: {}", v))
     };
     let account_id = as_id(account.get("id").expect("account/read id"));
     let thread_start = assert_request(&log, "thread/start");
@@ -171,7 +195,10 @@ async fn happy_path_initializes_reads_account_starts_thread_and_turn() {
     // turn/start carries the requested model and effort; sandbox/cwd/
     // modelProvider are thread/start settings inherited by turns.
     let params = turn_start.get("params").cloned().unwrap_or_default();
-    assert_eq!(params.get("model"), Some(&serde_json::json!("gpt-5.6-luna")));
+    assert_eq!(
+        params.get("model"),
+        Some(&serde_json::json!("gpt-5.6-luna"))
+    );
     assert_eq!(params.get("effort"), Some(&serde_json::json!("high")));
     let tparams = thread_start.get("params").cloned().unwrap_or_default();
     let sandbox = tparams
@@ -236,10 +263,24 @@ async fn tool_roundtrip_answers_open_jsonrpc_request_and_completes() {
         .and_then(|m| m.tool_calls.as_ref())
         .unwrap_or_else(|| panic!("no tool_calls in first response"));
     assert_eq!(calls.len(), 1, "exactly one tool call expected");
-    assert_eq!(calls[0].id.as_deref(), Some("c1"), "callId must be the tool call id");
-    assert_eq!(calls[0].function.as_ref().unwrap().name.as_deref(), Some("shell"));
+    assert_eq!(
+        calls[0].id.as_deref(),
+        Some("c1"),
+        "callId must be the tool call id"
+    );
+    assert_eq!(
+        calls[0].function.as_ref().unwrap().name.as_deref(),
+        Some("shell")
+    );
     assert!(
-        calls[0].function.as_ref().unwrap().arguments.as_deref().unwrap_or("").contains("ls"),
+        calls[0]
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref()
+            .unwrap_or("")
+            .contains("ls"),
         "arguments must carry the mock command"
     );
 
@@ -276,9 +317,17 @@ async fn tool_roundtrip_answers_open_jsonrpc_request_and_completes() {
         .iter()
         .filter(|e| e.get("sent").and_then(|s| s.as_str()) == Some("item/tool/call answer"))
         .collect();
-    assert_eq!(answers.len(), 1, "exactly one tool answer expected: {:?}", answers);
+    assert_eq!(
+        answers.len(),
+        1,
+        "exactly one tool answer expected: {:?}",
+        answers
+    );
     assert_eq!(answers[0].get("id"), Some(&serde_json::json!(71)));
-    assert_eq!(answers[0].pointer("/params/success"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        answers[0].pointer("/params/success"),
+        Some(&serde_json::json!(true))
+    );
     assert_eq!(
         answers[0].pointer("/params/contentItems/0/type"),
         Some(&serde_json::json!("inputText"))
@@ -292,7 +341,9 @@ async fn tool_roundtrip_answers_open_jsonrpc_request_and_completes() {
     let thread_starts = log
         .iter()
         .filter(|e| {
-            e.get("received").and_then(|f| f.get("method")).and_then(|m| m.as_str())
+            e.get("received")
+                .and_then(|f| f.get("method"))
+                .and_then(|m| m.as_str())
                 == Some("thread/start")
         })
         .count();
@@ -309,7 +360,12 @@ async fn second_tool_call_roundtrips_without_deadlock() {
         .await
         .expect("first call should surface the first tool call");
     let calls1 = first.choices.as_ref().unwrap()[0]
-        .message.as_ref().unwrap().tool_calls.as_ref().unwrap();
+        .message
+        .as_ref()
+        .unwrap()
+        .tool_calls
+        .as_ref()
+        .unwrap();
     assert_eq!(calls1[0].id.as_deref(), Some("c1"));
 
     // Answer c1: the mock confirms id 71 and immediately asks a SECOND tool
@@ -327,11 +383,26 @@ async fn second_tool_call_roundtrips_without_deadlock() {
         )
         .await
         .expect("second call must surface the second tool call");
-    assert_eq!(second.choices.as_ref().unwrap()[0].finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(
+        second.choices.as_ref().unwrap()[0].finish_reason.as_deref(),
+        Some("tool_calls")
+    );
     let calls2 = second.choices.as_ref().unwrap()[0]
-        .message.as_ref().unwrap().tool_calls.as_ref().unwrap();
-    assert_eq!(calls2[0].id.as_deref(), Some("c2"), "second pending call must be c2");
-    assert_eq!(calls2[0].function.as_ref().unwrap().name.as_deref(), Some("shell"));
+        .message
+        .as_ref()
+        .unwrap()
+        .tool_calls
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        calls2[0].id.as_deref(),
+        Some("c2"),
+        "second pending call must be c2"
+    );
+    assert_eq!(
+        calls2[0].function.as_ref().unwrap().name.as_deref(),
+        Some("shell")
+    );
 
     // Answer c2: the turn completes and the reply text reflects the output.
     let third = bridge
@@ -349,8 +420,15 @@ async fn second_tool_call_roundtrips_without_deadlock() {
         )
         .await
         .expect("third call should complete the turn");
-    assert_eq!(third.choices.as_ref().unwrap()[0].finish_reason.as_deref(), Some("stop"));
-    assert!(text_of(&third).contains("cat output"), "final text: {}", text_of(&third));
+    assert_eq!(
+        third.choices.as_ref().unwrap()[0].finish_reason.as_deref(),
+        Some("stop")
+    );
+    assert!(
+        text_of(&third).contains("cat output"),
+        "final text: {}",
+        text_of(&third)
+    );
 
     // Wire: both answers echoed the ORIGINAL request ids 71 then 72.
     let log = read_log(&cwd);
@@ -373,19 +451,27 @@ async fn apikey_auth_fails_before_thread_start() {
         drip::harness::model_call::ModelCallError::Message(m) => m,
         other => panic!("expected Message error, got {:?}", other),
     };
-    assert!(msg.contains("chatgpt") || msg.contains("codex login") || msg.contains("apiKey"),
-        "auth error must explain the billing problem: {}", msg);
+    assert!(
+        msg.contains("chatgpt") || msg.contains("codex login") || msg.contains("apiKey"),
+        "auth error must explain the billing problem: {}",
+        msg
+    );
 
     // Failed BEFORE thread/start: no thread was ever created.
     let log = read_log(&cwd);
     let thread_starts = log
         .iter()
         .filter(|e| {
-            e.get("received").and_then(|f| f.get("method")).and_then(|m| m.as_str())
+            e.get("received")
+                .and_then(|f| f.get("method"))
+                .and_then(|m| m.as_str())
                 == Some("thread/start")
         })
         .count();
-    assert_eq!(thread_starts, 0, "no thread/start may happen on auth failure");
+    assert_eq!(
+        thread_starts, 0,
+        "no thread/start may happen on auth failure"
+    );
     assert_request(&log, "account/read");
 }
 
@@ -409,7 +495,8 @@ async fn missing_executable_fails_spawn() {
     };
     assert!(
         msg.contains("definitely-not-a-real-codex-binary-xyz"),
-        "spawn error must name the executable: {}", msg
+        "spawn error must name the executable: {}",
+        msg
     );
 }
 
@@ -449,7 +536,8 @@ async fn failed_turn_status_surfaces_error() {
     };
     assert!(
         msg.contains("mock turn exploded") || msg.contains("failed"),
-        "error must carry the turn failure, got: {}", msg
+        "error must carry the turn failure, got: {}",
+        msg
     );
 }
 
@@ -507,7 +595,8 @@ async fn abort_during_hung_turn_interrupts_and_frees_the_child() {
         msg.to_lowercase().contains("abort")
             || msg.to_lowercase().contains("stopped")
             || msg.to_lowercase().contains("cancel"),
-        "error must reflect the abort, got: {}", msg
+        "error must reflect the abort, got: {}",
+        msg
     );
 
     // Wire: drip must have sent turn/interrupt (request or notification).
@@ -552,7 +641,11 @@ async fn abort_during_hung_turn_interrupts_and_frees_the_child() {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    assert!(pids.is_empty(), "mock child must be killed after abort, still running: {}", pids);
+    assert!(
+        pids.is_empty(),
+        "mock child must be killed after abort, still running: {}",
+        pids
+    );
 }
 
 #[tokio::test]
@@ -582,7 +675,9 @@ async fn auth_null_rejected_before_thread_start() {
     let thread_starts = log
         .iter()
         .filter(|e| {
-            e.get("received").and_then(|f| f.get("method")).and_then(|m| m.as_str())
+            e.get("received")
+                .and_then(|f| f.get("method"))
+                .and_then(|m| m.as_str())
                 == Some("thread/start")
         })
         .count();
@@ -602,8 +697,14 @@ async fn rewritten_same_length_history_starts_fresh_thread_with_replay() {
         .expect("first call should surface the tool call");
     assert_eq!(
         first.choices.as_ref().unwrap()[0]
-            .message.as_ref().unwrap().tool_calls.as_ref().unwrap()[0]
-            .id.as_deref(),
+            .message
+            .as_ref()
+            .unwrap()
+            .tool_calls
+            .as_ref()
+            .unwrap()[0]
+            .id
+            .as_deref(),
         Some("c1")
     );
 
@@ -648,7 +749,9 @@ async fn rewritten_same_length_history_starts_fresh_thread_with_replay() {
     let thread_starts = log
         .iter()
         .filter(|e| {
-            e.get("received").and_then(|f| f.get("method")).and_then(|m| m.as_str())
+            e.get("received")
+                .and_then(|f| f.get("method"))
+                .and_then(|m| m.as_str())
                 == Some("thread/start")
         })
         .count();

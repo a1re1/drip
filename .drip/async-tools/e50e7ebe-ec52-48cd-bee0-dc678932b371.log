@@ -1,0 +1,49 @@
+[start] cargo test (images feature)
+[cwd] /Users/tylerwhitehurst/src/drip/.worktrees/tw-sofia-20eqc/drip
+[session] imgtest
+[attach] tmux attach -t imgtest
+[kill] tmux kill-session -t imgtest
+[cwd] /Users/tylerwhitehurst/src/drip/.worktrees/tw-sofia-20eqc/drip
+[command] cd /Users/tylerwhitehurst/src/drip/.worktrees/tw-sofia-20eqc/drip && cargo test 2>&1 | tail -40
+test run_summary_messages_match ... ok
+test iteration_messages_match ... ok
+test iteration_user_message_matches ... ok
+test looks_like_question_goal_matches ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/statusline_example.rs (target/debug/deps/statusline_example-75dc9e0c4eeec884)
+
+running 5 tests
+test documented_payload_keys_match_implementation ... ok
+test empty_payload_falls_back_to_literal_drip ... ok
+test model_only_payload_renders_styled_model_without_cwd ... ok
+test workspace_only_payload_falls_back_to_literal_drip ... ok
+test example_script_renders_representative_payload ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/tools_schema_parity.rs (target/debug/deps/tools_schema_parity-4d0cfe52348a363f)
+
+running 10 tests
+test fixture_covers_exactly_the_built_in_pack ... ok
+test read_definition_matches_the_fixture ... ok
+test bash_definition_matches_the_fixture ... ok
+test bash_async_definition_matches_the_fixture ... ok
+test verify_definition_matches_the_fixture ... ok
+test grep_definition_matches_the_fixture ... ok
+test dir_definition_matches_the_fixture ... ok
+test fetch_definition_matches_the_fixture ... ok
+test check_definition_matches_the_fixture ... ok
+test patch_definition_matches_the_fixture ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests drip
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[tmux-exit] session=imgtest exitCode=0
+[finish] status=completed exitCode=0

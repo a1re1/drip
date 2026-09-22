@@ -5,15 +5,15 @@ use crate::cli::run_record::{build_run_record, save_run_record, BuildRunRecordAr
 use crate::cli::runner::{run_cli_goal, CliGoalRunArgs};
 use crate::cli::skills::LoadedCliSkill;
 use crate::cli::transcript::{
-    append_transcript_entry, TranscriptEntry, TranscriptEventEntry, TranscriptGoalEntry, TranscriptModelEntry,
-    TranscriptModelRoleRoute, TranscriptRunEndEntry,
+    append_transcript_entry, TranscriptEntry, TranscriptEventEntry, TranscriptGoalEntry,
+    TranscriptModelEntry, TranscriptModelRoleRoute, TranscriptRunEndEntry,
 };
 use crate::core::home::DripProject;
 use crate::core::inference::ResolvedInferenceConfig;
 use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{
-    list_recent_project_memories, session_paths_for, sync_session_memories, touch_session, SessionIndex,
-    SessionRecord,
+    list_recent_project_memories, session_paths_for, sync_session_memories, touch_session,
+    SessionIndex, SessionRecord,
 };
 use crate::core::types::{HarnessEvent, HarnessRunReason, HarnessRunResult};
 use crate::harness::harness_tools::RepoMemoryConfig;
@@ -139,7 +139,9 @@ pub fn current_pid() -> i64 {
 }
 
 /// Runs one goal against a session directory and returns how it ended.
-pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOutcome, SessionGoalError> {
+pub async fn run_session_goal(
+    args: SessionGoalArgs<'_>,
+) -> Result<SessionGoalOutcome, SessionGoalError> {
     let paths = session_paths_for(args.project, args.session);
 
     // A second concurrent run against one session would interleave
@@ -190,7 +192,10 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
                 .iter()
                 .filter(|kind| {
                     let bound = match **kind {
-                        "planning" => args.role_bindings.as_ref().and_then(|b| b.planning.as_deref()),
+                        "planning" => args
+                            .role_bindings
+                            .as_ref()
+                            .and_then(|b| b.planning.as_deref()),
                         _ => args.role_bindings.as_ref().and_then(|b| b.task.as_deref()),
                     };
                     bound == Some(role.name.as_str())
@@ -200,11 +205,18 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
 
             TranscriptModelRoleRoute {
                 binding: bindings.first().cloned(),
-                bindings: if bindings.is_empty() { None } else { Some(bindings) },
+                bindings: if bindings.is_empty() {
+                    None
+                } else {
+                    Some(bindings)
+                },
                 model: role.route.as_ref().map(|route| route.model.clone()),
                 name: role.name.clone(),
                 provider: role.route.as_ref().and_then(|route| route.provider.clone()),
-                reasoning_effort: role.route.as_ref().and_then(|route| route.reasoning_effort.clone()),
+                reasoning_effort: role
+                    .route
+                    .as_ref()
+                    .and_then(|route| route.reasoning_effort.clone()),
             }
         })
         .collect();
@@ -219,10 +231,26 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
             profile_id: args.inference.profile_id.clone(),
             provider: args.inference.provider.clone(),
             reasoning_effort: args.inference.reasoning_effort.clone(),
-            roles: if role_routes.is_empty() { None } else { Some(role_routes) },
-            tool_model: args.inference.tool_route.as_ref().map(|route| route.model.clone()),
-            tool_profile_id: args.inference.tool_route.as_ref().map(|route| route.profile_id.clone()),
-            tool_reasoning_effort: args.inference.tool_route.as_ref().and_then(|route| route.reasoning_effort.clone()),
+            roles: if role_routes.is_empty() {
+                None
+            } else {
+                Some(role_routes)
+            },
+            tool_model: args
+                .inference
+                .tool_route
+                .as_ref()
+                .map(|route| route.model.clone()),
+            tool_profile_id: args
+                .inference
+                .tool_route
+                .as_ref()
+                .map(|route| route.profile_id.clone()),
+            tool_reasoning_effort: args
+                .inference
+                .tool_route
+                .as_ref()
+                .and_then(|route| route.reasoning_effort.clone()),
         }),
     );
 
@@ -270,7 +298,11 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: args.cwd.clone(),
         goal: args.goal.clone(),
-        goal_context: if goal_context.is_empty() { None } else { Some(goal_context) },
+        goal_context: if goal_context.is_empty() {
+            None
+        } else {
+            Some(goal_context)
+        },
         goal_images: args.goal_images.clone(),
         hooks: args.hooks.clone(),
         inbox_path: Some(paths.inbox_path.clone().into()),
@@ -320,7 +352,16 @@ pub async fn run_session_goal(args: SessionGoalArgs<'_>) -> Result<SessionGoalOu
         args.index,
         &args.session.id,
         None,
-        Some(if matches!(result.reason, HarnessRunReason::Completed | HarnessRunReason::Unreconciled) { "completed" } else { "idle" }),
+        Some(
+            if matches!(
+                result.reason,
+                HarnessRunReason::Completed | HarnessRunReason::Unreconciled
+            ) {
+                "completed"
+            } else {
+                "idle"
+            },
+        ),
     );
 
     let pending_operator_messages = read_inbox_messages(

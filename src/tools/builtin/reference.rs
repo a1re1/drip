@@ -116,7 +116,9 @@ pub fn prepare(args: &Value, _ctx: &ToolCtx) -> Result<ReferencePrepared> {
     let action = args
         .get("action")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow!("Missing required string argument \"action\" (\"search\" or \"show\")."))?;
+        .ok_or_else(|| {
+            anyhow!("Missing required string argument \"action\" (\"search\" or \"show\").")
+        })?;
 
     match action {
         "search" => {
@@ -125,9 +127,14 @@ pub fn prepare(args: &Value, _ctx: &ToolCtx) -> Result<ReferencePrepared> {
                 .and_then(|value| value.as_str())
                 .map(|text| text.to_string())
                 .filter(|text| !text.trim().is_empty())
-                .ok_or_else(|| anyhow!("Missing required string argument \"query\" when action=\"search\"."))?;
+                .ok_or_else(|| {
+                    anyhow!("Missing required string argument \"query\" when action=\"search\".")
+                })?;
             let k = clamp_k(args.get("k"));
-            let lexical = match args.get("mode").map(|value| value.as_str().unwrap_or_default()) {
+            let lexical = match args
+                .get("mode")
+                .map(|value| value.as_str().unwrap_or_default())
+            {
                 None | Some("") | Some("hybrid") => false,
                 Some("lexical") => true,
                 Some(other) => {
@@ -137,11 +144,7 @@ pub fn prepare(args: &Value, _ctx: &ToolCtx) -> Result<ReferencePrepared> {
                 }
             };
             Ok(ReferencePrepared {
-                action: ReferenceAction::Search {
-                    query,
-                    k,
-                    lexical,
-                },
+                action: ReferenceAction::Search { query, k, lexical },
             })
         }
         "show" => {
@@ -150,14 +153,13 @@ pub fn prepare(args: &Value, _ctx: &ToolCtx) -> Result<ReferencePrepared> {
                 Some(Value::String(text)) => Some(text.clone()),
                 Some(other) => return Err(anyhow!("\"path\" must be a string, got {other}")),
             };
-            let chunk = match args.get("chunk") {
-                None | Some(Value::Null) => None,
-                Some(value) => Some(
-                    value
-                        .as_i64()
-                        .ok_or_else(|| anyhow!("\"chunk\" must be a chunk id number, got {value}"))?,
-                ),
-            };
+            let chunk =
+                match args.get("chunk") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(value.as_i64().ok_or_else(|| {
+                        anyhow!("\"chunk\" must be a chunk id number, got {value}")
+                    })?),
+                };
             if path.is_some() == chunk.is_some() {
                 return Err(anyhow!(
                     "action=\"show\" needs exactly one of \"path\" or \"chunk\"; got {}.",
@@ -213,11 +215,9 @@ pub fn execute_prepared(prepared: &ReferencePrepared, ctx: &ToolCtx) -> Result<S
         ReferenceAction::Show { path, chunk } => {
             let arguments = match (path, chunk) {
                 (Some(path), _) => vec!["show".to_string(), "--path".to_string(), path.clone()],
-                (None, Some(chunk)) => vec![
-                    "show".to_string(),
-                    "--chunk".to_string(),
-                    chunk.to_string(),
-                ],
+                (None, Some(chunk)) => {
+                    vec!["show".to_string(), "--chunk".to_string(), chunk.to_string()]
+                }
                 (None, None) => unreachable!("prepare enforces exactly one of path/chunk"),
             };
             (arguments, show_label(&prepared.action))
@@ -229,7 +229,8 @@ pub fn execute_prepared(prepared: &ReferencePrepared, ctx: &ToolCtx) -> Result<S
         return Err(anyhow!(
             "oasis {} exited with status {}: {}",
             label,
-            code.map(|code| code.to_string()).unwrap_or_else(|| "signal".to_string()),
+            code.map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
             stderr_diagnostic(&stderr)
         ));
     }
@@ -253,8 +254,12 @@ pub fn execute_prepared(prepared: &ReferencePrepared, ctx: &ToolCtx) -> Result<S
 /// render_show prefixes only "REFERENCE", so the verb lives here alone.
 fn show_label(action: &ReferenceAction) -> String {
     match action {
-        ReferenceAction::Show { path: Some(path), .. } => format!("show {path}"),
-        ReferenceAction::Show { chunk: Some(chunk), .. } => format!("show chunk {chunk}"),
+        ReferenceAction::Show {
+            path: Some(path), ..
+        } => format!("show {path}"),
+        ReferenceAction::Show {
+            chunk: Some(chunk), ..
+        } => format!("show chunk {chunk}"),
         _ => "show".to_string(),
     }
 }
@@ -416,7 +421,10 @@ Rephrase the query with different or more general terms and search again."
         ));
     }
 
-    let header = format!("REFERENCE search \"{query}\" — {} hits (k={k}, {mode})", parsed.len());
+    let header = format!(
+        "REFERENCE search \"{query}\" — {} hits (k={k}, {mode})",
+        parsed.len()
+    );
     let mut lines: Vec<String> = Vec::new();
     for (index, hit) in parsed.iter().enumerate() {
         let rank = index + 1;
@@ -525,11 +533,7 @@ mod tests {
 
     #[test]
     fn missing_roots_names_flag_and_env_var() {
-        let error = prepare(
-            &json!({"action": "search", "query": "bm25"}),
-            &ctx(&[]),
-        )
-        .unwrap();
+        let error = prepare(&json!({"action": "search", "query": "bm25"}), &ctx(&[])).unwrap();
         let text = execute_prepared(&error, &ctx(&[])).unwrap_err().to_string();
         assert!(text.contains("--reference-root"), "got: {text}");
         assert!(text.contains("DRIP_REFERENCE_ROOTS"), "got: {text}");
@@ -543,12 +547,41 @@ mod tests {
 
     #[test]
     fn k_clamps_into_one_to_twenty() {
-        let low = prepare(&json!({"action": "search", "query": "q", "k": 0}), &ctx(&["wiki"])).unwrap();
-        let high = prepare(&json!({"action": "search", "query": "q", "k": 99}), &ctx(&["wiki"])).unwrap();
+        let low = prepare(
+            &json!({"action": "search", "query": "q", "k": 0}),
+            &ctx(&["wiki"]),
+        )
+        .unwrap();
+        let high = prepare(
+            &json!({"action": "search", "query": "q", "k": 99}),
+            &ctx(&["wiki"]),
+        )
+        .unwrap();
         let default = prepare(&json!({"action": "search", "query": "q"}), &ctx(&["wiki"])).unwrap();
-        assert_eq!(low.action, ReferenceAction::Search { query: "q".into(), k: 1, lexical: false });
-        assert_eq!(high.action, ReferenceAction::Search { query: "q".into(), k: 20, lexical: false });
-        assert_eq!(default.action, ReferenceAction::Search { query: "q".into(), k: 5, lexical: false });
+        assert_eq!(
+            low.action,
+            ReferenceAction::Search {
+                query: "q".into(),
+                k: 1,
+                lexical: false
+            }
+        );
+        assert_eq!(
+            high.action,
+            ReferenceAction::Search {
+                query: "q".into(),
+                k: 20,
+                lexical: false
+            }
+        );
+        assert_eq!(
+            default.action,
+            ReferenceAction::Search {
+                query: "q".into(),
+                k: 5,
+                lexical: false
+            }
+        );
     }
 
     #[test]
@@ -561,13 +594,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(both.to_string().contains("both"), "got: {both}");
-        let path = prepare(&json!({"action": "show", "path": "concepts/bm25.md"}), &ctx(&["wiki"])).unwrap();
+        let path = prepare(
+            &json!({"action": "show", "path": "concepts/bm25.md"}),
+            &ctx(&["wiki"]),
+        )
+        .unwrap();
         let chunk = prepare(&json!({"action": "show", "chunk": 234}), &ctx(&["wiki"])).unwrap();
         assert_eq!(
             path.action,
-            ReferenceAction::Show { path: Some("concepts/bm25.md".into()), chunk: None }
+            ReferenceAction::Show {
+                path: Some("concepts/bm25.md".into()),
+                chunk: None
+            }
         );
-        assert_eq!(chunk.action, ReferenceAction::Show { path: None, chunk: Some(234) });
+        assert_eq!(
+            chunk.action,
+            ReferenceAction::Show {
+                path: None,
+                chunk: Some(234)
+            }
+        );
     }
 
     #[test]
@@ -589,7 +635,12 @@ mod tests {
     #[test]
     fn hand_written_json_renders_ranking_order_paths_and_snippets() {
         let hits = vec![
-            hit("concepts/bm25.md", 234, "BM25", "## Related\n- tf-idf ranking"),
+            hit(
+                "concepts/bm25.md",
+                234,
+                "BM25",
+                "## Related\n- tf-idf ranking",
+            ),
             hit("algorithms/kmp.md", 77, "KMP", "prefix function"),
         ];
         let text = render_search("bm25 ranking", 5, "hybrid", &hits).unwrap();
@@ -597,8 +648,14 @@ mod tests {
             text.starts_with("REFERENCE search \"bm25 ranking\" — 2 hits (k=5, hybrid)"),
             "got: {text}"
         );
-        assert!(text.contains("1. concepts/bm25.md  [chunk 234]  BM25"), "got: {text}");
-        assert!(text.contains("2. algorithms/kmp.md  [chunk 77]  KMP"), "got: {text}");
+        assert!(
+            text.contains("1. concepts/bm25.md  [chunk 234]  BM25"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("2. algorithms/kmp.md  [chunk 77]  KMP"),
+            "got: {text}"
+        );
         let ranking_before = text.find("concepts/bm25.md").unwrap();
         assert!(ranking_before < text.find("algorithms/kmp.md").unwrap());
         assert!(text.contains("    ## Related"), "got: {text}");
@@ -611,7 +668,11 @@ mod tests {
         let text = render_search("q", 5, "hybrid", &hits).unwrap();
         let snippet_line = text.lines().nth(2).expect("snippet line");
         // "    " indent + 400 chars + the ellipsis.
-        assert!(snippet_line.chars().count() <= 405, "got {} chars", snippet_line.chars().count());
+        assert!(
+            snippet_line.chars().count() <= 405,
+            "got {} chars",
+            snippet_line.chars().count()
+        );
         assert!(text.contains('…'));
     }
 
@@ -621,31 +682,56 @@ mod tests {
             .map(|index| hit(&format!("page-{index}.md"), index, "H", &"y".repeat(900)))
             .collect();
         let text = render_search("q", 20, "lexical", &hits).unwrap();
-        assert!(text.chars().count() <= 8000, "got {} chars", text.chars().count());
+        assert!(
+            text.chars().count() <= 8000,
+            "got {} chars",
+            text.chars().count()
+        );
         assert!(text.ends_with("(output truncated)"), "got: {text}");
     }
 
     #[test]
     fn hit_without_a_path_is_reported_as_schema_drift() {
-        let hits = vec![hit("concepts/bm25.md", 1, "BM25", "text"), json!({"chunk_id": 2})];
-        let error = render_search("q", 5, "hybrid", &hits).unwrap_err().to_string();
+        let hits = vec![
+            hit("concepts/bm25.md", 1, "BM25", "text"),
+            json!({"chunk_id": 2}),
+        ];
+        let error = render_search("q", 5, "hybrid", &hits)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("without a \"path\""), "got: {error}");
     }
 
     // A query that looks like a flag must reach oasis as the positional query.
     #[test]
     fn queries_starting_with_a_dash_are_passed_after_a_separator() {
-        let prepared = prepare(&json!({"action": "search", "query": "-> operator"}), &ctx(&["wiki"])).unwrap();
-        let error = execute_prepared(&prepared, &ctx(&["/nope/missing"])).unwrap_err().to_string();
+        let prepared = prepare(
+            &json!({"action": "search", "query": "-> operator"}),
+            &ctx(&["wiki"]),
+        )
+        .unwrap();
+        let error = execute_prepared(&prepared, &ctx(&["/nope/missing"]))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("does not exist"), "got: {error}");
     }
 
     #[test]
     fn wrong_typed_show_arguments_name_the_argument() {
-        let path = prepare(&json!({"action": "show", "path": 7}), &ctx(&["wiki"])).unwrap_err().to_string();
+        let path = prepare(&json!({"action": "show", "path": 7}), &ctx(&["wiki"]))
+            .unwrap_err()
+            .to_string();
         assert!(path.contains("\"path\" must be a string"), "got: {path}");
-        let chunk = prepare(&json!({"action": "show", "chunk": "twelve"}), &ctx(&["wiki"])).unwrap_err().to_string();
-        assert!(chunk.contains("\"chunk\" must be a chunk id number"), "got: {chunk}");
+        let chunk = prepare(
+            &json!({"action": "show", "chunk": "twelve"}),
+            &ctx(&["wiki"]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            chunk.contains("\"chunk\" must be a chunk id number"),
+            "got: {chunk}"
+        );
     }
 
     #[test]
@@ -668,11 +754,18 @@ mod tests {
         assert!(text.contains("# BM25"), "got: {text}");
 
         let chunk = render_show("show chunk 12", "passage");
-        assert!(chunk.starts_with("REFERENCE show chunk 12 (7 chars)"), "got: {chunk}");
+        assert!(
+            chunk.starts_with("REFERENCE show chunk 12 (7 chars)"),
+            "got: {chunk}"
+        );
 
         let big = "z".repeat(30_000);
         let capped = render_show("show big.md", &big);
-        assert!(capped.chars().count() <= 20_000, "got {} chars", capped.chars().count());
+        assert!(
+            capped.chars().count() <= 20_000,
+            "got {} chars",
+            capped.chars().count()
+        );
         assert!(capped.ends_with("(output truncated)"));
     }
 
@@ -681,7 +774,10 @@ mod tests {
     #[test]
     fn show_labels_carry_exactly_one_verb() {
         for (arguments, expected) in [
-            (json!({"action": "show", "path": "concepts/bm25.md"}), "show concepts/bm25.md"),
+            (
+                json!({"action": "show", "path": "concepts/bm25.md"}),
+                "show concepts/bm25.md",
+            ),
             (json!({"action": "show", "chunk": 12}), "show chunk 12"),
         ] {
             let prepared = prepare(&arguments, &ctx(&["wiki"])).unwrap();
@@ -703,7 +799,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(show_path, "REFERENCE show concepts/bm25.md");
-        let show_chunk = display_input(&json!({"action": "show", "chunk": 234}), &ctx(&["wiki"])).unwrap();
+        let show_chunk =
+            display_input(&json!({"action": "show", "chunk": 234}), &ctx(&["wiki"])).unwrap();
         assert_eq!(show_chunk, "REFERENCE show chunk 234");
     }
 
@@ -711,13 +808,21 @@ mod tests {
     fn stderr_diagnostic_is_capped_at_five_hundred_chars() {
         let stderr = "INFO: loading model\n".repeat(200);
         let diagnostic = stderr_diagnostic(&stderr);
-        assert!(diagnostic.chars().count() <= 501, "got {} chars", diagnostic.chars().count());
+        assert!(
+            diagnostic.chars().count() <= 501,
+            "got {} chars",
+            diagnostic.chars().count()
+        );
         assert!(diagnostic.contains("INFO"), "got: {diagnostic}");
     }
 
     #[test]
     fn nonexistent_root_is_an_execute_time_error() {
-        let prepared = prepare(&json!({"action": "search", "query": "q"}), &ctx(&["missing"])).unwrap();
+        let prepared = prepare(
+            &json!({"action": "search", "query": "q"}),
+            &ctx(&["missing"]),
+        )
+        .unwrap();
         let error = execute_prepared(&prepared, &ctx(&["missing"])).unwrap_err();
         assert!(error.to_string().contains("does not exist"), "got: {error}");
     }

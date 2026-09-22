@@ -18,29 +18,52 @@ fn is_marketplace_key_enabled_precedence() {
         disabled: vec!["pkg/b".to_string()],
         enabled: Vec::new(),
     };
-    assert!(!is_marketplace_key_enabled("pkg/b", "pkg/b", &file, &overrides));
+    assert!(!is_marketplace_key_enabled(
+        "pkg/b", "pkg/b", &file, &overrides
+    ));
 
     // Project override enabled beats the registry's disabled entry.
     let overrides = ProjectPluginOverrides {
         disabled: Vec::new(),
         enabled: vec!["pkg/a".to_string()],
     };
-    assert!(is_marketplace_key_enabled("pkg/a", "pkg/a", &file, &overrides));
+    assert!(is_marketplace_key_enabled(
+        "pkg/a", "pkg/a", &file, &overrides
+    ));
 
     // The item key wins over the plugin key when they disagree.
     let overrides = ProjectPluginOverrides {
         disabled: Vec::new(),
         enabled: Vec::new(),
     };
-    assert!(is_marketplace_key_enabled("pkg/a", "pkg/b", &file, &overrides));
-    assert!(!is_marketplace_key_enabled("pkg/b", "pkg/a", &file, &overrides));
+    assert!(is_marketplace_key_enabled(
+        "pkg/a", "pkg/b", &file, &overrides
+    ));
+    assert!(!is_marketplace_key_enabled(
+        "pkg/b", "pkg/a", &file, &overrides
+    ));
 
     // The plugin key is used as a fallback when the item key is unknown.
-    assert!(!is_marketplace_key_enabled("pkg/a", "pkg/a/unknown-item", &file, &overrides));
-    assert!(is_marketplace_key_enabled("pkg/b", "pkg/b/unknown-item", &file, &overrides));
+    assert!(!is_marketplace_key_enabled(
+        "pkg/a",
+        "pkg/a/unknown-item",
+        &file,
+        &overrides
+    ));
+    assert!(is_marketplace_key_enabled(
+        "pkg/b",
+        "pkg/b/unknown-item",
+        &file,
+        &overrides
+    ));
 
     // Neither key known anywhere -> false.
-    assert!(!is_marketplace_key_enabled("pkg/zzz", "pkg/zzz/item", &file, &overrides));
+    assert!(!is_marketplace_key_enabled(
+        "pkg/zzz",
+        "pkg/zzz/item",
+        &file,
+        &overrides
+    ));
 }
 
 #[test]

@@ -11,10 +11,14 @@ use std::sync::{Arc, Mutex};
 use drip::core::types::{HarnessEvent, HarnessRunReason};
 use drip::harness::hooks::HooksConfig;
 use drip::harness::r#loop::{run_solid_state_harness, SolidStateHarnessOptions};
-use drip::tools::async_jobs::{create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions};
+use drip::tools::async_jobs::{
+    create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions,
+};
 
 /// Serves one canned response per connection, in order.
-fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
+fn spawn_scripted_server(
+    responses: Vec<String>,
+) -> (String, std::thread::JoinHandle<Vec<serde_json::Value>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
@@ -31,14 +35,19 @@ fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHa
                     let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
                     let len = head
                         .lines()
-                        .find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
                         .unwrap_or(0);
                     if data.len() >= pos + 4 + len {
                         break pos + 4;
                     }
                 }
             };
-            bodies.push(serde_json::from_slice(&data[body_start..]).unwrap_or(serde_json::Value::Null));
+            bodies.push(
+                serde_json::from_slice(&data[body_start..]).unwrap_or(serde_json::Value::Null),
+            );
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 response_body.len(),
@@ -49,7 +58,10 @@ fn spawn_scripted_server(responses: Vec<String>) -> (String, std::thread::JoinHa
         }
         bodies
     });
-    (format!("http://127.0.0.1:{port}/v1/chat/completions"), handle)
+    (
+        format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        handle,
+    )
 }
 
 fn tool_call_response(id: &str, name: &str, arguments: serde_json::Value) -> String {
@@ -83,7 +95,9 @@ fn count_marker_lines(path: &std::path::Path, needle: &str) -> usize {
 // side-effect and post_tool_use assertions meaningful (its command text must
 // stay non-writing — see the non-veto test).
 fn fake_bash_tool(side_effect: std::path::PathBuf) -> drip::tools::types::ChatToolDefinition {
-    use drip::tools::types::{define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters};
+    use drip::tools::types::{
+        define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters,
+    };
     define_sync_tool(ChatToolDefinition {
         name: "BASH".to_string(),
         description: "test double that records execution in a side-effect file".to_string(),
@@ -131,10 +145,12 @@ fn base_options(
         hooks,
         on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
         state_path: Some(temp.join("state.json")),
-        tool_services: Some(create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
-            cwd: Some(temp.to_path_buf()),
-            jobs_root: Some(temp.join("jobs")),
-        })),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.to_path_buf()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
         url: Some(url),
         summarize_run: Some(true),
         tools: Vec::new(),
@@ -164,9 +180,21 @@ async fn successful_remember_fires_memory_write_exactly_once() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["remember a fact"]})),
-        tool_call_response("call-2", "remember", serde_json::json!({"note": "the fixture note alpha-xyz"})),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "remembered"})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["remember a fact"]}),
+        ),
+        tool_call_response(
+            "call-2",
+            "remember",
+            serde_json::json!({"note": "the fixture note alpha-xyz"}),
+        ),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "remembered"}),
+        ),
         text_response("done"),
     ]);
 
@@ -182,8 +210,15 @@ async fn successful_remember_fires_memory_write_exactly_once() {
         event_kinds(&events)
     );
     let contents = std::fs::read_to_string(&marker).unwrap_or_default();
-    let mw_lines: Vec<&str> = contents.lines().filter(|l| l.contains("MemoryWrite")).collect();
-    assert_eq!(mw_lines.len(), 1, "exactly one MemoryWrite payload, got: {contents}");
+    let mw_lines: Vec<&str> = contents
+        .lines()
+        .filter(|l| l.contains("MemoryWrite"))
+        .collect();
+    assert_eq!(
+        mw_lines.len(),
+        1,
+        "exactly one MemoryWrite payload, got: {contents}"
+    );
     assert!(
         mw_lines[0].contains("\"tool_name\"") && mw_lines[0].contains("remember"),
         "payload names the tool: {}",
@@ -209,11 +244,23 @@ async fn failed_remember_fires_no_memory_write() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["remember a fact"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["remember a fact"]}),
+        ),
         // Malformed: `note` is required, so apply_harness_op rejects the op
         // (parse failure keeps the run alive) and state_changed stays false.
-        tool_call_response("call-2", "remember", serde_json::json!({"scope": "session"})),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "gave up"})),
+        tool_call_response(
+            "call-2",
+            "remember",
+            serde_json::json!({"scope": "session"}),
+        ),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "gave up"}),
+        ),
         text_response("done"),
     ]);
 
@@ -254,13 +301,21 @@ async fn pre_tool_use_exit_two_blocks_the_tool_call() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["touch the file"]}),
+        ),
         tool_call_response(
             "call-2",
             "BASH",
             serde_json::json!({"command": format!("touch {}", side_effect.to_string_lossy())}),
         ),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "done"}),
+        ),
         text_response("done"),
     ]);
 
@@ -278,7 +333,10 @@ async fn pre_tool_use_exit_two_blocks_the_tool_call() {
 
     // bodies[2] replays loop 2 round 1: the assistant tool call and the tool
     // result — which must be the veto message carrying the hook's stderr.
-    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -287,12 +345,16 @@ async fn pre_tool_use_exit_two_blocks_the_tool_call() {
     assert!(
         tool_texts
             .iter()
-            .any(|t| t.contains("tool call blocked by pre_tool_use hook") && t.contains("hook-says-no")),
+            .any(|t| t.contains("tool call blocked by pre_tool_use hook")
+                && t.contains("hook-says-no")),
         "tool result must carry the veto + hook stderr, got: {tool_texts:?}"
     );
 
     // The vetoed tool never ran and no post_tool_use hook fired for it.
-    assert!(!side_effect.exists(), "vetoed tool must not execute its side effect");
+    assert!(
+        !side_effect.exists(),
+        "vetoed tool must not execute its side effect"
+    );
     assert_eq!(
         count_marker_lines(&marker, "PostToolUse"),
         0,
@@ -318,7 +380,11 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["touch the file"]}),
+        ),
         tool_call_response(
             "call-2",
             "BASH",
@@ -328,7 +394,11 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
             // tool's closure creates the side-effect file itself.
             serde_json::json!({"command": "echo touched-ok"}),
         ),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "done"}),
+        ),
         text_response("done"),
     ]);
 
@@ -343,7 +413,10 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
         "events: {:?}",
         event_kinds(&events)
     );
-    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -359,7 +432,10 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
         tool_texts.iter().any(|t| t.contains("executed")),
         "tool result should carry the tool's output, got: {tool_texts:?}"
     );
-    assert!(side_effect.exists(), "tool must execute when the pre hook does not veto");
+    assert!(
+        side_effect.exists(),
+        "tool must execute when the pre hook does not veto"
+    );
     assert_eq!(
         count_marker_lines(&marker, "PostToolUse"),
         1,
@@ -376,7 +452,9 @@ async fn non_vetoing_pre_tool_use_leaves_execution_untouched() {
 // ---------------------------------------------------------------------------
 
 fn fake_failing_bash_tool() -> drip::tools::types::ChatToolDefinition {
-    use drip::tools::types::{define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters};
+    use drip::tools::types::{
+        define_sync_tool, ChatToolDefinition, ChatToolMode, ChatToolParameters,
+    };
     define_sync_tool(ChatToolDefinition {
         name: "BASH".to_string(),
         description: "test double whose execution always fails".to_string(),
@@ -411,13 +489,21 @@ const PUBLISH_COMMAND: &str = "git push origin feat/hooks";
 
 fn publish_script() -> Vec<String> {
     vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["publish the branch"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["publish the branch"]}),
+        ),
         tool_call_response(
             "call-2",
             "BASH",
             serde_json::json!({"command": PUBLISH_COMMAND}),
         ),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "done"}),
+        ),
         text_response("done"),
     ]
 }
@@ -525,7 +611,10 @@ async fn vetoed_publish_fires_no_pr_ready() {
         event_kinds(&events)
     );
     // The veto still blocks the publish tool...
-    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -534,10 +623,14 @@ async fn vetoed_publish_fires_no_pr_ready() {
     assert!(
         tool_texts
             .iter()
-            .any(|t| t.contains("tool call blocked by pre_tool_use hook") && t.contains("hook-says-no")),
+            .any(|t| t.contains("tool call blocked by pre_tool_use hook")
+                && t.contains("hook-says-no")),
         "vetoed publish must be blocked with the hook stderr, got: {tool_texts:?}"
     );
-    assert!(!side_effect.exists(), "vetoed publish tool must not execute");
+    assert!(
+        !side_effect.exists(),
+        "vetoed publish tool must not execute"
+    );
     // ...and pr_ready never fires for it.
     assert_eq!(
         count_marker_lines(&marker, "PRReady"),
@@ -575,7 +668,9 @@ async fn pr_ready_hook_failure_surfaces_run_warning() {
     );
     assert!(side_effect.exists(), "publish tool must have executed");
     assert!(
-        event_kinds(&events).iter().any(|k| k.contains("RunWarning")),
+        event_kinds(&events)
+            .iter()
+            .any(|k| k.contains("RunWarning")),
         "pr_ready hook failure must surface as RunWarning, events: {:?}",
         event_kinds(&events)
     );
@@ -607,10 +702,18 @@ async fn empty_pr_ready_configuration_stays_inert() {
         "events: {:?}",
         event_kinds(&events)
     );
-    assert!(side_effect.exists(), "publish tool still executes with empty hook config");
-    assert!(!marker.exists(), "no hook command exists, so no marker may be created");
     assert!(
-        !event_kinds(&events).iter().any(|k| k.contains("RunWarning")),
+        side_effect.exists(),
+        "publish tool still executes with empty hook config"
+    );
+    assert!(
+        !marker.exists(),
+        "no hook command exists, so no marker may be created"
+    );
+    assert!(
+        !event_kinds(&events)
+            .iter()
+            .any(|k| k.contains("RunWarning")),
         "empty config is inert — no hook failure warnings, events: {:?}",
         event_kinds(&events)
     );
@@ -641,14 +744,22 @@ async fn successful_forget_fires_memory_write_exactly_once() {
     // can target the note this very run created.
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["note then forget"]})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["note then forget"]}),
+        ),
         tool_call_response(
             "call-2",
             "remember",
             serde_json::json!({"note": "forget-me alpha-1"}),
         ),
         tool_call_response("call-3", "forget", serde_json::json!({"noteId": "note-1"})),
-        tool_call_response("call-4", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
+        tool_call_response(
+            "call-4",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "done"}),
+        ),
         text_response("done"),
     ]);
 
@@ -665,7 +776,10 @@ async fn successful_forget_fires_memory_write_exactly_once() {
 
     // The forget actually removed the note this run created. Its tool result
     // appears in the 5th request (after the forget response is consumed).
-    let replay = bodies[3]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[3]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -726,9 +840,21 @@ async fn pre_tool_use_exit_two_with_empty_stderr_reports_no_stderr_output() {
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let (url, server) = spawn_scripted_server(vec![
-        tool_call_response("call-1", "plan_tasks", serde_json::json!({"tasks": ["touch the file"]})),
-        tool_call_response("call-2", "BASH", serde_json::json!({"command": "echo touched-ok"})),
-        tool_call_response("call-3", "finish_task", serde_json::json!({"status": "completed", "summary": "done"})),
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["touch the file"]}),
+        ),
+        tool_call_response(
+            "call-2",
+            "BASH",
+            serde_json::json!({"command": "echo touched-ok"}),
+        ),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "done"}),
+        ),
         text_response("done"),
     ]);
 
@@ -744,7 +870,10 @@ async fn pre_tool_use_exit_two_with_empty_stderr_reports_no_stderr_output() {
         event_kinds(&events)
     );
 
-    let replay = bodies[2]["messages"].as_array().cloned().unwrap_or_default();
+    let replay = bodies[2]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let tool_texts: Vec<String> = replay
         .iter()
         .filter(|m| m["role"] == "tool")
@@ -753,12 +882,16 @@ async fn pre_tool_use_exit_two_with_empty_stderr_reports_no_stderr_output() {
     assert!(
         tool_texts
             .iter()
-            .any(|t| t.contains("tool call blocked by pre_tool_use hook") && t.contains("(no stderr output)")),
+            .any(|t| t.contains("tool call blocked by pre_tool_use hook")
+                && t.contains("(no stderr output)")),
         "empty-stderr veto must surface the fallback text, got: {tool_texts:?}"
     );
 
     // The vetoed tool never ran and no post_tool_use hook fired for it.
-    assert!(!side_effect.exists(), "vetoed tool must not execute its side effect");
+    assert!(
+        !side_effect.exists(),
+        "vetoed tool must not execute its side effect"
+    );
     assert_eq!(
         count_marker_lines(&marker, "PostToolUse"),
         0,

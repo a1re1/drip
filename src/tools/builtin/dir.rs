@@ -213,10 +213,7 @@ pub fn prepare(args: &Value, ctx: &ToolCtx) -> Result<DirToolPrepared> {
 /// whole-pipeline entry point below owns that name per the builtin/mod.rs
 /// contract).
 pub fn execute_prepared(prepared: &DirToolPrepared) -> Result<DirToolExecution> {
-    assert_directory_path(
-        &prepared.input.absolute_path,
-        &prepared.input.display_path,
-    )?;
+    assert_directory_path(&prepared.input.absolute_path, &prepared.input.display_path)?;
     let tree = build_tree(
         &prepared.input.absolute_path,
         prepared.input.max_depth,
@@ -261,7 +258,9 @@ pub fn complete(prepared: &DirToolPrepared, result: &DirToolResult) -> ToolCompl
 /// prepare() produces — or None when the arguments do not parse (the
 /// execute path reports that error).
 pub fn display_input(args: &Value, ctx: &ToolCtx) -> Option<String> {
-    prepare(args, ctx).ok().map(|prepared| prepared.display_input)
+    prepare(args, ctx)
+        .ok()
+        .map(|prepared| prepared.display_input)
 }
 
 /// Whole-pipeline entry point: prepare → execute → complete, mapping errors

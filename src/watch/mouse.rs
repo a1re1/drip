@@ -48,7 +48,10 @@ pub enum MouseEvent {
     Wheel(MouseScroll),
     /// A left-button press with the 1-based cell under the pointer. Releases,
     /// drags, motion and the other buttons are not clicks.
-    Click { col: usize, row: usize },
+    Click {
+        col: usize,
+        row: usize,
+    },
 }
 
 /// Parse one SGR mouse report at the first byte of `chunk`: a wheel notch or a
@@ -59,7 +62,11 @@ pub fn parse_mouse_event(chunk: &str) -> Option<MouseEvent> {
     let (cb, col, row, terminator) = parse_sgr_body(chunk)?;
     // 64 marks a wheel event; bits 0-1 carry the direction (0 up, 1 down).
     if cb & 64 != 0 {
-        let wheel = if cb & 1 == 0 { MouseWheel::Up } else { MouseWheel::Down };
+        let wheel = if cb & 1 == 0 {
+            MouseWheel::Up
+        } else {
+            MouseWheel::Down
+        };
         return Some(MouseEvent::Wheel(MouseScroll { wheel, col, row }));
     }
     // Bit 5 marks pointer motion (a drag) and the 'm' terminator a release:
@@ -172,10 +179,19 @@ mod tests {
 
     #[test]
     fn left_press_is_a_click_and_the_other_buttons_are_ignored() {
-        assert_eq!(parse_mouse_event("\x1b[<0;12;7M"), Some(MouseEvent::Click { col: 12, row: 7 }));
+        assert_eq!(
+            parse_mouse_event("\x1b[<0;12;7M"),
+            Some(MouseEvent::Click { col: 12, row: 7 })
+        );
         // Modifier bits ride along with the button and still mean the left one.
-        assert_eq!(parse_mouse_event("\x1b[<4;3;4M"), Some(MouseEvent::Click { col: 3, row: 4 }));
-        assert_eq!(parse_mouse_event("\x1b[<16;3;4M"), Some(MouseEvent::Click { col: 3, row: 4 }));
+        assert_eq!(
+            parse_mouse_event("\x1b[<4;3;4M"),
+            Some(MouseEvent::Click { col: 3, row: 4 })
+        );
+        assert_eq!(
+            parse_mouse_event("\x1b[<16;3;4M"),
+            Some(MouseEvent::Click { col: 3, row: 4 })
+        );
         // Middle (1), right (2), release (3), a drag (32) and the 'm' release
         // terminator never navigate.
         assert_eq!(parse_mouse_event("\x1b[<1;10;5M"), None);
@@ -189,10 +205,15 @@ mod tests {
 
     #[test]
     fn wheel_reports_survive_the_event_layer() {
-        assert_eq!(parse_mouse_event("\x1b[<64;12;7M").map(wheel_of), Some(MouseWheel::Up));
-        assert_eq!(parse_mouse_event("\x1b[<65;3;4M").map(wheel_of), Some(MouseWheel::Down));
+        assert_eq!(
+            parse_mouse_event("\x1b[<64;12;7M").map(wheel_of),
+            Some(MouseWheel::Up)
+        );
+        assert_eq!(
+            parse_mouse_event("\x1b[<65;3;4M").map(wheel_of),
+            Some(MouseWheel::Down)
+        );
         // The wheel-only helper still rejects a click.
         assert_eq!(parse_sgr_mouse("\x1b[<0;12;7M"), None);
     }
-
 }

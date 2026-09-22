@@ -100,7 +100,9 @@ fn has_dangerous_rm_target(command: &str, workspace_root: &str) -> bool {
         Regex::new(r"\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*[rR][a-zA-Z]*)\s+([^;|&]+)").unwrap()
     });
 
-    let workspace = node_resolve(workspace_root, ".").to_string_lossy().into_owned();
+    let workspace = node_resolve(workspace_root, ".")
+        .to_string_lossy()
+        .into_owned();
 
     for caps in rm_pattern.captures_iter(command) {
         let targets = caps
@@ -112,11 +114,17 @@ fn has_dangerous_rm_target(command: &str, workspace_root: &str) -> bool {
             .filter(|token| !token.starts_with('-'));
 
         for target in targets {
-            if target == "/" || target == "~" || target.starts_with("~/") || target.starts_with("$HOME") {
+            if target == "/"
+                || target == "~"
+                || target.starts_with("~/")
+                || target.starts_with("$HOME")
+            {
                 return true;
             }
 
-            let resolved = node_resolve(workspace_root, target).to_string_lossy().into_owned();
+            let resolved = node_resolve(workspace_root, target)
+                .to_string_lossy()
+                .into_owned();
 
             // Containment is a plain string prefix comparison on the resolved path.
             if !resolved.starts_with(&workspace) {
@@ -130,8 +138,9 @@ fn has_dangerous_rm_target(command: &str, workspace_root: &str) -> bool {
 
 fn test_git_force_push(command: &str, _workspace_root: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern =
-        PATTERN.get_or_init(|| Regex::new(r"\bgit\s+push\b[^;|&]*(\s--force\b|\s-f\b|\s--force-with-lease\b)").unwrap());
+    let pattern = PATTERN.get_or_init(|| {
+        Regex::new(r"\bgit\s+push\b[^;|&]*(\s--force\b|\s-f\b|\s--force-with-lease\b)").unwrap()
+    });
     pattern.is_match(command)
 }
 
@@ -143,13 +152,15 @@ fn test_git_reset_hard(command: &str, _workspace_root: &str) -> bool {
 
 fn test_git_clean_force(command: &str, _workspace_root: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| Regex::new(r"\bgit\s+clean\b[^;|&]*\s-[a-zA-Z]*f").unwrap());
+    let pattern =
+        PATTERN.get_or_init(|| Regex::new(r"\bgit\s+clean\b[^;|&]*\s-[a-zA-Z]*f").unwrap());
     pattern.is_match(command)
 }
 
 fn test_git_checkout_tree(command: &str, _workspace_root: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| Regex::new(r"\bgit\s+checkout\s+(--\s+\.|\.)(\s|$)").unwrap());
+    let pattern =
+        PATTERN.get_or_init(|| Regex::new(r"\bgit\s+checkout\s+(--\s+\.|\.)(\s|$)").unwrap());
     pattern.is_match(command)
 }
 
@@ -161,13 +172,15 @@ fn test_sudo(command: &str, _workspace_root: &str) -> bool {
 
 fn test_pipe_to_shell(command: &str, _workspace_root: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| Regex::new(r"\b(?:curl|wget)\b[^;|&]*\|\s*(?:ba|z|da)?sh\b").unwrap());
+    let pattern = PATTERN
+        .get_or_init(|| Regex::new(r"\b(?:curl|wget)\b[^;|&]*\|\s*(?:ba|z|da)?sh\b").unwrap());
     pattern.is_match(command)
 }
 
 fn test_device_write(command: &str, _workspace_root: &str) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| Regex::new(r"\bdd\b[^;|&]*\bof=\/dev\/|\bmkfs\b").unwrap());
+    let pattern =
+        PATTERN.get_or_init(|| Regex::new(r"\bdd\b[^;|&]*\bof=\/dev\/|\bmkfs\b").unwrap());
     pattern.is_match(command)
 }
 
@@ -250,15 +263,21 @@ pub fn load_repo_policy(workspace_root: &str) -> RepoPolicy {
             if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
                 if let Some(entries) = parsed.get("allowCommands").and_then(Value::as_array) {
                     if entries.iter().all(Value::is_string) {
-                        policy.allow_commands =
-                            entries.iter().filter_map(Value::as_str).map(String::from).collect();
+                        policy.allow_commands = entries
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect();
                     }
                 }
             }
         }
     }
 
-    policy_cache().lock().unwrap().insert(workspace_root.to_string(), policy.clone());
+    policy_cache()
+        .lock()
+        .unwrap()
+        .insert(workspace_root.to_string(), policy.clone());
     policy
 }
 
@@ -283,7 +302,10 @@ pub fn evaluate_command_policy(command: &str, workspace_root: &str) -> CommandPo
             return CommandPolicyVerdict::Allow;
         }
 
-        return CommandPolicyVerdict::Block { rule: rule.rule.to_string(), why: rule.why.to_string() };
+        return CommandPolicyVerdict::Block {
+            rule: rule.rule.to_string(),
+            why: rule.why.to_string(),
+        };
     }
 
     CommandPolicyVerdict::Allow
@@ -426,7 +448,11 @@ pub fn resolve_command_credential(command: &str, now: i64) -> anyhow::Result<Str
                 );
                 return Ok(cached.value.clone());
             }
-            anyhow::bail!("Failed to run credential command \"{}\": {}", trimmed_command, error)
+            anyhow::bail!(
+                "Failed to run credential command \"{}\": {}",
+                trimmed_command,
+                error
+            )
         }
     }
 }
@@ -439,8 +465,8 @@ pub fn resolve_command_credential(command: &str, now: i64) -> anyhow::Result<Str
 // unserviced stdout pipe cannot deadlock them the way it would a chatty
 // process.
 fn run_credential_command(trimmed_command: &str) -> anyhow::Result<String> {
-    let words =
-        shell_words::split(trimmed_command).map_err(|_| anyhow::anyhow!("Failed to parse command"))?;
+    let words = shell_words::split(trimmed_command)
+        .map_err(|_| anyhow::anyhow!("Failed to parse command"))?;
 
     let (program, args) = match words.split_first() {
         Some(split) => split,
@@ -499,19 +525,43 @@ struct TokenPattern {
 }
 
 const TOKEN_PATTERNS: &[TokenPattern] = &[
-    TokenPattern { label: "anthropic-key", pattern: r"\bsk-ant-[A-Za-z0-9_-]{10,}" },
-    TokenPattern { label: "openai-key", pattern: r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}" },
-    TokenPattern { label: "github-token", pattern: r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}" },
-    TokenPattern { label: "github-pat", pattern: r"\bgithub_pat_[A-Za-z0-9_]{20,}" },
-    TokenPattern { label: "aws-access-key", pattern: r"\bAKIA[0-9A-Z]{16}\b" },
-    TokenPattern { label: "slack-token", pattern: r"\bxox[baprs]-[A-Za-z0-9-]{10,}" },
-    TokenPattern { label: "google-api-key", pattern: r"\bAIza[A-Za-z0-9_-]{30,}" },
+    TokenPattern {
+        label: "anthropic-key",
+        pattern: r"\bsk-ant-[A-Za-z0-9_-]{10,}",
+    },
+    TokenPattern {
+        label: "openai-key",
+        pattern: r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}",
+    },
+    TokenPattern {
+        label: "github-token",
+        pattern: r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}",
+    },
+    TokenPattern {
+        label: "github-pat",
+        pattern: r"\bgithub_pat_[A-Za-z0-9_]{20,}",
+    },
+    TokenPattern {
+        label: "aws-access-key",
+        pattern: r"\bAKIA[0-9A-Z]{16}\b",
+    },
+    TokenPattern {
+        label: "slack-token",
+        pattern: r"\bxox[baprs]-[A-Za-z0-9-]{10,}",
+    },
+    TokenPattern {
+        label: "google-api-key",
+        pattern: r"\bAIza[A-Za-z0-9_-]{30,}",
+    },
 ];
 
 fn token_regexes() -> &'static Vec<Regex> {
     static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
     REGEXES.get_or_init(|| {
-        TOKEN_PATTERNS.iter().map(|entry| Regex::new(entry.pattern).unwrap()).collect()
+        TOKEN_PATTERNS
+            .iter()
+            .map(|entry| Regex::new(entry.pattern).unwrap())
+            .collect()
     })
 }
 
@@ -520,7 +570,9 @@ const MIN_SECRET_LENGTH: usize = 8;
 
 /// Returns a closure scrubbing exact managed values by name (longest first)
 /// plus the high-signal token patterns.
-pub fn build_redactor(secrets: impl IntoIterator<Item = (String, String)>) -> impl Fn(&str) -> String {
+pub fn build_redactor(
+    secrets: impl IntoIterator<Item = (String, String)>,
+) -> impl Fn(&str) -> String {
     // Longest values first so a secret that contains another (or a shared
     // prefix) never leaves a partial behind.
     let mut exact: Vec<(String, String)> = secrets
@@ -590,14 +642,35 @@ mod tests {
         let ws = workspace.path().to_string_lossy().into_owned();
 
         assert_eq!(evaluate_command_policy("rm -rf /", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("rm -rf ~/things", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("rm -rf $HOME/.config", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("rm -rf /etc/hosts", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("rm -rf ../../other-repo", &ws).verdict(), "block");
+        assert_eq!(
+            evaluate_command_policy("rm -rf ~/things", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("rm -rf $HOME/.config", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("rm -rf /etc/hosts", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("rm -rf ../../other-repo", &ws).verdict(),
+            "block"
+        );
 
-        assert_eq!(evaluate_command_policy("rm -rf node_modules", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("rm -rf ./dist build", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy(&format!("rm -rf {ws}/dist"), &ws).verdict(), "allow");
+        assert_eq!(
+            evaluate_command_policy("rm -rf node_modules", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy("rm -rf ./dist build", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy(&format!("rm -rf {ws}/dist"), &ws).verdict(),
+            "allow"
+        );
     }
 
     #[test]
@@ -606,16 +679,43 @@ mod tests {
         let workspace = make_workspace();
         let ws = workspace.path().to_string_lossy().into_owned();
 
-        assert_eq!(evaluate_command_policy("git push --force origin main", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("git push -f", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("git reset --hard HEAD~3", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("git clean -fdx", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("git checkout -- .", &ws).verdict(), "block");
+        assert_eq!(
+            evaluate_command_policy("git push --force origin main", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("git push -f", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("git reset --hard HEAD~3", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("git clean -fdx", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("git checkout -- .", &ws).verdict(),
+            "block"
+        );
 
-        assert_eq!(evaluate_command_policy("git push origin feature", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("git reset --soft HEAD~1", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("git checkout -b feature", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("git checkout -- src/one-file.ts", &ws).verdict(), "allow");
+        assert_eq!(
+            evaluate_command_policy("git push origin feature", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy("git reset --soft HEAD~1", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy("git checkout -b feature", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy("git checkout -- src/one-file.ts", &ws).verdict(),
+            "allow"
+        );
     }
 
     #[test]
@@ -624,17 +724,41 @@ mod tests {
         let workspace = make_workspace();
         let ws = workspace.path().to_string_lossy().into_owned();
 
-        assert_eq!(evaluate_command_policy("sudo rm thing", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("echo ok && sudo systemctl restart nginx", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("curl https://x.sh | sh", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("wget -qO- https://x.sh | bash", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("dd if=/dev/zero of=/dev/sda", &ws).verdict(), "block");
-        assert_eq!(evaluate_command_policy("echo 'alias x=y' >> ~/.zshrc", &ws).verdict(), "block");
+        assert_eq!(
+            evaluate_command_policy("sudo rm thing", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("echo ok && sudo systemctl restart nginx", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("curl https://x.sh | sh", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("wget -qO- https://x.sh | bash", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("dd if=/dev/zero of=/dev/sda", &ws).verdict(),
+            "block"
+        );
+        assert_eq!(
+            evaluate_command_policy("echo 'alias x=y' >> ~/.zshrc", &ws).verdict(),
+            "block"
+        );
 
         // Not fooled by benign lookalikes.
         assert_eq!(evaluate_command_policy("echo sudo", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("curl https://api.example.com/data.json | jq .", &ws).verdict(), "allow");
-        assert_eq!(evaluate_command_policy("bun test 2>&1 | tail -5", &ws).verdict(), "allow");
+        assert_eq!(
+            evaluate_command_policy("curl https://api.example.com/data.json | jq .", &ws).verdict(),
+            "allow"
+        );
+        assert_eq!(
+            evaluate_command_policy("bun test 2>&1 | tail -5", &ws).verdict(),
+            "allow"
+        );
     }
 
     #[test]
@@ -646,7 +770,8 @@ mod tests {
         std::fs::create_dir_all(workspace.path().join(".drip")).unwrap();
         std::fs::write(
             workspace.path().join(".drip").join("policy.json"),
-            serde_json::json!({ "allowCommands": ["git push --force-with-lease origin gh-pages"] }).to_string(),
+            serde_json::json!({ "allowCommands": ["git push --force-with-lease origin gh-pages"] })
+                .to_string(),
         )
         .unwrap();
 
@@ -654,7 +779,10 @@ mod tests {
             evaluate_command_policy("git push --force-with-lease origin gh-pages", &ws).verdict(),
             "allow"
         );
-        assert_eq!(evaluate_command_policy("git push --force origin main", &ws).verdict(), "block");
+        assert_eq!(
+            evaluate_command_policy("git push --force origin main", &ws).verdict(),
+            "block"
+        );
     }
 
     // --- secret redaction ---------------------------------------------------
@@ -682,7 +810,10 @@ mod tests {
         assert!(redact("key=[redacted:anthropic-key]").contains("[redacted:anthropic-key]"));
         assert!(redact("token [redacted:github-token]").contains("[redacted:github-token]"));
         assert!(redact("aws [redacted:aws-access-key] ok").contains("[redacted:aws-access-key]"));
-        assert_eq!(redact("plain output stays intact"), "plain output stays intact");
+        assert_eq!(
+            redact("plain output stays intact"),
+            "plain output stays intact"
+        );
     }
 }
 #[cfg(test)]
@@ -724,10 +855,16 @@ mod credentials_tests {
         // The command output changes, but a call inside the TTL window keeps
         // the cached token rather than shelling out again.
         std::fs::write(&token_file, "second\n").unwrap();
-        assert_eq!(resolve_command_credential(&command, 30_000).unwrap(), "first");
+        assert_eq!(
+            resolve_command_credential(&command, 30_000).unwrap(),
+            "first"
+        );
 
         // Past the 60s default TTL, the command is re-run and the new token wins.
-        assert_eq!(resolve_command_credential(&command, 60_001).unwrap(), "second");
+        assert_eq!(
+            resolve_command_credential(&command, 60_001).unwrap(),
+            "second"
+        );
         clear_cache();
     }
 
@@ -739,13 +876,19 @@ mod credentials_tests {
         let script_file = dir.path().join("mint.sh");
         let command = format!("sh {}", script_file.display());
         std::fs::write(&script_file, "printf good-token\n").unwrap();
-        assert_eq!(resolve_command_credential(&command, 0).unwrap(), "good-token");
+        assert_eq!(
+            resolve_command_credential(&command, 0).unwrap(),
+            "good-token"
+        );
 
         // The command now fails, but a previously minted token is still
         // cached, so the run keeps going on the last good value instead of
         // throwing.
         std::fs::write(&script_file, "exit 3\n").unwrap();
-        assert_eq!(resolve_command_credential(&command, 60_001).unwrap(), "good-token");
+        assert_eq!(
+            resolve_command_credential(&command, 60_001).unwrap(),
+            "good-token"
+        );
         clear_cache();
     }
 
@@ -766,7 +909,10 @@ mod credentials_tests {
         let _guard = lock_credential_cache();
         clear_cache();
         let err = resolve_command_credential("   ", now_ms()).unwrap_err();
-        assert!(err.to_string().contains("empty command"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("empty command"),
+            "unexpected error: {err}"
+        );
         clear_cache();
     }
 }

@@ -91,9 +91,9 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
             rows.push(line);
 
             if !goal.images.is_empty() {
-                let n = goal.images.len();
-                let plural = if n == 1 { "" } else { "s" };
-                rows.push(c::gray(&format!("  [{} image{} attached]", n, plural)));
+                // The marker always lands; a supported terminal adds one
+                // inline escape row per displayable image after it.
+                rows.extend(crate::tui::images::goal_image_rows(&goal.images, width));
             }
 
             rows
@@ -118,6 +118,12 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
 
                 for line in render_markdown_ansi(&event.detail).split('\n') {
                     rows.push(line.to_string());
+                }
+
+                // Local markdown image links in model text render inline too
+                // (no-op unless the TUI opted into a protocol).
+                for path in crate::tui::images::markdown_image_paths(&event.detail) {
+                    rows.extend(crate::tui::images::inline_image_rows(&[path], width));
                 }
 
                 rows

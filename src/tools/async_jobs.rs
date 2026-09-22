@@ -161,7 +161,9 @@ pub fn job_not_found_message(job_id: &str) -> String {
 
 /// The child inherits the harness environment with the request's overrides
 /// applied on top.
-pub fn build_child_process_env(overrides: Option<&BTreeMap<String, String>>) -> BTreeMap<String, String> {
+pub fn build_child_process_env(
+    overrides: Option<&BTreeMap<String, String>>,
+) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
 
     if let Some(overrides) = overrides {
@@ -180,7 +182,8 @@ pub fn run_process(command: &str, args: &[&str]) -> Result<ProcessResult> {
     let owned_args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
 
     let captured = crate::tools::child_process::run_captured_process(
-        &crate::tools::child_process::CapturedProcessArgs { stdin_payload: None,
+        &crate::tools::child_process::CapturedProcessArgs {
+            stdin_payload: None,
             command,
             cwd: None,
             env: None,
@@ -213,7 +216,11 @@ fn append_to_log(log_path: &str, text: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log_path) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
         let _ = file.write_all(text.as_bytes());
     }
 }
@@ -342,10 +349,13 @@ impl AsyncToolJobManager {
         extra_env: Option<&BTreeMap<String, String>>,
     ) -> Result<ChatAsyncToolJob> {
         let formatted = format_command(command, args);
-        let cwd = cwd
-            .map(str::to_string)
-            .unwrap_or_else(|| ".".to_string());
-        let job = self.create_job(Some(formatted.clone()), &cwd, title.unwrap_or(&formatted), tool_name)?;
+        let cwd = cwd.map(str::to_string).unwrap_or_else(|| ".".to_string());
+        let job = self.create_job(
+            Some(formatted.clone()),
+            &cwd,
+            title.unwrap_or(&formatted),
+            tool_name,
+        )?;
         let logger = JobLogger::new(&job.id, &job.log_path);
 
         logger.line(&format!("[start] {}", job.title));
@@ -405,13 +415,23 @@ impl AsyncToolJobManager {
                             manager.finish_job(&job_id, None, exit_code, status);
                         }
                         Err(error) => {
-                            manager.finish_job(&job_id, Some(error.to_string()), None, ChatAsyncToolJobStatus::Failed);
+                            manager.finish_job(
+                                &job_id,
+                                Some(error.to_string()),
+                                None,
+                                ChatAsyncToolJobStatus::Failed,
+                            );
                         }
                     }
                 });
             }
             Err(error) => {
-                self.finish_job(&job.id, Some(error.to_string()), None, ChatAsyncToolJobStatus::Failed);
+                self.finish_job(
+                    &job.id,
+                    Some(error.to_string()),
+                    None,
+                    ChatAsyncToolJobStatus::Failed,
+                );
             }
         }
 
@@ -445,7 +465,12 @@ impl AsyncToolJobManager {
                 manager.finish_job(&job_id, None, Some(0), ChatAsyncToolJobStatus::Completed);
             }
             Err(error) => {
-                manager.finish_job(&job_id, Some(format_error(&error)), None, ChatAsyncToolJobStatus::Failed);
+                manager.finish_job(
+                    &job_id,
+                    Some(format_error(&error)),
+                    None,
+                    ChatAsyncToolJobStatus::Failed,
+                );
             }
         });
 
@@ -454,7 +479,10 @@ impl AsyncToolJobManager {
 
     /// Marks a settled job's result as seen by the model.
     pub fn mark_reported(&self, job_id: &str) {
-        let mut guard = self.records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(record) = guard.iter_mut().find(|record| record.job.id == job_id) {
             if record.job.status != ChatAsyncToolJobStatus::Running {
                 record.reported = true;
@@ -464,10 +492,15 @@ impl AsyncToolJobManager {
 
     /// Settled, not-yet-reported jobs, each returned exactly once.
     pub fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
-        let mut guard = self.records.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .iter_mut()
-            .filter(|record| record.job.status != ChatAsyncToolJobStatus::Running && !record.reported)
+            .filter(|record| {
+                record.job.status != ChatAsyncToolJobStatus::Running && !record.reported
+            })
             .map(|record| {
                 record.reported = true;
                 record.job.clone()
@@ -539,7 +572,11 @@ impl AsyncToolJobManager {
         };
         let (guard, _timeout_result) = self
             .settled
-            .wait_timeout_while(guard, Duration::from_millis(normalized_timeout_ms), still_running)
+            .wait_timeout_while(
+                guard,
+                Duration::from_millis(normalized_timeout_ms),
+                still_running,
+            )
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let record = guard
@@ -576,9 +613,7 @@ impl AsyncToolJobManager {
             .records
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let record = guard
-            .iter_mut()
-            .find(|record| record.job.id == job_id)?;
+        let record = guard.iter_mut().find(|record| record.job.id == job_id)?;
 
         if record.settled {
             return None;
@@ -829,7 +864,11 @@ impl ChatAsyncToolRuntime for Arc<AsyncToolJobManager> {
         Ok(result)
     }
 
-    fn wait_for_job(&self, job_id: &str, timeout_ms: Option<i64>) -> Result<ChatAsyncToolWaitResult> {
+    fn wait_for_job(
+        &self,
+        job_id: &str,
+        timeout_ms: Option<i64>,
+    ) -> Result<ChatAsyncToolWaitResult> {
         let result = AsyncToolJobManager::wait_for_job(self, job_id, timeout_ms.unwrap_or(60_000))?;
         if result.completed {
             self.mark_reported(job_id);
@@ -862,7 +901,6 @@ pub struct CreateChatToolRuntimeServicesOptions {
     pub jobs_root: Option<PathBuf>,
 }
 
-
 /// Builds the runtime services for the chat tools; the jobs root defaults to
 /// <cwd>/.drip/async-tools.
 pub fn create_chat_tool_runtime_services(
@@ -871,9 +909,7 @@ pub fn create_chat_tool_runtime_services(
     let cwd = options
         .cwd
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let jobs_root = options
-        .jobs_root
-        .unwrap_or_else(|| default_jobs_root(&cwd));
+    let jobs_root = options.jobs_root.unwrap_or_else(|| default_jobs_root(&cwd));
 
     ChatToolRuntimeServices {
         async_jobs: Arc::new(Arc::new(AsyncToolJobManager::new(jobs_root))),
@@ -1000,7 +1036,12 @@ mod tests {
     fn finish_job_settles_once_and_writes_the_finish_lines() {
         let manager = AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test"));
         let job = manager
-            .create_job(Some("bun run build".to_string()), "/tmp", "bun run build", "BASH_ASYNC")
+            .create_job(
+                Some("bun run build".to_string()),
+                "/tmp",
+                "bun run build",
+                "BASH_ASYNC",
+            )
             .unwrap();
 
         let first = manager.finish_job(
@@ -1046,7 +1087,9 @@ mod tests {
 
     #[test]
     fn wait_for_job_reports_completion_and_timeouts() {
-        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test")));
+        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from(
+            "/tmp/drip-jobs-test",
+        )));
         let job = manager
             .create_job(None, "/tmp", "wait on me", "BASH_ASYNC")
             .unwrap();
@@ -1071,7 +1114,9 @@ mod tests {
 
     #[test]
     fn start_task_runs_the_closure_and_settles_the_job() {
-        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test")));
+        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from(
+            "/tmp/drip-jobs-test",
+        )));
         let job = manager
             .start_task("/tmp", "background work", "BASH_ASYNC", |logger| {
                 logger.line("[session] drip-test");
@@ -1081,8 +1126,7 @@ mod tests {
 
         assert_eq!(job.status, ChatAsyncToolJobStatus::Running);
 
-        let finished = AsyncToolJobManager::wait_for_job(&manager, &job.id, 10_000)
-            .unwrap();
+        let finished = AsyncToolJobManager::wait_for_job(&manager, &job.id, 10_000).unwrap();
         assert!(finished.completed);
         assert_eq!(finished.job.status, ChatAsyncToolJobStatus::Completed);
         assert_eq!(finished.job.exit_code, Some(Some(0)));
@@ -1096,10 +1140,16 @@ mod tests {
 
     #[test]
     fn settled_jobs_are_reported_once_and_a_completed_wait_counts_as_reported() {
-        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test")));
+        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from(
+            "/tmp/drip-jobs-test",
+        )));
         let runtime: Arc<dyn ChatAsyncToolRuntime> = Arc::new(Arc::clone(&manager));
-        let seen = manager.start_task("/tmp", "seen by a wait", "BASH_ASYNC", |_| Ok(())).unwrap();
-        let unseen = manager.start_task("/tmp", "nobody waited", "BASH_ASYNC", |_| Ok(())).unwrap();
+        let seen = manager
+            .start_task("/tmp", "seen by a wait", "BASH_ASYNC", |_| Ok(()))
+            .unwrap();
+        let unseen = manager
+            .start_task("/tmp", "nobody waited", "BASH_ASYNC", |_| Ok(()))
+            .unwrap();
         let running = manager
             .start_task("/tmp", "still running", "BASH_ASYNC", |_| {
                 thread::sleep(Duration::from_millis(1_500));
@@ -1107,21 +1157,42 @@ mod tests {
             })
             .unwrap();
 
-        assert!(runtime.wait_for_job(&seen.id, Some(10_000)).unwrap().completed);
+        assert!(
+            runtime
+                .wait_for_job(&seen.id, Some(10_000))
+                .unwrap()
+                .completed
+        );
         AsyncToolJobManager::wait_for_job(&manager, &unseen.id, 10_000).unwrap();
 
-        let reported: Vec<String> = runtime.take_settled_unreported().into_iter().map(|job| job.id).collect();
-        assert_eq!(reported, vec![unseen.id.clone()], "the waited job is already reported; the running one is not settled");
-        assert!(runtime.take_settled_unreported().is_empty(), "each job is reported once");
+        let reported: Vec<String> = runtime
+            .take_settled_unreported()
+            .into_iter()
+            .map(|job| job.id)
+            .collect();
+        assert_eq!(
+            reported,
+            vec![unseen.id.clone()],
+            "the waited job is already reported; the running one is not settled"
+        );
+        assert!(
+            runtime.take_settled_unreported().is_empty(),
+            "each job is reported once"
+        );
 
         AsyncToolJobManager::wait_for_job(&manager, &running.id, 10_000).unwrap();
         runtime.tail_job(&running.id, Some(5)).unwrap();
-        assert!(runtime.take_settled_unreported().is_empty(), "a tail after settling counts as reported");
+        assert!(
+            runtime.take_settled_unreported().is_empty(),
+            "a tail after settling counts as reported"
+        );
     }
 
     #[test]
     fn start_task_failures_settle_the_job_as_failed() {
-        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from("/tmp/drip-jobs-test")));
+        let manager = Arc::new(AsyncToolJobManager::new(PathBuf::from(
+            "/tmp/drip-jobs-test",
+        )));
         let job = manager
             .start_task("/tmp", "failing work", "BASH_ASYNC", |_logger| {
                 bail!("task exploded")

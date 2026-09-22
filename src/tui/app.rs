@@ -20,57 +20,73 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cli::args::{praeparare_goal_with_context, PRAEPARARE_DEFAULT_MAX_ITERATIONS};
-use crate::cli::commands::{get_slash_command_suggestions, parse_slash_command, SlashCommandSpec, SLASH_COMMANDS};
-use crate::cli::file_suggestions::{get_workspace_file_suggestions, WorkspaceFileSource, DEFAULT_FILE_SUGGESTION_LIMIT};
+use crate::cli::commands::{
+    get_slash_command_suggestions, parse_slash_command, SlashCommandSpec, SLASH_COMMANDS,
+};
+use crate::cli::file_suggestions::{
+    get_workspace_file_suggestions, WorkspaceFileSource, DEFAULT_FILE_SUGGESTION_LIMIT,
+};
 use crate::cli::images::{
-    attachment_from_data_url, attachment_from_image_file, capture_clipboard_image, looks_like_image_paste, GoalImageAttachment,
+    attachment_from_data_url, attachment_from_image_file, capture_clipboard_image,
+    looks_like_image_paste, GoalImageAttachment,
 };
 use crate::cli::marketplaces::{
-    add_marketplace, discover_all_skills, is_marketplace_key_enabled, list_enabled_marketplace_roles, list_marketplace_plugins,
-    load_marketplaces_file, load_project_plugin_overrides, remove_marketplace, set_marketplace_key_enabled, update_marketplaces,
-    AddMarketplaceArgs,
+    add_marketplace, discover_all_skills, is_marketplace_key_enabled,
+    list_enabled_marketplace_roles, list_marketplace_plugins, load_marketplaces_file,
+    load_project_plugin_overrides, remove_marketplace, set_marketplace_key_enabled,
+    update_marketplaces, AddMarketplaceArgs,
 };
-use crate::cli::mentions::{get_active_chat_file_mention, replace_active_chat_file_mention, resolve_goal_mentions};
+use crate::cli::mentions::{
+    get_active_chat_file_mention, replace_active_chat_file_mention, resolve_goal_mentions,
+};
 use crate::cli::paste::{sanitize_pasted_input, DISABLE_BRACKETED_PASTE, ENABLE_BRACKETED_PASTE};
-use crate::cli::roles::{load_skill_content, resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource};
-use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
+use crate::cli::roles::{
+    load_skill_content, resolve_role_setup, ResolveRoleSetupArgs, RoleSetupSource,
+};
+use crate::cli::session_run::{
+    run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
+};
 use crate::cli::skills::{CliSkill, LoadedCliSkill, SkillSource};
 use crate::cli::state_summary::format_state_summary;
 use crate::cli::transcript::{
-    append_transcript_entry, read_transcript, TranscriptEntry, TranscriptEventEntry, TranscriptGoalEntry, TranscriptNoteEntry,
-    TranscriptRunEndEntry, TranscriptSkillEntry,
+    append_transcript_entry, read_transcript, TranscriptEntry, TranscriptEventEntry,
+    TranscriptGoalEntry, TranscriptNoteEntry, TranscriptRunEndEntry, TranscriptSkillEntry,
 };
 use crate::core::config::{
-    get_active_cli_profile_id, get_active_cli_tool_profile_id, list_cli_model_profiles, list_cli_system_prompt_profiles,
-    resolve_cli_inference, save_cli_config, set_active_cli_profile, set_active_cli_system_prompt, set_active_cli_tool_profile,
-    CliConfig,
+    get_active_cli_profile_id, get_active_cli_tool_profile_id, list_cli_model_profiles,
+    list_cli_system_prompt_profiles, resolve_cli_inference, save_cli_config,
+    set_active_cli_profile, set_active_cli_system_prompt, set_active_cli_tool_profile, CliConfig,
 };
-use crate::core::env_vars::{load_env_vars, load_merged_env, lookup_env_var_source, upsert_env_var};
+use crate::core::env_vars::{
+    load_env_vars, load_merged_env, lookup_env_var_source, upsert_env_var,
+};
 use crate::core::home::{DripHome, DripProject};
 use crate::core::sessions::{
-    create_session, list_all_sessions, open_session_index, resolve_any_session_ref, session_paths_for, CreateSessionArgs,
-    ProjectPaths, SessionEnvScope, SessionPaths, SessionRecord,
+    create_session, list_all_sessions, open_session_index, resolve_any_session_ref,
+    session_paths_for, CreateSessionArgs, ProjectPaths, SessionEnvScope, SessionPaths,
+    SessionRecord,
 };
 use crate::core::types::{
     HarnessEvent, HarnessEventType, HarnessSurveyAnswer, HarnessSurveyAnswers, QuestionSurvey,
 };
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
-use crate::tui::pane_title::{FALLBACK_LABEL, PaneTitle, SPINNER_INTERVAL_MS};
-use crate::tui::session_name::{persist_session_name, read_session_name, read_session_name_context};
+use crate::tui::compact::{
+    render_compact_cell, render_tool_group, select_compact_tail_start, CompactCell, CompactEmitter,
+};
+use crate::tui::pane_title::{PaneTitle, FALLBACK_LABEL, SPINNER_INTERVAL_MS};
+use crate::tui::session_name::{
+    persist_session_name, read_session_name, read_session_name_context,
+};
+use crate::tui::term::{terminal_size, write_out, RawMode};
 use crate::tui::terminal_title::{
     generate_chat_title, generate_session_title, resolve_session_route, resolve_title_route,
     terminal_title_enabled, terminal_title_timeout_ms,
 };
-use crate::tui::term::{terminal_size, write_out, RawMode};
-use crate::tui::compact::{
-	render_compact_cell, render_tool_group, select_compact_tail_start,
-	CompactCell, CompactEmitter,
-};
 use crate::tui::widgets::{
     composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
-    render_composer, render_picker, render_skill_picker, render_status_bar, render_survey, ComposerProps,
-    PickerItem, SkillPickerItem, StatusBarProps,
+    render_composer, render_picker, render_skill_picker, render_status_bar, render_survey,
+    ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
 };
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -136,7 +152,10 @@ fn help_text() -> String {
         lines.push(format!(
             "  /{}{} — {}",
             command.name,
-            command.args.map(|args| format!(" {args}")).unwrap_or_default(),
+            command
+                .args
+                .map(|args| format!(" {args}"))
+                .unwrap_or_default(),
             command.description
         ));
     }
@@ -195,8 +214,7 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum OverlayKind {
     Model,
     Prompt,
@@ -344,14 +362,23 @@ enum Msg {
     Event(HarnessEvent),
     Info(String),
     Input(Vec<u8>),
-    Mentions { paths: Vec<String>, seq: u64 },
+    Mentions {
+        paths: Vec<String>,
+        seq: u64,
+    },
     RunDone(Result<SessionGoalOutcome, SessionGoalError>),
     /// One-shot title generation finished on the background thread. `label`
     /// is None on any failure; stale epochs are dropped by the handler.
-    Title { epoch: u64, label: Option<String> },
+    Title {
+        epoch: u64,
+        label: Option<String>,
+    },
     /// An explicit /rename finished on a background thread. Unlike Msg::Title
     /// the name is persisted to session.json when present.
-    Rename { epoch: u64, name: Option<String> },
+    Rename {
+        epoch: u64,
+        name: Option<String>,
+    },
 }
 
 /// One decoded terminal input.
@@ -373,7 +400,6 @@ enum Key {
 
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
-
 
 /// Splits a raw stdin chunk into keys. Bracketed pastes may span chunks, so
 /// the caller keeps `paste_buffer` between calls.
@@ -414,7 +440,9 @@ fn decode_input(chunk: &[u8], paste_buffer: &mut Option<Vec<u8>>) -> Vec<Key> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 // Ink's useInput semantics: a single byte is a key; an escape sequence is an
@@ -882,11 +910,23 @@ impl TuiApp {
     }
 
     fn push_info(&mut self, text: impl Into<String>) {
-        self.push_cell(TranscriptEntry::Info(TranscriptNoteEntry { at: now_iso(), text: text.into() }), true);
+        self.push_cell(
+            TranscriptEntry::Info(TranscriptNoteEntry {
+                at: now_iso(),
+                text: text.into(),
+            }),
+            true,
+        );
     }
 
     fn push_error(&mut self, text: impl Into<String>) {
-        self.push_cell(TranscriptEntry::Error(TranscriptNoteEntry { at: now_iso(), text: text.into() }), true);
+        self.push_cell(
+            TranscriptEntry::Error(TranscriptNoteEntry {
+                at: now_iso(),
+                text: text.into(),
+            }),
+            true,
+        );
     }
 
     // ----- painting -------------------------------------------------------
@@ -941,7 +981,11 @@ impl TuiApp {
             rows.extend(render_tool_group(group, self.cols));
         }
 
-        if let Some(state) = self.survey.as_ref().filter(|state| state.other_input.is_some()) {
+        if let Some(state) = self
+            .survey
+            .as_ref()
+            .filter(|state| state.other_input.is_some())
+        {
             let question = state
                 .survey
                 .questions
@@ -960,7 +1004,12 @@ impl TuiApp {
             } else if overlay.kind == OverlayKind::Skills {
                 rows.extend(self.skill_picker_rows(overlay));
             } else {
-                rows.extend(render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols));
+                rows.extend(render_picker(
+                    &overlay.title,
+                    &overlay.items,
+                    overlay.selected,
+                    self.cols,
+                ));
             }
         } else {
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
@@ -983,7 +1032,11 @@ impl TuiApp {
             ));
         }
 
-        let skill_names: Vec<String> = self.active_skills.iter().map(|skill| skill.name.clone()).collect();
+        let skill_names: Vec<String> = self
+            .active_skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
         // Custom statusLine: when configured, its output replaces only the
         // presentation status row (essential controls and the composer stay).
         // Disabled, failed, timed-out, or blank output falls back to the
@@ -1126,8 +1179,7 @@ impl TuiApp {
             .as_ref()
             .map(|runner| runner.setting().update_interval_ms)
             .unwrap_or(300);
-        self.status_line_next_refresh =
-            Some(Instant::now() + Duration::from_millis(interval_ms));
+        self.status_line_next_refresh = Some(Instant::now() + Duration::from_millis(interval_ms));
         self.status_line_request_width = Some(self.cols);
         let request = self.status_line_request();
         if let Some(runner) = self.status_line_runner.as_mut() {
@@ -1143,13 +1195,19 @@ impl TuiApp {
             Err(_) => return "invalid profile config".to_string(),
         };
         let base_label = match profiles.iter().find(|candidate| candidate.id == active_id) {
-            Some(profile) => format!("{} ({})", profile.label.clone().unwrap_or_else(|| profile.id.clone()), profile.model),
+            Some(profile) => format!(
+                "{} ({})",
+                profile.label.clone().unwrap_or_else(|| profile.id.clone()),
+                profile.model
+            ),
             None if active_id.is_empty() => "no profile".to_string(),
             None => active_id.clone(),
         };
         let tool_profile_id = get_active_cli_tool_profile_id(settings);
         let tool_profile = if !tool_profile_id.is_empty() && tool_profile_id != active_id {
-            profiles.iter().find(|candidate| candidate.id == tool_profile_id)
+            profiles
+                .iter()
+                .find(|candidate| candidate.id == tool_profile_id)
         } else {
             None
         };
@@ -1292,7 +1350,10 @@ impl TuiApp {
 
         if let Some(mention) = get_active_chat_file_mention(&self.text, self.cursor) {
             if !self.mention_suggestions.is_empty() {
-                let path = self.mention_suggestions[self.selected_suggestion_index.min(self.mention_suggestions.len() - 1)].clone();
+                let path = self.mention_suggestions[self
+                    .selected_suggestion_index
+                    .min(self.mention_suggestions.len() - 1)]
+                .clone();
                 let next = replace_active_chat_file_mention(&self.text, &mention, &path);
                 let next_cursor = mention.path_start + path.chars().count();
                 self.apply_edit(next, next_cursor);
@@ -1379,7 +1440,9 @@ impl TuiApp {
     /// stays empty. Retries like finish_survey; a failure keeps chat mode on
     /// and puts the reply back in the composer so Enter retries it.
     fn record_chat_reply(&mut self, text: String) {
-        let Some(state) = self.survey.as_ref() else { return };
+        let Some(state) = self.survey.as_ref() else {
+            return;
+        };
         let path = state.answers_path.clone();
         let mut outcome = crate::core::state::answers::append_chat(&path, &text);
         for _ in 0..2 {
@@ -1452,7 +1515,11 @@ impl TuiApp {
             return;
         }
 
-        if self.queued_prompts.iter().all(|queued| queued.trim().is_empty()) {
+        if self
+            .queued_prompts
+            .iter()
+            .all(|queued| queued.trim().is_empty())
+        {
             self.queued_prompts.clear();
             self.push_info(
                 "nothing to steer with — type a message, or queue one with enter first.",
@@ -1491,7 +1558,11 @@ impl TuiApp {
     fn on_key(&mut self, key: Key) {
         // Free-text "Other…" survey answer: collected before the overlay arm
         // and the running guard so typing works mid-run.
-        if self.survey.as_ref().is_some_and(|state| state.other_input.is_some()) {
+        if self
+            .survey
+            .as_ref()
+            .is_some_and(|state| state.other_input.is_some())
+        {
             match key {
                 Key::Return => {
                     let text = self
@@ -1514,12 +1585,20 @@ impl TuiApp {
                     self.open_survey_question();
                 }
                 Key::Backspace => {
-                    if let Some(input) = self.survey.as_mut().and_then(|state| state.other_input.as_mut()) {
+                    if let Some(input) = self
+                        .survey
+                        .as_mut()
+                        .and_then(|state| state.other_input.as_mut())
+                    {
                         input.pop();
                     }
                 }
                 Key::Text(text) | Key::Paste(text) => {
-                    if let Some(input) = self.survey.as_mut().and_then(|state| state.other_input.as_mut()) {
+                    if let Some(input) = self
+                        .survey
+                        .as_mut()
+                        .and_then(|state| state.other_input.as_mut())
+                    {
                         input.push_str(&text);
                     }
                 }
@@ -1685,7 +1764,8 @@ impl TuiApp {
                 // Enter accepts an open menu selection unless the text already matches it exactly.
                 if menu_length > 0 {
                     let slash = get_slash_command_suggestions(&self.text);
-                    let exact_slash = slash.len() == 1 && format!("/{}", slash[0].name) == self.text.trim();
+                    let exact_slash =
+                        slash.len() == 1 && format!("/{}", slash[0].name) == self.text.trim();
                     let exact_skill = slash_len == 0
                         && self.skill_suggestions.len() == 1
                         && format!("/{}", self.skill_suggestions[0].0) == self.text.trim();
@@ -1745,7 +1825,12 @@ impl TuiApp {
             Key::Ctrl('u') => self.apply_edit(String::new(), 0),
             Key::Ctrl('c') => self.quit = true,
             Key::Ctrl('v') => match capture_clipboard_image(Path::new(&self.paths.images_dir)) {
-                Some(attachment) => self.attachments.push(attachment),
+                Some(attachment) => {
+                    self.attachments.push(attachment);
+                    let count = self.attachments.len();
+                    let status = crate::tui::images::inline_status();
+                    self.push_info(format!("{count} image(s) attached. {status}"));
+                }
                 None => self.push_info("no image found on the clipboard."),
             },
             Key::Backspace | Key::Delete => {
@@ -1777,15 +1862,18 @@ impl TuiApp {
 
         match looks_like_image_paste(&pasted) {
             Some("data-url") => {
-                if let Some(attachment) = attachment_from_data_url(&pasted, Path::new(&self.paths.images_dir)) {
+                if let Some(attachment) =
+                    attachment_from_data_url(&pasted, Path::new(&self.paths.images_dir))
+                {
                     self.attachments.push(attachment);
                     return;
                 }
             }
             Some("file-path") => {
-                if let Some(attachment) =
-                    attachment_from_image_file(pasted.trim(), (&self.bootstrap.cwd, Path::new(&self.paths.images_dir)))
-                {
+                if let Some(attachment) = attachment_from_image_file(
+                    pasted.trim(),
+                    (&self.bootstrap.cwd, Path::new(&self.paths.images_dir)),
+                ) {
                     self.attachments.push(attachment);
                     return;
                 }
@@ -1795,7 +1883,11 @@ impl TuiApp {
 
         let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let submits_on_newline = normalized.ends_with('\n');
-        let insertion = if submits_on_newline { &normalized[..normalized.len() - 1] } else { normalized.as_str() };
+        let insertion = if submits_on_newline {
+            &normalized[..normalized.len() - 1]
+        } else {
+            normalized.as_str()
+        };
         if !insertion.is_empty() {
             self.insert_text(insertion);
         }
@@ -1841,15 +1933,28 @@ impl TuiApp {
                     .map(|profiles| {
                         let active_tool_id = get_active_cli_tool_profile_id(settings);
                         let mut items = vec![PickerItem {
-                            detail: Some("route every request through the active model".to_string()),
+                            detail: Some(
+                                "route every request through the active model".to_string(),
+                            ),
                             id: String::new(),
-                            label: format!("{}no split — use the active model", if active_tool_id.is_empty() { "● " } else { "" }),
+                            label: format!(
+                                "{}no split — use the active model",
+                                if active_tool_id.is_empty() {
+                                    "● "
+                                } else {
+                                    ""
+                                }
+                            ),
                         }];
                         items.extend(profiles.into_iter().map(|profile| PickerItem {
                             detail: Some(format!("{} · {}", profile.provider, profile.model)),
                             label: format!(
                                 "{}{}",
-                                if profile.id == active_tool_id { "● " } else { "" },
+                                if profile.id == active_tool_id {
+                                    "● "
+                                } else {
+                                    ""
+                                },
                                 profile.label.clone().unwrap_or_else(|| profile.id.clone())
                             ),
                             id: profile.id,
@@ -1878,10 +1983,19 @@ impl TuiApp {
                 list_all_sessions(&self.bootstrap.project, Some(15))
                     .into_iter()
                     .map(|record| PickerItem {
-                        detail: Some(record.last_goal.clone().unwrap_or_else(|| "(no goal yet)".to_string())),
+                        detail: Some(
+                            record
+                                .last_goal
+                                .clone()
+                                .unwrap_or_else(|| "(no goal yet)".to_string()),
+                        ),
                         label: format!(
                             "{}{} · {} · {} goal(s)",
-                            if record.id == self.session.id { "● " } else { "" },
+                            if record.id == self.session.id {
+                                "● "
+                            } else {
+                                ""
+                            },
                             short_id(&record.id),
                             record.status,
                             record.goal_count
@@ -1891,7 +2005,13 @@ impl TuiApp {
                     .collect(),
             ),
         };
-        self.overlay = Some(Overlay { filter: String::new(), items, kind, selected: 0, title: title.to_string() });
+        self.overlay = Some(Overlay {
+            filter: String::new(),
+            items,
+            kind,
+            selected: 0,
+            title: title.to_string(),
+        });
     }
 
     // ----- ask_user surveys ----------------------------------------------
@@ -1925,7 +2045,9 @@ impl TuiApp {
 
     fn open_survey_question(&mut self) {
         let Some(state) = &self.survey else { return };
-        let Some(question) = state.survey.questions.get(state.current) else { return };
+        let Some(question) = state.survey.questions.get(state.current) else {
+            return;
+        };
         let mut items: Vec<PickerItem> = question
             .options
             .iter()
@@ -1964,7 +2086,13 @@ impl TuiApp {
             question.header,
             question.question
         );
-        self.overlay = Some(Overlay { filter: String::new(), items, kind: OverlayKind::Question, selected: 0, title });
+        self.overlay = Some(Overlay {
+            filter: String::new(),
+            items,
+            kind: OverlayKind::Question,
+            selected: 0,
+            title,
+        });
     }
 
     /// Space on a "select all that apply" question: flip one option's mark.
@@ -2048,7 +2176,11 @@ impl TuiApp {
         if self.survey.take().is_none() {
             return;
         }
-        if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::Question) {
+        if self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.kind == OverlayKind::Question)
+        {
             self.overlay = None;
         }
         self.set_title_waiting(false);
@@ -2056,8 +2188,14 @@ impl TuiApp {
     }
 
     fn finish_survey(&mut self) {
-        let Some(state) = self.survey.as_ref() else { return };
-        let record = HarnessSurveyAnswers { at: now_iso(), answers: state.answers.clone(), chat: None };
+        let Some(state) = self.survey.as_ref() else {
+            return;
+        };
+        let record = HarnessSurveyAnswers {
+            at: now_iso(),
+            answers: state.answers.clone(),
+            chat: None,
+        };
         // A single local append syscall: transient failures are worth two
         // cheap retries before falling back to the manual re-answer path.
         let mut outcome = crate::core::state::answers::append_answers(&state.answers_path, &record);
@@ -2095,7 +2233,9 @@ impl TuiApp {
     /// survey in one message (the next composer submit writes the chat record).
     fn begin_survey_chat(&mut self) {
         let lines = {
-            let Some(state) = self.survey.as_mut() else { return };
+            let Some(state) = self.survey.as_mut() else {
+                return;
+            };
             state.chat_mode = true;
             state.last_question = state.current;
             let total = state.survey.questions.len();
@@ -2103,7 +2243,12 @@ impl TuiApp {
                 "chat about the survey — your next message answers all {total} questions"
             )];
             for (index, question) in state.survey.questions.iter().enumerate() {
-                lines.push(format!("{}. {} — {}", index + 1, question.header, question.question));
+                lines.push(format!(
+                    "{}. {} — {}",
+                    index + 1,
+                    question.header,
+                    question.question
+                ));
                 for (option_index, option) in question.options.iter().enumerate() {
                     lines.push(format!(
                         "   {}. {} — {}",
@@ -2113,7 +2258,9 @@ impl TuiApp {
                     ));
                 }
             }
-            lines.push("esc dismisses the survey (answer it later with `drip --answer`)".to_string());
+            lines.push(
+                "esc dismisses the survey (answer it later with `drip --answer`)".to_string(),
+            );
             lines
         };
         self.overlay = None;
@@ -2140,21 +2287,26 @@ impl TuiApp {
                 Ok(next) => self.save_config(next, format!("model profile set to {}", item.id)),
                 Err(error) => self.push_error(error.to_string()),
             },
-            OverlayKind::ToolModel => match set_active_cli_tool_profile(self.config.clone(), &item.id) {
-                Ok(next) => {
-                    let note = if item.id.is_empty() {
-                        "tool-calling model cleared — every request uses the active model".to_string()
-                    } else {
-                        format!("tool-calling model set to {}", item.id)
-                    };
-                    self.save_config(next, note);
+            OverlayKind::ToolModel => {
+                match set_active_cli_tool_profile(self.config.clone(), &item.id) {
+                    Ok(next) => {
+                        let note = if item.id.is_empty() {
+                            "tool-calling model cleared — every request uses the active model"
+                                .to_string()
+                        } else {
+                            format!("tool-calling model set to {}", item.id)
+                        };
+                        self.save_config(next, note);
+                    }
+                    Err(error) => self.push_error(error.to_string()),
                 }
-                Err(error) => self.push_error(error.to_string()),
-            },
-            OverlayKind::Prompt => match set_active_cli_system_prompt(self.config.clone(), &item.id) {
-                Ok(next) => self.save_config(next, format!("system prompt set to {}", item.id)),
-                Err(error) => self.push_error(error.to_string()),
-            },
+            }
+            OverlayKind::Prompt => {
+                match set_active_cli_system_prompt(self.config.clone(), &item.id) {
+                    Ok(next) => self.save_config(next, format!("system prompt set to {}", item.id)),
+                    Err(error) => self.push_error(error.to_string()),
+                }
+            }
             OverlayKind::Skills => {
                 // The picker's own key handling toggles and stays open; this
                 // arm keeps the match exhaustive for any future caller.
@@ -2162,7 +2314,9 @@ impl TuiApp {
                 self.skills_toggle(&name);
             }
             OverlayKind::Sessions => {
-                if let Some(record) = resolve_any_session_ref(&self.bootstrap.project, Some(&item.id)) {
+                if let Some(record) =
+                    resolve_any_session_ref(&self.bootstrap.project, Some(&item.id))
+                {
                     self.switch_session(record);
                 }
             }
@@ -2185,7 +2339,9 @@ impl TuiApp {
         self.flush_pending_cells();
         // A survey belongs to the session whose run asked it; never carry it
         // (or write its answers) across a switch.
-        self.drop_survey("survey dismissed by session switch — answer that run with `drip --answer`");
+        self.drop_survey(
+            "survey dismissed by session switch — answer that run with `drip --answer`",
+        );
         // History stays in memory across sessions, but browsing state and the
         // saved draft must not leak into the newly loaded session.
         self.prompt_history.reset();
@@ -2429,10 +2585,18 @@ impl TuiApp {
     }
 
     fn toggle_skill(&mut self, skill_name: &str) {
-        if self.active_skills.iter().any(|skill| skill.name == skill_name) {
+        if self
+            .active_skills
+            .iter()
+            .any(|skill| skill.name == skill_name)
+        {
             self.active_skills.retain(|skill| skill.name != skill_name);
             self.push_cell(
-                TranscriptEntry::Skill(TranscriptSkillEntry { at: now_iso(), enabled: false, name: skill_name.to_string() }),
+                TranscriptEntry::Skill(TranscriptSkillEntry {
+                    at: now_iso(),
+                    enabled: false,
+                    name: skill_name.to_string(),
+                }),
                 true,
             );
             return;
@@ -2565,11 +2729,18 @@ impl TuiApp {
                         .map(|record| {
                             format!(
                                 "{} {} · {} · {} goal(s) · {}",
-                                if record.id == self.session.id { "▸" } else { " " },
+                                if record.id == self.session.id {
+                                    "▸"
+                                } else {
+                                    " "
+                                },
                                 short_id(&record.id),
                                 record.updated_at,
                                 record.goal_count,
-                                record.last_goal.clone().unwrap_or_else(|| "(no goal yet)".to_string())
+                                record
+                                    .last_goal
+                                    .clone()
+                                    .unwrap_or_else(|| "(no goal yet)".to_string())
                             )
                         })
                         .collect::<Vec<_>>()
@@ -2581,7 +2752,9 @@ impl TuiApp {
                 // A corrupt state file comes back as the loader's error text,
                 // which is surfaced as an error entry.
                 let summary = format_state_summary(Path::new(&self.paths.state_path));
-                if summary.starts_with("Could not read harness state at ") || summary.starts_with("The file at ") {
+                if summary.starts_with("Could not read harness state at ")
+                    || summary.starts_with("The file at ")
+                {
                     self.push_error(summary);
                 } else {
                     self.push_info(summary);
@@ -2666,7 +2839,10 @@ impl TuiApp {
                             format!("endpoint: {}", inference.route.url),
                         ];
                         if let Some(route) = &inference.tool_route {
-                            lines.push(format!("tool-calling model: {} ({})", route.model, route.url));
+                            lines.push(format!(
+                                "tool-calling model: {} ({})",
+                                route.model, route.url
+                            ));
                         }
                         if let Some(warning) = &inference.tool_route_warning {
                             lines.push(format!("tool-calling model: {warning}"));
@@ -2725,13 +2901,19 @@ impl TuiApp {
             .env_overlay
             .clone()
             .or_else(|| Some(std::env::vars().collect()));
-        load_merged_env(Path::new(&self.bootstrap.home.env_vars_path), process_env.as_ref())
-            .into_iter()
-            .collect()
+        load_merged_env(
+            Path::new(&self.bootstrap.home.env_vars_path),
+            process_env.as_ref(),
+        )
+        .into_iter()
+        .collect()
     }
 
     fn marketplace_command(&mut self, args: &str) {
-        let parts: Vec<String> = args.split_whitespace().map(|part| part.to_string()).collect();
+        let parts: Vec<String> = args
+            .split_whitespace()
+            .map(|part| part.to_string())
+            .collect();
         let subcommand = parts.first().map(|part| part.as_str()).unwrap_or("list");
         let home = self.bootstrap.home.clone();
 
@@ -2752,19 +2934,40 @@ impl TuiApp {
                 let listing = list_marketplace_plugins(&home, &file);
                 let mut lines: Vec<String> = Vec::new();
                 for record in &file.marketplaces {
-                    lines.push(format!("{} ({}: {})", record.name, record.kind, record.source));
-                    for plugin in listing.plugins.iter().filter(|candidate| candidate.marketplace_name == record.name) {
-                        let plugin_enabled = is_marketplace_key_enabled(&plugin.key, &plugin.key, &file, &overrides);
+                    lines.push(format!(
+                        "{} ({}: {})",
+                        record.name, record.kind, record.source
+                    ));
+                    for plugin in listing
+                        .plugins
+                        .iter()
+                        .filter(|candidate| candidate.marketplace_name == record.name)
+                    {
+                        let plugin_enabled =
+                            is_marketplace_key_enabled(&plugin.key, &plugin.key, &file, &overrides);
                         lines.push(format!(
                             "  {} {}{}",
                             if plugin_enabled { "●" } else { "○" },
                             plugin.key,
-                            if plugin.description.is_empty() { String::new() } else { format!(" — {}", plugin.description) }
+                            if plugin.description.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {}", plugin.description)
+                            }
                         ));
                         for skill in &plugin.skills {
                             lines.push(format!(
                                 "      {} skill {} — {}",
-                                if is_marketplace_key_enabled(&plugin.key, &skill.key, &file, &overrides) { "●" } else { "○" },
+                                if is_marketplace_key_enabled(
+                                    &plugin.key,
+                                    &skill.key,
+                                    &file,
+                                    &overrides
+                                ) {
+                                    "●"
+                                } else {
+                                    "○"
+                                },
                                 skill.name,
                                 skill.description
                             ));
@@ -2772,16 +2975,30 @@ impl TuiApp {
                         for role in &plugin.roles {
                             lines.push(format!(
                                 "      {} role {}{}",
-                                if is_marketplace_key_enabled(&plugin.key, &role.key, &file, &overrides) { "●" } else { "○" },
+                                if is_marketplace_key_enabled(
+                                    &plugin.key,
+                                    &role.key,
+                                    &file,
+                                    &overrides
+                                ) {
+                                    "●"
+                                } else {
+                                    "○"
+                                },
                                 role.name,
-                                role.description.as_ref().map(|text| format!(" — {text}")).unwrap_or_default()
+                                role.description
+                                    .as_ref()
+                                    .map(|text| format!(" — {text}"))
+                                    .unwrap_or_default()
                             ));
                         }
                     }
                 }
                 lines.extend(listing.issues.iter().map(|issue| format!("! {issue}")));
                 lines.push(String::new());
-                lines.push("toggle with /plugin enable|disable <marketplace/plugin[/skill]>.".to_string());
+                lines.push(
+                    "toggle with /plugin enable|disable <marketplace/plugin[/skill]>.".to_string(),
+                );
                 self.push_info(lines.join("\n"));
             }
             "add" => {
@@ -2804,10 +3021,15 @@ impl TuiApp {
                         Ok(added) => {
                             let record = added.record;
                             let listing = list_marketplace_plugins(&home, &added.file);
-                            let own: Vec<_> =
-                                listing.plugins.iter().filter(|plugin| plugin.marketplace_name == record.name).collect();
-                            let skill_count: usize = own.iter().map(|plugin| plugin.skills.len()).sum();
-                            let role_count: usize = own.iter().map(|plugin| plugin.roles.len()).sum();
+                            let own: Vec<_> = listing
+                                .plugins
+                                .iter()
+                                .filter(|plugin| plugin.marketplace_name == record.name)
+                                .collect();
+                            let skill_count: usize =
+                                own.iter().map(|plugin| plugin.skills.len()).sum();
+                            let role_count: usize =
+                                own.iter().map(|plugin| plugin.roles.len()).sum();
                             let mut lines = vec![format!(
                                 "registered \"{}\" ({}): {} plugin(s), {} skill(s), {} role(s).",
                                 record.name,
@@ -2817,7 +3039,13 @@ impl TuiApp {
                                 role_count
                             )];
                             let needle = format!("\"{}\"", record.name);
-                            lines.extend(listing.issues.iter().filter(|issue| issue.contains(&needle)).map(|issue| format!("! {issue}")));
+                            lines.extend(
+                                listing
+                                    .issues
+                                    .iter()
+                                    .filter(|issue| issue.contains(&needle))
+                                    .map(|issue| format!("! {issue}")),
+                            );
                             lines.push("everything starts disabled — enable with /plugin enable <key> (see /marketplace list).".to_string());
                             Msg::Info(lines.join("\n"))
                         }
@@ -2842,16 +3070,18 @@ impl TuiApp {
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
                     let message = match update_marketplaces(None, &home, name.as_deref()) {
-                        Ok(updated) if updated.is_empty() => {
-                            Msg::Info("nothing to update (local marketplaces read in place).".to_string())
-                        }
+                        Ok(updated) if updated.is_empty() => Msg::Info(
+                            "nothing to update (local marketplaces read in place).".to_string(),
+                        ),
                         Ok(updated) => Msg::Info(format!("updated: {}", updated.join(", "))),
                         Err(error) => Msg::Error(error.to_string()),
                     };
                     let _ = tx.send(message);
                 });
             }
-            _ => self.push_error("Usage: /marketplace [add <repo> [name] | remove <name> | update [name] | list]"),
+            _ => self.push_error(
+                "Usage: /marketplace [add <repo> [name] | remove <name> | update [name] | list]",
+            ),
         }
     }
 
@@ -2863,8 +3093,16 @@ impl TuiApp {
             config: &self.config,
             cwd: self.bootstrap.cwd.clone(),
             env: Some(&env),
-            extra_bindings: self.bootstrap.roles_flag.as_ref().and_then(|flag| flag.bindings.clone()),
-            extra_roles: self.bootstrap.roles_flag.as_ref().map(|flag| flag.roles.clone()),
+            extra_bindings: self
+                .bootstrap
+                .roles_flag
+                .as_ref()
+                .and_then(|flag| flag.bindings.clone()),
+            extra_roles: self
+                .bootstrap
+                .roles_flag
+                .as_ref()
+                .map(|flag| flag.roles.clone()),
             marketplace_roles: Some(list_enabled_marketplace_roles(cwd, home).unwrap_or_default()),
             skills: discover_all_skills(cwd, home).unwrap_or_default(),
             tool_names: self.tool_names(),
@@ -2899,7 +3137,10 @@ impl TuiApp {
                     parts.push(format!("model: {}", route.model));
                 }
                 if let Some(loop_config) = &role.r#loop {
-                    parts.push(format!("loop: {}", serde_json::to_string(loop_config).unwrap_or_default()));
+                    parts.push(format!(
+                        "loop: {}",
+                        serde_json::to_string(loop_config).unwrap_or_default()
+                    ));
                 }
                 if let Some(verified_by) = &role.verified_by {
                     parts.push(format!("verifiedBy: {verified_by}"));
@@ -2907,7 +3148,10 @@ impl TuiApp {
                 format!(
                     "{}{}\n    {}",
                     role.name,
-                    role.description.as_ref().map(|text| format!(" — {text}")).unwrap_or_default(),
+                    role.description
+                        .as_ref()
+                        .map(|text| format!(" — {text}"))
+                        .unwrap_or_default(),
                     parts.join(" · ")
                 )
             })
@@ -2915,8 +3159,12 @@ impl TuiApp {
         let bindings = role_setup.bindings.as_ref();
         lines.push(format!(
             "bindings: planning={} task={} — tasks may carry their own role from plan_tasks",
-            bindings.and_then(|b| b.planning.clone()).unwrap_or_else(|| "(default)".to_string()),
-            bindings.and_then(|b| b.task.clone()).unwrap_or_else(|| "(default)".to_string())
+            bindings
+                .and_then(|b| b.planning.clone())
+                .unwrap_or_else(|| "(default)".to_string()),
+            bindings
+                .and_then(|b| b.task.clone())
+                .unwrap_or_else(|| "(default)".to_string())
         ));
         lines.extend(role_setup.issues.iter().map(|issue| format!("! {issue}")));
         self.push_info(lines.join("\n"));
@@ -2936,12 +3184,19 @@ impl TuiApp {
             let mut order: Vec<String> = Vec::new();
             let mut referenced_by: HashMap<String, Vec<String>> = HashMap::new();
             for profile in &profiles {
-                if let Some(env_name) = profile.api_key_ref.as_deref().and_then(|reference| reference.strip_prefix("env:")) {
+                if let Some(env_name) = profile
+                    .api_key_ref
+                    .as_deref()
+                    .and_then(|reference| reference.strip_prefix("env:"))
+                {
                     let env_name = env_name.trim().to_string();
                     if !referenced_by.contains_key(&env_name) {
                         order.push(env_name.clone());
                     }
-                    referenced_by.entry(env_name).or_default().push(profile.id.clone());
+                    referenced_by
+                        .entry(env_name)
+                        .or_default()
+                        .push(profile.id.clone());
                 }
             }
 
@@ -2959,16 +3214,35 @@ impl TuiApp {
                 };
                 // Length + last-4 fingerprint so a corrupted or stale token is
                 // visible without ever printing the secret.
-                let value = if source == "missing" { String::new() } else { merged.get(env_name).cloned().unwrap_or_default().trim().to_string() };
+                let value = if source == "missing" {
+                    String::new()
+                } else {
+                    merged
+                        .get(env_name)
+                        .cloned()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                };
                 let fingerprint = if value.is_empty() {
                     String::new()
                 } else {
-                    let tail: String = value.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+                    let tail: String = value
+                        .chars()
+                        .rev()
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
                     format!(" ({} chars, …{tail})", value.chars().count())
                 };
                 lines.push(format!(
                     "{mark}  {env_name}{fingerprint} — {}",
-                    referenced_by.get(env_name).map(|ids| ids.join(", ")).unwrap_or_default()
+                    referenced_by
+                        .get(env_name)
+                        .map(|ids| ids.join(", "))
+                        .unwrap_or_default()
                 ));
             }
             lines.push(String::new());
@@ -2999,7 +3273,10 @@ impl TuiApp {
     }
 
     fn tool_names(&self) -> Vec<String> {
-        builtin_tool_pack(self.tool_options()).iter().map(|tool| tool.name.clone()).collect()
+        builtin_tool_pack(self.tool_options())
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect()
     }
 
     // ----- goals ----------------------------------------------------------
@@ -3024,7 +3301,10 @@ impl TuiApp {
             TranscriptEntry::Goal(TranscriptGoalEntry {
                 at: now_iso(),
                 goal_id: "live".to_string(),
-                images: goal_images.iter().map(|attachment| attachment.path.clone()).collect(),
+                images: goal_images
+                    .iter()
+                    .map(|attachment| attachment.path.clone())
+                    .collect(),
                 mentions: resolved.mentions.clone(),
                 text: goal_text.clone(),
             }),
@@ -3049,9 +3329,19 @@ impl TuiApp {
             config: &self.config,
             cwd: self.bootstrap.cwd.clone(),
             env: Some(&env),
-            extra_bindings: self.bootstrap.roles_flag.as_ref().and_then(|flag| flag.bindings.clone()),
-            extra_roles: self.bootstrap.roles_flag.as_ref().map(|flag| flag.roles.clone()),
-            marketplace_roles: Some(list_enabled_marketplace_roles(cwd, &self.bootstrap.home).unwrap_or_default()),
+            extra_bindings: self
+                .bootstrap
+                .roles_flag
+                .as_ref()
+                .and_then(|flag| flag.bindings.clone()),
+            extra_roles: self
+                .bootstrap
+                .roles_flag
+                .as_ref()
+                .map(|flag| flag.roles.clone()),
+            marketplace_roles: Some(
+                list_enabled_marketplace_roles(cwd, &self.bootstrap.home).unwrap_or_default(),
+            ),
             skills: discover_all_skills(cwd, &self.bootstrap.home).unwrap_or_default(),
             tool_names: self.tool_names(),
             // Same merged set the CLI validates against (global mcpServers plus
@@ -3087,10 +3377,14 @@ impl TuiApp {
         let ask_user_timeout_seconds = self.bootstrap.ask_timeout_secs;
         let tool_options = self.tool_options();
         let skills = self.active_skills.clone();
-        let redact_secrets = load_env_vars(Path::new(&self.bootstrap.home.env_vars_path)).unwrap_or_default();
+        let redact_secrets =
+            load_env_vars(Path::new(&self.bootstrap.home.env_vars_path)).unwrap_or_default();
         let goal_context = resolved.context_block.clone();
         let mentions = resolved.mentions.clone();
-        let images: Vec<String> = goal_images.iter().map(|attachment| attachment.data_url.clone()).collect();
+        let images: Vec<String> = goal_images
+            .iter()
+            .map(|attachment| attachment.data_url.clone())
+            .collect();
         let hooks = self.config.hooks.clone();
 
         // The skill classifier is config-driven on every surface, the TUI
@@ -3159,8 +3453,14 @@ impl TuiApp {
         std::thread::spawn(move || {
             // A panic anywhere below must still release the composer: the
             // guard reports it as a failed run unless the thread finishes normally.
-            let mut guard = RunDoneGuard { tx: tx.clone(), armed: true };
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let mut guard = RunDoneGuard {
+                tx: tx.clone(),
+                armed: true,
+            };
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     guard.armed = false;
@@ -3176,9 +3476,10 @@ impl TuiApp {
             // was, so a session `/new` creates afterwards is a root, not a child
             // of a finished run.
             let session_env = SessionEnvScope::enter(&session.id);
-            let on_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> = Arc::new(move |event: HarnessEvent| {
-                let _ = event_tx.send(Msg::Event(event));
-            });
+            let on_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> =
+                Arc::new(move |event: HarnessEvent| {
+                    let _ = event_tx.send(Msg::Event(event));
+                });
             let result = runtime.block_on(run_session_goal(SessionGoalArgs {
                 ask_user_enabled,
                 ask_user_timeout_seconds,
@@ -3190,14 +3491,18 @@ impl TuiApp {
                 cwd,
                 goal: goal_text,
                 goal_context,
-                goal_images: if images.is_empty() { None } else { Some(images) },
+                goal_images: if images.is_empty() {
+                    None
+                } else {
+                    Some(images)
+                },
                 hooks,
                 index: &index,
                 inference,
                 max_iterations,
                 max_loops,
                 task_loop_limit,
-            review_waiver_lines,
+                review_waiver_lines,
                 plan_mode,
                 mentions: Some(mentions),
                 new_goal: false,
@@ -3209,7 +3514,11 @@ impl TuiApp {
                 seed_tasks: None,
                 project: &project,
                 role_bindings: role_setup.bindings.clone(),
-                roles: if role_setup.roles.is_empty() { None } else { Some(role_setup.roles.clone()) },
+                roles: if role_setup.roles.is_empty() {
+                    None
+                } else {
+                    Some(role_setup.roles.clone())
+                },
                 session: &session,
                 signal: Some(signal),
                 skills,
@@ -3245,7 +3554,10 @@ impl TuiApp {
                 );
             }
             Err(SessionGoalError::LiveRun(error)) => {
-                self.push_error(format!("{} (Another process owns this session's run right now.)", error.message()));
+                self.push_error(format!(
+                    "{} (Another process owns this session's run right now.)",
+                    error.message()
+                ));
             }
             Err(SessionGoalError::Run(message)) => self.push_error(message),
         }
@@ -3275,12 +3587,7 @@ impl TuiApp {
 
     /// `is_tty` is injected so lifecycle tests can drive the spinner wiring
     /// without a real terminal.
-    fn begin_title_with(
-        &mut self,
-        goal_text: &str,
-        env: &HashMap<String, String>,
-        is_tty: bool,
-    ) {
+    fn begin_title_with(&mut self, goal_text: &str, env: &HashMap<String, String>, is_tty: bool) {
         let settings = self.config.settings.clone();
         // An explicit /rename name wins over a generated title: when
         // session.json already carries one, the one-shot auto-title never
@@ -3556,8 +3863,10 @@ impl TuiApp {
                         // switch must not bind a survey to the new session.
                         && self.run_session_id.as_deref() == Some(self.session.id.as_str())
                     {
-                        if let Some(survey) =
-                            event.data.as_ref().and_then(|data| data.question_survey.clone())
+                        if let Some(survey) = event
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.question_survey.clone())
                         {
                             self.begin_survey(survey);
                         }
@@ -3586,7 +3895,8 @@ impl TuiApp {
                     }));
                 }
                 Ok(Msg::RunDone(result)) => {
-                    if matches!(&result, Err(SessionGoalError::Run(message)) if message == RUN_THREAD_PANIC) {
+                    if matches!(&result, Err(SessionGoalError::Run(message)) if message == RUN_THREAD_PANIC)
+                    {
                         // The panic hook restored the terminal for a crash that
                         // did not happen on this thread; take it back.
                         write_out(&format!("{ENABLE_BRACKETED_PASTE}{HIDE_CURSOR}"));
@@ -3628,7 +3938,9 @@ impl TuiApp {
             // Give the harness a moment to reach its safe point and write the
             // run record; a stuck request is not worth more than a few seconds.
             let deadline = Instant::now() + Duration::from_secs(3);
-            while let Ok(message) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            while let Ok(message) =
+                rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
                 if let Msg::RunDone(result) = message {
                     self.on_run_done(result);
                     break;
@@ -3655,7 +3967,9 @@ struct RunDoneGuard {
 impl Drop for RunDoneGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.tx.send(Msg::RunDone(Err(SessionGoalError::Run(RUN_THREAD_PANIC.to_string()))));
+            let _ = self.tx.send(Msg::RunDone(Err(SessionGoalError::Run(
+                RUN_THREAD_PANIC.to_string(),
+            ))));
         }
     }
 }
@@ -3706,7 +4020,9 @@ fn spawn_mention_indexer(cwd: String, requests: Receiver<(u64, String)>, tx: Sen
                 query = newer_query;
             }
             let paths = match source.load() {
-                Ok(files) => get_workspace_file_suggestions(&files, &query, DEFAULT_FILE_SUGGESTION_LIMIT),
+                Ok(files) => {
+                    get_workspace_file_suggestions(&files, &query, DEFAULT_FILE_SUGGESTION_LIMIT)
+                }
                 Err(_) => Vec::new(),
             };
             if tx.send(Msg::Mentions { paths, seq }).is_err() {
@@ -3827,6 +4143,12 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let mut raw = RawMode::enable();
     write_out(ENABLE_BRACKETED_PASTE);
 
+    // Inline images are opted into exactly once, for an interactive stdout:
+    // detection is a no-op for piped output, and `DRIP_IMAGE_PROTOCOL`
+    // overrides it either way.
+    crate::tui::images::set_inline_images(crate::tui::images::detect_image_protocol());
+    let inline_images_status = crate::tui::images::inline_status();
+
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -3838,6 +4160,10 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     spawn_mention_indexer(cwd, mention_rx, tx.clone());
 
     let mut app = TuiApp::new(bootstrap, tx, mention_tx);
+    // Say which protocol (if any) was detected: the text marker alone is
+    // indistinguishable from "feature missing", especially on terminals that
+    // report a plain TERM (tmux, ssh, VS Code, pwrde/shpool).
+    app.push_info(inline_images_status);
     let code = app.run(rx);
 
     write_out(DISABLE_BRACKETED_PASTE);
@@ -4005,7 +4331,10 @@ mod tests {
             Key::Ctrl(c) => assert_eq!(*c, 'v'),
             _ => panic!("ctrl+v expected"),
         }
-        assert_eq!(kinds(&decode_input("é".as_bytes(), &mut paste)), vec!["text"]);
+        assert_eq!(
+            kinds(&decode_input("é".as_bytes(), &mut paste)),
+            vec!["text"]
+        );
         // Ctrl+s is the steer key: a single raw-mode byte on every terminal.
         match &decode_input(b"\x13", &mut paste)[0] {
             Key::Ctrl(c) => assert_eq!(*c, 's'),
@@ -4040,9 +4369,18 @@ mod tests {
     #[test]
     fn a_chunk_with_several_escape_sequences_decodes_each() {
         let mut paste = None;
-        assert_eq!(kinds(&decode_input(b"\x1b[A\x1b[A", &mut paste)), vec!["up", "up"]);
-        assert_eq!(kinds(&decode_input(b"\x1b[Da", &mut paste)), vec!["left", "text"]);
-        assert_eq!(kinds(&decode_input(b"\x1b[1;5C", &mut paste)), vec!["ignored"]);
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[A\x1b[A", &mut paste)),
+            vec!["up", "up"]
+        );
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[Da", &mut paste)),
+            vec!["left", "text"]
+        );
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[1;5C", &mut paste)),
+            vec!["ignored"]
+        );
     }
 
     #[test]
@@ -4058,7 +4396,11 @@ mod tests {
     fn help_text_lists_every_slash_command() {
         let text = help_text();
         for command in SLASH_COMMANDS {
-            assert!(text.contains(&format!("/{}", command.name)), "{}", command.name);
+            assert!(
+                text.contains(&format!("/{}", command.name)),
+                "{}",
+                command.name
+            );
         }
         assert!(text.contains("ctrl+c — exit"));
     }
@@ -4124,8 +4466,7 @@ mod status_line_tui_tests {
 
     #[test]
     fn custom_ansi_output_is_exact_width_with_reset() {
-        let row =
-            custom_status_row_from(Some(&output("\x1b[32mok\x1b[0m", true)), 10, 0).unwrap();
+        let row = custom_status_row_from(Some(&output("\x1b[32mok\x1b[0m", true)), 10, 0).unwrap();
         assert!(row.starts_with("\x1b[32mok\x1b[0m"), "{row:?}");
         assert_eq!(string_width(&row), 10);
         assert!(row.ends_with("\x1b[0m"));
@@ -4144,8 +4485,7 @@ mod status_line_tui_tests {
 
     #[test]
     fn shutdown_runner_ignores_refresh_requests() {
-        let mut runner =
-            crate::tui::status_line::StatusLineRunner::new(command_setting("true"));
+        let mut runner = crate::tui::status_line::StatusLineRunner::new(command_setting("true"));
         runner.shutdown();
         assert!(!runner.request_refresh(bare_request()));
     }
@@ -4217,7 +4557,9 @@ mod pane_title_lifecycle_tests {
         assert!(apply_title_result(Some(&mut title), 0, 0, None, Instant::now()).is_none());
         assert_eq!(title.label(), fallback_title("my goal"));
         // No pane title at all (headless/no-TTY): results are dropped safely.
-        assert!(apply_title_result(None, 0, 0, Some("unused".to_string()), Instant::now()).is_none());
+        assert!(
+            apply_title_result(None, 0, 0, Some("unused".to_string()), Instant::now()).is_none()
+        );
     }
 
     #[test]
@@ -4290,10 +4632,19 @@ mod pane_title_lifecycle_tests {
         // text and strips any residual control sequences.
         let raw = "\x1b]2;pwn\x07 \u{24b8}fix\tlogin\nbug\x1b[2J";
         let label = crate::tui::pane_title::sanitize(raw);
-        assert!(!label.contains('\x1b') && !label.contains('\x07'), "{label:?}");
+        assert!(
+            !label.contains('\x1b') && !label.contains('\x07'),
+            "{label:?}"
+        );
         let title = crate::tui::pane_title::osc2(&label);
-        assert!(title.starts_with("\x1b]2;") && title.ends_with('\x07'), "{title:?}");
-        assert!(!title.contains("pwn") && !title.contains("\x1b[2J"), "{title:?}");
+        assert!(
+            title.starts_with("\x1b]2;") && title.ends_with('\x07'),
+            "{title:?}"
+        );
+        assert!(
+            !title.contains("pwn") && !title.contains("\x1b[2J"),
+            "{title:?}"
+        );
         let row = crate::tui::status_line::sanitize_status_line(&label, 20, 0);
         assert!(row.contains("fix login bug"), "{row:?}");
         assert!(!row.contains('\x1b') && !row.contains('\x07'), "{row:?}");
@@ -4327,8 +4678,8 @@ mod rename_tests {
     fn rename_app(dir: &Path) -> TuiApp {
         let root = dir.to_string_lossy().to_string();
         let home = crate::core::home::open_drip_home(&root);
-        let project = crate::core::home::resolve_drip_project("/tmp", &root, None)
-            .expect("project resolves");
+        let project =
+            crate::core::home::resolve_drip_project("/tmp", &root, None).expect("project resolves");
         let project = crate::core::home::ensure_drip_project(&project);
         let index = crate::core::sessions::open_session_index(&project.index_db_path);
         let session = crate::core::sessions::create_session(
@@ -4353,7 +4704,7 @@ mod rename_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
-        review_waiver_lines: None,
+            review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: false,
             project,
@@ -4386,7 +4737,12 @@ mod rename_tests {
         let settings = crate::core::config::default_setting_values();
         // An explicit /rename name wins: no auto-title even on a fresh,
         // TTY-visible, enabled session.
-        assert!(!should_request_auto_title(true, &settings, false, Some("User Chosen Name")));
+        assert!(!should_request_auto_title(
+            true,
+            &settings,
+            false,
+            Some("User Chosen Name")
+        ));
         // Without one, the usual gate applies unchanged.
         assert!(should_request_auto_title(true, &settings, false, None));
         assert!(!should_request_auto_title(false, &settings, false, None));
@@ -4484,7 +4840,10 @@ mod rename_tests {
         app.running = true;
         app.text = "/rename Renamed live".to_string();
         app.submit();
-        assert!(app.queued_prompts.is_empty(), "/rename must not wait in the queue");
+        assert!(
+            app.queued_prompts.is_empty(),
+            "/rename must not wait in the queue"
+        );
         assert_eq!(
             read_session_name(Path::new(&app.paths.meta_path)).as_deref(),
             Some("Renamed live")
@@ -4570,7 +4929,11 @@ mod rename_tests {
         assert_eq!(app.rename_epoch, 2, "/new must bump the rename epoch");
         let fresh = label(&app);
         app.apply_rename_result(1, Some(stale_name.to_string()));
-        assert_ne!(label(&app), stale_name, "stale rename must not clobber /new");
+        assert_ne!(
+            label(&app),
+            stale_name,
+            "stale rename must not clobber /new"
+        );
         assert_eq!(label(&app), fresh);
 
         // /resume is the other switch path; the same protection applies.
@@ -4589,7 +4952,11 @@ mod rename_tests {
         app.dispatch_command("resume", &other.id);
         assert_eq!(app.rename_epoch, 11, "/resume must bump the rename epoch");
         app.apply_rename_result(10, Some(stale_name.to_string()));
-        assert_eq!(label(&app), FALLBACK_LABEL, "stale rename must not clobber /resume");
+        assert_eq!(
+            label(&app),
+            FALLBACK_LABEL,
+            "stale rename must not clobber /resume"
+        );
     }
 
     #[test]
@@ -4622,7 +4989,11 @@ mod rename_tests {
         // Resume (switch away and back) restores the manual name verbatim.
         let session = app.session.clone();
         app.switch_session(session);
-        assert_eq!(label(&app), multiword, "resume must restore the manual name");
+        assert_eq!(
+            label(&app),
+            multiword,
+            "resume must restore the manual name"
+        );
     }
 
     #[test]
@@ -4793,7 +5164,7 @@ mod skill_activation_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
-        review_waiver_lines: None,
+            review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: true,
             project: drip_project,
@@ -5420,9 +5791,18 @@ mod skill_activation_tests {
             .expect("steering writes the session inbox");
         let texts: Vec<String> = raw
             .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["text"].as_str().unwrap().to_string())
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
             .collect();
-        assert_eq!(texts, vec!["first", "second"], "every queued message steers, in order");
+        assert_eq!(
+            texts,
+            vec!["first", "second"],
+            "every queued message steers, in order"
+        );
         assert!(
             fixture.app.cells.iter().any(
                 |entry| matches!(entry, TranscriptEntry::Info(note) if note.text.contains("2 queued messages"))
@@ -5440,7 +5820,11 @@ mod skill_activation_tests {
         fixture.app.text = "steer me now".to_string();
         fixture.app.on_key(Key::Ctrl('s'));
 
-        assert_eq!(fixture.app.queued_prompts.len(), 1, "the queue is untouched");
+        assert_eq!(
+            fixture.app.queued_prompts.len(),
+            1,
+            "the queue is untouched"
+        );
         assert_eq!(fixture.app.queued_prompts[0], "queued");
         let raw = std::fs::read_to_string(&fixture.app.paths.inbox_path)
             .expect("steering writes the session inbox");
@@ -5568,7 +5952,7 @@ mod prompt_history_wiring_tests {
             max_iterations: None,
             max_loops: None,
             task_loop_limit: None,
-        review_waiver_lines: None,
+            review_waiver_lines: None,
             plan_mode: None,
             no_repo_memory: true,
             project: drip_project,
@@ -5737,7 +6121,10 @@ mod prompt_history_wiring_tests {
             fixture.app.text, older_multiline,
             "second Up moves inside the entry"
         );
-        assert_eq!(fixture.app.cursor, 12, "top line, column clamped to its end");
+        assert_eq!(
+            fixture.app.cursor, 12,
+            "top line, column clamped to its end"
+        );
         fixture.app.on_key(Key::Up);
         assert_eq!(
             fixture.app.text, "newest single line",
@@ -5954,7 +6341,9 @@ mod survey_tests {
         let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
         fixture.app.begin_survey(survey());
         let rows = plain(&fixture.app.live_region());
-        assert!(rows.iter().any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Approach") && row.contains("question 1 of 2")));
         assert!(rows.iter().any(|row| row.contains("Poll or channel?")));
         assert!(rows.iter().any(|row| row.contains("❯ 1. Poll")));
         assert!(rows.iter().any(|row| row.contains("   watch the file")));
@@ -5962,7 +6351,8 @@ mod survey_tests {
         assert!(rows.iter().any(|row| row.contains("4. Chat about this")));
         assert!(rows
             .iter()
-            .any(|row| row.contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
+            .any(|row| row
+                .contains("Enter to select · ↑/↓ to navigate · 1-9 to jump · Esc to cancel")));
     }
 
     #[test]
@@ -6011,7 +6401,9 @@ mod survey_tests {
         assert_eq!(state.answers[0].choice.as_deref(), Some("Channel"));
         // Question 2 has no allow_other, so its chat row is the last item.
         let rows = plain(&fixture.app.live_region());
-        assert!(rows.iter().any(|row| row.contains("Scope") && row.contains("question 2 of 2")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Scope") && row.contains("question 2 of 2")));
         assert!(rows.iter().any(|row| row.contains("3. Chat about this")));
     }
 
@@ -6022,7 +6414,11 @@ mod survey_tests {
         // The chat row is last: 2 listed options + "Type something." + chat.
         fixture.app.on_key(Key::Text("4".to_string()));
         assert!(fixture.app.overlay.is_none(), "the overlay closes");
-        assert!(fixture.app.survey.as_ref().is_some_and(|state| state.chat_mode));
+        assert!(fixture
+            .app
+            .survey
+            .as_ref()
+            .is_some_and(|state| state.chat_mode));
         assert!(fixture.app.cells.iter().any(|entry| matches!(
             entry,
             TranscriptEntry::Info(note)
@@ -6039,9 +6435,13 @@ mod survey_tests {
             entry,
             TranscriptEntry::Info(note) if note.text == "chat reply recorded — the run continues"
         )));
-        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
-        assert!(written.contains("\"chat\":\"use the channel, no tests\""), "{written}");
+        assert!(
+            written.contains("\"chat\":\"use the channel, no tests\""),
+            "{written}"
+        );
         assert!(written.contains("\"answers\":[]"), "{written}");
     }
 
@@ -6052,7 +6452,8 @@ mod survey_tests {
         fixture.app.on_key(Key::Text("4".to_string()));
         fixture.app.on_key(Key::Escape);
         assert!(fixture.app.survey.is_none());
-        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         assert!(!path.exists(), "a dismissal writes nothing");
     }
 
@@ -6062,16 +6463,28 @@ mod survey_tests {
         fixture.app.begin_survey(survey());
         fixture.app.on_key(Key::Text("1".to_string()));
         fixture.app.on_key(Key::Text("3".to_string()));
-        assert!(fixture.app.survey.as_ref().is_some_and(|state| state.chat_mode));
+        assert!(fixture
+            .app
+            .survey
+            .as_ref()
+            .is_some_and(|state| state.chat_mode));
         // The answers path now names a directory, so every append fails.
-        let blocked = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        let blocked =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         let _ = std::fs::remove_file(&blocked);
         std::fs::create_dir_all(&blocked).expect("block the answers path");
         type_text(&mut fixture.app, "still thinking");
         fixture.app.submit();
-        let state = fixture.app.survey.as_ref().expect("survey survives the failure");
+        let state = fixture
+            .app
+            .survey
+            .as_ref()
+            .expect("survey survives the failure");
         assert!(state.chat_mode, "chat mode stays on for the retry");
-        assert_eq!(fixture.app.text, "still thinking", "the reply is back in the composer");
+        assert_eq!(
+            fixture.app.text, "still thinking",
+            "the reply is back in the composer"
+        );
         assert!(fixture.app.cells.iter().any(|entry| matches!(
             entry,
             TranscriptEntry::Error(note) if note.text.contains("press Enter to retry")
@@ -6094,12 +6507,19 @@ mod survey_tests {
         for ch in ["u", "s", "e", " ", "p", "o", "l", "l"] {
             fixture.app.on_key(Key::Text(ch.to_string()));
         }
-        assert_eq!(fixture.app.text, "use poll", "typed text reaches the composer in chat mode");
+        assert_eq!(
+            fixture.app.text, "use poll",
+            "typed text reaches the composer in chat mode"
+        );
         fixture.app.on_key(Key::Backspace);
         assert_eq!(fixture.app.text, "use pol");
         fixture.app.on_key(Key::Return);
-        assert!(fixture.app.survey.is_none(), "Enter records the reply and clears the survey");
-        let path = std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
+        assert!(
+            fixture.app.survey.is_none(),
+            "Enter records the reply and clears the survey"
+        );
+        let path =
+            std::path::Path::new(&fixture.app.paths.state_path).with_file_name("answers.jsonl");
         let written = std::fs::read_to_string(&path).expect("answers.jsonl written");
         assert!(written.contains("\"chat\":\"use pol\""), "{written}");
     }

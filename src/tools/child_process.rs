@@ -104,8 +104,14 @@ pub fn install_stop_signal_handlers() {
         }
 
         unsafe {
-            libc::signal(libc::SIGTERM, on_stop_signal as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGINT, on_stop_signal as *const () as libc::sighandler_t);
+            libc::signal(
+                libc::SIGTERM,
+                on_stop_signal as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGINT,
+                on_stop_signal as *const () as libc::sighandler_t,
+            );
         }
     });
 }
@@ -223,14 +229,22 @@ pub struct WarmupJob {
 impl WarmupJob {
     pub fn spawn(program: &str, args: &[String], cwd: &str) -> std::io::Result<WarmupJob> {
         let mut builder = Command::new(program);
-        builder.args(args).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        builder
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             builder.process_group(0);
         }
         let child = builder.spawn()?;
-        Ok(WarmupJob { child, command: format!("{program} {}", args.join(" ")) })
+        Ok(WarmupJob {
+            child,
+            command: format!("{program} {}", args.join(" ")),
+        })
     }
 
     pub fn finished(&mut self) -> bool {
@@ -319,7 +333,9 @@ fn wait_with_pipes(
             thread::spawn(move || {
                 use std::io::Write;
                 let mut stdin = stdin;
-                let write = stdin.write_all(payload.as_bytes()).and_then(|_| stdin.flush());
+                let write = stdin
+                    .write_all(payload.as_bytes())
+                    .and_then(|_| stdin.flush());
                 if let Err(error) = write {
                     if let Ok(mut slot) = error_slot.lock() {
                         *slot = Some(error.to_string());
@@ -359,7 +375,9 @@ fn wait_with_pipes(
         }
 
         if let Some((exit_code, signal)) = exited.clone() {
-            if stdout_handle.eof.load(Ordering::Acquire) && stderr_handle.eof.load(Ordering::Acquire) {
+            if stdout_handle.eof.load(Ordering::Acquire)
+                && stderr_handle.eof.load(Ordering::Acquire)
+            {
                 break Outcome::Exited { exit_code, signal };
             }
         }
@@ -597,7 +615,8 @@ mod tests {
     #[test]
     fn captured_process_result_captures_stdout_stderr_and_exit_code() {
         let process_args = owned(&["-c", "echo out; echo err 1>&2; exit 3"]);
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -615,7 +634,8 @@ mod tests {
 
     #[test]
     fn captured_process_honors_cwd_and_empty_process_args() {
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/bin/pwd",
             cwd: Some("/"),
             env: None,
@@ -637,7 +657,8 @@ mod tests {
         // once. The signal reported is the one that actually reaped the
         // child, not the one first sent.
         let process_args = owned(&["-c", "trap '' TERM; echo started; sleep 30"]);
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -660,7 +681,8 @@ mod tests {
         // timed_out: true } in ~0.3s — the shell's own exit code survives, and
         // timed_out records that the kill is what freed the pipes.
         let process_args = owned(&["-c", "sleep 30 & sleep 30 & echo started"]);
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: None,
@@ -674,7 +696,11 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.signal, None);
         assert_eq!(result.stdout.trim(), "started");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "settled in {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "settled in {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -682,7 +708,8 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("DRIP_TEST_VALUE".to_string(), "42".to_string());
         let process_args = owned(&["-c", "echo $DRIP_TEST_VALUE"]);
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/bin/sh",
             cwd: None,
             env: Some(&env),
@@ -697,7 +724,8 @@ mod tests {
 
     #[test]
     fn missing_command_rejects_with_an_error() {
-        let args = CapturedProcessArgs { stdin_payload: None,
+        let args = CapturedProcessArgs {
+            stdin_payload: None,
             command: "/definitely/not/a/real/binary",
             cwd: None,
             env: None,
@@ -707,10 +735,7 @@ mod tests {
         let error = run_captured_process(&args).expect_err("spawn should fail");
 
         // The spawn error surfaces as the call's Err.
-        assert!(
-            error.contains("No such file"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("No such file"), "unexpected error: {error}");
     }
 
     #[test]
@@ -753,7 +778,10 @@ mod tests {
 
     #[test]
     fn build_combined_output_joins_sections_with_a_blank_line() {
-        assert_eq!(build_combined_output("out\n", "err\n"), "out\n\n[stderr]\nerr");
+        assert_eq!(
+            build_combined_output("out\n", "err\n"),
+            "out\n\n[stderr]\nerr"
+        );
     }
 
     #[test]
@@ -828,8 +856,7 @@ mod tests {
         // The child floods stdout with NULs first, then echoes stdin.
         let expected_suffix = format!("\0\0{}", payload);
         assert!(
-            result.stdout.ends_with(&expected_suffix)
-                || result.stdout.ends_with(&payload),
+            result.stdout.ends_with(&expected_suffix) || result.stdout.ends_with(&payload),
             "payload not delivered intact after the stdout flood"
         );
         assert_eq!(result.stdin_error, None);

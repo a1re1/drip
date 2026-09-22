@@ -19,17 +19,17 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::chat::types::{ChatMessageBlock, CompletionBlock, TextBlock, ToolCallStatus};
-use crate::tools::builtin::{self, ToolCtx, ToolOutcome};
 use crate::tools::async_jobs::{compact_whitespace, truncate_text};
+use crate::tools::builtin::{self, ToolCtx, ToolOutcome};
 use crate::tools::helpers::{
-    format_tool_path, get_optional_number_argument, get_required_string_argument, parse_tool_arguments,
-    resolve_tool_path,
+    format_tool_path, get_optional_number_argument, get_required_string_argument,
+    parse_tool_arguments, resolve_tool_path,
 };
 use crate::tools::types::{
     define_async_tool, define_sync_tool, ChatAsyncToolJobStatus, ChatAsyncToolTaskRequest,
-    ChatToolCompleteRequest, ChatToolCompletionResult, ChatToolDefinition, ChatToolExecuteRequest,
-    ChatToolMode, ChatToolParameters, ChatToolPrepareRequest, ChatToolPreparedInput, ChatToolResult,
-    ChatToolRuntimeServices, ChatTmuxSession,
+    ChatTmuxSession, ChatToolCompleteRequest, ChatToolCompletionResult, ChatToolDefinition,
+    ChatToolExecuteRequest, ChatToolMode, ChatToolParameters, ChatToolPrepareRequest,
+    ChatToolPreparedInput, ChatToolResult, ChatToolRuntimeServices,
 };
 
 /// The names of the built-in pack, in registration order.
@@ -68,7 +68,10 @@ impl BuiltinToolOptions {
     /// The options for a run with network access but no corpus — the shape
     /// most callers and tests want.
     pub fn with_allow_net(allow_net: bool) -> Self {
-        Self { allow_net, ..Self::default() }
+        Self {
+            allow_net,
+            ..Self::default()
+        }
     }
 }
 
@@ -78,7 +81,10 @@ impl BuiltinToolOptions {
 fn split_definition(definition: &Value) -> (String, String, ChatToolParameters) {
     let function = &definition["function"];
     let name = function["name"].as_str().unwrap_or_default().to_string();
-    let description = function["description"].as_str().unwrap_or_default().to_string();
+    let description = function["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let parameters: ChatToolParameters =
         serde_json::from_value(function["parameters"].clone()).unwrap_or_default();
 
@@ -145,13 +151,19 @@ fn sync_tool(
             let ctx = tool_ctx(&request.runtime_context.cwd, &prepare_options);
 
             Ok(ChatToolPreparedInput {
-                display_input: display(request.raw_input, &ctx).unwrap_or_else(|| request.raw_input.to_string()),
+                display_input: display(request.raw_input, &ctx)
+                    .unwrap_or_else(|| request.raw_input.to_string()),
                 input: Value::String(request.raw_input.to_string()),
                 tags: None,
             })
         }),
         execute: Box::new(move |request: ChatToolExecuteRequest<'_>| {
-            let raw_input = request.prepared.input.as_str().unwrap_or_default().to_string();
+            let raw_input = request
+                .prepared
+                .input
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let ctx = tool_ctx(&request.runtime_context.cwd, &execute_options);
 
             outcome_to_result(run(&raw_input, &ctx))
@@ -166,13 +178,17 @@ fn sync_tool(
     })
 }
 
-fn value_runner(run: fn(&Value, &ToolCtx) -> ToolOutcome) -> Arc<dyn Fn(&str, &ToolCtx) -> ToolOutcome> {
+fn value_runner(
+    run: fn(&Value, &ToolCtx) -> ToolOutcome,
+) -> Arc<dyn Fn(&str, &ToolCtx) -> ToolOutcome> {
     Arc::new(move |raw_input: &str, ctx: &ToolCtx| run(&Value::String(raw_input.to_string()), ctx))
 }
 
 macro_rules! value_display {
     ($module:ident) => {
-        |raw_input: &str, ctx: &ToolCtx| builtin::$module::display_input(&Value::String(raw_input.to_string()), ctx)
+        |raw_input: &str, ctx: &ToolCtx| {
+            builtin::$module::display_input(&Value::String(raw_input.to_string()), ctx)
+        }
     };
 }
 
@@ -180,16 +196,21 @@ macro_rules! value_display {
 // BASH_ASYNC — the async variant of BASH, backed by a tmux session
 // ---------------------------------------------------------------------------
 
-fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPreparedInput, String> {
+fn async_bash_prepare(
+    request: ChatToolPrepareRequest<'_>,
+) -> Result<ChatToolPreparedInput, String> {
     let args = parse_tool_arguments(request.raw_input).map_err(|error| error.to_string())?;
-    let command = get_required_string_argument(&args, "command").map_err(|error| error.to_string())?;
-    let raw_cwd = builtin::bash::get_optional_string_argument(&args, "cwd").map_err(|error| error.to_string())?;
+    let command =
+        get_required_string_argument(&args, "command").map_err(|error| error.to_string())?;
+    let raw_cwd = builtin::bash::get_optional_string_argument(&args, "cwd")
+        .map_err(|error| error.to_string())?;
     let context_cwd = request.runtime_context.cwd.clone();
     let absolute_cwd = resolve_tool_path(&context_cwd, raw_cwd.as_deref().unwrap_or(&context_cwd));
     let display_cwd = format_tool_path(&context_cwd, &absolute_cwd);
-    let requested_session_name =
-        builtin::bash::get_optional_string_argument(&args, "sessionName").map_err(|error| error.to_string())?;
-    let session_name = builtin::bash::create_session_name(&command, requested_session_name.as_deref());
+    let requested_session_name = builtin::bash::get_optional_string_argument(&args, "sessionName")
+        .map_err(|error| error.to_string())?;
+    let session_name =
+        builtin::bash::create_session_name(&command, requested_session_name.as_deref());
 
     // Async commands run detached and unwatched — the same gate applies.
     match crate::tools::command_policy::evaluate_command_policy(&command, &context_cwd) {
@@ -197,7 +218,9 @@ fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPre
             if crate::tools::command_policy::allow_destructive_enabled() {
                 eprintln!("[policy] allowing destructive command (rule {rule}, --allow-destructive): {command}");
             } else {
-                return Err(crate::tools::command_policy::format_policy_refusal(&command, &rule, &why));
+                return Err(crate::tools::command_policy::format_policy_refusal(
+                    &command, &rule, &why,
+                ));
             }
         }
         crate::tools::command_policy::CommandPolicyVerdict::Allow => {}
@@ -205,7 +228,12 @@ fn async_bash_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPre
 
     let title = builtin::bash::get_optional_string_argument(&args, "title")
         .map_err(|error| error.to_string())?
-        .unwrap_or_else(|| format!("tmux {session_name}: {}", truncate_text(&compact_whitespace(&command), 72)));
+        .unwrap_or_else(|| {
+            format!(
+                "tmux {session_name}: {}",
+                truncate_text(&compact_whitespace(&command), 72)
+            )
+        });
     let wait_ms = get_optional_number_argument(&args, "waitMs")
         .map_err(|error| error.to_string())?
         .map(|value| value.max(0.0).min(60_000.0) as i64)
@@ -234,10 +262,16 @@ pub const ASYNC_BASH_GRACE_MS: i64 = 15_000;
 
 fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolResult, String> {
     let input = &request.prepared.input;
-    let absolute_cwd = input["absoluteCwd"].as_str().unwrap_or_default().to_string();
+    let absolute_cwd = input["absoluteCwd"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let display_cwd = input["displayCwd"].as_str().unwrap_or_default().to_string();
     let command = input["command"].as_str().unwrap_or_default().to_string();
-    let session_name = input["sessionName"].as_str().unwrap_or_default().to_string();
+    let session_name = input["sessionName"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let title = input["title"].as_str().unwrap_or_default().to_string();
     let wait_ms = input["waitMs"].as_i64().unwrap_or(ASYNC_BASH_GRACE_MS);
 
@@ -309,16 +343,19 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
         })
         .map_err(|error| error.to_string())?;
 
-    request.services.tmux_sessions.register_session(ChatTmuxSession {
-        attach_command: attach_command.clone(),
-        cwd: absolute_cwd.clone(),
-        job_id: job.id.clone(),
-        kill_command: kill_command.clone(),
-        session_name: session_name.clone(),
-        started_at: job.started_at.clone(),
-        title,
-        tool_name: "BASH_ASYNC".to_string(),
-    });
+    request
+        .services
+        .tmux_sessions
+        .register_session(ChatTmuxSession {
+            attach_command: attach_command.clone(),
+            cwd: absolute_cwd.clone(),
+            job_id: job.id.clone(),
+            kill_command: kill_command.clone(),
+            session_name: session_name.clone(),
+            started_at: job.started_at.clone(),
+            title,
+            tool_name: "BASH_ASYNC".to_string(),
+        });
 
     // Grace wait: finished-in-time commands return their output inline.
     let wait_result = request
@@ -342,7 +379,8 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
                 "Background command finished in {:.1}s with status {}{}.",
                 elapsed_ms as f64 / 1000.0,
                 job_status_text(finished_job.status),
-                exit.map(|code| format!(" (exit {code})")).unwrap_or_default()
+                exit.map(|code| format!(" (exit {code})"))
+                    .unwrap_or_default()
             ),
             job_status_to_tool_call_status(finished_job.status),
         )
@@ -354,7 +392,11 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
     };
 
     Ok(ChatToolResult {
-        async_job: Some(if wait_result.completed { finished_job } else { job }),
+        async_job: Some(if wait_result.completed {
+            finished_job
+        } else {
+            job
+        }),
         data: Some(json!({
             "attachCommand": attach_command,
             "command": command,
@@ -372,7 +414,9 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
     })
 }
 
-fn async_bash_complete(request: ChatToolCompleteRequest<'_>) -> Result<ChatToolCompletionResult, String> {
+fn async_bash_complete(
+    request: ChatToolCompleteRequest<'_>,
+) -> Result<ChatToolCompletionResult, String> {
     let data = request.result.data.clone().unwrap_or(Value::Null);
     let session_name = data["sessionName"].as_str().unwrap_or_default();
     let attach_command = data["attachCommand"].as_str().unwrap_or_default();
@@ -383,13 +427,21 @@ fn async_bash_complete(request: ChatToolCompleteRequest<'_>) -> Result<ChatToolC
     let headline = request.result.output_text.clone().unwrap_or_default();
 
     let (text, tool_content) = if completed {
-        let output = if tail.is_empty() { "(no output)".to_string() } else { fallback_log_preview(&tail) };
+        let output = if tail.is_empty() {
+            "(no output)".to_string()
+        } else {
+            fallback_log_preview(&tail)
+        };
         (
             format!("{headline}\n{output}"),
             format!("{headline}\nOutput (last lines):\n{output}"),
         )
     } else {
-        let so_far = if tail.is_empty() { String::new() } else { format!("\nOutput so far:\n{}", fallback_log_preview(&tail)) };
+        let so_far = if tail.is_empty() {
+            String::new()
+        } else {
+            format!("\nOutput so far:\n{}", fallback_log_preview(&tail))
+        };
         (
             [format!("Started tmux session {session_name} (still running after {wait_ms}ms)."), format!("Attach: {attach_command}"), format!("Kill: {kill_command}")].join("\n"),
             format!(
@@ -399,7 +451,11 @@ fn async_bash_complete(request: ChatToolCompleteRequest<'_>) -> Result<ChatToolC
     };
 
     Ok(ChatToolCompletionResult {
-        blocks: Some(vec![ChatMessageBlock::Text(TextBlock { context_state: None, tags: None, text })]),
+        blocks: Some(vec![ChatMessageBlock::Text(TextBlock {
+            context_state: None,
+            tags: None,
+            text,
+        })]),
         tool_content: Some(tool_content),
         tags: None,
     })
@@ -447,8 +503,15 @@ fn fallback_log_preview(output: &str) -> String {
     }
 }
 
-fn resolve_async_job_reference(job_id_or_session_name: &str, services: &ChatToolRuntimeServices) -> String {
-    if services.async_jobs.get_job(job_id_or_session_name).is_some() {
+fn resolve_async_job_reference(
+    job_id_or_session_name: &str,
+    services: &ChatToolRuntimeServices,
+) -> String {
+    if services
+        .async_jobs
+        .get_job(job_id_or_session_name)
+        .is_some()
+    {
         return job_id_or_session_name.to_string();
     }
 
@@ -476,7 +539,11 @@ fn job_status_to_tool_call_status(status: ChatAsyncToolJobStatus) -> ToolCallSta
 }
 
 fn join_present(parts: Vec<String>) -> String {
-    parts.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The ASYNC_TAIL tool: read the latest lines from an async job's log.
@@ -702,9 +769,27 @@ pub fn get_framework_tool_definitions() -> Vec<ChatToolDefinition> {
 pub fn builtin_tool_pack(options: BuiltinToolOptions) -> Vec<ChatToolDefinition> {
     let options = &options;
     let mut pack = vec![
-        sync_tool(builtin::read::definition(), false, options, value_display!(read), value_runner(builtin::read::execute)),
-        sync_tool(builtin::patch::definition(), true, options, value_display!(patch), value_runner(builtin::patch::execute)),
-        sync_tool(builtin::dir::definition(), false, options, value_display!(dir), value_runner(builtin::dir::execute)),
+        sync_tool(
+            builtin::read::definition(),
+            false,
+            options,
+            value_display!(read),
+            value_runner(builtin::read::execute),
+        ),
+        sync_tool(
+            builtin::patch::definition(),
+            true,
+            options,
+            value_display!(patch),
+            value_runner(builtin::patch::execute),
+        ),
+        sync_tool(
+            builtin::dir::definition(),
+            false,
+            options,
+            value_display!(dir),
+            value_runner(builtin::dir::execute),
+        ),
         // Only PATCH declares mutates_workspace; a BASH
         // call is not progress for the stall accounting.
         sync_tool(
@@ -715,10 +800,34 @@ pub fn builtin_tool_pack(options: BuiltinToolOptions) -> Vec<ChatToolDefinition>
             Arc::new(|raw_input: &str, ctx: &ToolCtx| builtin::bash::execute(raw_input, ctx)),
         ),
         async_bash_tool(),
-        sync_tool(builtin::grep::definition(), false, options, value_display!(grep), value_runner(builtin::grep::execute)),
-        sync_tool(builtin::verify::definition(), false, options, value_display!(verify), value_runner(builtin::verify::execute)),
-        sync_tool(builtin::fetch::definition(), false, options, value_display!(fetch), value_runner(builtin::fetch::execute)),
-        sync_tool(builtin::check::definition(), false, options, value_display!(check), value_runner(builtin::check::execute)),
+        sync_tool(
+            builtin::grep::definition(),
+            false,
+            options,
+            value_display!(grep),
+            value_runner(builtin::grep::execute),
+        ),
+        sync_tool(
+            builtin::verify::definition(),
+            false,
+            options,
+            value_display!(verify),
+            value_runner(builtin::verify::execute),
+        ),
+        sync_tool(
+            builtin::fetch::definition(),
+            false,
+            options,
+            value_display!(fetch),
+            value_runner(builtin::fetch::execute),
+        ),
+        sync_tool(
+            builtin::check::definition(),
+            false,
+            options,
+            value_display!(check),
+            value_runner(builtin::check::execute),
+        ),
     ];
 
     // REFERENCE is corpus-gated: without a root every call would fail, so the
@@ -739,8 +848,12 @@ pub fn builtin_tool_pack(options: BuiltinToolOptions) -> Vec<ChatToolDefinition>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::types::{ChatMessage, ChatRole, ChatRuntimeContext, WorkingFileContext, WorkingFileScope};
-    use crate::tools::async_jobs::{create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions};
+    use crate::chat::types::{
+        ChatMessage, ChatRole, ChatRuntimeContext, WorkingFileContext, WorkingFileScope,
+    };
+    use crate::tools::async_jobs::{
+        create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions,
+    };
     use crate::tools::execute::{execute_tool_call, ToolExecutionContext};
 
     fn message() -> ChatMessage {
@@ -759,7 +872,12 @@ mod tests {
         }
     }
 
-    fn run(tools: &[ChatToolDefinition], name: &str, raw_input: &str, cwd: &std::path::Path) -> (String, bool) {
+    fn run(
+        tools: &[ChatToolDefinition],
+        name: &str,
+        raw_input: &str,
+        cwd: &std::path::Path,
+    ) -> (String, bool) {
         let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
             cwd: Some(cwd.to_path_buf()),
             jobs_root: None,
@@ -794,7 +912,10 @@ mod tests {
     /// The tool-call block's `input` for one call, as derived by `display`.
     fn display_of(name: &str, raw_input: &str, cwd: &std::path::Path) -> String {
         let tools = builtin_tool_pack(BuiltinToolOptions::default());
-        let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions { cwd: Some(cwd.to_path_buf()), jobs_root: None });
+        let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+            cwd: Some(cwd.to_path_buf()),
+            jobs_root: None,
+        });
         let message = message();
         let executed = execute_tool_call(ToolExecutionContext {
             call_id: "c1",
@@ -803,7 +924,12 @@ mod tests {
             raw_input,
             runtime_context: ChatRuntimeContext {
                 cwd: cwd.to_string_lossy().to_string(),
-                working_file: WorkingFileContext { exists: false, path: String::new(), scope: WorkingFileScope::Cwd, text: None },
+                working_file: WorkingFileContext {
+                    exists: false,
+                    path: String::new(),
+                    scope: WorkingFileScope::Cwd,
+                    text: None,
+                },
             },
             services,
             tool: tools.iter().find(|tool| tool.name == name),
@@ -826,23 +952,53 @@ mod tests {
         std::fs::write(dir.path().join("hello.txt"), "hi\n").unwrap();
         let cwd = dir.path();
 
-        assert_eq!(display_of("READ", r#"{"path":"hello.txt"}"#, cwd), "hello.txt");
-        assert_eq!(display_of("PATCH", r#"{"path":"hello.txt","content":"a\nb\n"}"#, cwd), "hello.txt (write 3 line(s))");
-        assert_eq!(display_of("DIR", r#"{"path":".","maxDepth":1}"#, cwd), ".\ndepth 1");
-        assert_eq!(display_of("GREP", r#"{"pattern":"hi","path":".","glob":"*.txt"}"#, cwd), "pattern=hi path=. glob=*.txt");
-        assert_eq!(display_of("VERIFY", r#"{"command":"true"}"#, cwd), "command=true");
+        assert_eq!(
+            display_of("READ", r#"{"path":"hello.txt"}"#, cwd),
+            "hello.txt"
+        );
+        assert_eq!(
+            display_of("PATCH", r#"{"path":"hello.txt","content":"a\nb\n"}"#, cwd),
+            "hello.txt (write 3 line(s))"
+        );
+        assert_eq!(
+            display_of("DIR", r#"{"path":".","maxDepth":1}"#, cwd),
+            ".\ndepth 1"
+        );
+        assert_eq!(
+            display_of("GREP", r#"{"pattern":"hi","path":".","glob":"*.txt"}"#, cwd),
+            "pattern=hi path=. glob=*.txt"
+        );
+        assert_eq!(
+            display_of("VERIFY", r#"{"command":"true"}"#, cwd),
+            "command=true"
+        );
         assert_eq!(display_of("BASH", r#"{"command":"true"}"#, cwd), ".\ntrue");
         // FETCH's prepare refuses without --allow-net, so the block falls back to
         // the raw input there; with net the "GET url (max N bytes)" formula shows.
-        assert_eq!(display_of("FETCH", r#"{"url":"https://example.com/x"}"#, cwd), r#"{"url":"https://example.com/x"}"#);
         assert_eq!(
-            builtin::fetch::display_input(&Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()), &tool_ctx(&cwd.to_string_lossy(), &BuiltinToolOptions::with_allow_net(true))),
+            display_of("FETCH", r#"{"url":"https://example.com/x"}"#, cwd),
+            r#"{"url":"https://example.com/x"}"#
+        );
+        assert_eq!(
+            builtin::fetch::display_input(
+                &Value::String(r#"{"url":"https://example.com/x","maxBytes":100}"#.into()),
+                &tool_ctx(
+                    &cwd.to_string_lossy(),
+                    &BuiltinToolOptions::with_allow_net(true)
+                )
+            ),
             Some("GET https://example.com/x (max 100 bytes)".to_string())
         );
         // A failed execution (no tsconfig here) shows the raw input.
-        assert_eq!(display_of("CHECK", r#"{"path":"hello.txt"}"#, cwd), r#"{"path":"hello.txt"}"#);
         assert_eq!(
-            builtin::check::display_input(&Value::String(r#"{"path":" hello.txt "}"#.into()), &tool_ctx(&cwd.to_string_lossy(), &BuiltinToolOptions::default())),
+            display_of("CHECK", r#"{"path":"hello.txt"}"#, cwd),
+            r#"{"path":"hello.txt"}"#
+        );
+        assert_eq!(
+            builtin::check::display_input(
+                &Value::String(r#"{"path":" hello.txt "}"#.into()),
+                &tool_ctx(&cwd.to_string_lossy(), &BuiltinToolOptions::default())
+            ),
             Some(r#"{ path: "hello.txt" }"#.to_string())
         );
         // Unparseable arguments fall back to the raw input; execute reports the error.
@@ -851,19 +1007,39 @@ mod tests {
 
     #[test]
     fn pack_names_match_tools_index_order() {
-        let names: Vec<String> = builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.name).collect();
-        assert_eq!(names, BUILTIN_TOOL_NAMES.iter().map(|name| name.to_string()).collect::<Vec<_>>());
-        let modes: Vec<ChatToolMode> = builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.mode).collect();
+        let names: Vec<String> = builtin_tool_pack(BuiltinToolOptions::default())
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            names,
+            BUILTIN_TOOL_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        );
+        let modes: Vec<ChatToolMode> = builtin_tool_pack(BuiltinToolOptions::default())
+            .into_iter()
+            .map(|tool| tool.mode)
+            .collect();
         assert_eq!(modes[4], ChatToolMode::Async);
-        assert!(modes.iter().enumerate().all(|(index, mode)| index == 4 || *mode == ChatToolMode::Sync));
+        assert!(modes
+            .iter()
+            .enumerate()
+            .all(|(index, mode)| index == 4 || *mode == ChatToolMode::Sync));
     }
 
     // REFERENCE is corpus-gated: absent with no roots, appended last with them.
     #[test]
     fn reference_is_registered_only_when_a_corpus_root_is_configured() {
-        let without: Vec<String> =
-            builtin_tool_pack(BuiltinToolOptions::default()).into_iter().map(|tool| tool.name).collect();
-        assert!(!without.contains(&REFERENCE_TOOL_NAME.to_string()), "{without:?}");
+        let without: Vec<String> = builtin_tool_pack(BuiltinToolOptions::default())
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(
+            !without.contains(&REFERENCE_TOOL_NAME.to_string()),
+            "{without:?}"
+        );
 
         let with: Vec<String> = builtin_tool_pack(BuiltinToolOptions {
             allow_net: false,
@@ -893,10 +1069,17 @@ mod tests {
 
         let refusal = builtin::reference::execute(
             &Value::String(r#"{"action":"search","query":"bm25"}"#.into()),
-            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
+            &tool_ctx(
+                &dir.path().to_string_lossy(),
+                &BuiltinToolOptions::default(),
+            ),
         );
         assert!(refusal.failed);
-        assert!(refusal.text.contains("no reference corpus configured"), "{}", refusal.text);
+        assert!(
+            refusal.text.contains("no reference corpus configured"),
+            "{}",
+            refusal.text
+        );
     }
 
     #[test]
@@ -931,13 +1114,21 @@ mod tests {
             builtin::reference::definition()
         );
 
-        for (tool, definition) in builtin_tool_pack(BuiltinToolOptions::default()).iter().zip(definitions.iter()) {
+        for (tool, definition) in builtin_tool_pack(BuiltinToolOptions::default())
+            .iter()
+            .zip(definitions.iter())
+        {
             let rebuilt = crate::harness::transport::create_request_tool(
                 &tool.name,
                 &tool.description,
                 serde_json::to_value(&tool.parameters).unwrap(),
             );
-            assert_eq!(serde_json::to_value(&rebuilt).unwrap(), *definition, "{}", tool.name);
+            assert_eq!(
+                serde_json::to_value(&rebuilt).unwrap(),
+                *definition,
+                "{}",
+                tool.name
+            );
         }
     }
 
@@ -951,7 +1142,10 @@ mod tests {
         assert!(!failed);
         let direct = builtin::read::execute(
             &json!({ "path": "hello.txt" }),
-            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
+            &tool_ctx(
+                &dir.path().to_string_lossy(),
+                &BuiltinToolOptions::default(),
+            ),
         );
         assert_eq!(content, direct.text);
 
@@ -959,7 +1153,10 @@ mod tests {
         assert!(failed);
         let direct = builtin::read::execute(
             &json!({ "path": "missing.txt" }),
-            &tool_ctx(&dir.path().to_string_lossy(), &BuiltinToolOptions::default()),
+            &tool_ctx(
+                &dir.path().to_string_lossy(),
+                &BuiltinToolOptions::default(),
+            ),
         );
         assert_eq!(content, direct.text);
         assert!(content.starts_with("ERROR: "));
@@ -971,12 +1168,18 @@ mod tests {
         let tools = builtin_tool_pack(BuiltinToolOptions::default());
         let (content, failed) = run(&tools, "NOPE", "{}", dir.path());
         assert!(failed);
-        assert_eq!(content, "ERROR: Tool \"NOPE\" is not available in the loaded tools folder.");
+        assert_eq!(
+            content,
+            "ERROR: Tool \"NOPE\" is not available in the loaded tools folder."
+        );
     }
 
     #[test]
     fn framework_tools_have_the_ts_names_and_clamps() {
-        let names: Vec<String> = get_framework_tool_definitions().into_iter().map(|tool| tool.name).collect();
+        let names: Vec<String> = get_framework_tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
         assert_eq!(names, vec!["ASYNC_TAIL", "ASYNC_WAIT"]);
         assert_eq!(clamp_lines(None), 80);
         assert_eq!(clamp_lines(Some(0.0)), 1);
@@ -998,7 +1201,12 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let tools = vec![async_bash_tool()];
-        let (content, failed) = run(&tools, "BASH_ASYNC", r#"{"command":"echo grace-hello"}"#, dir.path());
+        let (content, failed) = run(
+            &tools,
+            "BASH_ASYNC",
+            r#"{"command":"echo grace-hello"}"#,
+            dir.path(),
+        );
         assert!(!failed, "{content}");
         assert!(content.contains("finished in"), "{content}");
         assert!(content.contains("grace-hello"), "{content}");
@@ -1011,7 +1219,12 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let tools = vec![async_bash_tool()];
-        let (content, failed) = run(&tools, "BASH_ASYNC", r#"{"command":"sleep 5; echo late","waitMs":300}"#, dir.path());
+        let (content, failed) = run(
+            &tools,
+            "BASH_ASYNC",
+            r#"{"command":"sleep 5; echo late","waitMs":300}"#,
+            dir.path(),
+        );
         assert!(!failed, "{content}");
         assert!(content.contains("still running after 300ms"), "{content}");
         assert!(content.contains("ASYNC_WAIT"), "{content}");

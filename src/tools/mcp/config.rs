@@ -77,9 +77,9 @@ pub fn parse_mcp_servers(
         None => return Ok(McpServerMap::new()),
         Some(value) => value,
     };
-    let entries = value
-        .as_object()
-        .ok_or_else(|| "ignoring \"mcpServers\": expected an object keyed by server name".to_string())?;
+    let entries = value.as_object().ok_or_else(|| {
+        "ignoring \"mcpServers\": expected an object keyed by server name".to_string()
+    })?;
     let mut servers = McpServerMap::new();
     for (name, entry) in entries {
         // The name is embedded in tool names as MCP__<server>__<tool> and
@@ -132,7 +132,11 @@ pub fn read_project_mcp_servers(
     let mut entry_warnings = Vec::new();
     let servers = parse_mcp_servers(parsed.get("mcpServers"), &mut entry_warnings)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    warnings.extend(entry_warnings.into_iter().map(|warning| format!("{}: {warning}", path.display())));
+    warnings.extend(
+        entry_warnings
+            .into_iter()
+            .map(|warning| format!("{}: {warning}", path.display())),
+    );
     Ok(Some(servers))
 }
 
@@ -190,8 +194,16 @@ mod tests {
         }));
         assert_eq!(map.keys().collect::<Vec<_>>(), vec!["local"]);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("\"remote\"") && w.contains("no command")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("\"blank\"")), "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("\"remote\"") && w.contains("no command")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("\"blank\"")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -203,7 +215,12 @@ mod tests {
         }));
         assert_eq!(map.keys().collect::<Vec<_>>(), vec!["ok-server"]);
         assert_eq!(warnings.len(), 2, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("\"my__server\"") && w.contains("__")), "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("\"my__server\"") && w.contains("__")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -274,8 +291,7 @@ mod tests {
 
     #[test]
     fn merge_with_missing_sides_keeps_the_present_side() {
-        let global: McpServerMap =
-            parse_ok(&serde_json::json!({"a": {"command": "a"}}));
+        let global: McpServerMap = parse_ok(&serde_json::json!({"a": {"command": "a"}}));
         assert_eq!(
             merge_mcp_servers(Some(&global), None).len(),
             1,
@@ -325,7 +341,11 @@ mod tests {
     fn project_file_without_mcp_servers_key_degrades_to_empty() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".drip")).unwrap();
-        std::fs::write(dir.path().join(".drip").join("mcp.json"), r#"{"other":true}"#).unwrap();
+        std::fs::write(
+            dir.path().join(".drip").join("mcp.json"),
+            r#"{"other":true}"#,
+        )
+        .unwrap();
         let servers = load_mcp_servers(&McpServerMap::new(), dir.path());
         assert!(servers.is_empty());
     }

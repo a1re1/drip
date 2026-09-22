@@ -153,10 +153,7 @@ impl McpClient {
             }),
         )?;
         if reply.get("result").is_none() {
-            return Err(format!(
-                "initialize: malformed reply: {}",
-                summary(&reply)
-            ));
+            return Err(format!("initialize: malformed reply: {}", summary(&reply)));
         }
         Ok(())
     }
@@ -191,10 +188,7 @@ impl McpClient {
     // (timeout, dead server) are Err; tool-level failures come back with
     // `is_error: true`.
     pub fn call(&mut self, tool: &str, arguments: Value) -> Result<McpCallOutcome, String> {
-        let reply = self.request(
-            "tools/call",
-            json!({"name": tool, "arguments": arguments}),
-        )?;
+        let reply = self.request("tools/call", json!({"name": tool, "arguments": arguments}))?;
         let result = reply
             .get("result")
             .ok_or_else(|| format!("tools/call {tool}: no result in {}", summary(&reply)))?;
@@ -233,10 +227,7 @@ impl McpClient {
     }
 
     fn send_raw(&mut self, message: &Value) -> Result<(), String> {
-        let mut stdin = self
-            .stdin
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut stdin = self.stdin.lock().unwrap_or_else(PoisonError::into_inner);
         serde_json::to_writer(&mut *stdin, message)
             .map_err(|error| format!("encode {message}: {error}"))?;
         stdin
@@ -248,7 +239,12 @@ impl McpClient {
     fn wait_for_reply(&self, id: u64, method: &str) -> Result<Value, String> {
         let deadline = Instant::now() + self.timeout;
         loop {
-            if let Some(reply) = self.replies.lock().unwrap_or_else(PoisonError::into_inner).remove(&id) {
+            if let Some(reply) = self
+                .replies
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id)
+            {
                 if let Some(error) = reply.get("error") {
                     return Err(format!(
                         "{method}: MCP error {}: {}",

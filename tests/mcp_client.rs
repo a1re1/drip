@@ -12,10 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use drip::chat::types::{
-    ChatMessage, ChatMessageBlock, ChatRole, ChatRuntimeContext, ToolCallStatus, WorkingFileContext,
-    WorkingFileScope,
+    ChatMessage, ChatMessageBlock, ChatRole, ChatRuntimeContext, ToolCallStatus,
+    WorkingFileContext, WorkingFileScope,
 };
-use drip::tools::async_jobs::{create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions};
+use drip::tools::async_jobs::{
+    create_chat_tool_runtime_services, CreateChatToolRuntimeServicesOptions,
+};
 use drip::tools::execute::{execute_tool_call, ToolExecutionContext};
 use drip::tools::mcp::client::McpClient;
 use drip::tools::mcp::config::McpServerConfig;
@@ -66,7 +68,8 @@ fn fake_server() -> FakeServer {
     let path = dir.path().join("fake-mcp-server");
     std::fs::write(&path, format!("#!/bin/sh\n{FAKE_SERVER}\n")).expect("write fake server script");
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod fake server");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake server");
     FakeServer { _dir: dir, path }
 }
 
@@ -92,8 +95,12 @@ fn with_watchdog<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -
 
 fn spawn_fake() -> (FakeServer, Vec<ChatToolDefinition>) {
     let fake = fake_server();
-    let client = McpClient::spawn("fake", &server_config(fake.path.to_str().expect("fake path")), &PathBuf::from("."))
-        .expect("spawn fake MCP server");
+    let client = McpClient::spawn(
+        "fake",
+        &server_config(fake.path.to_str().expect("fake path")),
+        &PathBuf::from("."),
+    )
+    .expect("spawn fake MCP server");
     let clients = vec![Arc::new(Mutex::new(client))];
     let tools = mcp_tool_definitions(&clients);
     (fake, tools)
@@ -161,11 +168,21 @@ fn spawn_lists_the_servers_tools_under_namespaced_names() {
         assert_eq!(names, vec!["MCP__fake__echo", "MCP__fake__boom"]);
 
         let echo = &tools[0];
-        assert!(echo.description.starts_with("[mcp:fake] "), "description: {}", echo.description);
+        assert!(
+            echo.description.starts_with("[mcp:fake] "),
+            "description: {}",
+            echo.description
+        );
         assert!(echo.description.contains("Echo text back"));
-        assert!(!echo.mutates_workspace, "MCP tools never count as workspace progress");
+        assert!(
+            !echo.mutates_workspace,
+            "MCP tools never count as workspace progress"
+        );
         assert!(echo.parameters.properties.contains_key("text"));
-        assert_eq!(echo.parameters.required.as_deref(), Some(&["text".to_string()][..]));
+        assert_eq!(
+            echo.parameters.required.as_deref(),
+            Some(&["text".to_string()][..])
+        );
 
         // A bare `{"type":"object"}` schema degrades to an empty object schema.
         let boom = &tools[1];
@@ -179,7 +196,10 @@ fn executing_an_mcp_tool_returns_the_servers_text() {
         let (_fake, tools) = spawn_fake();
         let (content, failed) = run(&tools, "MCP__fake__echo", r#"{"text":"hello from drip"}"#);
         assert!(!failed, "echo must not fail: {content}");
-        assert!(content.contains("echo: hello from drip"), "content: {content}");
+        assert!(
+            content.contains("echo: hello from drip"),
+            "content: {content}"
+        );
     });
 }
 
@@ -203,7 +223,10 @@ fn a_missing_server_binary_is_a_spawn_error_not_a_panic() {
         )
         .err()
         .expect("spawn must fail for a missing binary");
-        assert!(error.contains("/nonexistent/drip-mcp-client-fake-path"), "error: {error}");
+        assert!(
+            error.contains("/nonexistent/drip-mcp-client-fake-path"),
+            "error: {error}"
+        );
     });
 }
 
@@ -213,18 +236,28 @@ fn a_silent_server_hits_the_call_timeout_and_the_client_stays_usable() {
         let fake = fake_server();
         let mut config = server_config(fake.path.to_str().expect("fake path"));
         config.timeout_secs = 1;
-        let mut client = McpClient::spawn("fake", &config, &PathBuf::from(".")).expect("spawn fake MCP server");
+        let mut client =
+            McpClient::spawn("fake", &config, &PathBuf::from(".")).expect("spawn fake MCP server");
         let started = std::time::Instant::now();
         let error = client
             .call("hang", serde_json::json!({}))
             .err()
             .expect("a call the server never answers must time out");
         assert!(error.contains("timed out after 1s"), "error: {error}");
-        assert!(started.elapsed() < Duration::from_secs(10), "timeout must fire near the deadline");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timeout must fire near the deadline"
+        );
         // The server is still alive and later replies are still matched by id.
-        let outcome = client.call("echo", serde_json::json!({"text": "after"})).expect("echo after timeout");
+        let outcome = client
+            .call("echo", serde_json::json!({"text": "after"}))
+            .expect("echo after timeout");
         assert!(!outcome.is_error);
-        assert!(outcome.text.contains("echo: after"), "text: {}", outcome.text);
+        assert!(
+            outcome.text.contains("echo: after"),
+            "text: {}",
+            outcome.text
+        );
     });
 }
 
@@ -232,9 +265,12 @@ fn a_silent_server_hits_the_call_timeout_and_the_client_stays_usable() {
 fn a_server_that_exits_before_replying_is_an_error_not_a_hang() {
     with_watchdog(|| {
         let fake = fake_server();
-        let mut client =
-            McpClient::spawn("fake", &server_config(fake.path.to_str().expect("fake path")), &PathBuf::from("."))
-                .expect("spawn fake MCP server");
+        let mut client = McpClient::spawn(
+            "fake",
+            &server_config(fake.path.to_str().expect("fake path")),
+            &PathBuf::from("."),
+        )
+        .expect("spawn fake MCP server");
         let error = client
             .call("die", serde_json::json!({}))
             .err()

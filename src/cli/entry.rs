@@ -12,47 +12,68 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::cli::args::{parse_cli_args, ParsedCliArgs, ReviewSynthesis};
-use crate::cli::review::{
-    resolve_default_base_ref, run_review_command, synthesis_mode_name, ReviewCommandArgs, ReviewProgressEvent,
-    DEFAULT_REVIEW_FILE_PROFILE, DEFAULT_REVIEW_SYNTH_PROFILE,
-};
-use crate::cli::review_report::ReviewSynthesisMode;
-use crate::core::inference::ResolvedInferenceConfig;
 use crate::cli::delegate_tool::{build_delegate_tool, DelegateToolWiring};
-use crate::cli::follow::{format_transcript_entry_line, parse_transcript_line, read_appended_jsonl_lines};
-use crate::cli::gc::{collect_gc_plan, execute_gc_plan, reap_orphan_tmux_sessions, sweep_async_job_logs};
-use crate::cli::headless_output::{headless_event_line, headless_result_payload, HeadlessResultArgs};
+use crate::cli::follow::{
+    format_transcript_entry_line, parse_transcript_line, read_appended_jsonl_lines,
+};
+use crate::cli::gc::{
+    collect_gc_plan, execute_gc_plan, reap_orphan_tmux_sessions, sweep_async_job_logs,
+};
+use crate::cli::headless_output::{
+    headless_event_line, headless_result_payload, HeadlessResultArgs,
+};
 use crate::cli::inspect::{build_inspect_report, format_inspect_report, InspectPaths};
 use crate::cli::marketplaces::{
-    add_marketplace, discover_all_skills, is_marketplace_key_enabled, list_enabled_marketplace_roles,
-    list_marketplace_plugins, load_marketplaces_file, load_project_plugin_overrides, remove_marketplace,
-    set_marketplace_key_enabled, update_marketplaces, AddMarketplaceArgs,
+    add_marketplace, discover_all_skills, is_marketplace_key_enabled,
+    list_enabled_marketplace_roles, list_marketplace_plugins, load_marketplaces_file,
+    load_project_plugin_overrides, remove_marketplace, set_marketplace_key_enabled,
+    update_marketplaces, AddMarketplaceArgs,
 };
 use crate::cli::mentions::resolve_goal_mentions;
-use crate::cli::queue::{append_queued_goal, drain_queued_goals, pending_queued_goals, DrainError, QueuedGoal};
-use crate::cli::roles::{referenced_mcp_servers, resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs, RoleSetupSource};
-use crate::tools::mcp::{client::McpClient, config::load_mcp_servers, mcp_tool_definitions};
+use crate::cli::queue::{
+    append_queued_goal, drain_queued_goals, pending_queued_goals, DrainError, QueuedGoal,
+};
+use crate::cli::review::{
+    resolve_default_base_ref, run_review_command, synthesis_mode_name, ReviewCommandArgs,
+    ReviewProgressEvent, DEFAULT_REVIEW_FILE_PROFILE, DEFAULT_REVIEW_SYNTH_PROFILE,
+};
+use crate::cli::review_report::ReviewSynthesisMode;
+use crate::cli::roles::{
+    referenced_mcp_servers, resolve_role_setup, resolve_roles_flag, ResolveRoleSetupArgs,
+    RoleSetupSource,
+};
 use crate::cli::run_record::{load_run_record, RunRecord};
-use crate::cli::session_run::{run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome};
+use crate::cli::session_run::{
+    run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
+};
 use crate::cli::skills::{
     load_skill_activation, load_skill_content, resolve_effective_activation, save_skill_activation,
     LoadedCliSkill, ResolveEffectiveActivationArgs, SessionRunConfig, SkillActivationEntry,
 };
 use crate::cli::state_summary::{build_state_summary_json, format_state_summary};
-use crate::cli::transcript::{append_transcript_entry, read_transcript, TranscriptEntry, TranscriptNoteEntry};
+use crate::cli::transcript::{
+    append_transcript_entry, read_transcript, TranscriptEntry, TranscriptNoteEntry,
+};
 use crate::cli::wait::{wait_for_run_end, WaitForRunEndArgs, WaitOutcome};
-use crate::core::config::{load_cli_config, resolve_cli_inference, set_active_cli_profile, set_active_cli_tool_profile, CliConfig};
+use crate::core::config::{
+    load_cli_config, resolve_cli_inference, set_active_cli_profile, set_active_cli_tool_profile,
+    CliConfig,
+};
 use crate::core::env_vars::{list_env_var_names, load_env_vars, load_merged_env};
-use crate::core::home::{ensure_drip_project, open_drip_home, resolve_drip_project, DripHome, DripProject};
+use crate::core::home::{
+    ensure_drip_project, open_drip_home, resolve_drip_project, DripHome, DripProject,
+};
+use crate::core::inference::ResolvedInferenceConfig;
 use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{
-    create_session, has_any_session_index, latest_any_session, list_all_sessions, open_session_index,
-    resolve_any_session_ref, session_paths_for, CreateSessionArgs, ProjectPaths, SessionIndex, SessionPaths,
-    SessionRecord, SESSION_ENV_VAR,
+    create_session, has_any_session_index, latest_any_session, list_all_sessions,
+    open_session_index, resolve_any_session_ref, session_paths_for, CreateSessionArgs,
+    ProjectPaths, SessionIndex, SessionPaths, SessionRecord, SESSION_ENV_VAR,
 };
 use crate::core::state::load_harness_state;
 use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
+use crate::tools::mcp::{client::McpClient, config::load_mcp_servers, mcp_tool_definitions};
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions, PLAN_MODE_TOOLS};
 use crate::tools::patch_journal::{undo_last_patches, UndoOutcome};
 use crate::tools::types::ChatToolDefinition;
@@ -125,7 +146,9 @@ fn resolve_reference_roots(cli_args: &ParsedCliArgs) -> Vec<PathBuf> {
     }
 
     for variable in ["DRIP_REFERENCE_ROOTS", "OASIS_ROOTS"] {
-        let Ok(raw) = std::env::var(variable) else { continue };
+        let Ok(raw) = std::env::var(variable) else {
+            continue;
+        };
         let roots: Vec<PathBuf> = raw
             .split(':')
             .map(str::trim)
@@ -148,7 +171,10 @@ fn builtin_tool_options(cli_args: &ParsedCliArgs) -> BuiltinToolOptions {
     }
 }
 
-fn load_tools(tools_path: &str, options: BuiltinToolOptions) -> Result<Vec<ChatToolDefinition>, String> {
+fn load_tools(
+    tools_path: &str,
+    options: BuiltinToolOptions,
+) -> Result<Vec<ChatToolDefinition>, String> {
     if tools_path != "./tools" {
         // A missing pack is an error; a pack that exists is still refused,
         // since drip only loads the built-in tool pack.
@@ -175,16 +201,24 @@ fn resolve_session_ref(project: &DripProject, reference: Option<&str>) -> Resolv
     // home still resolves. The returned record carries the tree it lives in.
     if let Some(reference) = reference.filter(|reference| !reference.is_empty()) {
         return match resolve_any_session_ref(project, Some(reference)) {
-            Some(record) => ResolvedSessionRef { error: None, record: Some(record) },
+            Some(record) => ResolvedSessionRef {
+                error: None,
+                record: Some(record),
+            },
             None => ResolvedSessionRef {
-                error: Some(format!("No session found matching \"{reference}\". Try drip --list.")),
+                error: Some(format!(
+                    "No session found matching \"{reference}\". Try drip --list."
+                )),
                 record: None,
             },
         };
     }
 
     match latest_any_session(project) {
-        Some(record) => ResolvedSessionRef { error: None, record: Some(record) },
+        Some(record) => ResolvedSessionRef {
+            error: None,
+            record: Some(record),
+        },
         None => ResolvedSessionRef {
             error: Some("No sessions recorded yet — start one with plain drip.".to_string()),
             record: None,
@@ -238,7 +272,12 @@ fn answers_from_payload(payload: &str) -> Result<crate::core::types::HarnessSurv
     }
 }
 
-fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: &DripProject) -> ResolvedSessionRef {
+fn pick_session(
+    index: &SessionIndex,
+    args: &ParsedCliArgs,
+    cwd: &str,
+    project: &DripProject,
+) -> ResolvedSessionRef {
     if args.resume {
         let resolved = resolve_session_ref(project, args.resume_id.as_deref());
 
@@ -255,7 +294,10 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
             resolved
         } else {
             ResolvedSessionRef {
-                error: Some(format!("No sessions recorded for {} yet — start one with plain drip.", project.root)),
+                error: Some(format!(
+                    "No sessions recorded for {} yet — start one with plain drip.",
+                    project.root
+                )),
                 record: None,
             }
         };
@@ -263,12 +305,18 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
 
     if args.continue_latest {
         if let Some(latest) = latest_any_session(project) {
-            return ResolvedSessionRef { error: None, record: Some(latest) };
+            return ResolvedSessionRef {
+                error: None,
+                record: Some(latest),
+            };
         }
 
         // Falling through to a fresh session is convenient interactively but a
         // trap for scripts that believe they resumed prior work — say so.
-        eprintln!("No existing session for {} — starting a new one.", project.root);
+        eprintln!(
+            "No existing session for {} — starting a new one.",
+            project.root
+        );
     }
 
     let project_paths = ProjectPaths::from(project);
@@ -288,7 +336,13 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
 
 const RECURSIVE_LIST_LIMIT: usize = 100;
 
-fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, project: &DripProject) {
+fn print_session_list(
+    cwd: &str,
+    json: bool,
+    recursive: bool,
+    home_root: &str,
+    project: &DripProject,
+) {
     // --recursive widens the sweep from this project's registry to every
     // registry under the drip home (the same enumeration dripw's sidebar
     // uses), filtered to sessions launched under this directory tree.
@@ -306,7 +360,8 @@ fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, p
     };
     // Rows from other projects carry their own sessions_dir, which
     // session_paths_for honours over the launch project's.
-    let paths_for = |record: &crate::core::sessions::SessionRecord| session_paths_for(project, record);
+    let paths_for =
+        |record: &crate::core::sessions::SessionRecord| session_paths_for(project, record);
 
     if json {
         // Same curated shape as bare `drip --json`, so callers get paths without
@@ -343,7 +398,10 @@ fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, p
             })
             .collect();
 
-        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
         return;
     }
 
@@ -359,10 +417,18 @@ fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, p
         // The lease is the truth about "running right now"; the status column
         // alone goes stale when a run crashes.
         let live = check_lease(Path::new(&paths_for(record).lease_path), &chrono::Utc::now).alive();
-        let status = if live { "running" } else { record.status.as_str() };
+        let status = if live {
+            "running"
+        } else {
+            record.status.as_str()
+        };
 
         // Recursive rows span directories, so the text form names the cwd too.
-        let location = if recursive { format!("  {}", record.cwd) } else { String::new() };
+        let location = if recursive {
+            format!("  {}", record.cwd)
+        } else {
+            String::new()
+        };
         println!(
             "{}  {}  {:<9}  {} goal(s){}  {}",
             record.id,
@@ -407,7 +473,10 @@ fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, sessio
 
     if let Some(verification) = &payload.last_verification {
         let staleness = if verification.mutations_after > 0 {
-            format!("; STALE — {} edit(s) after it", verification.mutations_after)
+            format!(
+                "; STALE — {} edit(s) after it",
+                verification.mutations_after
+            )
         } else {
             String::new()
         };
@@ -415,7 +484,11 @@ fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, sessio
         println!(
             "verification: {} ({}{staleness})",
             verification.command,
-            crate::core::state::describe_verification_outcome(verification.failed, verification.ran_no_tests, verification.evidence.as_ref())
+            crate::core::state::describe_verification_outcome(
+                verification.failed,
+                verification.ran_no_tests,
+                verification.evidence.as_ref()
+            )
         );
     }
 
@@ -424,7 +497,10 @@ fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, sessio
 
     if let Some(usage) = &payload.usage {
         let waits = if usage.rate_limit_wait_seconds > 0.0 {
-            format!(", {}s in retry waits", usage.rate_limit_wait_seconds.round() as i64)
+            format!(
+                ", {}s in retry waits",
+                usage.rate_limit_wait_seconds.round() as i64
+            )
         } else {
             String::new()
         };
@@ -517,7 +593,10 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
             "status": session.status,
             "transcriptPath": paths.transcript_path
         });
-        println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&info).unwrap_or_default()
+        );
         return;
     }
 
@@ -526,7 +605,10 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
     println!("  state:      {}", paths.state_path);
     println!("  transcript: {}", paths.transcript_path);
     println!();
-    println!("Run a goal here:   drip --resume {} \"your goal\"", short_id(&session.id));
+    println!(
+        "Run a goal here:   drip --resume {} \"your goal\"",
+        short_id(&session.id)
+    );
     println!("Follow the run:    tail -f {}", paths.transcript_path);
     println!("Full reference:    drip --help");
 }
@@ -534,13 +616,21 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
 /// Runs the --review branch: resolve both lanes' routes, stream progress
 /// to stderr, print the report (or the JSON object) and exit with the
 /// review's contractual code.
-fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, project: &DripProject, cwd: &str) -> i32 {
+fn run_review(
+    cli_args: &ParsedCliArgs,
+    config: &CliConfig,
+    home: &DripHome,
+    project: &DripProject,
+    cwd: &str,
+) -> i32 {
     // Both routes are resolved here, where the config (and any --profile
     // override) is already settled, through resolve_cli_inference so each
     // child inherits the full config — url, headers, credentials, system
     // prompt, fallback profile — and the pinned model is the one that answers.
     let merged_env: std::collections::HashMap<String, String> =
-        load_merged_env(Path::new(&home.env_vars_path), None).into_iter().collect();
+        load_merged_env(Path::new(&home.env_vars_path), None)
+            .into_iter()
+            .collect();
     let resolve_route = |profile_id: &str, flag: &str| -> Result<ResolvedInferenceConfig, i32> {
         set_active_cli_profile(config.clone(), profile_id)
             .and_then(|config| set_active_cli_tool_profile(config, profile_id))
@@ -552,8 +642,14 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
                 1
             })
     };
-    let file_profile_id = cli_args.review_file_profile.clone().unwrap_or_else(|| DEFAULT_REVIEW_FILE_PROFILE.to_string());
-    let synth_profile_id = cli_args.review_synth_profile.clone().unwrap_or_else(|| DEFAULT_REVIEW_SYNTH_PROFILE.to_string());
+    let file_profile_id = cli_args
+        .review_file_profile
+        .clone()
+        .unwrap_or_else(|| DEFAULT_REVIEW_FILE_PROFILE.to_string());
+    let synth_profile_id = cli_args
+        .review_synth_profile
+        .clone()
+        .unwrap_or_else(|| DEFAULT_REVIEW_SYNTH_PROFILE.to_string());
     let mut file_inference = match resolve_route(&file_profile_id, "--file-profile") {
         Ok(inference) => inference,
         Err(code) => return code,
@@ -567,16 +663,23 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
     // provider that does not take the field must not see it on the wire
     // (drip --review found this one — a P1 on the first version of this hunk).
     if file_inference.route.reasoning_effort.is_none()
-        && crate::core::inference::supports_openai_reasoning_effort(&file_inference.route.provider, &file_inference.route.model)
+        && crate::core::inference::supports_openai_reasoning_effort(
+            &file_inference.route.provider,
+            &file_inference.route.model,
+        )
     {
-        file_inference.route.reasoning_effort = Some(crate::cli::review::DEFAULT_REVIEW_FILE_REASONING_EFFORT.to_string());
+        file_inference.route.reasoning_effort =
+            Some(crate::cli::review::DEFAULT_REVIEW_FILE_REASONING_EFFORT.to_string());
     }
     let synth_inference = match resolve_route(&synth_profile_id, "--synth-profile") {
         Ok(inference) => inference,
         Err(code) => return code,
     };
     let project = ensure_drip_project(project);
-    let base_ref = cli_args.review_base.clone().unwrap_or_else(|| resolve_default_base_ref(cwd));
+    let base_ref = cli_args
+        .review_base
+        .clone()
+        .unwrap_or_else(|| resolve_default_base_ref(cwd));
     let review_source = if crate::cli::review::git_available(cwd) {
         format!("{base_ref}...HEAD")
     } else {
@@ -632,11 +735,24 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
             // the terminal otherwise, and --json stdout must stay one object.
             on_progress: Some(Arc::new(move |event: ReviewProgressEvent| match event {
                 ReviewProgressEvent::Planned { units, file_count } => {
-                    let labels: Vec<String> = units.iter().map(|unit| format!("{} [{} lines]", unit.label, unit.diff_lines)).collect();
+                    let labels: Vec<String> = units
+                        .iter()
+                        .map(|unit| format!("{} [{} lines]", unit.label, unit.diff_lines))
+                        .collect();
 
-                    eprintln!("review: {} unit(s) for {file_count} file(s) — {}", units.len(), labels.join(" · "));
+                    eprintln!(
+                        "review: {} unit(s) for {file_count} file(s) — {}",
+                        units.len(),
+                        labels.join(" · ")
+                    );
                 }
-                ReviewProgressEvent::UnitDone { unit, errored, elapsed_ms, counts, retry } => {
+                ReviewProgressEvent::UnitDone {
+                    unit,
+                    errored,
+                    elapsed_ms,
+                    counts,
+                    retry,
+                } => {
                     let counts = format!("{} P0 · {} P1 · {} P2", counts.p0, counts.p1, counts.p2);
 
                     eprintln!(
@@ -645,19 +761,33 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
                         if retry { "(retry) " } else { "" },
                         unit.label,
                         seconds(elapsed_ms),
-                        if errored { String::new() } else { format!(" — {counts}") }
+                        if errored {
+                            String::new()
+                        } else {
+                            format!(" — {counts}")
+                        }
                     );
                 }
                 ReviewProgressEvent::UnitRetry { unit, reason } => {
                     eprintln!("review: ↻ retrying {} — {reason}", unit.label);
                 }
                 ReviewProgressEvent::SynthesisStart => {
-                    eprintln!("review: synthesizing on {synth_profile_for_progress} ({} elapsed)", elapsed());
+                    eprintln!(
+                        "review: synthesizing on {synth_profile_for_progress} ({} elapsed)",
+                        elapsed()
+                    );
                 }
                 ReviewProgressEvent::SynthesisSkipped { mode } => {
-                    eprintln!("review: synthesis skipped (--synthesis {}) — {} total", synthesis_mode_name(mode), elapsed());
+                    eprintln!(
+                        "review: synthesis skipped (--synthesis {}) — {} total",
+                        synthesis_mode_name(mode),
+                        elapsed()
+                    );
                 }
-                ReviewProgressEvent::SynthesisDone { elapsed_ms, errored } => {
+                ReviewProgressEvent::SynthesisDone {
+                    elapsed_ms,
+                    errored,
+                } => {
                     eprintln!(
                         "review: synthesis {} in {} — {} total",
                         if errored { "failed" } else { "done" },
@@ -697,7 +827,10 @@ fn run_review(cli_args: &ParsedCliArgs, config: &CliConfig, home: &DripHome, pro
             );
 
             if cli_args.json {
-                println!("{}", serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "null".to_string()));
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&outcome).unwrap_or_else(|_| "null".to_string())
+                );
             } else {
                 println!("{}", outcome.report);
             }
@@ -720,7 +853,10 @@ fn install_stop_signals(on_signal: impl Fn() + Send + Sync + 'static) {
 
     let on_signal: Arc<dyn Fn() + Send + Sync> = Arc::new(on_signal);
 
-    for (kind, signum) in [(SignalKind::interrupt(), libc::SIGINT), (SignalKind::terminate(), libc::SIGTERM)] {
+    for (kind, signum) in [
+        (SignalKind::interrupt(), libc::SIGINT),
+        (SignalKind::terminate(), libc::SIGTERM),
+    ] {
         let on_signal = on_signal.clone();
 
         if let Ok(mut stream) = signal(kind) {
@@ -776,13 +912,17 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     let base_tools_factory: Arc<dyn Fn() -> Vec<ChatToolDefinition>> = Arc::new(move || {
         let pack = builtin_tool_pack(tool_options.clone());
         if plan {
-            pack.into_iter().filter(|tool| PLAN_MODE_TOOLS.contains(&tool.name.as_str())).collect()
+            pack.into_iter()
+                .filter(|tool| PLAN_MODE_TOOLS.contains(&tool.name.as_str()))
+                .collect()
         } else {
             pack
         }
     });
     let merged_env: std::collections::HashMap<String, String> =
-        load_merged_env(Path::new(&args.home.env_vars_path), None).into_iter().collect();
+        load_merged_env(Path::new(&args.home.env_vars_path), None)
+            .into_iter()
+            .collect();
 
     // Skills requested for this run join the system prompt exactly like the
     // TUI's /skill toggles; an unknown explicit name is a hard error, not a
@@ -804,7 +944,9 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
     if let Some(profile) = &effective.profile {
         eprintln!("Re-using model profile \"{profile}\" from this session's last run (override with --profile).");
-        config = match set_active_cli_profile(config, profile).and_then(|config| set_active_cli_tool_profile(config, profile)) {
+        config = match set_active_cli_profile(config, profile)
+            .and_then(|config| set_active_cli_tool_profile(config, profile))
+        {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("{error}");
@@ -855,15 +997,26 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         for requested in &effective.entries {
             let Some(matched) = pool.iter().find(|skill| skill.name == requested.name) else {
                 if effective.reactivated {
-                    eprintln!("Stored skill \"{}\" no longer resolves — skipping it for this run.", requested.name);
+                    eprintln!(
+                        "Stored skill \"{}\" no longer resolves — skipping it for this run.",
+                        requested.name
+                    );
                     continue;
                 }
 
-                let available = pool.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>().join(", ");
+                let available = pool
+                    .iter()
+                    .map(|skill| skill.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 eprintln!(
                     "Unknown skill \"{}\". Available: {}.",
                     requested.name,
-                    if available.is_empty() { "none".to_string() } else { available }
+                    if available.is_empty() {
+                        "none".to_string()
+                    } else {
+                        available
+                    }
                 );
                 return 1;
             };
@@ -881,7 +1034,11 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         }
     }
 
-    let pinned_profile = args.cli_args.profile.clone().or_else(|| effective.profile.clone());
+    let pinned_profile = args
+        .cli_args
+        .profile
+        .clone()
+        .or_else(|| effective.profile.clone());
 
     // --ask pins like --profile: explicit flags win, and a resume-like run
     // inherits the session's stored choice so a continueCommand keeps the
@@ -915,11 +1072,18 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
     // --roles resolved once at startup; the flag's own contents are pinned for
     // the whole run.
-    let extra_roles = args.roles_flag.as_ref().map(|resolved| resolved.roles.clone());
-    let extra_bindings = args.roles_flag.as_ref().and_then(|resolved| resolved.bindings.clone());
+    let extra_roles = args
+        .roles_flag
+        .as_ref()
+        .map(|resolved| resolved.roles.clone());
+    let extra_bindings = args
+        .roles_flag
+        .as_ref()
+        .and_then(|resolved| resolved.bindings.clone());
 
     let skills_pool = discover_all_skills(Path::new(args.cwd), args.home).unwrap_or_default();
-    let marketplace_roles = list_enabled_marketplace_roles(Path::new(args.cwd), args.home).unwrap_or_default();
+    let marketplace_roles =
+        list_enabled_marketplace_roles(Path::new(args.cwd), args.home).unwrap_or_default();
     // The configured MCP server set (global `mcpServers` merged with
     // <cwd>/.drip/mcp.json, project wins) is read once here: roles validate
     // their `mcpServers` against its names, and the spawn loop below looks up
@@ -969,19 +1133,25 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         }
         for name in &spawn_set {
             let Some(server_config) = mcp_configured.get(name) else {
-                eprintln!("mcp: server \"{name}\": not in mcpServers config — its tools are unavailable");
+                eprintln!(
+                    "mcp: server \"{name}\": not in mcpServers config — its tools are unavailable"
+                );
                 continue;
             };
             match McpClient::spawn(name, server_config, Path::new(args.cwd)) {
                 Ok(client) => mcp_clients.push(Arc::new(std::sync::Mutex::new(client))),
-                Err(error) => eprintln!("mcp: server \"{name}\": {error} — its tools are unavailable"),
+                Err(error) => {
+                    eprintln!("mcp: server \"{name}\": {error} — its tools are unavailable")
+                }
             }
         }
     }
     // Role `tools` allowlists may name MCP__<server>__<tool> entries.
-    role_args
-        .tool_names
-        .extend(mcp_tool_definitions(&mcp_clients).into_iter().map(|tool| tool.name));
+    role_args.tool_names.extend(
+        mcp_tool_definitions(&mcp_clients)
+            .into_iter()
+            .map(|tool| tool.name),
+    );
     let role_setup = resolve_role_setup(&role_args);
 
     for issue in &role_setup.issues {
@@ -1017,12 +1187,16 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     let mut skill_pool: Vec<crate::harness::classifier::DynamicSkill> = Vec::new();
 
     if let Some(route) = &classifier {
-        let active_names: std::collections::HashSet<&str> =
-            active_skills.iter().map(|skill| skill.name.as_str()).collect();
+        let active_names: std::collections::HashSet<&str> = active_skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect();
         let discovered = match discover_all_skills(Path::new(args.cwd), args.home) {
             Ok(discovered) => discovered,
             Err(error) => {
-                eprintln!("classifier: skill discovery failed ({error}) — the pool is empty for this run");
+                eprintln!(
+                    "classifier: skill discovery failed ({error}) — the pool is empty for this run"
+                );
                 Vec::new()
             }
         };
@@ -1051,7 +1225,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 }
             };
 
-            let classifiers = match crate::harness::classifier::load_skill_classifiers(&skill.path) {
+            let classifiers = match crate::harness::classifier::load_skill_classifiers(&skill.path)
+            {
                 None => None,
                 Some(Ok(classifiers)) => Some(classifiers),
                 Some(Err(error)) => {
@@ -1063,7 +1238,9 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 }
             };
 
-            let declared = classifiers.as_ref().and_then(|set| set.requirements.clone());
+            let declared = classifiers
+                .as_ref()
+                .and_then(|set| set.requirements.clone());
             authored.insert(skill.name.clone(), classifiers);
             candidates.push((skill, loaded.content, declared));
         }
@@ -1084,10 +1261,16 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         });
         for client in &mcp_clients {
             let (name, tool_names) = {
-                let guard = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let guard = client
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 (
                     guard.name().to_string(),
-                    guard.tools().iter().map(|tool| tool.name.clone()).collect::<Vec<String>>(),
+                    guard
+                        .tools()
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<String>>(),
                 )
             };
             capabilities
@@ -1127,19 +1310,17 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
 
         eprintln!(
             "classifier: {} ({}) → {} · {} skills in pool",
-            classifier_profile_id,
-            route.model,
-            route.url,
-            pool_count
+            classifier_profile_id, route.model, route.url, pool_count
         );
     }
 
     let json = args.cli_args.json;
-    let print_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> = Arc::new(move |event: HarnessEvent| {
-        if let Some(line) = headless_event_line(&event, json) {
-            println!("{line}");
-        }
-    });
+    let print_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> =
+        Arc::new(move |event: HarnessEvent| {
+            if let Some(line) = headless_event_line(&event, json) {
+                println!("{line}");
+            }
+        });
 
     // SIGTERM/SIGINT abort the run at the next safe point; the harness persists
     // state and reports reason "aborted" instead of dying mid-write.
@@ -1215,7 +1396,11 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         seed_tasks: None,
         project: args.project,
         role_bindings: role_setup.bindings.clone(),
-        roles: if role_setup.roles.is_empty() { None } else { Some(role_setup.roles.clone()) },
+        roles: if role_setup.roles.is_empty() {
+            None
+        } else {
+            Some(role_setup.roles.clone())
+        },
         session: args.session,
         signal: Some(controller.clone()),
         skills: active_skills.clone(),
@@ -1278,7 +1463,10 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             usage.completion_tokens,
             (usage.wall_ms as f64 / 1000.0).round() as i64,
             if usage.rate_limit_wait_seconds > 0.0 {
-                format!(", {}s in retry waits", usage.rate_limit_wait_seconds.round() as i64)
+                format!(
+                    ", {}s in retry waits",
+                    usage.rate_limit_wait_seconds.round() as i64
+                )
             } else {
                 String::new()
             }
@@ -1372,7 +1560,11 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 seed_tasks: None,
                 project: args.project,
                 role_bindings: role_setup.bindings.clone(),
-                roles: if role_setup.roles.is_empty() { None } else { Some(role_setup.roles.clone()) },
+                roles: if role_setup.roles.is_empty() {
+                    None
+                } else {
+                    Some(role_setup.roles.clone())
+                },
                 session: args.session,
                 signal: Some(controller.clone()),
                 skills: active_skills.clone(),
@@ -1394,7 +1586,13 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         }
     };
 
-    match drain_queued_goals(&queue_path, first_exit_code, Some(&mut on_refusal), &mut run_goal, &aborted) {
+    match drain_queued_goals(
+        &queue_path,
+        first_exit_code,
+        Some(&mut on_refusal),
+        &mut run_goal,
+        &aborted,
+    ) {
         Ok(drained) => drained.exit_code,
         Err(DrainError::LiveRunError(message)) | Err(DrainError::Other(message)) => {
             eprintln!("{message}");
@@ -1438,11 +1636,19 @@ pub async fn main(argv: Vec<String>) -> i32 {
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    let home = open_drip_home(&cli_args.home.clone().unwrap_or_else(crate::core::home::resolve_drip_home_root));
+    let home = open_drip_home(
+        &cli_args
+            .home
+            .clone()
+            .unwrap_or_else(crate::core::home::resolve_drip_home_root),
+    );
 
     // Paths only — the .drip directory is not created until a command actually
     // needs session storage, so read-only invocations never mutate the cwd.
-    let project_override = cli_args.project_dir.clone().or_else(|| std::env::var("DRIP_PROJECT_DIR").ok());
+    let project_override = cli_args
+        .project_dir
+        .clone()
+        .or_else(|| std::env::var("DRIP_PROJECT_DIR").ok());
     let project = match resolve_drip_project(&cwd, &home.root, project_override.as_deref()) {
         Ok(project) => project,
         Err(error) => {
@@ -1466,7 +1672,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
             return 1;
         }
 
-        let outcomes = undo_last_patches(Path::new(&project.root), cli_args.undo_last_count.unwrap_or(1).max(0) as usize);
+        let outcomes = undo_last_patches(
+            Path::new(&project.root),
+            cli_args.undo_last_count.unwrap_or(1).max(0) as usize,
+        );
 
         if cli_args.json {
             let rows: Vec<serde_json::Value> = outcomes
@@ -1474,7 +1683,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 .map(|outcome| match outcome {
                     UndoOutcome::Undone { path } => json!({ "kind": "undone", "path": path }),
                     UndoOutcome::Deleted { path } => json!({ "kind": "deleted", "path": path }),
-                    UndoOutcome::Refused { path, why } => json!({ "kind": "refused", "path": path, "why": why }),
+                    UndoOutcome::Refused { path, why } => {
+                        json!({ "kind": "refused", "path": path, "why": why })
+                    }
                     UndoOutcome::Empty => json!({ "kind": "empty" }),
                 })
                 .collect();
@@ -1484,13 +1695,22 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 match outcome {
                     UndoOutcome::Empty => println!("Nothing to undo — the patch journal is empty."),
                     UndoOutcome::Refused { path, why } => println!("refused {path}: {why}"),
-                    UndoOutcome::Deleted { path } => println!("deleted (was created by the patch) {path}"),
+                    UndoOutcome::Deleted { path } => {
+                        println!("deleted (was created by the patch) {path}")
+                    }
                     UndoOutcome::Undone { path } => println!("restored {path}"),
                 }
             }
         }
 
-        return if outcomes.iter().any(|outcome| matches!(outcome, UndoOutcome::Refused { .. })) { 1 } else { 0 };
+        return if outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, UndoOutcome::Refused { .. }))
+        {
+            1
+        } else {
+            0
+        };
     }
 
     if cli_args.allow_destructive {
@@ -1523,12 +1743,19 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--undo-last", cli_args.undo_last),
         ("--wait", cli_args.wait),
     ];
-    let active_modes: Vec<&str> = exclusive_modes.iter().filter(|(_, active)| *active).map(|(name, _)| *name).collect();
+    let active_modes: Vec<&str> = exclusive_modes
+        .iter()
+        .filter(|(_, active)| *active)
+        .map(|(name, _)| *name)
+        .collect();
     // JS truthiness: `--prompt ""` is no goal at all (the empty-goal error comes later).
     let has_goal_like = non_empty(&cli_args.goal) || non_empty(&cli_args.prompt) || cli_args.tui;
 
     if active_modes.len() > 1 {
-        eprintln!("Pass one of {} — they are separate modes.", active_modes.join(", "));
+        eprintln!(
+            "Pass one of {} — they are separate modes.",
+            active_modes.join(", ")
+        );
         return 1;
     }
 
@@ -1558,11 +1785,20 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 return 0;
             }
 
-            println!("No sessions recorded for {} yet.", project.worktree_root.as_deref().unwrap_or(&cwd));
+            println!(
+                "No sessions recorded for {} yet.",
+                project.worktree_root.as_deref().unwrap_or(&cwd)
+            );
             return 0;
         }
 
-        print_session_list(&cwd, cli_args.json, cli_args.recursive, &home.root, &project);
+        print_session_list(
+            &cwd,
+            cli_args.json,
+            cli_args.recursive,
+            &home.root,
+            &project,
+        );
         return 0;
     }
 
@@ -1575,11 +1811,17 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
         if !has_any_session_index(&project) {
             if cli_args.json {
-                println!("{}", json!({ "compactedSessions": 0, "deletedBytes": 0, "sessions": [] }));
+                println!(
+                    "{}",
+                    json!({ "compactedSessions": 0, "deletedBytes": 0, "sessions": [] })
+                );
                 return 0;
             }
 
-            println!("No sessions recorded for {} yet.", project.worktree_root.as_deref().unwrap_or(&cwd));
+            println!(
+                "No sessions recorded for {} yet.",
+                project.worktree_root.as_deref().unwrap_or(&cwd)
+            );
             return 0;
         }
 
@@ -1604,10 +1846,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
             cli_args.dry_run,
             chrono::Utc::now().timestamp_millis(),
             &|name: &str| {
-                crate::tools::builtin::bash::kill_tmux_session(name).map_err(|error| error.to_string())
+                crate::tools::builtin::bash::kill_tmux_session(name)
+                    .map_err(|error| error.to_string())
             },
         );
-        let swept_logs = sweep_async_job_logs(&project, older_than_ms, cli_args.dry_run, &chrono::Utc::now);
+        let swept_logs =
+            sweep_async_job_logs(&project, older_than_ms, cli_args.dry_run, &chrono::Utc::now);
 
         index.close();
 
@@ -1645,7 +1889,11 @@ pub async fn main(argv: Vec<String>) -> i32 {
         );
         println!(
             "{}: {} MB across {} session(s)",
-            if cli_args.dry_run { "Would free" } else { "Freed" },
+            if cli_args.dry_run {
+                "Would free"
+            } else {
+                "Freed"
+            },
             mb(result.deleted_bytes),
             result.compacted_sessions
         );
@@ -1661,7 +1909,11 @@ pub async fn main(argv: Vec<String>) -> i32 {
         if swept_logs.deleted_files > 0 {
             println!(
                 "{} {} settled async job log(s).",
-                if cli_args.dry_run { "Would sweep" } else { "Swept" },
+                if cli_args.dry_run {
+                    "Would sweep"
+                } else {
+                    "Swept"
+                },
                 swept_logs.deleted_files
             );
         }
@@ -1671,7 +1923,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     if cli_args.result || cli_args.wait || cli_args.inspect {
         if has_goal_like {
-            eprintln!("--result/--wait/--inspect only inspect a session — run the goal separately.");
+            eprintln!(
+                "--result/--wait/--inspect only inspect a session — run the goal separately."
+            );
             return 1;
         }
 
@@ -1690,7 +1944,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
         let resolved = resolve_session_ref(&project, reference);
 
         let Some(record) = resolved.record else {
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            eprintln!(
+                "{}",
+                resolved
+                    .error
+                    .unwrap_or_else(|| "No session available.".to_string())
+            );
             return 1;
         };
 
@@ -1704,7 +1963,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
             });
 
             if cli_args.json {
-                println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
             } else {
                 println!("{}", format_inspect_report(&report));
             }
@@ -1729,12 +1991,16 @@ pub async fn main(argv: Vec<String>) -> i32 {
             result_path: Path::new(&paths.result_path),
             grace_ms: None,
             poll_ms: None,
-            timeout_ms: cli_args.timeout_secs.map(|secs| (secs * 1000).max(0) as u64),
+            timeout_ms: cli_args
+                .timeout_secs
+                .map(|secs| (secs * 1000).max(0) as u64),
             now: None,
         });
 
         return match outcome {
-            WaitOutcome::Result { record: run_record } => print_run_record(cli_args.json, &paths, &run_record, &record.id),
+            WaitOutcome::Result { record: run_record } => {
+                print_run_record(cli_args.json, &paths, &run_record, &record.id)
+            }
             WaitOutcome::NoRun => {
                 eprintln!(
                     "No run is live and none has recorded a result for session {}.",
@@ -1744,7 +2010,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
             }
             WaitOutcome::Crashed => {
                 if cli_args.json {
-                    println!("{}", json!({ "reason": "crashed", "sessionId": record.id, "type": "wait-crashed" }));
+                    println!(
+                        "{}",
+                        json!({ "reason": "crashed", "sessionId": record.id, "type": "wait-crashed" })
+                    );
                 } else {
                     eprintln!(
                         "The running goal in session {} died without recording a result (crash or kill -9). State on disk is whatever the last save left.",
@@ -1755,7 +2024,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
             }
             WaitOutcome::Timeout => {
                 if cli_args.json {
-                    println!("{}", json!({ "sessionId": record.id, "timeoutSecs": cli_args.timeout_secs, "type": "wait-timeout" }));
+                    println!(
+                        "{}",
+                        json!({ "sessionId": record.id, "timeoutSecs": cli_args.timeout_secs, "type": "wait-timeout" })
+                    );
                 } else {
                     eprintln!(
                         "Still running after {}s — gave up waiting (the run continues; re-run --wait to keep waiting).",
@@ -1788,7 +2060,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 return 0;
             }
 
-            println!("No sessions recorded for {} yet.", project.worktree_root.as_deref().unwrap_or(&cwd));
+            println!(
+                "No sessions recorded for {} yet.",
+                project.worktree_root.as_deref().unwrap_or(&cwd)
+            );
             return 0;
         }
 
@@ -1802,11 +2077,19 @@ pub async fn main(argv: Vec<String>) -> i32 {
                     return 0;
                 }
 
-                println!("No sessions recorded for {} yet.", project.worktree_root.as_deref().unwrap_or(&cwd));
+                println!(
+                    "No sessions recorded for {} yet.",
+                    project.worktree_root.as_deref().unwrap_or(&cwd)
+                );
                 return 0;
             }
 
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            eprintln!(
+                "{}",
+                resolved
+                    .error
+                    .unwrap_or_else(|| "No session available.".to_string())
+            );
             return 1;
         };
 
@@ -1815,7 +2098,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
         // Every --state shape shares one load path, so a corrupt state.json
         // produces the same error message whichever view asked.
         if let Err(error) = load_harness_state(Path::new(&paths.state_path)) {
-            eprintln!("Could not read harness state at {}: {error}", paths.state_path);
+            eprintln!(
+                "Could not read harness state at {}: {error}",
+                paths.state_path
+            );
             return 1;
         }
 
@@ -1823,9 +2109,15 @@ pub async fn main(argv: Vec<String>) -> i32 {
             // The raw HarnessState dump — history, telemetry, promoted context —
             // for debugging; drivers should use the curated summary below.
             match load_harness_state(Path::new(&paths.state_path)) {
-                Ok(state) => println!("{}", serde_json::to_string_pretty(&state).unwrap_or_else(|_| "null".to_string())),
+                Ok(state) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&state).unwrap_or_else(|_| "null".to_string())
+                ),
                 Err(error) => {
-                    eprintln!("Could not read harness state at {}: {error}", paths.state_path);
+                    eprintln!(
+                        "Could not read harness state at {}: {error}",
+                        paths.state_path
+                    );
                     return 1;
                 }
             }
@@ -1838,7 +2130,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
             println!(
                 "{}",
                 summary
-                    .map(|map| serde_json::to_string_pretty(&map).unwrap_or_else(|_| "null".to_string()))
+                    .map(|map| serde_json::to_string_pretty(&map)
+                        .unwrap_or_else(|_| "null".to_string()))
                     .unwrap_or_else(|| "null".to_string())
             );
         } else {
@@ -1860,7 +2153,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
         // A --profile flag applies for this invocation without rewriting the
         // config file — and it selects the model that actually does the work:
         // tool-bearing activations follow the tool route, so both routes move.
-        config = match set_active_cli_profile(config, profile).and_then(|config| set_active_cli_tool_profile(config, profile)) {
+        config = match set_active_cli_profile(config, profile)
+            .and_then(|config| set_active_cli_tool_profile(config, profile))
+        {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("{error}");
@@ -1911,7 +2206,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
         };
 
         if cli_args.json {
-            println!("{}", serde_json::to_string_pretty(&pool).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&pool).unwrap_or_default()
+            );
             return 0;
         }
 
@@ -1944,7 +2242,13 @@ pub async fn main(argv: Vec<String>) -> i32 {
     if marketplace_command {
         // Config commands manage the global home only: no session, no project
         // .drip, and no mixing with run/monitor modes.
-        if has_goal_like || cli_args.state || cli_args.send || cli_args.follow || cli_args.stop || cli_args.list {
+        if has_goal_like
+            || cli_args.state
+            || cli_args.send
+            || cli_args.follow
+            || cli_args.stop
+            || cli_args.list
+        {
             eprintln!("Marketplace/plugin commands cannot be combined with goals or other modes.");
             return 1;
         }
@@ -1967,7 +2271,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
         let resolved = resolve_session_ref(&project, cli_args.stop_id.as_deref());
 
         let Some(record) = resolved.record else {
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            eprintln!(
+                "{}",
+                resolved
+                    .error
+                    .unwrap_or_else(|| "No session available.".to_string())
+            );
             return 1;
         };
 
@@ -1980,7 +2289,11 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 eprintln!(
                     "No goal is running in session {}{}.",
                     short_id(&record.id),
-                    if lease.is_some() { " (its last run left a stale lease)" } else { "" }
+                    if lease.is_some() {
+                        " (its last run left a stale lease)"
+                    } else {
+                        ""
+                    }
                 );
                 return 1;
             }
@@ -2020,7 +2333,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
         }
 
         if cli_args.json {
-            println!("{}", json!({ "pid": lease.pid, "sessionId": record.id, "type": "stopped" }));
+            println!(
+                "{}",
+                json!({ "pid": lease.pid, "sessionId": record.id, "type": "stopped" })
+            );
         } else {
             println!(
                 "Sent SIGTERM to the running goal (pid {}) in session {} — it aborts at the next safe point, state persisted.",
@@ -2043,7 +2359,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
         let resolved = resolve_session_ref(&project, cli_args.answer_id.as_deref());
 
         let Some(record) = resolved.record else {
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            eprintln!(
+                "{}",
+                resolved
+                    .error
+                    .unwrap_or_else(|| "No session available.".to_string())
+            );
             return 1;
         };
 
@@ -2093,7 +2414,10 @@ pub async fn main(argv: Vec<String>) -> i32 {
             .with_file_name("answers.jsonl")
             .to_path_buf();
         if let Err(error) = crate::core::state::answers::append_answers(&answers_path, &answers) {
-            eprintln!("Could not append the answer to {}: {error}", answers_path.display());
+            eprintln!(
+                "Could not append the answer to {}: {error}",
+                answers_path.display()
+            );
             return 1;
         }
 
@@ -2141,11 +2465,20 @@ pub async fn main(argv: Vec<String>) -> i32 {
             return 1;
         }
 
-        let reference = if cli_args.send { cli_args.send_id.as_deref() } else { cli_args.follow_id.as_deref() };
+        let reference = if cli_args.send {
+            cli_args.send_id.as_deref()
+        } else {
+            cli_args.follow_id.as_deref()
+        };
         let resolved = resolve_session_ref(&project, reference);
 
         let Some(record) = resolved.record else {
-            eprintln!("{}", resolved.error.unwrap_or_else(|| "No session available.".to_string()));
+            eprintln!(
+                "{}",
+                resolved
+                    .error
+                    .unwrap_or_else(|| "No session available.".to_string())
+            );
             return 1;
         };
 
@@ -2164,9 +2497,14 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 .create(true)
                 .append(true)
                 .open(&paths.inbox_path)
-                .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()))
+                .and_then(|mut file| {
+                    std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes())
+                })
             {
-                eprintln!("Could not queue the message at {}: {error}", paths.inbox_path);
+                eprintln!(
+                    "Could not queue the message at {}: {error}",
+                    paths.inbox_path
+                );
                 return 1;
             }
             // Queued vs consumed matter to followers: the harness emits an
@@ -2212,7 +2550,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
     let picked = pick_session(&index, &cli_args, &cwd, &project);
 
     let Some(session) = picked.record else {
-        eprintln!("{}", picked.error.unwrap_or_else(|| "No session available.".to_string()));
+        eprintln!(
+            "{}",
+            picked
+                .error
+                .unwrap_or_else(|| "No session available.".to_string())
+        );
         index.close();
         return 1;
     };
@@ -2257,11 +2600,20 @@ pub async fn main(argv: Vec<String>) -> i32 {
         // --enqueue: a live run on the session means "run this next" instead of
         // LiveRunError. The owning process drains the queue at run end. With no
         // live run the flag is a no-op and the goal runs now.
-        if cli_args.enqueue && check_lease(Path::new(&dispatch_paths.lease_path), &chrono::Utc::now).alive() {
-            let position = append_queued_goal(Path::new(&dispatch_paths.queue_path), &goal_text, cli_args.max_iterations);
+        if cli_args.enqueue
+            && check_lease(Path::new(&dispatch_paths.lease_path), &chrono::Utc::now).alive()
+        {
+            let position = append_queued_goal(
+                Path::new(&dispatch_paths.queue_path),
+                &goal_text,
+                cli_args.max_iterations,
+            );
 
             if cli_args.json {
-                println!("{}", json!({ "position": position, "sessionId": session.id, "type": "queued" }));
+                println!(
+                    "{}",
+                    json!({ "position": position, "sessionId": session.id, "type": "queued" })
+                );
             } else {
                 println!(
                     "Queued behind the running goal (position {position}) in session {} — the owning run picks it up when the current goal ends.",
@@ -2277,7 +2629,11 @@ pub async fn main(argv: Vec<String>) -> i32 {
         // The lease prevents double-runs; --wait/--result complete the lifecycle.
         if cli_args.detach {
             let run_log_path = Path::new(&dispatch_paths.dir).join("run.log");
-            let log_file = match std::fs::OpenOptions::new().create(true).append(true).open(&run_log_path) {
+            let log_file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&run_log_path)
+            {
                 Ok(file) => file,
                 Err(error) => {
                     eprintln!("{error}");
@@ -2285,9 +2641,16 @@ pub async fn main(argv: Vec<String>) -> i32 {
                     return 1;
                 }
             };
-            let mut child_args: Vec<String> = argv.iter().filter(|arg| *arg != "--detach").cloned().collect();
+            let mut child_args: Vec<String> = argv
+                .iter()
+                .filter(|arg| *arg != "--detach")
+                .cloned()
+                .collect();
 
-            if !child_args.iter().any(|arg| arg == "--resume" || arg == "-r") {
+            if !child_args
+                .iter()
+                .any(|arg| arg == "--resume" || arg == "-r")
+            {
                 child_args.insert(0, session.id.clone());
                 child_args.insert(0, "--resume".to_string());
             }
@@ -2296,7 +2659,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
             let child = std::process::Command::new(exe)
                 .args(&child_args)
                 .stdin(std::process::Stdio::null())
-                .stdout(log_file.try_clone().map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()))
+                .stdout(
+                    log_file
+                        .try_clone()
+                        .map(std::process::Stdio::from)
+                        .unwrap_or_else(|_| std::process::Stdio::null()),
+                )
                 .stderr(std::process::Stdio::from(log_file))
                 .process_group(0)
                 .spawn();
@@ -2391,9 +2759,17 @@ pub async fn main(argv: Vec<String>) -> i32 {
     })
 }
 
-fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome) -> anyhow::Result<i32> {
+fn run_marketplace_command(
+    cli_args: &ParsedCliArgs,
+    cwd: &str,
+    home: &DripHome,
+) -> anyhow::Result<i32> {
     if cli_args.marketplace_add {
-        let Some(source) = cli_args.marketplace_add_source.as_deref().filter(|source| !source.is_empty()) else {
+        let Some(source) = cli_args
+            .marketplace_add_source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+        else {
             eprintln!("Usage: drip --marketplace-add <git-url-or-path> [name]");
             return Ok(1);
         };
@@ -2423,7 +2799,11 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
     }
 
     if cli_args.marketplace_remove {
-        let Some(name) = cli_args.marketplace_remove_name.as_deref().filter(|name| !name.is_empty()) else {
+        let Some(name) = cli_args
+            .marketplace_remove_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+        else {
             eprintln!("Usage: drip --marketplace-remove <name>");
             return Ok(1);
         };
@@ -2443,11 +2823,17 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
         let updated = update_marketplaces(
             None,
             home,
-            cli_args.marketplace_update_name.as_deref().filter(|name| !name.is_empty()),
+            cli_args
+                .marketplace_update_name
+                .as_deref()
+                .filter(|name| !name.is_empty()),
         )?;
 
         if cli_args.json {
-            println!("{}", json!({ "type": "marketplaces-updated", "updated": updated }));
+            println!(
+                "{}",
+                json!({ "type": "marketplaces-updated", "updated": updated })
+            );
         } else if updated.is_empty() {
             println!("Nothing to update.");
         } else {
@@ -2467,7 +2853,11 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
         let Some(key) = key.filter(|key| !key.is_empty() && key.contains('/')) else {
             eprintln!(
                 "Usage: drip --plugin-{} <marketplace/plugin[/skill]>",
-                if cli_args.plugin_enable { "enable" } else { "disable" }
+                if cli_args.plugin_enable {
+                    "enable"
+                } else {
+                    "disable"
+                }
             );
             return Ok(1);
         };
@@ -2475,9 +2865,19 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
         set_marketplace_key_enabled(home, key, cli_args.plugin_enable)?;
 
         if cli_args.json {
-            println!("{}", json!({ "enabled": cli_args.plugin_enable, "key": key, "type": "plugin-toggled" }));
+            println!(
+                "{}",
+                json!({ "enabled": cli_args.plugin_enable, "key": key, "type": "plugin-toggled" })
+            );
         } else {
-            println!("{} {key}.", if cli_args.plugin_enable { "Enabled" } else { "Disabled" });
+            println!(
+                "{} {key}.",
+                if cli_args.plugin_enable {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            );
         }
 
         return Ok(0);
@@ -2503,7 +2903,8 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
             .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "issues": listed.issues, "plugins": plugins })).unwrap_or_default()
+            serde_json::to_string_pretty(&json!({ "issues": listed.issues, "plugins": plugins }))
+                .unwrap_or_default()
         );
         return Ok(0);
     }
@@ -2513,14 +2914,21 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
     }
 
     if listed.plugins.is_empty() {
-        println!("No marketplaces registered. Add one with drip --marketplace-add <git-url-or-path>.");
+        println!(
+            "No marketplaces registered. Add one with drip --marketplace-add <git-url-or-path>."
+        );
         return Ok(0);
     }
 
     for plugin in &listed.plugins {
         let enabled = is_marketplace_key_enabled(&plugin.key, &plugin.key, &file, &overrides);
 
-        println!("{} {}  {}", if enabled { "[x]" } else { "[ ]" }, plugin.key, plugin.description);
+        println!(
+            "{} {}  {}",
+            if enabled { "[x]" } else { "[ ]" },
+            plugin.key,
+            plugin.description
+        );
 
         for skill in &plugin.skills {
             println!("      skill: {}", skill.name);
@@ -2557,14 +2965,50 @@ mod tests {
     #[test]
     fn ask_user_resolution_prefers_flags_then_stored_then_config_default() {
         let settings = ask_settings("false", "true");
-        assert!(resolve_ask_user_enabled(true, false, true, Some(false), &settings, true));
-        assert!(!resolve_ask_user_enabled(false, true, false, Some(true), &settings, false));
-        assert!(resolve_ask_user_enabled(false, false, true, Some(true), &settings, true));
-        assert!(!resolve_ask_user_enabled(false, false, true, Some(false), &settings, false));
-        assert!(!resolve_ask_user_enabled(false, false, true, None, &settings, true));
-        assert!(resolve_ask_user_enabled(false, false, true, None, &settings, false));
-        assert!(!resolve_ask_user_enabled(false, false, false, None, &settings, true));
-        assert!(resolve_ask_user_enabled(false, false, false, None, &settings, false));
+        assert!(resolve_ask_user_enabled(
+            true,
+            false,
+            true,
+            Some(false),
+            &settings,
+            true
+        ));
+        assert!(!resolve_ask_user_enabled(
+            false,
+            true,
+            false,
+            Some(true),
+            &settings,
+            false
+        ));
+        assert!(resolve_ask_user_enabled(
+            false,
+            false,
+            true,
+            Some(true),
+            &settings,
+            true
+        ));
+        assert!(!resolve_ask_user_enabled(
+            false,
+            false,
+            true,
+            Some(false),
+            &settings,
+            false
+        ));
+        assert!(!resolve_ask_user_enabled(
+            false, false, true, None, &settings, true
+        ));
+        assert!(resolve_ask_user_enabled(
+            false, false, true, None, &settings, false
+        ));
+        assert!(!resolve_ask_user_enabled(
+            false, false, false, None, &settings, true
+        ));
+        assert!(resolve_ask_user_enabled(
+            false, false, false, None, &settings, false
+        ));
         assert!(resolve_ask_user_enabled(
             false,
             false,
@@ -2647,7 +3091,10 @@ mod tests {
         assert_eq!(answers.answers.len(), 1);
         assert_eq!(answers.answers[0].index, 0);
         assert_eq!(answers.answers[0].choice, None);
-        assert_eq!(answers.answers[0].other.as_deref(), Some("use the cache instead"));
+        assert_eq!(
+            answers.answers[0].other.as_deref(),
+            Some("use the cache instead")
+        );
         assert!(crate::core::state::answers::is_rfc3339(&answers.at));
     }
 
@@ -2663,7 +3110,10 @@ mod tests {
         let batches = crate::core::state::answers::read_answer_batches(&path);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].record.answers[0].choice.as_deref(), Some("A"));
-        assert_eq!(batches[1].record.answers[0].other.as_deref(), Some("later clarification"));
+        assert_eq!(
+            batches[1].record.answers[0].other.as_deref(),
+            Some("later clarification")
+        );
     }
 
     #[test]
@@ -2715,5 +3165,4 @@ mod tests {
         let ids: Vec<&str> = kept.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["here", "inner"]);
     }
-
 }

@@ -53,7 +53,8 @@ fn render_inline(text: &str) -> String {
 
         if (rest[0] == '*' || rest[0] == '_') && rest.len() >= 3 {
             let marker = rest[0];
-            let boundary_ok = rest[1] != ' ' && (i == 0 || !chars[i - 1].is_alphanumeric() || marker == '*');
+            let boundary_ok =
+                rest[1] != ' ' && (i == 0 || !chars[i - 1].is_alphanumeric() || marker == '*');
 
             if boundary_ok {
                 if let Some(end) = rest[1..].iter().position(|&ch| ch == marker) {
@@ -80,7 +81,8 @@ fn render_inline(text: &str) -> String {
 fn find_closing(chars: &[char], marker: &str) -> Option<usize> {
     let marker: Vec<char> = marker.chars().collect();
 
-    (0..chars.len().saturating_sub(marker.len() - 1)).find(|&at| chars[at..at + marker.len()] == marker[..])
+    (0..chars.len().saturating_sub(marker.len() - 1))
+        .find(|&at| chars[at..at + marker.len()] == marker[..])
 }
 
 pub fn render_markdown_ansi(source: &str) -> String {
@@ -108,17 +110,32 @@ pub fn render_markdown_ansi(source: &str) -> String {
         } else if let Some(heading) = trimmed.strip_prefix('#') {
             let level = 1 + heading.chars().take_while(|&ch| ch == '#').count();
             let text = heading.trim_start_matches('#').trim();
-            let style = if level == 1 { format!("{BOLD}{UNDERLINE}{GREEN}") } else { format!("{BOLD}{GREEN}") };
+            let style = if level == 1 {
+                format!("{BOLD}{UNDERLINE}{GREEN}")
+            } else {
+                format!("{BOLD}{GREEN}")
+            };
 
             out.push(format!("{style}{}{RESET}", render_inline(text)));
         } else if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             out.push(format!("{DIM}{}{RESET}", "─".repeat(40)));
         } else if let Some(quote) = trimmed.strip_prefix('>') {
-            out.push(format!("{DIM}│ {}{RESET}", render_inline(quote.trim_start())));
-        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")).or_else(|| trimmed.strip_prefix("+ ")) {
+            out.push(format!(
+                "{DIM}│ {}{RESET}",
+                render_inline(quote.trim_start())
+            ));
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("+ "))
+        {
             out.push(format!("{}  * {}", " ".repeat(indent), render_inline(item)));
         } else if let Some((number, item)) = ordered_item(trimmed) {
-            out.push(format!("{}  {number}. {}", " ".repeat(indent), render_inline(item)));
+            out.push(format!(
+                "{}  {number}. {}",
+                " ".repeat(indent),
+                render_inline(item)
+            ));
         } else {
             out.push(format!("{}{}", " ".repeat(indent), render_inline(trimmed)));
         }
@@ -135,7 +152,9 @@ fn ordered_item(line: &str) -> Option<(&str, &str)> {
     }
 
     let rest = &line[digits..];
-    let body = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))?;
+    let body = rest
+        .strip_prefix(". ")
+        .or_else(|| rest.strip_prefix(") "))?;
 
     Some((&line[..digits], body))
 }
@@ -156,7 +175,8 @@ mod tests {
 
     #[test]
     fn fences_lists_and_quotes_render_line_by_line() {
-        let rendered = render_markdown_ansi("- one\n- **two**\n\n```\nlet x = 1;\n```\n> note\n1. first\n");
+        let rendered =
+            render_markdown_ansi("- one\n- **two**\n\n```\nlet x = 1;\n```\n> note\n1. first\n");
         let lines: Vec<&str> = rendered.split('\n').collect();
 
         assert_eq!(lines[0], "  * one");
@@ -169,6 +189,9 @@ mod tests {
     #[test]
     fn unbalanced_markers_pass_through() {
         assert_eq!(render_markdown_ansi("a * b ** c ` d"), "a * b ** c ` d");
-        assert_eq!(render_markdown_ansi("snake_case_name stays"), "snake_case_name stays");
+        assert_eq!(
+            render_markdown_ansi("snake_case_name stays"),
+            "snake_case_name stays"
+        );
     }
 }

@@ -65,9 +65,7 @@ const MIN_SECRET_LENGTH: usize = 8;
 /// `secrets` is passed as ordered (name, value) pairs — source-file order is
 /// significant for diffing. The returned closure applies the exact-value
 /// pass (longest first) followed by the token-pattern pass.
-pub fn build_redactor(
-    secrets: Vec<(String, String)>,
-) -> impl Fn(&str) -> String {
+pub fn build_redactor(secrets: Vec<(String, String)>) -> impl Fn(&str) -> String {
     // Longest values first so a secret that contains another (or a shared
     // prefix) never leaves a partial behind.
     let mut exact: Vec<(String, String)> = secrets
@@ -87,7 +85,10 @@ pub fn build_redactor(
 
         for (name, value) in &exact {
             // `redacted.split(value).join(marker)` — replace_all semantics.
-            redacted = redacted.split(value).collect::<Vec<&str>>().join(&format!("[redacted:{name}]"));
+            redacted = redacted
+                .split(value)
+                .collect::<Vec<&str>>()
+                .join(&format!("[redacted:{name}]"));
         }
 
         for (label, pattern) in TOKEN_PATTERNS.iter() {
@@ -142,6 +143,9 @@ mod tests {
             "aws-access-key marker must survive"
         );
         // expect(redact("plain output stays intact")).toBe("plain output stays intact");
-        assert_eq!(redact("plain output stays intact"), "plain output stays intact");
+        assert_eq!(
+            redact("plain output stays intact"),
+            "plain output stays intact"
+        );
     }
 }

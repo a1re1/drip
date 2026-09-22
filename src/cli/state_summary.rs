@@ -74,7 +74,6 @@ fn load_harness_state(state_path: &Path) -> Result<Option<HarnessState>, String>
     Ok(Some(state))
 }
 
-
 // ---------------------------------------------------------------------------
 // read_inbox_messages: reads JSONL records from inboxPath, skips the first
 // consumedCount entries, and returns the `text` field of each remaining
@@ -114,7 +113,11 @@ fn read_inbox_messages(inbox_path: &Path, consumed_count: usize) -> Vec<String> 
         }
         let text = serde_json::from_str::<serde_json::Value>(line)
             .ok()
-            .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                v.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            })
             .unwrap_or_default();
         messages.push(text);
     }
@@ -271,10 +274,7 @@ pub fn format_state_summary(state_path: &Path) -> String {
 
     if !state.promoted_context.is_empty() {
         lines.push(String::new());
-        lines.push(format!(
-            "warm context ({}):",
-            state.promoted_context.len()
-        ));
+        lines.push(format!("warm context ({}):", state.promoted_context.len()));
         for entry in &state.promoted_context {
             lines.push(format!(
                 "  {} {} (ttl {}, reinforcements {})",

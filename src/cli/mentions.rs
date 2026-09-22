@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::types::{ChatContextFile, ChatContextFileLineRange};
 
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedChatFileMention {
     pub end_line: Option<usize>,
@@ -54,8 +53,7 @@ fn is_whitespace_character(value: Option<char>) -> bool {
 // separator consumed there cannot also start the next match.
 pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
     let chars: Vec<char> = text.chars().collect();
-    let is_mention_char =
-        |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-');
+    let is_mention_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-');
     let mut mentions: Vec<ParsedChatFileMention> = Vec::new();
 
     let mut i = 0usize;
@@ -130,7 +128,7 @@ pub fn parse_chat_file_mentions(text: &str) -> Vec<ParsedChatFileMention> {
             });
         }
 
-    // The scan restarts just after the whole match.
+        // The scan restarts just after the whole match.
         i = if j > i { j } else { i + 1 };
     }
 
@@ -175,7 +173,9 @@ pub fn get_active_chat_file_mention(text: &str, cursor: usize) -> Option<ActiveC
         Some(hash) => token_start + hash,
     };
     let path_text = trim_trailing_mention_punctuation(
-        &chars[token_start + 1..raw_path_end].iter().collect::<String>(),
+        &chars[token_start + 1..raw_path_end]
+            .iter()
+            .collect::<String>(),
     );
     let path_start = token_start + 1;
     let path_end = path_start + path_text.chars().count();
@@ -205,7 +205,6 @@ pub fn replace_active_chat_file_mention(
     out.extend(chars[mention.path_end..].iter());
     out
 }
-
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedChatFileMentions {
@@ -377,8 +376,7 @@ pub fn resolve_parsed_chat_file_mentions(
 
     for mention in mentions {
         let absolute_path = resolve_mention_path(cwd, &mention.path_text);
-        let line_range =
-            build_chat_context_file_line_range(mention.start_line, mention.end_line);
+        let line_range = build_chat_context_file_line_range(mention.start_line, mention.end_line);
         let cache_key = match &line_range {
             Some(range) => format!(
                 "{}:{}:{}",
@@ -455,7 +453,6 @@ pub fn resolve_chat_file_mentions(text: &str, cwd: &str) -> ResolvedChatFileMent
     resolve_parsed_chat_file_mentions(&parse_chat_file_mentions(text), cwd)
 }
 
-
 const MAX_DIRECTORY_TREE_ENTRIES: usize = 200;
 const IGNORED_DIRECTORY_NAMES: [&str; 7] = [
     ".git",
@@ -478,7 +475,7 @@ fn walk_directory_tree(
         return;
     }
 
-// Directory entries sort by UTF-16 code units; for the ASCII
+    // Directory entries sort by UTF-16 code units; for the ASCII
     // filenames this tree walk sees, Rust's byte sort matches.
     let mut entries: Vec<String> = match fs::read_dir(current_path) {
         Ok(entries) => entries
@@ -677,10 +674,8 @@ mod tests {
             "export const answer = 42;\n",
         );
 
-        let resolved = resolve_goal_mentions(
-            "explain @src/index.ts and @src and @missing.ts",
-            &cwd,
-        );
+        let resolved =
+            resolve_goal_mentions("explain @src/index.ts and @src and @missing.ts", &cwd);
 
         assert_eq!(
             resolved.mentions,

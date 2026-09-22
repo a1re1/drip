@@ -95,7 +95,9 @@ pub fn fit(plain: &str, width: usize, ellipsis: bool) -> String {
     if width == 0 {
         return String::new();
     }
-    let text = strip_ansi(plain).replace('\t', " ").replace(['\r', '\n'], " ");
+    let text = strip_ansi(plain)
+        .replace('\t', " ")
+        .replace(['\r', '\n'], " ");
     let mut out = String::new();
     let mut w = 0usize;
     for ch in text.chars() {
@@ -137,8 +139,14 @@ fn sgr_closers() -> &'static [(&'static str, Regex)] {
             ("24", Regex::new("^\\x1b\\[4m$").unwrap()),
             ("27", Regex::new("^\\x1b\\[7m$").unwrap()),
             ("29", Regex::new("^\\x1b\\[9m$").unwrap()),
-            ("39", Regex::new("^\\x1b\\[(?:3[0-7]|9[0-7]|38;[0-9;]+)m$").unwrap()),
-            ("49", Regex::new("^\\x1b\\[(?:4[0-7]|10[0-7]|48;[0-9;]+)m$").unwrap()),
+            (
+                "39",
+                Regex::new("^\\x1b\\[(?:3[0-7]|9[0-7]|38;[0-9;]+)m$").unwrap(),
+            ),
+            (
+                "49",
+                Regex::new("^\\x1b\\[(?:4[0-7]|10[0-7]|48;[0-9;]+)m$").unwrap(),
+            ),
         ]
     })
 }
@@ -227,11 +235,7 @@ pub fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
             for ch in seg.chars() {
                 let cw = char_width(ch as u32);
                 if st.w > 0 && st.w + cw > width {
-                    let use_space = st
-                        .space
-                        .as_ref()
-                        .is_some_and(|s| s.w > 0)
-                        && ch != ' ';
+                    let use_space = st.space.as_ref().is_some_and(|s| s.w > 0) && ch != ' ';
                     if use_space {
                         let space = st.space.take().unwrap();
                         // Break at the last space: the word in progress moves down whole.

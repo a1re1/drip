@@ -25,7 +25,9 @@ impl RawMode {
             termios.c_oflag = original.c_oflag;
             libc::tcsetattr(0, libc::TCSANOW, &termios);
 
-            Self { original: Some(original) }
+            Self {
+                original: Some(original),
+            }
         }
     }
 
@@ -56,8 +58,16 @@ pub fn terminal_size() -> (usize, usize) {
             return (80, 24);
         }
 
-        let cols = if size.ws_col == 0 { 80 } else { size.ws_col as usize };
-        let rows = if size.ws_row == 0 { 24 } else { size.ws_row as usize };
+        let cols = if size.ws_col == 0 {
+            80
+        } else {
+            size.ws_col as usize
+        };
+        let rows = if size.ws_row == 0 {
+            24
+        } else {
+            size.ws_row as usize
+        };
 
         (cols, rows)
     }
@@ -69,4 +79,3 @@ pub fn write_out(text: &str) {
     let _ = stdout.write_all(text.as_bytes());
     let _ = stdout.flush();
 }
-

@@ -7,24 +7,18 @@ use serde::{Deserialize, Serialize};
 // Built-in skill pack — embedded at compile time
 // ---------------------------------------------------------------------------
 
-const BUILTIN_CS_REFERENCE: &str =
-    include_str!("../../skills/cs-reference/SKILL.md");
-const BUILTIN_COMMIT_DISCIPLINE: &str =
-    include_str!("../../skills/commit-discipline/SKILL.md");
-const BUILTIN_DEBUG_ROOT_CAUSE: &str =
-    include_str!("../../skills/debug-root-cause/SKILL.md");
-const BUILTIN_HOOKS_SETUP: &str =
-    include_str!("../../skills/hooks-setup/SKILL.md");
+const BUILTIN_CS_REFERENCE: &str = include_str!("../../skills/cs-reference/SKILL.md");
+const BUILTIN_COMMIT_DISCIPLINE: &str = include_str!("../../skills/commit-discipline/SKILL.md");
+const BUILTIN_DEBUG_ROOT_CAUSE: &str = include_str!("../../skills/debug-root-cause/SKILL.md");
+const BUILTIN_HOOKS_SETUP: &str = include_str!("../../skills/hooks-setup/SKILL.md");
 const BUILTIN_MIGRATION_DISCIPLINE: &str =
     include_str!("../../skills/migration-discipline/SKILL.md");
 const BUILTIN_PRAEPARARE: &str = include_str!("../../skills/praeparare/SKILL.md");
-const BUILTIN_REFACTOR_SAFELY: &str =
-    include_str!("../../skills/refactor-safely/SKILL.md");
+const BUILTIN_REFACTOR_SAFELY: &str = include_str!("../../skills/refactor-safely/SKILL.md");
 const BUILTIN_REVIEW_INDEPENDENTLY: &str =
     include_str!("../../skills/review-independently/SKILL.md");
 const BUILTIN_TDD: &str = include_str!("../../skills/tdd/SKILL.md");
-const BUILTIN_VERIFY_BEFORE_DONE: &str =
-    include_str!("../../skills/verify-before-done/SKILL.md");
+const BUILTIN_VERIFY_BEFORE_DONE: &str = include_str!("../../skills/verify-before-done/SKILL.md");
 
 /// Returns the built-in (name, content) pairs in filesystem-sort order.
 fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
@@ -172,10 +166,18 @@ pub struct SessionRunConfig {
     pub profile: Option<String>,
     pub skills: Vec<SkillActivationEntry>,
     /// `--ask` opt-in pinned on the session so `--resume` keeps the ask_user tool.
-    #[serde(default, rename = "askEnabled", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "askEnabled",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ask_enabled: Option<bool>,
     /// `--ask-timeout <seconds>` pinned alongside it.
-    #[serde(default, rename = "askTimeoutSeconds", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "askTimeoutSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ask_timeout_seconds: Option<i64>,
 }
 
@@ -301,10 +303,7 @@ pub(crate) fn parse_skill_frontmatter(markdown: &str) -> SkillFrontmatter {
                             if roles_default.is_none() {
                                 roles_default = Some(value.to_string());
                             }
-                        } else if !roles_stages
-                            .iter()
-                            .any(|(name, _)| name == key)
-                        {
+                        } else if !roles_stages.iter().any(|(name, _)| name == key) {
                             roles_stages.push((key.to_string(), value.to_string()));
                         }
                         // Duplicate or malformed keys after the first are ignored.
@@ -386,7 +385,10 @@ pub fn collect_skill_files_with_issues(skills_dir: &Path) -> CollectSkillFilesRe
     CollectSkillFilesResult { issues, skills }
 }
 
-fn collect_skill_files_inner(skills_dir: &Path, with_issues: bool) -> (Vec<SkillFileEntry>, Vec<String>) {
+fn collect_skill_files_inner(
+    skills_dir: &Path,
+    with_issues: bool,
+) -> (Vec<SkillFileEntry>, Vec<String>) {
     if !skills_dir.exists() {
         return (vec![], vec![]);
     }
@@ -396,9 +398,7 @@ fn collect_skill_files_inner(skills_dir: &Path, with_issues: bool) -> (Vec<Skill
 
     // Read directory entries sorted
     let mut entries = match std::fs::read_dir(skills_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .collect::<Vec<_>>(),
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect::<Vec<_>>(),
         Err(err) => {
             if with_issues {
                 issues.push(format!(
@@ -505,7 +505,10 @@ fn collect_skills_from_dir(skills_dir: &Path, source: SkillSource) -> Vec<CliSki
         .collect()
 }
 
-fn collect_skills_from_dir_with_issues(skills_dir: &Path, source: SkillSource) -> CollectSkillsResult {
+fn collect_skills_from_dir_with_issues(
+    skills_dir: &Path,
+    source: SkillSource,
+) -> CollectSkillsResult {
     let result = collect_skill_files_with_issues(skills_dir);
     CollectSkillsResult {
         issues: result.issues,
@@ -589,8 +592,7 @@ pub fn discover_skills(
 ) -> Vec<CliSkill> {
     let project_skills =
         collect_skills_from_dir(&cwd.join(".drip").join("skills"), SkillSource::Project);
-    let mut local_names: HashSet<String> =
-        project_skills.iter().map(|s| s.name.clone()).collect();
+    let mut local_names: HashSet<String> = project_skills.iter().map(|s| s.name.clone()).collect();
 
     let user_skills = collect_skills_from_dir(home_skills_dir, SkillSource::User)
         .into_iter()
@@ -635,11 +637,13 @@ pub fn discover_skills_with_issues(
     );
     all_issues.extend(project_result.issues);
 
-    let mut local_names: HashSet<String> =
-        project_result.skills.iter().map(|s| s.name.clone()).collect();
+    let mut local_names: HashSet<String> = project_result
+        .skills
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
 
-    let user_result =
-        collect_skills_from_dir_with_issues(home_skills_dir, SkillSource::User);
+    let user_result = collect_skills_from_dir_with_issues(home_skills_dir, SkillSource::User);
     all_issues.extend(user_result.issues);
     let user_skills = user_result
         .skills
@@ -721,10 +725,7 @@ pub fn load_skill_content(
     if let Some(supplied) = args {
         for key in supplied.keys() {
             if !declared.contains_key(key.as_str()) {
-                return Err(format!(
-                    "Skill \"{}\": unknown arg \"{}\"",
-                    skill.name, key
-                ));
+                return Err(format!("Skill \"{}\": unknown arg \"{}\"", skill.name, key));
             }
         }
     }
@@ -761,9 +762,7 @@ pub fn load_skill_content(
                         .next()
                         .map(|c| c.is_ascii_alphabetic() || c == '_')
                         .unwrap_or(false)
-                    && key
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
                 if valid {
                     if let Some(val) = resolved.get(key) {
                         content.push_str(val);
@@ -905,7 +904,10 @@ pub fn load_skill_activation(path: &Path) -> Option<SessionRunConfig> {
         }
     }
 
-    let profile = parsed.get("profile").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let profile = parsed
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     // Absent in every pre-ask activation.json — old files keep deserializing.
     let ask_enabled = parsed.get("askEnabled").and_then(|v| v.as_bool());
     let ask_timeout_seconds = parsed.get("askTimeoutSeconds").and_then(|v| v.as_i64());
@@ -974,7 +976,9 @@ pub struct ResolveEffectiveActivationArgs<'a> {
     pub stored: Option<&'a SessionRunConfig>,
 }
 
-pub fn resolve_effective_activation(args: ResolveEffectiveActivationArgs<'_>) -> EffectiveActivation {
+pub fn resolve_effective_activation(
+    args: ResolveEffectiveActivationArgs<'_>,
+) -> EffectiveActivation {
     let stored_profile = if args.explicit_profile.is_some() {
         None
     } else if args.resume_like {
@@ -1186,7 +1190,11 @@ mod tests {
     fn collect_skill_files_name_falls_back_to_filename() {
         // "falls back to filename stem when no name in frontmatter"
         let tmp = make_temp_dir();
-        write_file(tmp.path(), "my-tool.md", "---\ndescription: My tool\n---\n\nBody.");
+        write_file(
+            tmp.path(),
+            "my-tool.md",
+            "---\ndescription: My tool\n---\n\nBody.",
+        );
         let skills = collect_skill_files(tmp.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "my-tool");
@@ -1264,10 +1272,9 @@ mod tests {
         // Should include built-ins
         assert!(skills.iter().any(|s| s.name == "tdd"));
         assert!(skills.iter().any(|s| s.name == "verify-before-done"));
-        assert!(skills
-            .iter()
-            .all(|s| s.source != SkillSource::Project && s.source != SkillSource::User
-                || s.source == SkillSource::Builtin));
+        assert!(skills.iter().all(|s| s.source != SkillSource::Project
+            && s.source != SkillSource::User
+            || s.source == SkillSource::Builtin));
     }
 
     #[test]
@@ -1456,8 +1463,14 @@ mod tests {
         });
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].name, "migration");
-        assert_eq!(result.entries[0].args.get("from").map(|s| s.as_str()), Some("jest"));
-        assert_eq!(result.entries[0].args.get("to").map(|s| s.as_str()), Some("vitest"));
+        assert_eq!(
+            result.entries[0].args.get("from").map(|s| s.as_str()),
+            Some("jest")
+        );
+        assert_eq!(
+            result.entries[0].args.get("to").map(|s| s.as_str()),
+            Some("vitest")
+        );
         assert!(!result.reactivated);
     }
 
@@ -1576,7 +1589,8 @@ mod tests {
 
     #[test]
     fn frontmatter_roles_block_before_args_block() {
-        let content = "---\nname: migrate\nroles:\n  review: reviewer\nargs:\n  from: vitest\n---\n\nBody.";
+        let content =
+            "---\nname: migrate\nroles:\n  review: reviewer\nargs:\n  from: vitest\n---\n\nBody.";
         let fm = parse_skill_frontmatter(content);
         let hints = fm.roles.unwrap();
         assert_eq!(hints.stage_role("review"), Some("reviewer"));
@@ -1608,7 +1622,8 @@ mod tests {
 
     #[test]
     fn frontmatter_roles_non_indented_line_ends_block() {
-        let content = "---\nname: x\nroles:\n  review: reviewer\ndescription: Ship loop\n---\n\nBody.";
+        let content =
+            "---\nname: x\nroles:\n  review: reviewer\ndescription: Ship loop\n---\n\nBody.";
         let fm = parse_skill_frontmatter(content);
         let hints = fm.roles.unwrap();
         assert_eq!(hints.stage_role("review"), Some("reviewer"));
@@ -1937,7 +1952,10 @@ mod tests {
         };
         let legacy = compose_skill_system_prompt(base, &[plain.clone()]);
         assert!(legacy.contains("# Skill: tdd"));
-        assert!(!legacy.contains("advisory"), "no hints -> no guidance block");
+        assert!(
+            !legacy.contains("advisory"),
+            "no hints -> no guidance block"
+        );
 
         let navis = LoadedCliSkill {
             role_hints: Some(SkillRoleHints {
@@ -1953,7 +1971,10 @@ mod tests {
             !both.contains("Skill 'tdd':"),
             "hint-less skills must not appear in the hints block"
         );
-        assert!(both.contains("# Skill: tdd"), "content still composed normally");
+        assert!(
+            both.contains("# Skill: tdd"),
+            "content still composed normally"
+        );
     }
 
     // --- documented example fixture (examples/skills/navis/SKILL.md) ---
@@ -2010,18 +2031,25 @@ mod tests {
     // a registry entry silently fails `--skill <name>` at runtime.
     #[test]
     fn every_shipped_skill_directory_is_registered() {
-        let registered: Vec<&str> = builtin_skill_entries().into_iter().map(|(name, _)| name).collect();
-        let mut shipped: Vec<String> = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"))
-            .expect("skills/ exists")
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().join("SKILL.md").exists())
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        let registered: Vec<&str> = builtin_skill_entries()
+            .into_iter()
+            .map(|(name, _)| name)
             .collect();
+        let mut shipped: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"))
+                .expect("skills/ exists")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().join("SKILL.md").exists())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
         shipped.sort();
 
         assert_eq!(
             shipped,
-            registered.iter().map(|name| name.to_string()).collect::<Vec<_>>(),
+            registered
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>(),
             "skills/ and builtin_skill_entries() disagree"
         );
     }

@@ -2,11 +2,11 @@
 // encoding, osascript clipboard hex parsing, and the size/type limits with
 // their exact error strings. Only std + base64 are needed.
 
-use std::path::{Path, PathBuf};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // export type GoalImageAttachment = { dataUrl, fileName, path }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -118,11 +118,7 @@ fn save_attachment(
 
     GoalImageAttachment {
         data_url: image_data_url(bytes, mime),
-        file_name: file_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string(),
+        file_name: file_path.file_name().unwrap().to_string_lossy().to_string(),
         path: file_path.to_string_lossy().to_string(),
     }
 }
@@ -196,7 +192,10 @@ pub fn attachment_from_image_file(
     let absolute_path = if Path::new(source_path).is_absolute() {
         source_path.to_string()
     } else {
-        Path::new(cwd).join(source_path).to_string_lossy().to_string()
+        Path::new(cwd)
+            .join(source_path)
+            .to_string_lossy()
+            .to_string()
     };
 
     if !Path::new(&absolute_path).exists() {
@@ -279,10 +278,9 @@ mod tests {
         let images_dir = temp.path().join("images");
         let hex = hex_of(&PNG_BYTES);
 
-        let attachment = capture_clipboard_image_with(&images_dir, || {
-            Some(format!("«data PNGf{hex}»"))
-        })
-        .expect("attachment");
+        let attachment =
+            capture_clipboard_image_with(&images_dir, || Some(format!("«data PNGf{hex}»")))
+                .expect("attachment");
 
         assert!(Path::new(&attachment.path).exists());
         assert_eq!(attachment.data_url, image_data_url(&PNG_BYTES, "image/png"));
@@ -297,7 +295,10 @@ mod tests {
         let images_dir = root.join("images");
 
         let attachment = attachment_from_data_url(
-            &format!("data:image/png;base64,{}", BASE64_STANDARD.encode(PNG_BYTES)),
+            &format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(PNG_BYTES)
+            ),
             &images_dir,
         )
         .expect("attachment from data URL");

@@ -64,9 +64,7 @@ pub fn extract_session_name(response: &OpenAICompatibleResponse) -> Option<Strin
 /// should go through `extract_session_name`.
 pub fn is_valid_session_name(name: &str) -> bool {
     let trimmed = name.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case(crate::tui::pane_title::FALLBACK_LABEL)
-    {
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(crate::tui::pane_title::FALLBACK_LABEL) {
         return false;
     }
     let words = trimmed.split_whitespace().count();
@@ -128,7 +126,10 @@ pub async fn generate_session_name(
         http_client: None,
     });
     let message = TransportRequestMessage {
-        content: Some(TransportContent::Text(build_session_name_prompt(goal, transcript_digest))),
+        content: Some(TransportContent::Text(build_session_name_prompt(
+            goal,
+            transcript_digest,
+        ))),
         ..Default::default()
     };
     let options = ModelCallOptions {
@@ -159,7 +160,9 @@ pub fn read_session_name_context(goal: &str, transcript_entries: &[TranscriptEnt
         ));
     }
     // Oldest-first, capped to the most recent window of transcript entries.
-    let start = transcript_entries.len().saturating_sub(SESSION_NAME_TRANSCRIPT_LINES);
+    let start = transcript_entries
+        .len()
+        .saturating_sub(SESSION_NAME_TRANSCRIPT_LINES);
     for entry in &transcript_entries[start..] {
         match entry {
             TranscriptEntry::Goal(g) if !g.text.trim().is_empty() => lines.push(format!(

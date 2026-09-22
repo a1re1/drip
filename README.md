@@ -1511,6 +1511,31 @@ once it closes:
   and `locked by plugin`: enable it with `/marketplace` instead of toggling it
   here.
 
+## Inline images (TUI)
+
+Images attached to a goal (pasted, mentioned by path, or carried in the
+session transcript) can be drawn in the terminal itself instead of being
+reduced to a marker row:
+
+- drip speaks the two protocols modern terminals implement. Under **kitty**
+  and **ghostty** it uses the kitty graphics protocol (transmit-and-display,
+  PNG, base64 payload chunked at the protocol's 4096-byte limit); under
+  **iTerm2** and **WezTerm** it uses iTerm2 inline images, which carry any
+  image format. Both are emitted with a cell-width hint so the image never
+  pushes the composer off screen.
+- The terminal is detected from `TERM`/`TERM_PROGRAM`, `KITTY_WINDOW_ID`,
+  `GHOSTTY_RESOURCES_DIR` and `WEZTERM_PANE`. Set
+  `DRIP_IMAGE_PROTOCOL=kitty|iterm2|none` to force a protocol or turn inline
+  images off.
+- Inline rows are only ever written when stdout is an interactive terminal:
+  headless runs, `--json`, redirected output and the `dripw` watch pane keep
+  the plain `[N images attached]` marker. Local markdown image links in model
+  text (`![shot](path.png)`, as long as the file exists and the target is not
+  a URL) are drawn the same way; remote URLs are never fetched.
+- kitty only decodes PNG, so a non-PNG attachment stays a marker under kitty
+  and renders normally under iTerm2/WezTerm. Unreadable paths degrade to the
+  marker rather than an error.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

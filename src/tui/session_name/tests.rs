@@ -7,7 +7,9 @@ use super::*;
 use crate::cli::transcript::{TranscriptEntry, TranscriptGoalEntry, TranscriptModelEntry};
 
 fn response_with_content(content: &str) -> OpenAICompatibleResponse {
-    let escaped = content.replace('\u{1b}', "\\u001b").replace('\u{7}', "\\u0007");
+    let escaped = content
+        .replace('\u{1b}', "\\u001b")
+        .replace('\u{7}', "\\u0007");
     serde_json::from_str(&format!(
         r#"{{"choices":[{{"message":{{"content":"{escaped}"}}}}]}}"#
     ))
@@ -23,12 +25,24 @@ fn response_with_parts(parts: &str) -> OpenAICompatibleResponse {
 
 #[test]
 fn accepts_five_to_seven_word_names() {
-    let five = extract_session_name(&response_with_content("Fix Flaky Websocket Reconnect Handshake"));
-    assert_eq!(five.as_deref(), Some("Fix Flaky Websocket Reconnect Handshake"));
+    let five = extract_session_name(&response_with_content(
+        "Fix Flaky Websocket Reconnect Handshake",
+    ));
+    assert_eq!(
+        five.as_deref(),
+        Some("Fix Flaky Websocket Reconnect Handshake")
+    );
     let seven = extract_session_name(&response_with_content(
         "Add Rename Command Wiring And Tests Today",
     ));
-    assert_eq!(seven.as_deref().unwrap_or_default().split_whitespace().count(), 7);
+    assert_eq!(
+        seven
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .count(),
+        7
+    );
 }
 
 #[test]
@@ -41,13 +55,16 @@ fn rejects_names_outside_the_word_contract() {
     assert_eq!(
         extract_session_name(&response_with_content(
             "Ship Flaky Websocket Reconnect Handshake Now Please Quickly"
-        )).as_deref(),
+        ))
+        .as_deref(),
         Some("Ship Flaky Websocket Reconnect Handshake Now Please"),
         "8-word reply trims to its first 7 whole words"
     );
     assert!(!is_valid_session_name(""));
     assert!(!is_valid_session_name("one two three"));
-    assert!(!is_valid_session_name(crate::tui::pane_title::FALLBACK_LABEL));
+    assert!(!is_valid_session_name(
+        crate::tui::pane_title::FALLBACK_LABEL
+    ));
     assert!(is_valid_session_name("five whole words right here now"));
 }
 
@@ -56,12 +73,14 @@ fn rejects_malformed_and_empty_model_replies() {
     // Empty content, whitespace, and control characters.
     assert_eq!(extract_session_name(&response_with_content("")), None);
     assert_eq!(extract_session_name(&response_with_content("   ")), None);
-    assert_eq!(extract_session_name(&response_with_content("\u{7}\u{1b}")), None);
+    assert_eq!(
+        extract_session_name(&response_with_content("\u{7}\u{1b}")),
+        None
+    );
     // Malformed JSON shapes: missing choices, missing message, non-string content.
     let empty: OpenAICompatibleResponse = serde_json::from_str(r#"{"choices":[]}"#).unwrap();
     assert_eq!(extract_session_name(&empty), None);
-    let no_message: OpenAICompatibleResponse =
-        serde_json::from_str(r#"{"choices":[{}]}"#).unwrap();
+    let no_message: OpenAICompatibleResponse = serde_json::from_str(r#"{"choices":[{}]}"#).unwrap();
     assert_eq!(extract_session_name(&no_message), None);
     let numeric: OpenAICompatibleResponse =
         serde_json::from_str(r#"{"choices":[{"message":{"content":42}}]}"#).unwrap();
@@ -81,7 +100,10 @@ fn assembles_content_parts_and_strips_quotes() {
 
 #[test]
 fn prompt_carries_goal_digest_and_word_contract() {
-    let prompt = build_session_name_prompt("fix the flaky websocket handshake", "User: please start\nAssistant: (reply)");
+    let prompt = build_session_name_prompt(
+        "fix the flaky websocket handshake",
+        "User: please start\nAssistant: (reply)",
+    );
     assert!(prompt.contains("5 to 7 word"));
     assert!(prompt.contains("fix the flaky websocket handshake"));
     assert!(prompt.contains("Assistant: (reply)"));
@@ -116,15 +138,15 @@ fn digest_prefers_goals_and_handles_empty_transcripts() {
     assert!(digest.contains("first goal"));
     // Empty transcript + empty goal degrades to an empty digest, not an error.
     assert_eq!(read_session_name_context("", &[]), "");
-    assert_eq!(read_session_name_context("solo goal", &[]), "User: solo goal");
+    assert_eq!(
+        read_session_name_context("solo goal", &[]),
+        "User: solo goal"
+    );
 }
 
 fn temp_meta_path(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "drip-session-name-{}-{}",
-        std::process::id(),
-        tag
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("drip-session-name-{}-{}", std::process::id(), tag));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir.join("session.json")
 }
@@ -138,32 +160,54 @@ fn persistence_round_trip_preserves_other_fields() {
     )
     .unwrap();
     assert_eq!(read_session_name(&path), None, "no name yet");
-    assert!(persist_session_name(&path, "Fix Flaky Websocket Handshake Today"));
+    assert!(persist_session_name(
+        &path,
+        "Fix Flaky Websocket Handshake Today"
+    ));
     assert_eq!(
         read_session_name(&path).as_deref(),
         Some("Fix Flaky Websocket Handshake Today")
     );
     let raw = std::fs::read_to_string(&path).unwrap();
-    assert!(raw.contains("\"createdAt\""), "existing fields survive: {raw}");
+    assert!(
+        raw.contains("\"createdAt\""),
+        "existing fields survive: {raw}"
+    );
     assert!(raw.contains("\"id\": \"abc\""));
     // Re-persisting overwrites the name in place.
     assert!(persist_session_name(&path, "A Whole Fresh Name Here"));
-    assert_eq!(read_session_name(&path).as_deref(), Some("A Whole Fresh Name Here"));
+    assert_eq!(
+        read_session_name(&path).as_deref(),
+        Some("A Whole Fresh Name Here")
+    );
 }
 
 #[test]
 fn persistence_rejects_malformed_metadata_and_creates_missing_files() {
     let path = temp_meta_path("malformed");
     std::fs::write(&path, "not json at all").unwrap();
-    assert!(!persist_session_name(&path, "Fix Flaky Websocket Handshake Today"));
-    assert_eq!(read_session_name(&path), None, "malformed file yields no name");
+    assert!(!persist_session_name(
+        &path,
+        "Fix Flaky Websocket Handshake Today"
+    ));
+    assert_eq!(
+        read_session_name(&path),
+        None,
+        "malformed file yields no name"
+    );
     // A non-object JSON document is rejected too.
     std::fs::write(&path, "[1, 2, 3]").unwrap();
-    assert!(!persist_session_name(&path, "Fix Flaky Websocket Handshake Today"));
+    assert!(!persist_session_name(
+        &path,
+        "Fix Flaky Websocket Handshake Today"
+    ));
     // Missing session.json: the write creates bare metadata and round-trips.
     let missing = temp_meta_path("missing");
     let _ = std::fs::remove_file(&missing);
-    assert!(persist_session_name(&missing, "Fix Flaky Websocket Handshake Today"));
+    assert!(persist_session_name(
+        &missing,
+        "Fix Flaky Websocket Handshake Today"
+    ));
     assert_eq!(
         read_session_name(&missing).as_deref(),
         Some("Fix Flaky Websocket Handshake Today")
@@ -215,7 +259,13 @@ fn empty_goal_and_transcript_yields_none_without_a_model_call() {
         url: "http://127.0.0.1:9/unreachable".into(),
     };
     let both_empty = runtime.block_on(generate_session_name(route.clone(), "", "", 1));
-    assert_eq!(both_empty, None, "empty goal + digest must not fabricate a name");
+    assert_eq!(
+        both_empty, None,
+        "empty goal + digest must not fabricate a name"
+    );
     let whitespace_only = runtime.block_on(generate_session_name(route, "   \n\t ", "  ", 1));
-    assert_eq!(whitespace_only, None, "whitespace-only context must not fabricate a name");
+    assert_eq!(
+        whitespace_only, None,
+        "whitespace-only context must not fabricate a name"
+    );
 }

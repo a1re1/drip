@@ -53,7 +53,10 @@ pub struct ToolOutcome {
 
 impl ToolOutcome {
     pub fn success(text: String) -> Self {
-        Self { text, failed: false }
+        Self {
+            text,
+            failed: false,
+        }
     }
 
     /// Tool content is "ERROR: " followed by the error message.

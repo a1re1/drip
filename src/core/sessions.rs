@@ -40,11 +40,17 @@ impl From<&crate::core::home::DripProject> for ProjectPaths {
         ProjectPaths {
             home_root: project.home_root.clone(),
             memory_dir: project.memory_dir.clone(),
-            repo_root: project.repo_root.clone().unwrap_or_else(|| project.root.clone()),
+            repo_root: project
+                .repo_root
+                .clone()
+                .unwrap_or_else(|| project.root.clone()),
             root: project.root.clone(),
             sessions_dir: project.sessions_dir.clone(),
             slug: project.slug.clone(),
-            worktree_root: project.worktree_root.clone().unwrap_or_else(|| project.root.clone()),
+            worktree_root: project
+                .worktree_root
+                .clone()
+                .unwrap_or_else(|| project.root.clone()),
         }
     }
 }
@@ -174,7 +180,10 @@ pub fn open_session_index(db_path: &str) -> SessionIndex {
         // both see the column missing. The loser's ALTER fails with a duplicate
         // column; that is a success as long as the column is there afterwards.
         if let Err(error) = conn.execute_batch("ALTER TABLE sessions ADD COLUMN parent_id TEXT;") {
-            assert!(sessions_has_column(&conn, "parent_id"), "migrate sessions.parent_id: {error}");
+            assert!(
+                sessions_has_column(&conn, "parent_id"),
+                "migrate sessions.parent_id: {error}"
+            );
         }
     }
 
@@ -301,9 +310,7 @@ pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionR
     use chrono::Utc;
 
     let now = if args.now.is_empty() {
-        Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string()
+        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
     } else {
         args.now.to_string()
     };
@@ -485,7 +492,12 @@ pub fn latest_session(index: &SessionIndex) -> Option<SessionRecord> {
 // touch_session — upsert updated_at/status/goal_count/last_goal
 // ---------------------------------------------------------------------------
 
-pub fn touch_session(index: &SessionIndex, session_id: &str, last_goal: Option<&str>, status: Option<&str>) {
+pub fn touch_session(
+    index: &SessionIndex,
+    session_id: &str,
+    last_goal: Option<&str>,
+    status: Option<&str>,
+) {
     touch_session_at(index, session_id, last_goal, status, None);
 }
 
@@ -551,8 +563,11 @@ pub fn sync_session_memories(index: &SessionIndex, session_id: &str, notes: &[Ha
         .conn
         .unchecked_transaction()
         .expect("begin session memories transaction");
-    tx.execute("DELETE FROM session_memories WHERE session_id = ?1", rusqlite::params![session_id])
-        .expect("delete session memories");
+    tx.execute(
+        "DELETE FROM session_memories WHERE session_id = ?1",
+        rusqlite::params![session_id],
+    )
+    .expect("delete session memories");
 
     for note in notes {
         tx.execute(
@@ -582,7 +597,10 @@ pub fn list_recent_project_memories(
         .expect("prepare list_recent_project_memories");
 
     let rows: Vec<String> = stmt
-        .query_map(rusqlite::params![exclude_session_id, (limit * 3) as i64], |row| row.get(0))
+        .query_map(
+            rusqlite::params![exclude_session_id, (limit * 3) as i64],
+            |row| row.get(0),
+        )
         .expect("query list_recent_project_memories")
         .map(|r| r.expect("row"))
         .collect();
@@ -647,11 +665,22 @@ pub struct SessionPaths {
 }
 
 /// A pre-move record's own sessionsDir wins over the project's.
-pub fn session_paths_for(project: &crate::core::home::DripProject, record: &SessionRecord) -> SessionPaths {
-    session_paths(&ProjectPaths::from(project), &record.id, record.sessions_dir.as_deref())
+pub fn session_paths_for(
+    project: &crate::core::home::DripProject,
+    record: &SessionRecord,
+) -> SessionPaths {
+    session_paths(
+        &ProjectPaths::from(project),
+        &record.id,
+        record.sessions_dir.as_deref(),
+    )
 }
 
-pub fn session_paths(project: &ProjectPaths, session_id: &str, sessions_dir_override: Option<&str>) -> SessionPaths {
+pub fn session_paths(
+    project: &ProjectPaths,
+    session_id: &str,
+    sessions_dir_override: Option<&str>,
+) -> SessionPaths {
     let base = sessions_dir_override.unwrap_or(&project.sessions_dir);
     let dir = PathBuf::from(base).join(session_id);
     let dir_str = dir.to_string_lossy().into_owned();
@@ -740,9 +769,10 @@ pub fn open_project_indexes(project: &DripProject) -> Vec<OpenedProjectIndex> {
         });
     }
 
-    if let (Some(legacy_index), Some(legacy_sessions_dir)) =
-        (project.legacy_index_db_path.as_deref(), project.legacy_sessions_dir.as_deref())
-    {
+    if let (Some(legacy_index), Some(legacy_sessions_dir)) = (
+        project.legacy_index_db_path.as_deref(),
+        project.legacy_sessions_dir.as_deref(),
+    ) {
         entries.push(OpenedProjectIndex {
             index: open_session_index(legacy_index),
             sessions_dir: legacy_sessions_dir.to_string(),
@@ -758,7 +788,8 @@ pub fn open_home_registries(drip_home: &Path) -> Vec<OpenedProjectIndex> {
     enumerate_project_registries(drip_home)
         .into_iter()
         .filter_map(|registry| {
-            let index = std::panic::catch_unwind(|| open_session_index(&registry.index_db_path)).ok()?;
+            let index =
+                std::panic::catch_unwind(|| open_session_index(&registry.index_db_path)).ok()?;
 
             Some(OpenedProjectIndex {
                 index,
@@ -814,7 +845,10 @@ pub fn latest_any_session(project: &DripProject) -> Option<SessionRecord> {
 /// Ambiguity is decided over the UNION of candidates, not per registry: probing
 /// the new tree first and falling back would report a unique match for a prefix
 /// that is actually ambiguous once the old tree is considered.
-pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -> Option<SessionRecord> {
+pub fn resolve_any_session_ref(
+    project: &DripProject,
+    reference: Option<&str>,
+) -> Option<SessionRecord> {
     let Some(reference) = reference else {
         return latest_any_session(project);
     };
@@ -857,10 +891,17 @@ pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -
             .map(|row| row.expect("row"))
             .collect();
 
-        prefixed.extend(rows.into_iter().map(|record| stamp(record, &entry.sessions_dir, project)));
+        prefixed.extend(
+            rows.into_iter()
+                .map(|record| stamp(record, &entry.sessions_dir, project)),
+        );
     }
 
-    let result = if prefixed.len() == 1 { prefixed.into_iter().next() } else { None };
+    let result = if prefixed.len() == 1 {
+        prefixed.into_iter().next()
+    } else {
+        None
+    };
 
     for entry in opened {
         entry.index.close();
@@ -892,13 +933,15 @@ pub fn list_all_home_sessions(drip_home: &Path) -> Vec<SessionRecord> {
             // A registry can open fine but panic while extracting rows (e.g. a
             // schema drift); skip that registry like open_home_registries skips
             // one that fails to open, so it never blanks the valid ones.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list_sessions(&entry.index, None)))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|record| SessionRecord {
-                    sessions_dir: Some(entry.sessions_dir.clone()),
-                    ..record
-                })
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                list_sessions(&entry.index, None)
+            }))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|record| SessionRecord {
+                sessions_dir: Some(entry.sessions_dir.clone()),
+                ..record
+            })
         })
         .collect();
 
@@ -968,11 +1011,23 @@ mod tests {
         // Each record resolves against the sessions tree it was written to.
         assert_eq!(
             records[0].sessions_dir.as_deref(),
-            Some(home.join("projects").join("beta").join("sessions").to_string_lossy().as_ref())
+            Some(
+                home.join("projects")
+                    .join("beta")
+                    .join("sessions")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert_eq!(
             records[1].sessions_dir.as_deref(),
-            Some(home.join("projects").join("alpha").join("sessions").to_string_lossy().as_ref())
+            Some(
+                home.join("projects")
+                    .join("alpha")
+                    .join("sessions")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
 
         cleanup(&home);
@@ -998,7 +1053,10 @@ mod tests {
         let home = temp_home("absent");
         assert!(enumerate_project_registries(&home).is_empty());
         assert!(list_all_home_sessions(&home).is_empty());
-        assert!(!home.join("projects").exists(), "no registry may be created");
+        assert!(
+            !home.join("projects").exists(),
+            "no registry may be created"
+        );
 
         cleanup(&home);
     }
@@ -1050,16 +1108,29 @@ mod tests {
             list_sessions(&bad_index, None)
         }))
         .is_err();
-        assert!(panicked, "fixture must open successfully but panic inside list_sessions");
+        assert!(
+            panicked,
+            "fixture must open successfully but panic inside list_sessions"
+        );
         bad_index.close();
 
         let records = list_all_home_sessions(&home);
-        assert_eq!(records.len(), 1, "the valid registry's session must survive");
+        assert_eq!(
+            records.len(),
+            1,
+            "the valid registry's session must survive"
+        );
         assert_eq!(records[0].id, "eeee");
         assert_eq!(records[0].cwd, "/repo/e");
         assert_eq!(
             records[0].sessions_dir.as_deref(),
-            Some(home.join("projects").join("good").join("sessions").to_string_lossy().as_ref())
+            Some(
+                home.join("projects")
+                    .join("good")
+                    .join("sessions")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
 
         cleanup(&home);
@@ -1108,7 +1179,10 @@ mod tests {
             .expect("query table_info")
             .filter_map(Result::ok)
             .collect();
-        assert!(columns.iter().any(|name| name == "parent_id"), "migration must add the column");
+        assert!(
+            columns.iter().any(|name| name == "parent_id"),
+            "migration must add the column"
+        );
         index.close();
 
         cleanup(&home);
@@ -1141,7 +1215,10 @@ mod tests {
         );
         assert_eq!(child.parent_id.as_deref(), Some("parent-session-id"));
         assert_eq!(
-            get_session(&index, &child.id).expect("child row").parent_id.as_deref(),
+            get_session(&index, &child.id)
+                .expect("child row")
+                .parent_id
+                .as_deref(),
             Some("parent-session-id")
         );
         // list_sessions is the path dripw and --list read; it must carry it too.
@@ -1151,9 +1228,15 @@ mod tests {
         );
         index.close();
 
-        let meta = fs::read_to_string(project_dir.join("sessions").join(&child.id).join("session.json"))
-            .expect("read child session.json");
-        let meta: serde_json::Value = serde_json::from_str(&meta).expect("child session.json parses");
+        let meta = fs::read_to_string(
+            project_dir
+                .join("sessions")
+                .join(&child.id)
+                .join("session.json"),
+        )
+        .expect("read child session.json");
+        let meta: serde_json::Value =
+            serde_json::from_str(&meta).expect("child session.json parses");
         assert_eq!(meta["parentId"], serde_json::json!("parent-session-id"));
 
         // A session created without an explicit parent records whatever the
@@ -1173,10 +1256,19 @@ mod tests {
         );
         assert_eq!(root.parent_id, expected);
         index.close();
-        let root_meta = fs::read_to_string(project_dir.join("sessions").join(&root.id).join("session.json"))
-            .expect("read root session.json");
-        let root_meta: serde_json::Value = serde_json::from_str(&root_meta).expect("root session.json parses");
-        assert!(root_meta.get("parentId").is_some(), "parentId is always written");
+        let root_meta = fs::read_to_string(
+            project_dir
+                .join("sessions")
+                .join(&root.id)
+                .join("session.json"),
+        )
+        .expect("read root session.json");
+        let root_meta: serde_json::Value =
+            serde_json::from_str(&root_meta).expect("root session.json parses");
+        assert!(
+            root_meta.get("parentId").is_some(),
+            "parentId is always written"
+        );
         assert_eq!(root_meta["parentId"], serde_json::json!(expected));
 
         cleanup(&home);
@@ -1184,13 +1276,25 @@ mod tests {
 
     #[test]
     fn resolve_parent_id_prefers_an_explicit_id_over_a_nonempty_env_value() {
-        assert_eq!(resolve_parent_id(Some("p".into()), Some("e".into())).as_deref(), Some("p"));
-        assert_eq!(resolve_parent_id(None, Some("e".into())).as_deref(), Some("e"));
+        assert_eq!(
+            resolve_parent_id(Some("p".into()), Some("e".into())).as_deref(),
+            Some("p")
+        );
+        assert_eq!(
+            resolve_parent_id(None, Some("e".into())).as_deref(),
+            Some("e")
+        );
         // A blank explicit id falls through to the environment…
-        assert_eq!(resolve_parent_id(Some(String::new()), Some("e".into())).as_deref(), Some("e"));
+        assert_eq!(
+            resolve_parent_id(Some(String::new()), Some("e".into())).as_deref(),
+            Some("e")
+        );
         // …and a blank environment value means "no parent" rather than "".
         assert_eq!(resolve_parent_id(None, Some(String::new())), None);
-        assert_eq!(resolve_parent_id(Some(String::new()), Some(String::new())), None);
+        assert_eq!(
+            resolve_parent_id(Some(String::new()), Some(String::new())),
+            None
+        );
         assert_eq!(resolve_parent_id(None, None), None);
     }
 
@@ -1203,9 +1307,15 @@ mod tests {
         std::env::set_var(SCOPE_TEST_VAR, "parent-session");
         {
             let _scope = SessionEnvScope::enter_var(SCOPE_TEST_VAR, "child-session");
-            assert_eq!(std::env::var(SCOPE_TEST_VAR).as_deref(), Ok("child-session"));
+            assert_eq!(
+                std::env::var(SCOPE_TEST_VAR).as_deref(),
+                Ok("child-session")
+            );
         }
-        assert_eq!(std::env::var(SCOPE_TEST_VAR).as_deref(), Ok("parent-session"));
+        assert_eq!(
+            std::env::var(SCOPE_TEST_VAR).as_deref(),
+            Ok("parent-session")
+        );
 
         std::env::remove_var(SCOPE_TEST_VAR);
         let scope = SessionEnvScope::enter_var(SCOPE_TEST_VAR, "child-session");
@@ -1214,6 +1324,9 @@ mod tests {
             let _scope = scope;
             panic!("child run failed");
         }));
-        assert!(std::env::var(SCOPE_TEST_VAR).is_err(), "an unset variable is removed again, not left pointing at the child");
+        assert!(
+            std::env::var(SCOPE_TEST_VAR).is_err(),
+            "an unset variable is removed again, not left pointing at the child"
+        );
     }
 }

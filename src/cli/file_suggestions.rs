@@ -5,7 +5,15 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_FILE_SUGGESTION_LIMIT: usize = 8;
 const FILE_INDEX_TTL: Duration = Duration::from_millis(5_000);
-const IGNORED_DIRECTORY_NAMES: &[&str] = &[".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules"];
+const IGNORED_DIRECTORY_NAMES: &[&str] = &[
+    ".git",
+    ".next",
+    ".turbo",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+];
 
 fn format_relative_path(cwd: &Path, target: &Path) -> String {
     match target.strip_prefix(cwd) {
@@ -53,7 +61,9 @@ fn file_suggestion_score(path: &str, query: &str) -> Option<f64> {
     let base_name = normalized_path.rsplit('/').next().unwrap_or("").to_string();
 
     if normalized_query.is_empty() {
-        return Some(path.split('/').count() as f64 * 10.0 + normalized_path.chars().count() as f64 / 100.0);
+        return Some(
+            path.split('/').count() as f64 * 10.0 + normalized_path.chars().count() as f64 / 100.0,
+        );
     }
     if normalized_path == normalized_query {
         return Some(0.0);
@@ -93,7 +103,11 @@ pub fn get_workspace_file_suggestions(files: &[String], query: &str, limit: usiz
             .then(left.1.chars().count().cmp(&right.1.chars().count()))
             .then(crate::tools::helpers::locale_compare(left.1, right.1))
     });
-    scored.into_iter().take(limit.max(1)).map(|(_, path)| path.clone()).collect()
+    scored
+        .into_iter()
+        .take(limit.max(1))
+        .map(|(_, path)| path.clone())
+        .collect()
 }
 
 /// A cwd-scoped file index with a short TTL, so a burst of keystrokes shares
@@ -105,7 +119,10 @@ pub struct WorkspaceFileSource {
 
 impl WorkspaceFileSource {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into(), cached: None }
+        Self {
+            cwd: cwd.into(),
+            cached: None,
+        }
     }
 
     pub fn load(&mut self) -> std::io::Result<Vec<String>> {
@@ -125,10 +142,16 @@ mod tests {
     use super::*;
 
     fn files() -> Vec<String> {
-        ["src/app.ts", "src/lib/app-helpers.ts", "README.md", "docs/app.md", "app.ts"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "src/app.ts",
+            "src/lib/app-helpers.ts",
+            "README.md",
+            "docs/app.md",
+            "app.ts",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -150,7 +173,8 @@ mod tests {
 
     #[test]
     fn collects_files_relative_to_cwd_skipping_ignored_dirs() {
-        let dir = std::env::temp_dir().join(format!("drip-file-suggestions-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("drip-file-suggestions-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules/x")).unwrap();

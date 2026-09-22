@@ -1456,6 +1456,26 @@ The forensics lead the result and the raw dump is trimmed to three frames
 per thread (the C stack dropped), so the middle truncation of a long result
 keeps them; the first probe lost them to it.
 
+## Skills picker (TUI)
+
+`/skills` in the TUI opens an interactive picker in the live region instead of
+printing the list into the transcript — nothing it shows stays in the history
+once it closes:
+
+- Each row shows the skill's on/off mark, its name, where it came from
+  (`project`, `user`, `builtin`, or the `<marketplace>/<plugin>/<skill>` key)
+  and a rough size (`~N tok`, the skill file's byte length divided by four).
+  The highlighted row adds its description.
+- Type to filter by name or description, `Backspace` to widen the search
+  again, and `Up`/`Down` (or `Tab`) to move the cursor. The list shows eight
+  rows at a time and the window slides to keep the cursor visible.
+- `Enter` or `Space` toggles the highlighted skill for the session and keeps
+  the picker open, so several skills can be turned on or off in one visit.
+  `Esc` closes it.
+- A marketplace skill the registry currently gates is shown dimmed with a `×`
+  and `locked by plugin`: enable it with `/marketplace` instead of toggling it
+  here.
+
 ## Prompt history (TUI)
 
 The TUI input line keeps a bounded in-memory history of prompts you have

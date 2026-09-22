@@ -568,6 +568,101 @@ pub fn render_survey(
     boxed(rows, width, ACCENT_COLOR)
 }
 
+/// One row of the interactive `/skills` picker (display data only).
+#[derive(Clone, Debug)]
+pub struct SkillPickerItem {
+    pub description: String,
+    pub enabled: bool,
+    pub locked: bool,
+    pub name: String,
+    /// Where the skill came from: `project`, `user`, `builtin`, or the
+    /// marketplace key for a plugin skill.
+    pub source: String,
+    /// Rough token size (byte length / 4), the Claude-style `~N tok` figure.
+    pub tokens: usize,
+}
+
+/// The interactive `/skills` picker: a header with the counts, a search line,
+/// up to eight rows (on/off mark, origin, rough size) with the highlight kept
+/// visible by a sliding window, and a footer. Pure render — the app owns the
+/// filter, the selection and the toggle side effects, so closing the picker
+/// leaves nothing in scrollback.
+pub fn render_skill_picker(
+    query: &str,
+    items: &[SkillPickerItem],
+    selected_index: usize,
+    total: usize,
+    width: usize,
+) -> Vec<String> {
+    use crate::watch::ansi::c::{bold, green, yellow};
+
+    let accent = paint(ACCENT_COLOR);
+    let dim = paint(DIM_COLOR);
+    /// Rows of the list shown at once; the window slides to follow the cursor.
+    const WINDOW: usize = 8;
+
+    let enabled = items.iter().filter(|item| item.enabled).count();
+    let mut rows: Vec<String> = vec![
+        accent(&bold("Skills")),
+        dim(&format!(
+            "{} of {total} skills · {enabled} on · enter/space toggles · ↑/↓ move · esc closes",
+            items.len()
+        )),
+        String::new(),
+    ];
+    let search = if query.is_empty() {
+        dim("type to search…")
+    } else {
+        format!("{}{}", query, accent("▏"))
+    };
+    rows.push(format!("{}{search}", accent("› ")));
+    rows.push(String::new());
+
+    let start = if selected_index >= WINDOW {
+        selected_index + 1 - WINDOW
+    } else {
+        0
+    };
+    for (index, item) in items.iter().enumerate().skip(start).take(WINDOW) {
+        let selected = index == selected_index;
+        let cursor = if selected {
+            accent("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        // A locked marketplace row keeps its mark visible but dimmed: plugin
+        // skills are managed through /marketplace, never toggled here.
+        let mark = if item.locked {
+            yellow("×")
+        } else if item.enabled {
+            green("✔")
+        } else {
+            dim("○")
+        };
+        let name = if selected {
+            accent(&item.name)
+        } else if item.locked {
+            dim(&item.name)
+        } else {
+            item.name.clone()
+        };
+        rows.push(format!(
+            "{cursor}{mark} {name} · {} · ~{} tok",
+            dim(&item.source),
+            item.tokens
+        ));
+        if selected && !item.description.is_empty() {
+            rows.push(format!("      {}", dim(&item.description)));
+        }
+    }
+    if items.is_empty() {
+        rows.push(dim("no skills match — backspace to clear the search"));
+    }
+    rows.push(String::new());
+    rows.push(dim("plugin skills are managed with /marketplace"));
+    boxed(rows, width, ACCENT_COLOR)
+}
+
 fn paint_bold_title(title: &str) -> String {
     crate::watch::ansi::c::bold(title)
 }
@@ -1246,5 +1341,53 @@ mod tests {
             rows.iter().all(|row| !row.contains("/navis \u{2014} one")),
             "skill menu rendered while composer disabled: {rows:?}"
         );
+    }
+
+    #[test]
+    fn skill_picker_shows_marks_origin_size_and_slides_the_window() {
+        let items: Vec<SkillPickerItem> = (0..10)
+            .map(|index| SkillPickerItem {
+                description: format!("desc {index}"),
+                enabled: index % 2 == 0,
+                locked: false,
+                name: format!("skill-{index}"),
+                source: "project".to_string(),
+                tokens: 100 * (index + 1),
+            })
+            .collect();
+        let rows = plain(&render_skill_picker("", &items, 9, 10, 60));
+        assert!(
+            rows.iter().any(|row| row.contains("10 of 10 skills")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("skill-9")
+                && row.contains("~1000 tok")
+                && row.contains("project")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains('✔')), "{rows:?}");
+        assert!(rows.iter().any(|row| row.contains('○')), "{rows:?}");
+        // The window follows the cursor, so the first rows are paged out.
+        assert!(!rows.iter().any(|row| row.contains("skill-0")), "{rows:?}");
+    }
+
+    #[test]
+    fn skill_picker_marks_locked_marketplace_rows_and_shows_the_search() {
+        let items = vec![SkillPickerItem {
+            description: "gated".to_string(),
+            enabled: false,
+            locked: true,
+            name: "spellcraft:navis".to_string(),
+            source: "spellcraft/navis".to_string(),
+            tokens: 42,
+        }];
+        let rows = plain(&render_skill_picker("nav", &items, 0, 1, 60));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("spellcraft:navis") && row.contains("spellcraft/navis")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("nav▏")), "{rows:?}");
     }
 }

@@ -51,7 +51,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         args: None,
-        description: "List available SKILL.md skills.",
+        description: "Pick skills interactively: search, move, toggle on/off.",
         name: "skills",
     },
     SlashCommandSpec {

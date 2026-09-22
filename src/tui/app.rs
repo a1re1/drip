@@ -1786,7 +1786,12 @@ impl TuiApp {
             Key::Ctrl('u') => self.apply_edit(String::new(), 0),
             Key::Ctrl('c') => self.quit = true,
             Key::Ctrl('v') => match capture_clipboard_image(Path::new(&self.paths.images_dir)) {
-                Some(attachment) => self.attachments.push(attachment),
+                Some(attachment) => {
+                    self.attachments.push(attachment);
+                    let count = self.attachments.len();
+                    let status = crate::tui::images::inline_status();
+                    self.push_info(format!("{count} image(s) attached. {status}"));
+                }
                 None => self.push_info("no image found on the clipboard."),
             },
             Key::Backspace | Key::Delete => {
@@ -3958,6 +3963,7 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     // detection is a no-op for piped output, and `DRIP_IMAGE_PROTOCOL`
     // overrides it either way.
     crate::tui::images::set_inline_images(crate::tui::images::detect_image_protocol());
+    let inline_images_status = crate::tui::images::inline_status();
 
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
@@ -3970,6 +3976,10 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     spawn_mention_indexer(cwd, mention_rx, tx.clone());
 
     let mut app = TuiApp::new(bootstrap, tx, mention_tx);
+    // Say which protocol (if any) was detected: the text marker alone is
+    // indistinguishable from "feature missing", especially on terminals that
+    // report a plain TERM (tmux, ssh, VS Code, pwrde/shpool).
+    app.push_info(inline_images_status);
     let code = app.run(rx);
 
     write_out(DISABLE_BRACKETED_PASTE);

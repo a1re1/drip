@@ -60,6 +60,26 @@ pub fn inline_images_protocol() -> Option<ImageProtocol> {
     ACTIVE.lock().ok().and_then(|slot| *slot)
 }
 
+/// One-line summary of what inline support is doing, so the operator can see
+/// it at startup instead of guessing why the marker is all they get.
+fn inline_status_for(protocol: Option<ImageProtocol>) -> String {
+    match protocol {
+        Some(protocol) => format!(
+            "inline images on: {} (DRIP_IMAGE_PROTOCOL=kitty|iterm2|none to override)",
+            protocol.name()
+        ),
+        None => "inline images off: this terminal announced no supported protocol, so \
+                 attachments keep the text marker. Force one with \
+                 DRIP_IMAGE_PROTOCOL=kitty (kitty/ghostty) or =iterm2 (iTerm2/WezTerm)."
+            .to_string(),
+    }
+}
+
+/// The status line for the protocol currently active in this process.
+pub fn inline_status() -> String {
+    inline_status_for(inline_images_protocol())
+}
+
 /// Pure detection: `lookup` reads an environment variable and `is_tty` says
 /// whether stdout is an interactive terminal. A non-tty stdout always wins
 /// (redirected output must stay text), then an explicit
@@ -432,6 +452,16 @@ mod tests {
 
         set_inline_images(None);
         assert_eq!(inline_images_protocol(), None);
+    }
+
+    #[test]
+    fn status_names_the_active_protocol_or_how_to_force_one() {
+        let off = inline_status_for(None);
+        assert!(off.contains("off"), "{off}");
+        assert!(off.contains("DRIP_IMAGE_PROTOCOL"), "{off}");
+
+        assert!(inline_status_for(Some(ImageProtocol::Kitty)).contains("kitty"));
+        assert!(inline_status_for(Some(ImageProtocol::Iterm2)).contains("iterm2"));
     }
 
     #[test]

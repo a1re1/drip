@@ -201,10 +201,11 @@ pub const VERIFICATION_STUCK_PREFIX: &str = "verification_stuck:";
 /// disabled, so the disabled-path system prompt stays byte-identical.
 pub const ASK_USER_GUIDANCE_FRAGMENT: &str = concat!(
     "# Clarification questions (ask_user)",
-    " ask_user is enabled for this run. When the goal is ambiguous or an approach tradeoff needs the operator's decision, ask early — preferably during planning, before implementing.",
+    " ask_user is enabled for this run and only answers while you are planning: ask right after the operator's goal or a new operator message, BEFORE the first task starts. Never ask mid-task — once the plan is executing, decide from the goal, the operator's messages and the repository and continue.",
     " Batch ALL of your questions into a single ask_user call as one survey, and put your best-guess option FIRST in each option list.",
     " Never ask what the repo itself answers: read files and run tools first.",
-    " After the operator's answers arrive, revise the plan with plan_tasks/revise_task to reflect them before implementing."
+    " After the operator's answers arrive, revise the plan with plan_tasks/revise_task to reflect them before implementing.",
+    " If the operator chose \"chat about this\", their reply is free-form discussion of the whole survey: take it as the answer to your questions, and you may ask ONE refined survey before you replan."
 );
 /// Exact directive prefixed to the injected Q->A summary when the operator
 /// answers a pending ask_user survey (live or on resume).

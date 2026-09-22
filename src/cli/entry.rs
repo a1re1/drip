@@ -197,6 +197,32 @@ fn resolve_session_ref(project: &DripProject, reference: Option<&str>) -> Resolv
 /// back), otherwise the plain-text shorthand {"index":0,"choice":null,"other":<text>}.
 /// Only syntactically invalid JSON falls back to shorthand — valid JSON with a
 /// wrong shape fails, so a caller never silently answers the wrong survey.
+/// Whether this run may ask the operator clarification questions: an explicit
+/// flag wins, a resume-like run inherits the session's stored choice (an
+/// explicit off is as inheritable as an on), and otherwise the scope's config
+/// default decides — interactive and headless runs read their own setting.
+fn resolve_ask_user_enabled(
+    explicit_ask: bool,
+    explicit_no_ask: bool,
+    resume_like: bool,
+    stored: Option<bool>,
+    settings: &indexmap::IndexMap<String, String>,
+    interactive: bool,
+) -> bool {
+    if explicit_ask {
+        return true;
+    }
+    if explicit_no_ask {
+        return false;
+    }
+    if resume_like {
+        if let Some(value) = stored {
+            return value;
+        }
+    }
+    crate::core::config::ask_user_default(settings, interactive)
+}
+
 fn answers_from_payload(payload: &str) -> Result<crate::core::types::HarnessSurveyAnswers, String> {
     match serde_json::from_str::<serde_json::Value>(payload) {
         Ok(value) => crate::core::state::answers::parse_answers_value(&value),
@@ -207,6 +233,7 @@ fn answers_from_payload(payload: &str) -> Result<crate::core::types::HarnessSurv
                 choice: None,
                 other: Some(payload.to_string()),
             }],
+            chat: None,
         }),
     }
 }
@@ -860,8 +887,14 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     // inherits the session's stored choice so a continueCommand keeps the
     // ask_user tool (and its timeout) without restating the flags.
     let resume_like = args.cli_args.resume || args.cli_args.continue_latest;
-    let ask_user_enabled = args.cli_args.ask
-        || (resume_like && stored.as_ref().and_then(|s| s.ask_enabled).unwrap_or(false));
+    let ask_user_enabled = resolve_ask_user_enabled(
+        args.cli_args.ask,
+        args.cli_args.no_ask,
+        resume_like,
+        stored.as_ref().and_then(|s| s.ask_enabled),
+        &args.config.settings,
+        false,
+    );
     let ask_user_timeout_seconds = args.cli_args.ask_timeout_secs.or_else(|| {
         if resume_like {
             stored.as_ref().and_then(|s| s.ask_timeout_seconds)
@@ -875,7 +908,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         &SessionRunConfig {
             profile: pinned_profile,
             skills: activated_entries,
-            ask_enabled: if ask_user_enabled { Some(true) } else { None },
+            ask_enabled: Some(ask_user_enabled),
             ask_timeout_seconds: ask_user_timeout_seconds,
         },
     );
@@ -2328,7 +2361,14 @@ pub async fn main(argv: Vec<String>) -> i32 {
     tokio::task::block_in_place(|| {
         crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
             allow_net,
-            ask: cli_args.ask,
+            ask: resolve_ask_user_enabled(
+                cli_args.ask,
+                cli_args.no_ask,
+                false,
+                None,
+                &config.settings,
+                true,
+            ),
             ask_timeout_secs: cli_args.ask_timeout_secs,
             reference_roots,
             config,
@@ -2490,8 +2530,48 @@ fn run_marketplace_command(cli_args: &ParsedCliArgs, cwd: &str, home: &DripHome)
 
 #[cfg(test)]
 mod tests {
-    use super::{answers_from_payload, non_empty, praeparare_tui_conflict_message, to_fixed_2};
+    use super::{
+        answers_from_payload, non_empty, praeparare_tui_conflict_message, resolve_ask_user_enabled,
+        to_fixed_2,
+    };
     use crate::cli::args::parse_cli_args;
+
+    fn ask_settings(interactive: &str, headless: &str) -> indexmap::IndexMap<String, String> {
+        let mut settings = indexmap::IndexMap::new();
+        settings.insert(
+            crate::core::config::ASK_USER_INTERACTIVE_SETTING_ID.to_string(),
+            interactive.to_string(),
+        );
+        settings.insert(
+            crate::core::config::ASK_USER_HEADLESS_SETTING_ID.to_string(),
+            headless.to_string(),
+        );
+        settings
+    }
+
+    /// The one resolver: explicit flags beat everything, a resume inherits the
+    /// stored choice (including an explicit off), and otherwise the scope's
+    /// config default applies (interactive runs read the interactive key).
+    #[test]
+    fn ask_user_resolution_prefers_flags_then_stored_then_config_default() {
+        let settings = ask_settings("false", "true");
+        assert!(resolve_ask_user_enabled(true, false, true, Some(false), &settings, true));
+        assert!(!resolve_ask_user_enabled(false, true, false, Some(true), &settings, false));
+        assert!(resolve_ask_user_enabled(false, false, true, Some(true), &settings, true));
+        assert!(!resolve_ask_user_enabled(false, false, true, Some(false), &settings, false));
+        assert!(!resolve_ask_user_enabled(false, false, true, None, &settings, true));
+        assert!(resolve_ask_user_enabled(false, false, true, None, &settings, false));
+        assert!(!resolve_ask_user_enabled(false, false, false, None, &settings, true));
+        assert!(resolve_ask_user_enabled(false, false, false, None, &settings, false));
+        assert!(resolve_ask_user_enabled(
+            false,
+            false,
+            false,
+            None,
+            &indexmap::IndexMap::new(),
+            true
+        ));
+    }
 
     fn parse_entry(argv: &[&str]) -> crate::cli::args::ParsedCliArgs {
         let owned: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();

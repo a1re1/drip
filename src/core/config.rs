@@ -37,8 +37,29 @@ pub const OTHER_SETTINGS_DEFAULT_JSON: &str = include_str!("defaults/other_setti
 
 /// Terminal pane title generation (best-effort, one-shot per chat).
 pub const TERMINAL_TITLE_ENABLED_SETTING_ID: &str = "runtime.terminal_title_enabled";
+
+/// Opt-in clarification surveys in the interactive TUI (`--ask`/`--no-ask`).
+pub const ASK_USER_INTERACTIVE_SETTING_ID: &str = "runtime.ask_user_interactive";
+/// Opt-in clarification surveys in headless runs.
+pub const ASK_USER_HEADLESS_SETTING_ID: &str = "runtime.ask_user_headless";
 pub const TERMINAL_TITLE_PROFILE_SETTING_ID: &str = "runtime.terminal_title_profile_id";
 pub const TERMINAL_TITLE_TIMEOUT_MS_SETTING_ID: &str = "runtime.terminal_title_timeout_ms";
+
+/// Whether clarification surveys (the ask_user tool) are on by default. Mirrors
+/// terminal_title_enabled: a missing key means on and only the literal "false"
+/// opts out. Interactive (TUI) and headless runs read their own setting.
+pub fn ask_user_default(settings: &IndexMap<String, String>, interactive: bool) -> bool {
+    let id = if interactive {
+        ASK_USER_INTERACTIVE_SETTING_ID
+    } else {
+        ASK_USER_HEADLESS_SETTING_ID
+    };
+    settings
+        .get(id)
+        .map(|value| value.trim())
+        .unwrap_or("true")
+        != "false"
+}
 
 /// Optional per-loop skill classifier (the "jev" Decisions API). Off by
 /// default: an empty profile id means no classifier, no discovery and no
@@ -1462,6 +1483,27 @@ mod tests {
         let profiles = list_cli_model_profiles(&config.settings).unwrap();
         assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ask_user_default_reads_each_scope_and_only_false_disables() {
+        let mut settings = IndexMap::new();
+        // Missing key (an older config file) keeps surveys on in both scopes.
+        assert!(ask_user_default(&settings, true));
+        assert!(ask_user_default(&settings, false));
+        settings.insert(ASK_USER_INTERACTIVE_SETTING_ID.to_string(), "false".to_string());
+        assert!(!ask_user_default(&settings, true));
+        assert!(ask_user_default(&settings, false));
+        settings.insert(ASK_USER_HEADLESS_SETTING_ID.to_string(), "false".to_string());
+        assert!(!ask_user_default(&settings, false));
+        settings.insert(ASK_USER_INTERACTIVE_SETTING_ID.to_string(), "true".to_string());
+        settings.insert(ASK_USER_HEADLESS_SETTING_ID.to_string(), "true".to_string());
+        assert!(ask_user_default(&settings, true));
+        assert!(ask_user_default(&settings, false));
+        // The shipped default catalog carries both keys as "true".
+        let defaults = default_setting_values();
+        assert_eq!(defaults.get(ASK_USER_INTERACTIVE_SETTING_ID).map(String::as_str), Some("true"));
+        assert_eq!(defaults.get(ASK_USER_HEADLESS_SETTING_ID).map(String::as_str), Some("true"));
     }
 
     #[test]

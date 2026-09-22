@@ -222,10 +222,15 @@ OPTIONS
 	                              corpus (repeatable; also DRIP_REFERENCE_ROOTS or
 	                              OASIS_ROOTS, colon-separated). Without a root the tool
 	                              is left out of the pack; requires the `oasis` binary
-	--ask                         Opt the run into operator clarification surveys: enables the
-	                              ask_user tool (staged multiple-choice questions; the run
-	                              blocks for answers via --answer or the TUI overlay, then
-	                              replans). Pinned on the session, so --resume keeps it
+	--ask                         Pin operator clarification surveys on for this run: the
+	                              ask_user tool asks staged multiple-choice questions while
+	                              planning, then the run blocks for answers via --answer or
+	                              the TUI overlay. On by default (runtime.ask_user_interactive
+	                              / runtime.ask_user_headless in config); pinned on the
+	                              session, so --resume keeps the choice
+	--no-ask                      Pin clarification surveys off for this run: the ask_user
+	                              tool is never offered, and the off choice is pinned on the
+	                              session so --resume keeps it. Cannot be combined with --ask
 	--ask-timeout <seconds>       How long a blocked survey waits for answers before the run
 	                              ends with reason awaiting-input (default 900); resume later
 	                              after answering
@@ -364,6 +369,7 @@ mod tests {
             "--no-skills",
             "--answer",
             "--ask",
+            "--no-ask",
             "--ask-timeout",
             "--allow-destructive",
             "--allow-net",

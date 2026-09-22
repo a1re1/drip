@@ -31,6 +31,18 @@ pub fn validate_survey_answers(
     survey: &QuestionSurvey,
     answers: &crate::core::types::HarnessSurveyAnswers,
 ) -> Result<(), String> {
+    // A "chat about this" record answers the whole survey with one free-form
+    // message instead of one answer per question.
+    if let Some(chat) = answers.chat.as_deref() {
+        if !chat.trim().is_empty() {
+            // A chat reply stands for the whole survey; a hybrid record would
+            // have its per-question answers silently ignored, so refuse it.
+            if !answers.answers.is_empty() {
+                return Err("a chat reply answers the whole survey: it cannot be combined with per-question answers".to_string());
+            }
+            return Ok(());
+        }
+    }
     let total = survey.questions.len();
     let mut seen = vec![false; total];
     for answer in &answers.answers {
@@ -564,7 +576,7 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "ask_user",
-                "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Use ONLY when the goal is ambiguous or an approach tradeoff needs the operator's decision — preferably during planning, before implementing. Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing.",
+                "description": "Ask the operator 1-4 staged multiple-choice clarification questions and block until they answer. Ask ONLY while planning — right after the operator's goal or a new operator message and before the first task starts; never mid-task, once the plan is executing decide from the goal, the operator's messages and the repository. Never ask anything the repository itself answers (read files and run tools first). Batch every question into this single call as one survey; put your best-guess option first in each list. After answers arrive, revise the plan with plan_tasks/revise_task before implementing. If the operator chose \"chat about this\", their reply is free-form discussion of the whole survey: take it as the answer, and you may ask ONE refined survey before you replan.",
                 "parameters": {
                     "properties": {
                         "questions": {
@@ -2325,6 +2337,9 @@ pub struct HarnessOpContext {
     /// Whether the ask_user tool is enabled for this run (--ask). When false,
     /// an AskUser op registers as a failed tool call with a clear message.
     pub ask_user_enabled: bool,
+    /// Whether the planning ask window is open: true at run start and again
+    /// right after a fresh operator message, false once a task loop starts.
+    pub ask_window_open: bool,
     /// Operator review/verify opt-out in force (sticky). When true, no
     /// verified_by reviewer chain is spawned and Review*/reviewer task work is
     /// rejected at every ledger boundary.
@@ -3707,6 +3722,17 @@ pub fn apply_harness_op(
                     direct_response: None,
                 };
             }
+            if !ctx.ask_window_open {
+                // Planning-only window: the model may clarify right after the
+                // operator's goal or message, never while a task executes.
+                return HarnessOpOutcome {
+                    text: "ask_user is only available while planning right after the operator's message; the plan is already executing. Decide from the goal, the operator's messages and the repository, and continue.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
             // Persist the pending survey; the run loop turns this into the
             // question event + blocking answers.jsonl wait (and owns the
             // timeout/awaiting-input path). No answer is available yet, so
@@ -5025,6 +5051,7 @@ mod apply_harness_op_tests {
         .unwrap();
         let ctx = HarnessOpContext {
             ask_user_enabled: true,
+            ask_window_open: true,
             ..HarnessOpContext::default()
         };
         let outcome = apply_harness_op(&mut state, op, &ctx);
@@ -5035,6 +5062,67 @@ mod apply_harness_op_tests {
         assert!(!pending.questions[0].allow_other);
         assert!(outcome.text.contains("pending"), "{}", outcome.text);
         assert!(outcome.direct_response.is_none());
+    }
+
+    /// Closed ask window: the op is refused like the disabled branch and no
+    /// pending survey is persisted (the plan is already executing).
+    #[test]
+    fn ask_user_outside_the_ask_window_is_refused_without_pending_state() {
+        let mut state = create_harness_state("goal");
+        let op = parse_harness_op(
+            "ask_user",
+            r#"{"questions":[{"header":"Q","question":"q?","options":[{"label":"a","description":"d"},{"label":"b","description":"d"}]}]}"#,
+        )
+        .unwrap();
+        let ctx = HarnessOpContext {
+            ask_user_enabled: true,
+            ask_window_open: false,
+            ..HarnessOpContext::default()
+        };
+        let outcome = apply_harness_op(&mut state, op, &ctx);
+        assert!(!outcome.state_changed);
+        assert!(!outcome.task_finished);
+        assert!(state.pending_questions.is_none());
+        assert!(
+            outcome.text.contains("only available while planning"),
+            "{}",
+            outcome.text
+        );
+    }
+
+    /// A chat record validates for any survey: its empty answers array is the
+    /// whole point, and every ordinary record keeps the strict coverage rules.
+    #[test]
+    fn validate_survey_answers_accepts_a_chat_record_for_any_survey() {
+        let survey = crate::core::types::QuestionSurvey {
+            questions: vec![crate::core::types::HarnessSurveyQuestion {
+                header: "H".to_string(),
+                question: "q?".to_string(),
+                options: vec![
+                    crate::core::types::HarnessSurveyOption { label: "a".to_string(), description: "d".to_string() },
+                    crate::core::types::HarnessSurveyOption { label: "b".to_string(), description: "d".to_string() },
+                ],
+                allow_other: false,
+            }],
+            answers_cursor: None,
+        };
+        let chat = crate::core::types::HarnessSurveyAnswers {
+            at: "2026-02-03T04:05:06.789Z".to_string(),
+            answers: Vec::new(),
+            chat: Some("talk it through".to_string()),
+        };
+        assert!(validate_survey_answers(&survey, &chat).is_ok());
+        let hybrid = crate::core::types::HarnessSurveyAnswers {
+            answers: vec![crate::core::types::HarnessSurveyAnswer { index: 0, choice: Some("a".to_string()), other: None }],
+            ..chat.clone()
+        };
+        assert!(validate_survey_answers(&survey, &hybrid).is_err());
+        let empty = crate::core::types::HarnessSurveyAnswers {
+            answers: Vec::new(),
+            chat: None,
+            ..chat.clone()
+        };
+        assert!(validate_survey_answers(&survey, &empty).is_err());
     }
 
     #[test]

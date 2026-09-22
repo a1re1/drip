@@ -4212,6 +4212,94 @@ mod dynamic_skills_tests {
             "a skill filtered by requirements must be decided without a classifier call"
         );
     }
+
+    // The loop-start telemetry must report the skills the loop actually has
+    // access to: the run's explicit --skill activations (which live in the
+    // base prompt, not the classifier pool) plus the classifier selection.
+    #[tokio::test]
+    async fn loop_start_records_base_and_dynamic_skills_and_omits_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink: std::sync::Arc<std::sync::Mutex<Vec<HarnessEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = sink.clone();
+        let mut run = HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            base_skills: vec!["navis".to_string()],
+            on_event: Some(std::sync::Arc::new(move |event| {
+                collected.lock().unwrap().push(event)
+            })),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap();
+        // "navis" is also selected dynamically on purpose: the base entry must
+        // not be duplicated in the field.
+        run.dynamic_skills = vec![
+            crate::cli::skills::LoadedCliSkill {
+                content: "body".to_string(),
+                name: "navis".to_string(),
+                role_hints: None,
+            },
+            crate::cli::skills::LoadedCliSkill {
+                content: "body".to_string(),
+                name: "verify-before-done".to_string(),
+                role_hints: None,
+            },
+        ];
+
+        let _scope = run.begin_loop();
+
+        let events = sink.lock().unwrap();
+        let start = events
+            .iter()
+            .find(|event| event.r#type == HarnessEventType::LoopStart)
+            .expect("begin_loop must emit a loop-start event");
+        let skills = start
+            .data
+            .as_ref()
+            .expect("loop-start carries data")
+            .skills
+            .as_ref()
+            .expect("a loop with skills must record them");
+        assert_eq!(skills.as_slice(), ["navis", "verify-before-done"]);
+        assert!(
+            start.detail.contains("[skills: navis, verify-before-done]"),
+            "the prose suffix must mirror the field: {}",
+            start.detail
+        );
+        std::mem::forget(dir);
+
+        // No base and no dynamic skills: the field is omitted, not empty.
+        let dir = tempfile::tempdir().unwrap();
+        let sink: std::sync::Arc<std::sync::Mutex<Vec<HarnessEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = sink.clone();
+        let mut run = HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            on_event: Some(std::sync::Arc::new(move |event| {
+                collected.lock().unwrap().push(event)
+            })),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap();
+
+        let _scope = run.begin_loop();
+
+        let events = sink.lock().unwrap();
+        let start = events
+            .iter()
+            .find(|event| event.r#type == HarnessEventType::LoopStart)
+            .unwrap();
+        assert!(
+            start.data.as_ref().unwrap().skills.is_none(),
+            "an empty skill set must omit the field"
+        );
+        assert!(!start.detail.contains("[skills:"), "{}", start.detail);
+        std::mem::forget(dir);
+    }
 }
 
 /// Options for constructing a `SolidStateHarness`. Every optional field is
@@ -4291,6 +4379,12 @@ pub struct SolidStateHarnessOptions {
     /// default, and never the explicit --skill activations (those are already
     /// in the base prompt).
     pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
+    /// Names of the run's explicit `--skill` activations. They are already
+    /// composed into the base system prompt (so they never appear in
+    /// `skill_pool`), but the loop-start telemetry records them alongside the
+    /// classifier selection: a run driven only by `--skill` composes no
+    /// dynamic skills at all, and would otherwise report no skills.
+    pub base_skills: Vec<String>,
     pub system_prompt: Option<String>,
     pub telemetry: Option<PartialHarnessTelemetryConfig>,
     pub redact_secrets: Vec<(String, String)>,
@@ -6865,17 +6959,23 @@ impl HarnessRun {
         };
 
         // the loop-start event.
-        let skills_suffix = if self.dynamic_skills.is_empty() {
+        // The skills this loop composed, kept both as prose (the detail a
+        // human reads) and as structure (the loop-start event's `skills`,
+        // which dripw and the browser UI read instead of parsing the prose).
+        // The set is the run's explicit --skill activations (already composed
+        // into the base prompt) followed by this loop's classifier selection,
+        // deduped by name: a --skill-driven run composes no dynamic skills, so
+        // without the base set its telemetry field would be empty.
+        let mut loaded_skills: Vec<String> = self.options.base_skills.clone();
+        for skill in &self.dynamic_skills {
+            if !loaded_skills.contains(&skill.name) {
+                loaded_skills.push(skill.name.clone());
+            }
+        }
+        let skills_suffix = if loaded_skills.is_empty() {
             String::new()
         } else {
-            format!(
-                " [skills: {}]",
-                self.dynamic_skills
-                    .iter()
-                    .map(|skill| skill.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            format!(" [skills: {}]", loaded_skills.join(", "))
         };
         let detail = format!(
             "loop {}{}{} — {}",
@@ -6898,6 +6998,7 @@ impl HarnessRun {
         self.emit(HarnessEvent {
             data: Some(HarnessEventData {
                 r#loop: Some(self.state.r#loop),
+                skills: if loaded_skills.is_empty() { None } else { Some(loaded_skills) },
                 task_id: current_task_id.clone(),
                 ..Default::default()
             }),

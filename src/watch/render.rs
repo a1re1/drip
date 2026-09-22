@@ -2,11 +2,11 @@
 // returns exactly `rows` lines, each exactly `cols` visible columns. No I/O,
 // no clock — `vm.now` is the only time it may read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::cli::transcript::{format_model_route_lines, TranscriptEntry};
 use crate::core::sessions::SessionRecord;
-use crate::core::types::{HarnessTask, HarnessTaskStatus};
+use crate::core::types::{HarnessEventType, HarnessTask, HarnessTaskStatus};
 use crate::watch::ansi::{c, char_width, fit, string_width, strip_ansi};
 use crate::watch::ps::PsProc;
 pub use crate::watch::transcript_view::{flatten_transcript, RowCell};
@@ -20,7 +20,7 @@ const MIN_PANE: usize = 3; // border+border + 1 content row
 
 // ── View model ───────────────────────────────────────────────────────────────
 
-/// 1 | 2 | 3
+/// 1 | 2 | 3 | 4
 pub type FocusPane = u8;
 
 /// Which slice of the session index the [1] Sessions pane shows. `r` cycles it.
@@ -86,6 +86,10 @@ pub struct WatchViewModel {
     pub tasks: Vec<HarnessTask>,
     /// Selection index into the ordered task list (used when focus == 2).
     pub sel_task: usize,
+    /// The focused session's loaded skills, one entry per loop, oldest first —
+    /// read from the loop-start telemetry of `transcript`. Empty when the
+    /// session recorded none (or predates the field).
+    pub skill_loads: Vec<SkillLoad>,
 }
 
 // ── Time helpers (pure; exported for tests) ──────────────────────────────────
@@ -431,7 +435,11 @@ fn task_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell
         .map(|i| {
             let (glyph, color) = task_glyph(tasks[i].status);
             // An untitled task still needs a visible handle: fall back to its id.
-            let label = if tasks[i].title.trim().is_empty() { tasks[i].id.as_str() } else { tasks[i].title.as_str() };
+            let label = if tasks[i].title.trim().is_empty() {
+                tasks[i].id.as_str()
+            } else {
+                tasks[i].title.as_str()
+            };
             let text = fit(&format!("{glyph} {label}"), inner_w, true);
             selectable(text, color, focused && i == vm.sel_task)
         })
@@ -465,12 +473,18 @@ fn task_count_note(tasks: &[HarnessTask]) -> Option<String> {
 
 /// True when the currently selected session is a running (live-lease) one.
 fn focused_is_running(vm: &WatchViewModel) -> bool {
-    vm.sessions.get(vm.sel_session).is_some_and(|r| vm.started_at_ms.contains_key(&r.id))
+    vm.sessions
+        .get(vm.sel_session)
+        .is_some_and(|r| vm.started_at_ms.contains_key(&r.id))
 }
 
 fn shell_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell> {
     if vm.shells.is_empty() {
-        let msg = if focused_is_running(vm) { "  (no shell processes)" } else { "  (no running session focused)" };
+        let msg = if focused_is_running(vm) {
+            "  (no shell processes)"
+        } else {
+            "  (no running session focused)"
+        };
         return vec![plain(msg, c::dim)];
     }
     let focused = vm.focus == 3;
@@ -482,7 +496,11 @@ fn shell_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCel
             let main = format!("{DOT} {:>6} {}", p.pid, p.command);
             let left_w = inner_w.saturating_sub(string_width(&right));
             // Every process in the table is live, so the dot is always green.
-            selectable(format!("{}{}", fit(&main, left_w, true), right), c::green, focused && i == vm.sel_shell)
+            selectable(
+                format!("{}{}", fit(&main, left_w, true), right),
+                c::green,
+                focused && i == vm.sel_shell,
+            )
         })
         .collect()
 }
@@ -491,7 +509,9 @@ fn shell_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCel
 // shell has no transcript, so the full (untruncated) command line plus its
 // child processes are the useful "log-equivalent" header.
 fn shell_detail_rows(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
-    let Some(p) = vm.shells.get(vm.sel_shell) else { return vec![plain("  (no process selected)", c::dim)] };
+    let Some(p) = vm.shells.get(vm.sel_shell) else {
+        return vec![plain("  (no process selected)", c::dim)];
+    };
     let mut rows = vec![
         plain(format!("pid      {}", p.pid), c::white),
         plain(format!("ppid     {}", p.ppid), c::gray),
@@ -554,7 +574,11 @@ pub fn wrap_plain(text: &str, width: usize) -> Vec<String> {
         }
         out.push(cur);
     }
-    if out.is_empty() { vec![String::new()] } else { out }
+    if out.is_empty() {
+        vec![String::new()]
+    } else {
+        out
+    }
 }
 
 // The inference route the focused session's newest run was launched on,
@@ -588,6 +612,103 @@ fn transcript_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<R
     flat[start..end].to_vec()
 }
 
+// ── Skill rows (the [4] Skills pane) ─────────────────────────────────────────
+
+/// One loop's loaded skills, exactly as the harness recorded them on its
+/// loop-start telemetry: the classifier-selected skills plus the run's
+/// base-prompt `--skill` activations, deduped in composition order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillLoad {
+    /// The loop iteration the skills were composed for.
+    pub iteration: i64,
+    pub skills: Vec<String>,
+}
+
+/// Every loop-start event in `transcript` that recorded a loaded-skill set, in
+/// transcript (chronological) order. Events from before the field existed — or
+/// loops that ran with no skills of their own — carry no `skills` and are
+/// skipped, so an old session simply shows the pane's empty state.
+pub fn skill_loads(transcript: &[TranscriptEntry]) -> Vec<SkillLoad> {
+    transcript
+        .iter()
+        .filter_map(|entry| {
+            let TranscriptEntry::Event(event) = entry else {
+                return None;
+            };
+            if event.kind != HarnessEventType::LoopStart {
+                return None;
+            }
+            let skills = event.data.as_ref()?.skills.clone()?;
+            if skills.is_empty() {
+                return None;
+            }
+            Some(SkillLoad {
+                iteration: event.iteration,
+                skills,
+            })
+        })
+        .collect()
+}
+
+/// The union of every loaded skill across `loads`, with the number of loops
+/// that loaded it, ordered by count (descending) then name so the roll-up is
+/// stable frame to frame. This is the pane's "all loaded skills" section.
+pub fn all_loaded_skills(loads: &[SkillLoad]) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for load in loads {
+        for name in &load.skills {
+            *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// Rows for the [4] Skills pane: the roll-up of every skill the focused
+/// session loaded, then each loop's own set in load order. The pane answers
+/// both "what does this run have access to right now" (its newest loop is the
+/// last block) and "how were the skills spread across the run".
+fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
+    if vm.skill_loads.is_empty() {
+        return vec![plain("  no skill telemetry yet", c::dim)];
+    }
+    let all = all_loaded_skills(&vm.skill_loads);
+    let mut rows = vec![plain(
+        format!("all loaded skills ({})", all.len()),
+        c::accent,
+    )];
+    for (name, count) in all {
+        let suffix = if count > 1 {
+            format!(" · {count} loops")
+        } else {
+            String::new()
+        };
+        rows.push(plain(format!("  {name}{suffix}"), c::white));
+    }
+    rows.push(plain("", c::dim));
+    for load in &vm.skill_loads {
+        rows.push(plain(
+            format!("loop {} · {}", load.iteration, load.skills.len()),
+            c::accent,
+        ));
+        for name in &load.skills {
+            rows.push(plain(format!("  {name}"), c::gray));
+        }
+    }
+    rows
+}
+
+/// How many real rows the [4] pane seats — the layout hugs the pane to its
+/// content with this, and the hit test counts rows with it. Zero when the pane
+/// shows its empty-state message, which is not a clickable row.
+fn skill_row_count(vm: &WatchViewModel) -> usize {
+    if vm.skill_loads.is_empty() {
+        return 0;
+    }
+    skill_rows(vm).len()
+}
+
 // ── Titles / footer notes ────────────────────────────────────────────────────
 
 fn sessions_title(vm: &WatchViewModel) -> String {
@@ -600,6 +721,12 @@ fn tasks_title(vm: &WatchViewModel) -> String {
 
 fn shells_title(vm: &WatchViewModel) -> String {
     format!("[3] Shells ({})", vm.shells.len())
+}
+
+/// `[4] Skills (n)` — n distinct skills loaded across the focused session's
+/// loops, the count the pane's roll-up section lists.
+fn skills_title(vm: &WatchViewModel) -> String {
+    format!("[4] Skills ({})", all_loaded_skills(&vm.skill_loads).len())
 }
 
 fn shell_detail_title(vm: &WatchViewModel) -> String {
@@ -625,15 +752,15 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3 focus · tab cycle · r mode · click/j/k move · [/] h/l/wheel scroll log · q quit";
+const FOOTER_HINT: &str = "1/2/3/4 focus · tab cycle · r mode · click/j/k move · [/] h/l/wheel scroll log · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
 /// The pane geometry `render_frame` paints with, read by every hit test so the
 /// rectangles a click is measured against cannot drift from the frame.
 struct PaneLayout {
-    /// Sessions / Tasks / Shells heights, top to bottom.
-    heights: [usize; 3],
+    /// Sessions / Tasks / Shells / Skills heights, top to bottom.
+    heights: [usize; 4],
     /// Width of the list column (portrait: the full frame).
     list_w: usize,
     /// Height of the `[0]` pane: the stacked transcript in portrait, the full
@@ -660,31 +787,35 @@ fn pane_layout(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<PaneLayo
     if cols < PORTRAIT_MAX_COLS {
         // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
         // transcript absorbs the reclaimed rows.
-        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), 0]);
+        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), skill_row_count(vm), 0]);
         return Some(PaneLayout {
-            heights: [heights[0], heights[1], heights[2]],
+            heights: [heights[0], heights[1], heights[2], heights[3]],
             list_w: cols,
-            zero_h: heights[3],
+            zero_h: heights[4],
             zero_w: None,
         });
     }
 
-    // Landscape: left [1]/[2]/Shells (~40% width), right full-height [0].
-    // Content-hug sessions and shells; tasks takes the rest of the left column.
+    // Landscape: left [1]/[2]/[3]/[4] (~40% width), right full-height [0].
+    // Content-hug sessions, shells and skills; tasks takes the rest of the left
+    // column (its ledger is the one list that grows without a natural bound).
     let list_w = (cols * 2 / 5).max(30).min(cols - 20);
     let sessions_desired = vm.sessions.len().max(1) + 2;
     let shells_desired = vm.shells.len().max(1) + 2;
-    let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(2 * MIN_PANE)));
-    let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + MIN_PANE)));
-    let mut h2 = body_h as i64 - h1 as i64 - h3 as i64;
+    let skills_desired = skill_row_count(vm).max(1) + 2;
+    let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(3 * MIN_PANE)));
+    let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + 2 * MIN_PANE)));
+    let mut h4 = skills_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + MIN_PANE)));
+    let mut h2 = body_h as i64 - h1 as i64 - h3 as i64 - h4 as i64;
     if h2 < MIN_PANE as i64 {
-        let capped = split_heights(body_h, &[4, 4, 3]);
+        let capped = split_heights(body_h, &[4, 4, 3, 3]);
         h1 = capped[0];
         h2 = capped[1] as i64;
         h3 = capped[2];
+        h4 = capped[3];
     }
     Some(PaneLayout {
-        heights: [h1, h2.max(0) as usize, h3],
+        heights: [h1, h2.max(0) as usize, h3, h4],
         list_w,
         zero_h: body_h,
         zero_w: Some(cols - list_w),
@@ -725,6 +856,11 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
         render_pane(w, height, &shells_title(vm), vm.focus == 3, &shell_rows(vm, w.saturating_sub(2), height.saturating_sub(2)), note.as_deref())
     };
 
+    let mk_skills = |w: usize, height: usize| -> Vec<String> {
+        let note = if vm.skill_loads.is_empty() { None } else { Some(format!("{} loops", vm.skill_loads.len())) };
+        render_pane(w, height, &skills_title(vm), vm.focus == 4, &skill_rows(vm), note.as_deref())
+    };
+
     // The [0] column: the transcript normally; a shell-detail box over a raw
     // stdout/stderr tail box when the Shells pane is focused (sub-zero's
     // renderRight). Always emits exactly `height` lines.
@@ -759,13 +895,14 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 
     // The one place the pane budgeting lives; the hit tests below read it too.
     let layout = pane_layout(vm, cols, rows).expect("terminal size checked above");
-    let (h1, h2, h3) = (layout.heights[0], layout.heights[1], layout.heights[2]);
+    let (h1, h2, h3, h4) = (layout.heights[0], layout.heights[1], layout.heights[2], layout.heights[3]);
 
     let body: Vec<String> = match layout.zero_w {
         None => {
             let mut body = mk_sessions(layout.list_w, h1.saturating_sub(2), h1);
             body.extend(mk_tasks(layout.list_w, h2.saturating_sub(2), h2));
             body.extend(mk_shells(layout.list_w, h3));
+            body.extend(mk_skills(layout.list_w, h4));
             body.extend(mk_zero(layout.list_w, layout.zero_h));
             body
         }
@@ -774,6 +911,7 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
             let mut left = mk_sessions(left_w, h1.saturating_sub(2), h1);
             left.extend(mk_tasks(left_w, h2.saturating_sub(2), h2));
             left.extend(mk_shells(left_w, h3));
+            left.extend(mk_skills(left_w, h4));
             let right = mk_zero(right_w, layout.zero_h);
             hconcat(&left, &right)
         }
@@ -815,8 +953,8 @@ pub fn transcript_region(vm: &WatchViewModel, cols: usize, rows: usize) -> Optio
 }
 
 /// The 1-based inclusive rectangle of each list pane, in panel order — `[0]`
-/// Sessions, `[1]` Tasks, `[2]` Shells — as `(row_start, row_end, col_start,
-/// col_end)`.
+/// Sessions, `[1]` Tasks, `[2]` Shells, `[3]` Skills — as `(row_start,
+/// row_end, col_start, col_end)`.
 ///
 /// Read from `pane_layout`, the same geometry `render_frame` paints with
 /// (portrait stacks them full-width; landscape seats them in the left column),
@@ -841,7 +979,9 @@ pub fn panel_regions(vm: &WatchViewModel, cols: usize, rows: usize) -> Vec<(usiz
 /// `vm.sessions` / `vm.shells`; Tasks index into `ordered_tasks`).
 ///
 /// `None` for a cell on a border, on a pane's empty-state message, past the
-/// last row, or when the terminal is too small to paint the frame.
+/// last row, or when the terminal is too small to paint the frame. Panel 3 (the
+/// Skills pane) has no selection of its own, so it reports the row's position
+/// only to tell a click it landed on the pane rather than on a border.
 pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, row: usize) -> Option<(usize, usize)> {
     for (panel, &(r0, r1, c0, c1)) in panel_regions(vm, cols, rows).iter().enumerate() {
         if row < r0 || row > r1 || col < c0 || col > c1 {
@@ -862,7 +1002,8 @@ pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, ro
         let (len, sel) = match panel {
             0 => (vm.sessions.len(), vm.sel_session),
             1 => (ordered_tasks(&vm.tasks).len(), vm.sel_task),
-            _ => (vm.shells.len(), vm.sel_shell),
+            2 => (vm.shells.len(), vm.sel_shell),
+            _ => (skill_row_count(vm), 0),
         };
         if len == 0 {
             continue; // the pane shows its empty-state message, not rows
@@ -898,6 +1039,7 @@ mod tests {
             shell_log_files: vec![],
             tasks: vec![],
             sel_task: 0,
+            skill_loads: vec![],
         }
     }
 
@@ -1029,27 +1171,52 @@ mod tests {
 
         for (cols, rows) in [(100usize, 30usize), (60, 24)] {
             let regions = panel_regions(&vm, cols, rows);
-            assert_eq!(regions.len(), 3, "{cols}x{rows}");
+            assert_eq!(regions.len(), 4, "{cols}x{rows}");
             let (sr0, sr1, sc0, sc1) = regions[0];
             // Every pane's rows are bracketed by its own top and bottom border.
             assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0), None, "top border {cols}x{rows}");
             assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr1), None, "bottom border {cols}x{rows}");
             assert_eq!(list_row_at(&vm, cols, rows, sc0 - 1, sr0 + 1), None, "left of pane");
             assert_eq!(list_row_at(&vm, cols, rows, sc1 + 1, sr0 + 1), None, "right of pane");
-            for i in 0..4 {
+            // Four panes leave a short terminal few rows each, so every pane
+            // asserts only what its own borders actually enclose.
+            let seated = |r: (usize, usize, usize, usize)| r.1 - r.0 - 1;
+            for i in 0..seated(regions[0]).min(4) {
                 assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0 + 1 + i), Some((0, i)), "session {i} {cols}x{rows}");
             }
-            // The row after the last session is blank, not a fourth pane hit.
-            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0 + 1 + 4), None, "past the last session");
+            // With a row to spare past the fourth session, that row is blank — it
+            // is this pane's own, not a hit borrowed from the pane below.
+            if seated(regions[0]) > 4 {
+                assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0 + 5), None, "past the last session");
+            }
 
             let (tr0, tr1, _, _) = regions[1];
-            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 1), Some((1, 0)), "first task");
-            assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 2), Some((1, 1)), "second task");
+            if seated(regions[1]) >= 1 {
+                assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 1), Some((1, 0)), "first task");
+            }
+            if seated(regions[1]) >= 2 {
+                assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr0 + 2), Some((1, 1)), "second task");
+            }
             assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, tr1), None, "task bottom border");
 
             let (kr0, _, kc0, _) = regions[2];
-            assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 1), Some((2, 0)), "first shell");
-            assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 2), None, "no second shell");
+            if seated(regions[2]) >= 1 {
+                assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 1), Some((2, 0)), "first shell");
+            }
+            if seated(regions[2]) >= 2 {
+                assert_eq!(list_row_at(&vm, cols, rows, kc0 + 3, kr0 + 2), None, "no second shell");
+            }
+
+            // The Skills pane's rows report their position; its empty state does not.
+            let (sk0, _, skc0, _) = regions[3];
+            assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0), None, "skills top border");
+            assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), None, "the empty state is not a row");
+            if seated(regions[3]) >= 1 {
+                vm.skill_loads = vec![SkillLoad { iteration: 2, skills: vec!["navis".into()] }];
+                let (sk0, _, skc0, _) = panel_regions(&vm, cols, rows)[3];
+                assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), Some((3, 0)), "first skills row");
+                vm.skill_loads.clear();
+            }
         }
 
         // Too small to paint: no panes, no hits.
@@ -1202,8 +1369,20 @@ mod tests {
             task("task-5", "cut one", HarnessTaskStatus::Dropped),
         ];
         let rows = task_rows(&vm, 24, 10);
-        assert_eq!(task_texts(&rows), vec!["◐ active one", "○ pending one", "● done one", "✗ stuck one", "○ cut one"]);
-        assert!(rows[0].selected, "the focused pane highlights the selected task");
+        assert_eq!(
+            task_texts(&rows),
+            vec![
+                "◐ active one",
+                "○ pending one",
+                "● done one",
+                "✗ stuck one",
+                "○ cut one"
+            ]
+        );
+        assert!(
+            rows[0].selected,
+            "the focused pane highlights the selected task"
+        );
     }
 
     #[test]
@@ -1216,7 +1395,10 @@ mod tests {
             task("task-2", "b", HarnessTaskStatus::Pending),
             task("task-3", "c", HarnessTaskStatus::Completed),
         ];
-        assert_eq!(task_count_note(&tasks).as_deref(), Some("2 pending · 1 completed"));
+        assert_eq!(
+            task_count_note(&tasks).as_deref(),
+            Some("2 pending · 1 completed")
+        );
         let mut vm = empty_vm();
         vm.tasks = tasks;
         assert_eq!(tasks_title(&vm), "[2] Tasks (3)");
@@ -1227,8 +1409,15 @@ mod tests {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
-        let mut tasks: Vec<HarnessTask> =
-            (0..10).map(|i| task(&format!("task-{i}"), &format!("t{i}"), HarnessTaskStatus::Pending)).collect();
+        let mut tasks: Vec<HarnessTask> = (0..10)
+            .map(|i| {
+                task(
+                    &format!("task-{i}"),
+                    &format!("t{i}"),
+                    HarnessTaskStatus::Pending,
+                )
+            })
+            .collect();
         tasks.push(task("task-x", "active", HarnessTaskStatus::InProgress));
         vm.tasks = tasks;
         // The window starts at the selected row: first row selected shows the
@@ -1236,7 +1425,138 @@ mod tests {
         vm.sel_task = 0;
         assert_eq!(task_texts(&task_rows(&vm, 24, 2)), vec!["◐ active", "○ t0"]);
         vm.sel_task = 10;
-        assert_eq!(task_texts(&task_rows(&vm, 24, 3)), vec!["○ t7", "○ t8", "○ t9"]);
+        assert_eq!(
+            task_texts(&task_rows(&vm, 24, 3)),
+            vec!["○ t7", "○ t8", "○ t9"]
+        );
+    }
+
+    #[test]
+    fn skill_loads_read_the_loop_start_telemetry_in_order() {
+        use crate::cli::transcript::{TranscriptEntry, TranscriptEventEntry};
+        use crate::core::types::HarnessEventData;
+
+        fn loop_start(iteration: i64, skills: Option<Vec<&str>>) -> TranscriptEntry {
+            TranscriptEntry::Event(TranscriptEventEntry {
+                at: "2026-01-01T00:00:00Z".into(),
+                data: Some(HarnessEventData {
+                    skills: skills.map(|s| s.into_iter().map(str::to_string).collect()),
+                    ..Default::default()
+                }),
+                detail: "loop 1".into(),
+                goal_id: "g1".into(),
+                iteration,
+                kind: HarnessEventType::LoopStart,
+            })
+        }
+
+        // A non-loop-start event carrying skills (never emitted today) is
+        // ignored: the pane reads loop-start telemetry only.
+        let other = TranscriptEntry::Event(TranscriptEventEntry {
+            at: "2026-01-01T00:00:00Z".into(),
+            data: Some(HarnessEventData {
+                skills: Some(vec!["bogus".into()]),
+                ..Default::default()
+            }),
+            detail: "tool".into(),
+            goal_id: "g1".into(),
+            iteration: 1,
+            kind: HarnessEventType::ToolCall,
+        });
+
+        let transcript = vec![
+            other,
+            loop_start(1, Some(vec!["navis"])),
+            loop_start(2, None),
+            loop_start(3, Some(vec![])),
+            loop_start(4, Some(vec!["navis", "verify-before-done"])),
+        ];
+        let loads = skill_loads(&transcript);
+        assert_eq!(
+            loads,
+            vec![
+                SkillLoad {
+                    iteration: 1,
+                    skills: vec!["navis".into()]
+                },
+                SkillLoad {
+                    iteration: 4,
+                    skills: vec!["navis".into(), "verify-before-done".into()]
+                },
+            ]
+        );
+        // The roll-up counts loops per skill, most-loaded first (ties by name).
+        assert_eq!(
+            all_loaded_skills(&loads),
+            vec![
+                ("navis".to_string(), 2),
+                ("verify-before-done".to_string(), 1)
+            ]
+        );
+        assert!(skill_loads(&[]).is_empty());
+        assert!(all_loaded_skills(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_skills_pane_rolls_up_then_lists_each_loop() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        assert_eq!(skills_title(&vm), "[4] Skills (0)");
+        assert_eq!(skill_rows(&vm)[0].text, "  no skill telemetry yet");
+
+        vm.skill_loads = vec![
+            SkillLoad {
+                iteration: 1,
+                skills: vec!["navis".into()],
+            },
+            SkillLoad {
+                iteration: 2,
+                skills: vec!["navis".into(), "tdd".into()],
+            },
+        ];
+        assert_eq!(skills_title(&vm), "[4] Skills (2)");
+        let texts: Vec<String> = skill_rows(&vm).iter().map(|r| r.text.clone()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "all loaded skills (2)",
+                "  navis · 2 loops",
+                "  tdd",
+                "",
+                "loop 1 · 1",
+                "  navis",
+                "loop 2 · 2",
+                "  navis",
+                "  tdd",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_skills_pane_paints_a_titled_box() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![SkillLoad {
+            iteration: 7,
+            skills: vec!["navis".into()],
+        }];
+        let frame = render_frame(&vm, 120, 40);
+        let plain: Vec<String> = frame.split('\n').map(strip_ansi).collect();
+        assert!(
+            plain.iter().any(|l| l.contains("[4] Skills (1)")),
+            "the frame titles the pane"
+        );
+        assert!(plain.iter().any(|l| l.contains("all loaded skills (1)")));
+        assert!(
+            plain.iter().any(|l| l.contains("loop 7 · 1")),
+            "the loop's own set is listed"
+        );
+        assert!(
+            widths(&frame).iter().all(|&w| w == 120),
+            "every row keeps the frame width"
+        );
     }
 
     #[test]

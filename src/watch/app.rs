@@ -19,7 +19,7 @@ use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
 use crate::watch::mouse::{parse_mouse_event, MouseEvent};
-use crate::watch::render::{diff_lines, list_row_at, render_frame, transcript_region, SessionsMode, WatchViewModel};
+use crate::watch::render::{diff_lines, list_row_at, render_frame, skill_loads, transcript_region, SessionsMode, WatchViewModel};
 use crate::watch::shelllog::{read_shell_log_files, seed_shell_log, LineFollower, SHELL_TAIL_BYTES};
 
 const LIST_MS: u64 = 2000; // session-list refresh
@@ -65,6 +65,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         shell_log_files: Vec::new(),
         tasks: Vec::new(),
         sel_task: 0,
+        skill_loads: Vec::new(),
     }
 }
 
@@ -337,6 +338,10 @@ impl WatchApp {
                 let mut all = std::mem::take(&mut self.vm.transcript);
                 all.extend(added);
                 self.vm.transcript = trim_transcript(&all, MAX_TRANSCRIPT);
+                // The [4] Skills pane is a projection of the transcript's
+                // loop-start telemetry, so it is refreshed with it — a skill
+                // loaded into a new loop appears the moment the loop starts.
+                self.vm.skill_loads = skill_loads(&self.vm.transcript);
                 dirty = true;
             }
         }
@@ -529,6 +534,7 @@ impl WatchApp {
         let mut tail = TranscriptTail::new(&paths.transcript_path, REPLAY_LIMIT);
         // Consume the replay batch immediately so the pane fills on focus.
         self.vm.transcript = trim_transcript(&tail.poll(), MAX_TRANSCRIPT);
+        self.vm.skill_loads = skill_loads(&self.vm.transcript);
         self.tail = Some(tail);
     }
 
@@ -599,11 +605,20 @@ impl WatchApp {
             return;
         }
 
-        // Tab cycles Sessions → Tasks → Shells
+        // Focus the Skills pane — a read-only projection of the focused
+        // session's loop-start skill telemetry, so there is nothing to select.
+        if key == "4" {
+            self.vm.focus = 4;
+            self.draw();
+            return;
+        }
+
+        // Tab cycles Sessions → Tasks → Shells → Skills
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
                 2 => 3,
+                3 => 4,
                 _ => 1,
             };
             if self.vm.focus == 3 {
@@ -658,9 +673,10 @@ impl WatchApp {
 
     /// A left click on a list row focuses that pane and moves its selection to
     /// the row under the pointer — the navigation `j`/`k` and Tab give, aimed
-    /// with the mouse. Selecting a session also re-focuses its transcript. A
-    /// click anywhere else (a border, the transcript, blank space) is ignored,
-    /// so the wheel keeps its scroll-only meaning.
+    /// with the mouse. Selecting a session also re-focuses its transcript; the
+    /// Skills pane has no selection, so a click on it only focuses it. A click
+    /// anywhere else (a border, the transcript, blank space) is ignored, so the
+    /// wheel keeps its scroll-only meaning.
     fn on_mouse_click(&mut self, col: usize, row: usize) {
         let (cols, rows) = terminal_size();
         self.click_at(col, row, cols, rows);
@@ -683,10 +699,14 @@ impl WatchApp {
                 self.vm.focus = 2;
                 self.vm.sel_task = self.painted_task_row(index);
             }
-            _ => {
+            2 => {
                 self.vm.focus = 3;
                 self.vm.sel_shell = self.painted_shell_row(index);
                 self.sync_shell_log();
+            }
+            _ => {
+                // The Skills pane is read-only: a click just focuses it.
+                self.vm.focus = 4;
             }
         }
         self.draw();
@@ -1005,5 +1025,26 @@ mod tests {
         assert!(vm.tasks.is_empty());
         assert_eq!(vm.sel_session, 0);
         assert_eq!(vm.sel_task, 0);
+    }
+
+    #[test]
+    fn a_skills_click_focuses_the_read_only_pane() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 1,
+            skills: vec!["navis".into()],
+        }];
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];
+
+        app.click_at(c0 + 3, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 4);
+
+        // A `4` key and Tab reach the same pane; Tab wraps back to Sessions.
+        app.on_key("1");
+        app.on_key("4");
+        assert_eq!(app.vm.focus, 4);
+        app.on_key("\t");
+        assert_eq!(app.vm.focus, 1);
     }
 }

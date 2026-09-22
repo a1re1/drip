@@ -365,6 +365,10 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
     let options = SolidStateHarnessOptions {
         classifier: args.classifier.clone(),
         skill_pool: args.skill_pool.clone(),
+        // The explicit --skill activations are already inside
+        // `persona_with_skills` below; naming them here only feeds the
+        // loop-start skill telemetry (see SolidStateHarnessOptions::base_skills).
+        base_skills: args.skills.iter().map(|skill| skill.name.clone()).collect(),
         collect_operator_messages: inbox_path.as_ref().map(|path| {
             let path = path.clone();
             Box::new(move |consumed_count: i64| -> Vec<OperatorInboxEntry> {

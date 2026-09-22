@@ -461,7 +461,11 @@ the whole survey) when the goal is ambiguous or an approach tradeoff needs the
 operator's call, then revise its plan around the answers before implementing. The
 model may only ask while planning — right after the goal or a fresh operator message
 (`--send`, or a queued/steered TUI message) and before the first task loop starts;
-once the plan is executing the tool is withheld and the run finishes on its own.
+once the plan is executing the tool is withheld. One exception: when nothing workable
+remains and a task is blocked on operator input, the harness itself offers a final
+survey drawn from the blocked tasks before ending the run — the answers reopen those
+tasks (and unblock their dependents) so the run continues, while no answer (or a
+timeout) ends it `awaiting-input` with the survey preserved for `--resume`.
 The defaults live in `~/.drip/config.json`: `runtime.ask_user_interactive` (the TUI)
 and `runtime.ask_user_headless` (headless runs), each `"true"` unless set to `"false"`.
 `--no-ask` turns surveys off for a run and `--ask` forces them on; either explicit

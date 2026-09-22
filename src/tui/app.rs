@@ -258,6 +258,17 @@ enum Key {
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Ask the terminal to report modified keys so shift+enter can be told apart
+/// from enter: the kitty keyboard protocol's "disambiguate" flag (`CSI > 1 u`,
+/// honoured by kitty, Ghostty, WezTerm, foot, Alacritty, iTerm2 3.5+) and
+/// xterm's modifyOtherKeys level 1 (`CSI > 4;1 m`, honoured by xterm and
+/// iTerm2). Level 1 leaves ctrl+letter and the arrows in their legacy form
+/// and only encodes combinations that have no legacy bytes, which is exactly
+/// shift+enter. A terminal that knows neither ignores both sequences.
+const ENABLE_MODIFIED_KEYS: &str = "\u{1b}[>1u\u{1b}[>4;1m";
+/// Pops the kitty flags pushed above and resets modifyOtherKeys.
+const DISABLE_MODIFIED_KEYS: &str = "\u{1b}[<u\u{1b}[>4;0m";
+
 /// Splits a raw stdin chunk into keys. Bracketed pastes may span chunks, so
 /// the caller keeps `paste_buffer` between calls.
 fn decode_input(chunk: &[u8], paste_buffer: &mut Option<Vec<u8>>) -> Vec<Key> {
@@ -308,13 +319,6 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         return Vec::new();
     }
 
-    // Shift+enter has no portable byte of its own: terminals send either the
-    // kitty/xterm modifyOtherKeys form (ESC 13;2u) or the classic ESC CR.
-    // Checked before the generic CSI branch, which would drop both.
-    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
-        return vec![Key::ShiftReturn];
-    }
-
     if chunk[0] == 0x1b {
         if chunk.len() == 1 {
             return vec![Key::Escape];
@@ -335,6 +339,14 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
         };
         let (sequence, rest) = chunk.split_at(end);
         let key = match sequence {
+            // Shift+enter has no portable byte of its own. With the modified
+            // key reporting requested at startup it arrives as the kitty
+            // `CSI 13;2 u` or the xterm `CSI 27;2;13 ~` form; terminals set up
+            // by hand (Claude Code's terminal-setup) send the classic ESC CR.
+            b"\x1b[13;2u" | b"\x1b[27;2;13~" | b"\x1b\r" => Key::ShiftReturn,
+            // Under the kitty protocol a bare escape key is reported as
+            // `CSI 27 u` so it can never be confused with a sequence prefix.
+            b"\x1b[27u" | b"\x1b[27;1u" => Key::Escape,
             b"\x1b[A" | b"\x1bOA" => Key::Up,
             b"\x1b[B" | b"\x1bOB" => Key::Down,
             b"\x1b[C" | b"\x1bOC" => Key::Right,
@@ -356,14 +368,6 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
             byte if byte < 0x20 => Key::Ignored,
             _ => Key::Text(String::from_utf8_lossy(chunk).into_owned()),
         }];
-    }
-
-    // Shift+enter has no portable byte of its own: terminals either send the
-    // kitty/xterm modifyOtherKeys form (ESC 13;2u), the classic ESC CR, or a
-    // bare LF for ctrl+enter. Only the first two are shift+enter (a ctrl+enter
-    // LF is not; it decodes as Return so a stray LF cannot silently steer).
-    if chunk == b"\x1b[13;2u" || chunk == b"\x1b\r" {
-        return vec![Key::ShiftReturn];
     }
 
     let text = String::from_utf8_lossy(chunk).into_owned();
@@ -2968,7 +2972,7 @@ impl TuiApp {
                     if matches!(&result, Err(SessionGoalError::Run(message)) if message == RUN_THREAD_PANIC) {
                         // The panic hook restored the terminal for a crash that
                         // did not happen on this thread; take it back.
-                        write_out(&format!("{ENABLE_BRACKETED_PASTE}{HIDE_CURSOR}"));
+                        write_out(&format!("{ENABLE_BRACKETED_PASTE}{ENABLE_MODIFIED_KEYS}{HIDE_CURSOR}"));
                     }
                     self.on_run_done(result);
                     self.repaint();
@@ -3204,12 +3208,12 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let cwd = bootstrap.cwd.clone();
 
     let mut raw = RawMode::enable();
-    write_out(ENABLE_BRACKETED_PASTE);
+    write_out(&format!("{ENABLE_BRACKETED_PASTE}{ENABLE_MODIFIED_KEYS}"));
 
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        write_out(&format!("{SHOW_CURSOR}{DISABLE_BRACKETED_PASTE}\n"));
+        write_out(&format!("{SHOW_CURSOR}{DISABLE_MODIFIED_KEYS}{DISABLE_BRACKETED_PASTE}\n"));
         previous_hook(info);
     }));
 
@@ -3219,7 +3223,7 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     let mut app = TuiApp::new(bootstrap, tx, mention_tx);
     let code = app.run(rx);
 
-    write_out(DISABLE_BRACKETED_PASTE);
+    write_out(&format!("{DISABLE_MODIFIED_KEYS}{DISABLE_BRACKETED_PASTE}"));
     raw.restore();
     let _ = std::panic::take_hook();
     code
@@ -3396,6 +3400,19 @@ mod tests {
             kinds(&decode_input(b"\x1b\r", &mut paste)),
             vec!["shift-return"]
         );
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[27;2;13~", &mut paste)),
+            vec!["shift-return"],
+            "xterm modifyOtherKeys form"
+        );
+        assert_eq!(
+            kinds(&decode_input(b"\x1b[27u", &mut paste)),
+            vec!["escape"],
+            "kitty-protocol escape key"
+        );
+        // A bare LF (ctrl+enter on some terminals) stays a plain return so a
+        // stray newline can never steer.
+        assert_eq!(kinds(&decode_input(b"\n", &mut paste)), vec!["return"]);
         assert_eq!(kinds(&decode_input(b"a\r", &mut paste)), vec!["paste"]);
     }
 

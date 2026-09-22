@@ -67,6 +67,10 @@ pub fn ask_user_default(settings: &IndexMap<String, String>, interactive: bool) 
 /// hard-disables it.
 pub const CLASSIFIER_PROFILE_SETTING_ID: &str = "runtime.classifier_profile_id";
 pub const CLASSIFIER_TIMEOUT_MS_SETTING_ID: &str = "runtime.classifier_timeout_ms";
+/// Whether the interactive TUI (`drip --tui`) runs the classifier too. Unset
+/// means yes (headless parity: a resolved profile is what enables it);
+/// `"false"` keeps the TUI on its explicit `/skill` toggles only.
+pub const CLASSIFIER_IN_TUI_SETTING_ID: &str = "runtime.classifier_in_tui";
 
 // ---------------------------------------------------------------------------
 // InferenceProviderId

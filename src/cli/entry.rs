@@ -2371,6 +2371,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
             ),
             ask_timeout_secs: cli_args.ask_timeout_secs,
             reference_roots,
+            classifier: cli_args.classifier.clone(),
+            no_classifier: cli_args.no_classifier,
             config,
             cwd: cwd.clone(),
             home: home.clone(),

@@ -99,6 +99,12 @@ pub struct TuiBootstrap {
     /// Opt-in custom status-line command from the persisted drip config; None
     /// keeps the built-in status bar. Never imported from ~/.claude.
     pub status_line: Option<crate::core::config::StatusLineSetting>,
+    /// `--classifier <profile-id>` override for this TUI run (headless
+    /// parity: it wins over `runtime.classifier_profile_id`).
+    pub classifier: Option<String>,
+    /// `--no-classifier`: hard off inside the TUI too, whatever the setting
+    /// says.
+    pub no_classifier: bool,
 }
 
 // Harness events can arrive far faster than the terminal can usefully paint;
@@ -3087,6 +3093,53 @@ impl TuiApp {
         let images: Vec<String> = goal_images.iter().map(|attachment| attachment.data_url.clone()).collect();
         let hooks = self.config.hooks.clone();
 
+        // The skill classifier is config-driven on every surface, the TUI
+        // included: a resolved `runtime.classifier_profile_id` turns it on here
+        // exactly as it does headless, and `runtime.classifier_in_tui = "false"`
+        // keeps the TUI on its explicit /skill toggles only. Resolved before
+        // the run thread starts so the announce line and any warnings land in
+        // this run's transcript.
+        let classifier_pool = {
+            let settings = self.config.settings.clone();
+            if crate::cli::classifier_pool::tui_classifier_pool_enabled(
+                &settings,
+                self.bootstrap.no_classifier,
+            ) {
+                let env = self.merged_env();
+                let active_names: std::collections::HashSet<String> =
+                    skills.iter().map(|skill| skill.name.clone()).collect();
+                let tools = builtin_tool_pack(tool_options.clone());
+                let pool_args = crate::cli::classifier_pool::ClassifierPoolArgs {
+                    active_skill_names: &active_names,
+                    cwd: &self.bootstrap.cwd,
+                    disabled: false,
+                    env: &env,
+                    home: &self.bootstrap.home,
+                    mcp_servers: Vec::new(),
+                    profile_override: self.bootstrap.classifier.as_deref(),
+                    settings: &settings,
+                    tools: &tools,
+                };
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(
+                        crate::cli::classifier_pool::build_classifier_pool(pool_args),
+                    ),
+                    Err(_) => Default::default(),
+                }
+            } else {
+                Default::default()
+            }
+        };
+        for warning in &classifier_pool.warnings {
+            self.push_info(warning.clone());
+        }
+        if let Some(announce) = classifier_pool.announce.clone() {
+            self.push_info(announce);
+        }
+
         std::thread::spawn(move || {
             // A panic anywhere below must still release the composer: the
             // guard reports it as a failed run unless the thread finishes normally.
@@ -3113,10 +3166,11 @@ impl TuiApp {
             let result = runtime.block_on(run_session_goal(SessionGoalArgs {
                 ask_user_enabled,
                 ask_user_timeout_seconds,
-                // The TUI owns its own /skill toggles; the opt-in classifier is
-                // a headless-CLI feature (see README §Skill classifier).
-                classifier: None,
-                skill_pool: Vec::new(),
+                // Config-driven like the headless path: the route and the
+                // pool were resolved (settings + env) before this run thread
+                // started.
+                classifier: classifier_pool.route.clone(),
+                skill_pool: classifier_pool.skills.clone(),
                 cwd,
                 goal: goal_text,
                 goal_context,
@@ -4290,6 +4344,8 @@ mod rename_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, _rx) = mpsc::channel::<Msg>();
         let (mention_tx, _mention_rx) = mpsc::channel::<(u64, String)>();
@@ -4728,6 +4784,8 @@ mod skill_activation_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
@@ -5501,6 +5559,8 @@ mod prompt_history_wiring_tests {
             roles_flag: None,
             session,
             status_line: None,
+            classifier: None,
+            no_classifier: false,
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();

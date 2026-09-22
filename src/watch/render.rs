@@ -59,6 +59,9 @@ pub struct WatchViewModel {
     /// Rows visible under `mode`, already filtered by the app: Running → the
     /// live-lease sessions, Recent → all others, All → running then recent.
     pub sessions: Vec<SessionRecord>,
+    /// Box-drawing connector for each row of `sessions`, same length and order:
+    /// the dripw rendering of the parent/child tree produced by `tree_rows`.
+    pub session_prefixes: Vec<String>,
     /// Lease started_at as epoch ms, keyed by session id (running only).
     pub started_at_ms: HashMap<String, i64>,
     pub focus: FocusPane,
@@ -346,17 +349,19 @@ fn goal_text(r: &SessionRecord) -> String {
     if goal.is_empty() { "(no goal)".to_string() } else { goal }
 }
 
-fn running_row(r: &SessionRecord, now: i64, started_at_ms: Option<i64>, inner_w: usize, selected: bool) -> RowCell {
+fn running_row(r: &SessionRecord, prefix: &str, now: i64, started_at_ms: Option<i64>, inner_w: usize, selected: bool) -> RowCell {
     let elapsed_sec = started_at_ms.map(|started| ((now - started) / 1000).max(0));
     let right = format!(" {}", fmt_duration(elapsed_sec));
-    let main = format!("{DOT} {} {}", short_id(&r.id), goal_text(r));
+    // The tree connector sits left of the status dot; the right-aligned time
+    // column is unchanged, so a child's elapsed time still lines up.
+    let main = format!("{prefix}{DOT} {} {}", short_id(&r.id), goal_text(r));
     let left_w = inner_w.saturating_sub(string_width(&right));
     selectable(format!("{}{}", fit(&main, left_w, true), right), c::green, selected)
 }
 
-fn recent_row(r: &SessionRecord, now: i64, inner_w: usize, selected: bool) -> RowCell {
+fn recent_row(r: &SessionRecord, prefix: &str, now: i64, inner_w: usize, selected: bool) -> RowCell {
     let right = format!(" {}", rel_time(Some(&r.updated_at), now));
-    let main = format!("{DOT} {} {}", short_id(&r.id), goal_text(r));
+    let main = format!("{prefix}{DOT} {} {}", short_id(&r.id), goal_text(r));
     let left_w = inner_w.saturating_sub(string_width(&right));
     selectable(format!("{}{}", fit(&main, left_w, true), right), status_dot_color(&r.status), selected)
 }
@@ -381,10 +386,11 @@ fn session_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowC
     (start..vm.sessions.len().min(start + inner_h))
         .map(|i| {
             let r = &vm.sessions[i];
+            let prefix = vm.session_prefixes.get(i).map(String::as_str).unwrap_or("");
             let selected = focused && i == vm.sel_session;
             match vm.started_at_ms.get(&r.id).copied() {
-                Some(started) => running_row(r, vm.now, Some(started), inner_w, selected),
-                None => recent_row(r, vm.now, inner_w, selected),
+                Some(started) => running_row(r, prefix, vm.now, Some(started), inner_w, selected),
+                None => recent_row(r, prefix, vm.now, inner_w, selected),
             }
         })
         .collect()
@@ -744,6 +750,7 @@ mod tests {
             now: 0,
             mode: SessionsMode::Running,
             sessions: vec![],
+            session_prefixes: vec![],
             started_at_ms: HashMap::new(),
             focus: 1,
             sel_session: 0,
@@ -800,6 +807,7 @@ mod tests {
             goal_count: 1,
             id: id.into(),
             last_goal: Some(goal.into()),
+            parent_id: None,
             project_slug: "p".into(),
             status: "idle".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
@@ -932,6 +940,29 @@ mod tests {
         let rows = session_rows(&vm, 40, 5);
         assert!(rows[0].text.contains("1:05"), "{}", rows[0].text);
         assert!(rows[1].text.contains("1m"), "{}", rows[1].text);
+    }
+
+    #[test]
+    fn session_rows_draw_the_tree_prefix_left_of_the_status_dot() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.mode = SessionsMode::All;
+        vm.sessions.push(record("aaaaaaaa-1", "parent goal"));
+        vm.sessions.push(record("bbbbbbbb-2", "child goal"));
+        vm.session_prefixes = vec![String::new(), "└─ ".to_string()];
+
+        let rows = session_rows(&vm, 40, 5);
+        assert!(
+            rows[0].text.starts_with(&format!("{DOT} aaaaaaaa")),
+            "a root row has no connector: {}",
+            rows[0].text
+        );
+        assert!(
+            rows[1].text.starts_with(&format!("└─ {DOT} bbbbbbbb")),
+            "the connector precedes the status dot: {}",
+            rows[1].text
+        );
     }
 
     #[test]

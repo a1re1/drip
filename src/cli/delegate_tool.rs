@@ -7,7 +7,7 @@ use crate::cli::session_run::{run_session_goal, SessionGoalArgs};
 use crate::cli::skills::LoadedCliSkill;
 use crate::core::home::DripProject;
 use crate::core::inference::ResolvedInferenceConfig;
-use crate::core::sessions::{create_session, open_session_index, CreateSessionArgs, ProjectPaths};
+use crate::core::sessions::{create_session, open_session_index, CreateSessionArgs, ProjectPaths, SessionEnvScope};
 use crate::harness::model_call::AbortSignal;
 use crate::tools::types::{
     define_sync_tool, ChatToolCompleteRequest, ChatToolCompletionResult, ChatToolDefinition,
@@ -16,8 +16,9 @@ use crate::tools::types::{
 };
 
 // Sub-delegation (backlog G3): drip could not safely spawn drip — a BASH-spawned
-// child loses the harness credentials to the env scrub, holds no parent link,
-// and escapes --stop. DELEGATE runs the child goal IN-PROCESS through the same
+// child loses the harness credentials to the env scrub and escapes --stop
+// (it does record its parent, via DRIP_SESSION_ID). DELEGATE runs the child
+// goal IN-PROCESS through the same
 // run_session_goal choreography instead: it inherits the resolved inference
 // config directly, chains the parent's abort signal, and lands its own
 // session (transcript, result.json, lease) beside the parent's.
@@ -177,6 +178,9 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                 &index,
                 CreateSessionArgs {
                     cwd: wiring.cwd.clone(),
+                    // The child's parent is the session whose DELEGATE call this
+                    // is, known in-process — no environment lookup involved.
+                    parent_id: Some(wiring.parent_session_id.clone()),
                     project: &project_paths,
                     now: "",
                 },
@@ -185,6 +189,16 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                 .into_iter()
                 .filter(|tool| tool.name != "DELEGATE")
                 .collect();
+
+            // Repoint DRIP_SESSION_ID at the child for the child's lifetime so a
+            // skill the child shells out to nests under the child. The parent
+            // is blocked inside this tool call the whole time (a response's
+            // tool calls run one after another, and a background job captured
+            // its environment when it was spawned), so nothing else reads the
+            // variable meanwhile; the guard restores the parent's value on every
+            // exit path, including an unwinding child, so the parent's later
+            // tool subprocesses attach to the parent again.
+            let _session_env = SessionEnvScope::enter(&child_session.id);
 
             let outcome = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(run_session_goal(SessionGoalArgs {
@@ -230,6 +244,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     mcp_servers: None,
                 }))
             });
+            drop(_session_env);
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = watcher.join();
             let deadline_hit = deadline_hit.load(std::sync::atomic::Ordering::SeqCst);

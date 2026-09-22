@@ -886,7 +886,8 @@ session transcript into a short 5-7 word name. Or name it yourself with `/rename
 the literal text is used as-is, with no model call and no word restriction. Either way the name
 replaces the window title and is persisted verbatim to the session's `session.json` metadata, so
 resume keeps it; the visible pane title trims it to at most 5 words / 48 characters. On any
-failure the current name is kept.
+failure the current name is kept. Both forms work while a goal is running: `/rename` applies
+immediately rather than queuing for the next run, and the busy spinner keeps going under the new name.
 
 ---
 

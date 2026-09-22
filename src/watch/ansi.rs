@@ -360,6 +360,11 @@ pub mod term {
     pub const HIDE_CURSOR: &str = "\x1b[?25l";
     pub const SHOW_CURSOR: &str = "\x1b[?25h";
     pub const CLEAR: &str = "\x1b[2J";
+    /// Normal tracking + SGR coordinates, so wheel reports come back as
+    /// `ESC [ < Cb ; Cx ; Cy M` with the hovered cell instead of legacy
+    /// `ESC [ M` byte pairs.
+    pub const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1006h";
+    pub const DISABLE_MOUSE: &str = "\x1b[?1000l\x1b[?1006l";
     pub const HOME: &str = "\x1b[H";
     pub fn move_to(row: usize, col: usize) -> String {
         format!("\x1b[{};{}H", row, col)

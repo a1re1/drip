@@ -115,6 +115,9 @@ pub fn get_default_base_url(provider: &str) -> String {
         "cerebras" => "https://api.cerebras.ai/v1",
         "xai" => "https://api.x.ai/v1",
         "openrouter" => OPENROUTER_BASE_URL,
+        // Typesafe's Decisions API (systemone) shares this base URL; the
+        // classifier appends /systemone instead of /chat/completions.
+        "typesafe" => "https://api.typesafe.ai/v1",
         _ => "http://localhost:4100/v1",
     }
     .to_string()

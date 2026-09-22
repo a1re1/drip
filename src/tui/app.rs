@@ -2578,6 +2578,10 @@ impl TuiApp {
             let result = runtime.block_on(run_session_goal(SessionGoalArgs {
                 ask_user_enabled,
                 ask_user_timeout_seconds,
+                // The TUI owns its own /skill toggles; the opt-in classifier is
+                // a headless-CLI feature (see README §Skill classifier).
+                classifier: None,
+                skill_pool: Vec::new(),
                 cwd,
                 goal: goal_text,
                 goal_context,

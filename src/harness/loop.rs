@@ -3987,6 +3987,233 @@ pub fn loop_allows_tool(
     }
 }
 
+/// The loop's effective tool surface: `filterToolsForRole` plus the MCP gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopToolScope {
+    /// Tool names this loop may call (an MCP tool is here only when its
+    /// server is in `mcp_servers`).
+    pub allowed: Vec<String>,
+    pub mcp_servers: Option<Vec<String>>,
+}
+
+/// Resolves a loop's tool surface from a tool-name list, the loop's role, and
+/// the run-level MCP gate. `begin_loop` builds its tool set from this and the
+/// classifier's requirements gate asks the same question, so the two can never
+/// disagree about what a loop can actually call.
+pub fn loop_tool_scope(
+    tool_names: &[String],
+    role: Option<&HarnessRoleRuntime>,
+    run_gate: Option<Vec<String>>,
+) -> LoopToolScope {
+    let mcp_servers = effective_mcp_servers(role, run_gate);
+    let role_tool_names = role.and_then(|role| role.tool_names.as_deref());
+    let allowed = tool_names
+        .iter()
+        .filter(|name| loop_allows_tool(name, role_tool_names, mcp_servers.as_deref()))
+        .cloned()
+        .collect();
+
+    LoopToolScope { allowed, mcp_servers }
+}
+
+/// Whether every requirement a skill is KNOWN to have is present in the loop's
+/// surface. Unknown requirements (`known == false`) are treated as satisfied:
+/// the classifier being down must never hide a skill from a loop.
+pub fn requirements_satisfied(
+    requirements: &crate::core::skill_requirements::SkillRequirements,
+    available: &std::collections::BTreeSet<String>,
+) -> bool {
+    if !requirements.known {
+        return true;
+    }
+
+    requirements.required.iter().all(|name| available.contains(name))
+}
+
+#[cfg(test)]
+mod dynamic_skills_tests {
+    use super::*;
+    use crate::core::skill_requirements::SkillRequirements;
+    use crate::harness::classifier::DynamicSkill;
+    use std::collections::BTreeSet;
+
+    fn requirement(required: &[&str], known: bool) -> SkillRequirements {
+        SkillRequirements {
+            required: required.iter().map(|name| name.to_string()).collect(),
+            known,
+        }
+    }
+
+    fn dynamic(name: &str, required: &[&str], known: bool) -> DynamicSkill {
+        DynamicSkill {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            content: format!("# {name}"),
+            classifiers: None,
+            requirements: requirement(required, known),
+        }
+    }
+
+    fn mcp_role(mcp_servers: Option<Vec<&str>>, tool_names: Option<Vec<&str>>) -> HarnessRoleRuntime {
+        HarnessRoleRuntime {
+            description: None,
+            r#loop: None,
+            name: "author".to_string(),
+            route: None,
+            system_prompt_suffix: None,
+            tool_names: tool_names.map(|names| names.into_iter().map(String::from).collect()),
+            verified_by: None,
+            blind: false,
+            mcp_servers: mcp_servers.map(|names| names.into_iter().map(String::from).collect()),
+        }
+    }
+
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn names(skills: &[DynamicSkill]) -> Vec<&str> {
+        skills.iter().map(|skill| skill.name.as_str()).collect()
+    }
+
+    // The scope the classifier gates on is the same one begin_loop builds its
+    // tool surface from: MCP servers are in scope only through the role's
+    // mcpServers or the run-level --mcp set.
+    #[test]
+    fn loop_tool_scope_matches_the_loops_role_and_mcp_gate() {
+        let tools = strings(&["READ", "PATCH", "MCP__github__search", "MCP__files__read"]);
+
+        let scoped =
+            loop_tool_scope(&tools, Some(&mcp_role(Some(vec!["github"]), Some(vec!["READ"]))), None);
+        assert_eq!(scoped.allowed, strings(&["READ", "MCP__github__search"]));
+        assert_eq!(scoped.mcp_servers, Some(strings(&["github"])));
+
+        // No role: the run-level gate decides MCP, and every builtin is in scope.
+        let ungated = loop_tool_scope(&tools, None, Some(strings(&["files"])));
+        assert_eq!(ungated.allowed, strings(&["READ", "PATCH", "MCP__files__read"]));
+
+        // --no-mcp: no MCP tool belongs to any loop.
+        let closed = loop_tool_scope(&tools, None, Some(Vec::new()));
+        assert_eq!(closed.allowed, strings(&["READ", "PATCH"]));
+        assert_eq!(closed.mcp_servers, Some(Vec::new()));
+    }
+
+    // The requirements gate: known-but-unsatisfiable is filtered out before any
+    // classifier call (this is a pure fn, so the filter is tested without a
+    // server); unknown requirements fail open so a classifier outage can never
+    // hide a skill.
+    #[test]
+    fn the_requirements_filter_drops_only_known_unsatisfiable_skills() {
+        let available: BTreeSet<String> =
+            strings(&["READ", "PATCH", "github"]).into_iter().collect();
+
+        assert!(requirements_satisfied(&requirement(&[], false), &available));
+        assert!(requirements_satisfied(&requirement(&["MISSING"], false), &available));
+        assert!(requirements_satisfied(&requirement(&[], true), &available));
+        assert!(requirements_satisfied(&requirement(&["READ", "github"], true), &available));
+        assert!(!requirements_satisfied(&requirement(&["MISSING"], true), &available));
+        assert!(!requirements_satisfied(&requirement(&["READ", "BASH"], true), &available));
+
+        let pool = vec![
+            dynamic("satisfiable", &["READ"], true),
+            dynamic("unsatisfiable", &["BASH"], true),
+            dynamic("unknown", &["BASH"], false),
+        ];
+        let offered: Vec<DynamicSkill> = pool
+            .into_iter()
+            .filter(|skill| requirements_satisfied(&skill.requirements, &available))
+            .collect();
+
+        assert_eq!(names(&offered), vec!["satisfiable", "unknown"]);
+    }
+
+    /// A minimal real HarnessRun over a temp state path (the same shape
+    /// `role_inference_tests::role_inference_test_run` uses; that helper is
+    /// private to its own test module).
+    async fn test_run_for_dynamic_skills() -> HarnessRun {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::mem::forget(dir); // keep the backing dir alive for the run's duration
+        HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(path),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    // A no-classifier run must not compose anything, and a loop that previously
+    // selected skills must clear them when nothing is selected this time.
+    #[tokio::test]
+    async fn select_dynamic_skills_is_a_noop_without_a_classifier_or_a_pool() {
+        let mut run = test_run_for_dynamic_skills().await;
+        run.dynamic_skills = vec![crate::cli::skills::LoadedCliSkill {
+            content: "body".to_string(),
+            name: "stale".to_string(),
+            role_hints: None,
+        }];
+        run.options.classifier = None;
+        run.options.skill_pool = vec![dynamic("pooled", &[], true)];
+
+        run.select_dynamic_skills().await;
+
+        assert!(
+            run.dynamic_skills.is_empty(),
+            "a loop without a classifier result must compose none"
+        );
+        assert!(run.dynamic_skill_cache.is_empty());
+    }
+
+    // An outage is a one-loop miss, never a whole-task one: the failed
+    // selection composes nothing now, but it is not cached, so the next loop
+    // on the same task asks the classifier again.
+    #[tokio::test]
+    async fn a_failed_selection_is_not_cached_for_the_task() {
+        let mut run = test_run_for_dynamic_skills().await;
+        run.tools = Vec::new();
+        run.options.classifier = Some(crate::harness::classifier::ClassifierRoute {
+            // Nothing listens on port 1: the request fails at connect.
+            url: "http://127.0.0.1:1/alpha/decisions".to_string(),
+            model: "jev-test".to_string(),
+            headers: Vec::new(),
+            timeout_ms: 500,
+        });
+        run.options.skill_pool = vec![dynamic("offered", &[], true)];
+
+        run.select_dynamic_skills().await;
+
+        assert!(run.dynamic_skills.is_empty());
+        assert!(
+            run.dynamic_skill_cache.is_empty(),
+            "a warning-tainted selection must not be remembered for the task"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pool_with_a_route_but_no_satisfiable_skill_composes_none() {
+        let mut run = test_run_for_dynamic_skills().await;
+        run.tools = Vec::new();
+        run.options.classifier = Some(crate::harness::classifier::ClassifierRoute {
+            url: "http://127.0.0.1:1/alpha/decisions".to_string(),
+            model: "jev-test".to_string(),
+            headers: Vec::new(),
+            timeout_ms: 200,
+        });
+        // No tool this loop can call, so the only pooled skill is filtered
+        // before any request would have been made.
+        run.options.skill_pool = vec![dynamic("needs-patch", &["PATCH"], true)];
+
+        run.select_dynamic_skills().await;
+
+        assert!(run.dynamic_skills.is_empty());
+        assert!(
+            run.dynamic_skill_cache.is_empty(),
+            "a skill filtered by requirements must be decided without a classifier call"
+        );
+    }
+}
+
 /// Options for constructing a `SolidStateHarness`. Every optional field is
 /// an `Option`; function-typed fields are trait objects.
 #[derive(Default)]
@@ -4056,6 +4283,14 @@ pub struct SolidStateHarnessOptions {
     /// before persisting the pending survey and ending with awaiting-input
     /// (default DEFAULT_ASK_USER_TIMEOUT_SECONDS = 900).
     pub ask_user_timeout_seconds: Option<i64>,
+    /// Optional per-loop skill classifier route. `None` (the default) disables
+    /// the feature entirely: no pool, no requests, only the explicit --skill
+    /// activations.
+    pub classifier: Option<crate::harness::classifier::ClassifierRoute>,
+    /// Discovered skills the classifier may compose into a loop. Empty by
+    /// default, and never the explicit --skill activations (those are already
+    /// in the base prompt).
+    pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
     pub system_prompt: Option<String>,
     pub telemetry: Option<PartialHarnessTelemetryConfig>,
     pub redact_secrets: Vec<(String, String)>,
@@ -4143,6 +4378,14 @@ pub struct HarnessRun {
     pub system_prompt: String,
     pub telemetry_config: HarnessTelemetryConfig,
     pub dynamic_tool_names: HashSet<String>,
+    /// This loop's classifier-selected skills. Cleared and rebuilt by
+    /// `select_dynamic_skills` on every loop, so a loop without a classifier
+    /// result composes none.
+    pub dynamic_skills: Vec<crate::cli::skills::LoadedCliSkill>,
+    /// Selections already paid for, keyed by the loop's task id (`None` for
+    /// planning loops): a task re-activated in a later loop reuses its
+    /// selection instead of calling the classifier again.
+    pub dynamic_skill_cache: HashMap<Option<String>, Vec<crate::cli::skills::LoadedCliSkill>>,
     /// `tools` in insertion order; `tool_registry` maps name → index (Map<name, tool>).
     pub tools: Vec<ChatToolDefinition>,
     pub tool_registry: HashMap<String, usize>,
@@ -4734,6 +4977,8 @@ impl HarnessRun {
             system_prompt,
             telemetry_config,
             dynamic_tool_names,
+            dynamic_skills: Vec::new(),
+            dynamic_skill_cache: HashMap::new(),
             tools,
             tool_registry,
             role_map,
@@ -6095,6 +6340,9 @@ impl HarnessRun {
                 break;
             }
 
+            // Decide which discovered skills THIS loop composes, immediately
+            // before it opens (and before begin_loop mutates task status).
+            self.select_dynamic_skills().await;
             let mut scope = self.begin_loop();
             self.fire_hook(crate::harness::hooks::HookEvent::LoopStart, None);
             self.fire_hook(crate::harness::hooks::HookEvent::TaskStart, None);
@@ -6247,6 +6495,145 @@ impl HarnessRun {
     /// pick up the current task, resolve the loop role,
     /// derive the loop budget, emit `loop-start`, refresh dynamic entries and
     /// build the loop scope.
+    /// The loop's current task id and role, resolved before `begin_loop`
+    /// mutates any task status — so the classifier pass and the loop it
+    /// precedes always agree on the task and the role.
+    fn loop_role_for_state(&self) -> (Option<String>, Option<HarnessRoleRuntime>) {
+        let current_task_id = core_state::get_current_task(&self.state).map(|task| task.id.clone());
+        let current_task = current_task_id
+            .as_deref()
+            .and_then(|id| core_state::get_task_by_id(&self.state, id));
+        let role = match current_task {
+            Some(_) => crate::harness::roles::resolve_loop_role(
+                &self.role_map,
+                current_task,
+                self.options.role_bindings.as_ref(),
+            ),
+            None => crate::harness::roles::resolve_planning_role(
+                &self.role_map,
+                self.options.role_bindings.as_ref(),
+                !self.state.tasks.is_empty(),
+                self.replan_escalated,
+            ),
+        };
+
+        (current_task_id, role)
+    }
+
+    /// Decides which pooled skills THIS loop composes. Called immediately
+    /// before the loop opens. Never fatal: no classifier or no pool is a
+    /// no-op, and every classifier failure warns and leaves the explicit
+    /// skills (already in the base prompt) untouched.
+    pub async fn select_dynamic_skills(&mut self) {
+        // A loop without a classifier result composes no dynamic skills.
+        self.dynamic_skills.clear();
+
+        let Some(route) = self.options.classifier.clone() else {
+            return;
+        };
+        if self.options.skill_pool.is_empty() {
+            return;
+        }
+
+        let (task_id, role) = self.loop_role_for_state();
+        let loop_tool_names: Vec<String> = self.tools.iter().map(|tool| tool.name.clone()).collect();
+        let scope = loop_tool_scope(&loop_tool_names, role.as_ref(), self.options.mcp_servers.clone());
+        let mut available: std::collections::BTreeSet<String> = scope.allowed.iter().cloned().collect();
+        if let Some(servers) = scope.mcp_servers.as_ref() {
+            available.extend(servers.iter().cloned());
+        }
+
+        // Requirements gate: a skill this loop cannot satisfy is never offered
+        // to the classifier, so it can never come back selected.
+        let candidates: Vec<crate::harness::classifier::SkillCandidate> = self
+            .options
+            .skill_pool
+            .iter()
+            .filter(|skill| requirements_satisfied(&skill.requirements, &available))
+            .map(|skill| crate::harness::classifier::SkillCandidate {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                classifiers: skill.classifiers.clone(),
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        // A task re-activated in a later loop keeps the selection it already
+        // paid for — but the capability gate is re-applied, because this
+        // loop's role can widen or narrow the tool surface.
+        if let Some(cached) = self.dynamic_skill_cache.get(&task_id).cloned() {
+            self.dynamic_skills = cached
+                .into_iter()
+                .filter(|skill| candidates.iter().any(|candidate| candidate.name == skill.name))
+                .collect();
+            return;
+        }
+
+        // The state the classifier sees: the goal, this task's id and title
+        // and its last three notes, the phase, the role, and the
+        // tool names. No repository contents, no transcript.
+        let task = task_id.as_deref().and_then(|id| core_state::get_task_by_id(&self.state, id));
+        let notes: Vec<String> = task
+            .map(|task| task.notes.iter().rev().take(3).rev().cloned().collect())
+            .unwrap_or_default();
+        // A task carries no description of its own: its title is the brief
+        // and its notes are the accumulated context.
+        let task_json = task.map(|task| {
+            serde_json::json!({
+                "id": task.id.clone(),
+                "title": task.title.clone(),
+                "notes": notes.clone(),
+            })
+        });
+        let state = serde_json::json!({
+            "goal": self.state.goal.clone(),
+            "task": task_json,
+            "phase": if task.is_some() { "task" } else { "planning" },
+            "role": role.as_ref().map(|role| role.name.clone()),
+            "availableTools": scope.allowed,
+        });
+
+        let selection =
+            crate::harness::classifier::select_skills(&route, state, &candidates).await;
+
+        for warning in &selection.warnings {
+            self.emit(HarnessEvent {
+                data: None,
+                detail: warning.clone(),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::RunWarning,
+            });
+        }
+
+        // Only a name this loop actually offered can be composed: the gate is
+        // structural, not a property of what the classifier happened to return.
+        let mut selected: Vec<crate::cli::skills::LoadedCliSkill> = Vec::new();
+        for (name, _score) in &selection.selected {
+            if !candidates.iter().any(|candidate| &candidate.name == name) {
+                continue;
+            }
+            if let Some(skill) = self.options.skill_pool.iter().find(|skill| &skill.name == name) {
+                selected.push(crate::cli::skills::LoadedCliSkill {
+                    name: skill.name.clone(),
+                    content: skill.content.clone(),
+                    role_hints: None,
+                });
+            }
+        }
+
+        // A selection the classifier could not fully answer (timeout, HTTP
+        // error, dropped skill) is used for this loop but never cached: the
+        // next loop on this task asks again, so an outage hides a skill for
+        // one loop at most.
+        if selection.warnings.is_empty() {
+            self.dynamic_skill_cache.insert(task_id, selected.clone());
+        }
+        self.dynamic_skills = selected;
+    }
+
     pub fn begin_loop(&mut self) -> LoopScope {
         // pending → in_progress; activations counts pickups.
         let current_task_id = core_state::get_current_task(&self.state)
@@ -6277,37 +6664,25 @@ impl HarnessRun {
             }
         }
 
-        // this loop's capability profile.
+        // this loop's capability profile — the same resolution
+        // `select_dynamic_skills` used before the loop opened, so the two can
+        // never disagree about the task, the role, or the tool surface.
         let current_task = current_task_id
             .as_deref()
-            .and_then(|id| {
-                self.state.tasks.iter().find(|task| task.id == id)
-            });
-        let role = match current_task {
-            Some(_) => crate::harness::roles::resolve_loop_role(
-                &self.role_map,
-                current_task,
-                self.options.role_bindings.as_ref(),
-            ),
-            None => crate::harness::roles::resolve_planning_role(
-                &self.role_map,
-                self.options.role_bindings.as_ref(),
-                !self.state.tasks.is_empty(),
-                self.replan_escalated,
-            ),
-        };
-        // filterToolsForRole. Non-MCP tools keep the plain tool_names
-        // behaviour; MCP tools (MCP__<server>__<tool>) additionally need their
-        // server in the loop's effective set: the role's mcpServers when it
-        // sets one, else the run-level --mcp set, else none.
-        let mcp_servers_for_loop =
-            effective_mcp_servers(role.as_ref(), self.options.mcp_servers.clone());
-        let role_tool_names = role.as_ref().and_then(|r| r.tool_names.as_deref());
+            .and_then(|id| core_state::get_task_by_id(&self.state, id));
+        let (_, role) = self.loop_role_for_state();
+        // filterToolsForRole, in one place with the classifier's gate.
+        // Non-MCP tools keep the plain tool_names behaviour; MCP tools
+        // (MCP__<server>__<tool>) additionally need their server in the loop's
+        // effective set: the role's mcpServers when it sets one, else the
+        // run-level --mcp set, else none.
+        let loop_tool_names: Vec<String> = self.tools.iter().map(|tool| tool.name.clone()).collect();
+        let loop_scope = loop_tool_scope(&loop_tool_names, role.as_ref(), self.options.mcp_servers.clone());
         let loop_tool_indexes: Vec<usize> = self
             .tools
             .iter()
             .enumerate()
-            .filter(|(_, tool)| loop_allows_tool(&tool.name, role_tool_names, mcp_servers_for_loop.as_deref()))
+            .filter(|(_, tool)| loop_scope.allowed.iter().any(|name| name == &tool.name))
             .map(|(index, _)| index)
             .collect();
         // transport tools.
@@ -6334,8 +6709,12 @@ impl HarnessRun {
             } else {
                 self.default_transport_tools.clone()
             };
-        let loop_system_prompt =
-            crate::harness::roles::compose_role_system_prompt(&self.system_prompt, role.as_ref());
+        // Role first, then this loop's classifier-selected skills, so the
+        // skill guidance reads inside the role's context.
+        let loop_system_prompt = crate::cli::skills::compose_skill_system_prompt(
+            &crate::harness::roles::compose_role_system_prompt(&self.system_prompt, role.as_ref()),
+            &self.dynamic_skills,
+        );
         // Per-role inference accounting keys off this for every model call in
         // the loop; roleless loops fall back to "default" at accumulation.
         self.active_role = role.as_ref().map(|role| role.name.clone());
@@ -6371,9 +6750,22 @@ impl HarnessRun {
         };
 
         // the loop-start event.
+        let skills_suffix = if self.dynamic_skills.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " [skills: {}]",
+                self.dynamic_skills
+                    .iter()
+                    .map(|skill| skill.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let detail = format!(
-            "loop {}{} — {}",
+            "loop {}{}{} — {}",
             self.state.r#loop,
+            skills_suffix,
             role.as_ref()
                 .map(|r| format!(" [role: {}]", r.name))
                 .unwrap_or_default(),

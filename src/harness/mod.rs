@@ -2,6 +2,7 @@
 // harness model-call layer.
 pub mod anthropic;
 pub mod chat_types;
+pub mod classifier;
 pub mod codex;
 pub mod harness_tools;
 pub mod hooks;

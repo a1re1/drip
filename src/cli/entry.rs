@@ -952,6 +952,152 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         eprintln!("roles: {issue}");
     }
 
+    // The optional skill classifier (jev). Resolution is one-time and never
+    // fatal: a bad profile warns and the run continues with only the explicit
+    // skills. Nothing below — no discovery, no cache, no HTTP — happens when no
+    // route resolves.
+    let classifier = if args.cli_args.no_classifier {
+        None
+    } else {
+        match crate::harness::classifier::resolve_classifier_route(
+            &args.config.settings,
+            Some(&merged_env),
+            args.cli_args.classifier.as_deref(),
+        ) {
+            Ok(route) => route,
+            Err(error) => {
+                eprintln!("{error} — skill classification is disabled for this run");
+                None
+            }
+        }
+    };
+
+    let classifier_profile_id = args
+        .cli_args
+        .classifier
+        .clone()
+        .or_else(|| crate::harness::classifier::classifier_profile_id(&args.config.settings))
+        .unwrap_or_default();
+    let mut skill_pool: Vec<crate::harness::classifier::DynamicSkill> = Vec::new();
+
+    if let Some(route) = &classifier {
+        let active_names: std::collections::HashSet<&str> =
+            active_skills.iter().map(|skill| skill.name.as_str()).collect();
+        let discovered = match discover_all_skills(Path::new(args.cwd), args.home) {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                eprintln!("classifier: skill discovery failed ({error}) — the pool is empty for this run");
+                Vec::new()
+            }
+        };
+        let mut candidates: Vec<(
+            crate::cli::skills::CliSkill,
+            String,
+            Option<crate::harness::classifier::DeclaredRequirements>,
+        )> = Vec::new();
+        let mut authored: std::collections::HashMap<
+            String,
+            Option<crate::harness::classifier::SkillClassifiers>,
+        > = std::collections::HashMap::new();
+
+        for skill in discovered {
+            // Explicit --skill activations are already in the base prompt; the
+            // pool is only what the classifier may add on top.
+            if active_names.contains(skill.name.as_str()) {
+                continue;
+            }
+
+            let loaded = match load_skill_content(&skill, None) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    eprintln!("classifier: {error} — skipping this skill");
+                    continue;
+                }
+            };
+
+            let classifiers = match crate::harness::classifier::load_skill_classifiers(&skill.path) {
+                None => None,
+                Some(Ok(classifiers)) => Some(classifiers),
+                Some(Err(error)) => {
+                    eprintln!(
+                        "classifier: skill \"{}\": {error} — treating it as unauthored",
+                        skill.name
+                    );
+                    None
+                }
+            };
+
+            let declared = classifiers.as_ref().and_then(|set| set.requirements.clone());
+            authored.insert(skill.name.clone(), classifiers);
+            candidates.push((skill, loaded.content, declared));
+        }
+
+        // The capability list is every tool the run's FULL pack carries (the
+        // plan-narrowed surface is a runtime filter, not a different pack) plus
+        // DELEGATE, then one entry per MCP server that actually spawned.
+        let mut capabilities: Vec<crate::core::skill_requirements::Capability> = loaded_tools
+            .iter()
+            .map(|tool| crate::core::skill_requirements::Capability::Tool {
+                description: tool.description.clone(),
+                name: tool.name.clone(),
+            })
+            .collect();
+        capabilities.push(crate::core::skill_requirements::Capability::Tool {
+            description: "Delegate a self-contained subtask to a fresh child session".to_string(),
+            name: "DELEGATE".to_string(),
+        });
+        for client in &mcp_clients {
+            let (name, tool_names) = {
+                let guard = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    guard.name().to_string(),
+                    guard.tools().iter().map(|tool| tool.name.clone()).collect::<Vec<String>>(),
+                )
+            };
+            capabilities
+                .push(crate::core::skill_requirements::Capability::McpServer { name, tool_names });
+        }
+
+        let (requirements, warnings) = crate::core::skill_requirements::ensure_requirements(
+            Path::new(&args.home.skill_requirements_db_path),
+            route,
+            &candidates,
+            &capabilities,
+        )
+        .await;
+
+        for warning in &warnings {
+            eprintln!("{warning}");
+        }
+
+        let pool_count = candidates.len();
+
+        for (skill, content, _) in candidates {
+            let skill_requirements = requirements.get(&skill.name).cloned().unwrap_or(
+                crate::core::skill_requirements::SkillRequirements {
+                    known: false,
+                    required: std::collections::BTreeSet::new(),
+                },
+            );
+            let classifiers = authored.remove(&skill.name).flatten();
+            skill_pool.push(crate::harness::classifier::DynamicSkill {
+                classifiers,
+                content,
+                description: skill.description.clone(),
+                name: skill.name.clone(),
+                requirements: skill_requirements,
+            });
+        }
+
+        eprintln!(
+            "classifier: {} ({}) → {} · {} skills in pool",
+            classifier_profile_id,
+            route.model,
+            route.url,
+            pool_count
+        );
+    }
+
     let json = args.cli_args.json;
     let print_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> = Arc::new(move |event: HarnessEvent| {
         if let Some(line) = headless_event_line(&event, json) {
@@ -1000,6 +1146,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     let mut outcome: SessionGoalOutcome = match run_session_goal(SessionGoalArgs {
         ask_user_enabled,
         ask_user_timeout_seconds,
+        classifier: classifier.clone(),
+        skill_pool: skill_pool.clone(),
         cwd: args.cwd.to_string(),
         goal: args.goal.to_string(),
         goal_context: resolved.context_block.clone(),
@@ -1155,6 +1303,8 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             tokio::runtime::Handle::current().block_on(run_session_goal(SessionGoalArgs {
                 ask_user_enabled,
                 ask_user_timeout_seconds,
+                classifier: classifier.clone(),
+                skill_pool: skill_pool.clone(),
                 cwd: args.cwd.to_string(),
                 goal: queued.goal.clone(),
                 goal_context: queued_mentions.context_block.clone(),

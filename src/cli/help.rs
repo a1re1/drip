@@ -213,6 +213,11 @@ OPTIONS
 	                              does not set its own mcpServers (repeatable)
 	--no-mcp                      Spawn no MCP servers and expose no MCP__ tools,
 	                              regardless of roles or --mcp
+	--classifier <profile-id>     Compose discovered skills per loop with the skill
+	                              classifier, using this model profile for one run
+	                              (overrides runtime.classifier_profile_id)
+	--no-classifier               Disable the skill classifier for this run regardless
+	                              of the configured profile
 	--reference-root <dir>        Point the REFERENCE tool at an oasis-indexed markdown
 	                              corpus (repeatable; also DRIP_REFERENCE_ROOTS or
 	                              OASIS_ROOTS, colon-separated). Without a root the tool
@@ -364,6 +369,8 @@ mod tests {
             "--allow-net",
             "--mcp",
             "--no-mcp",
+            "--classifier",
+            "--no-classifier",
             "--reference-root",
             "--enqueue",
             "--plan",

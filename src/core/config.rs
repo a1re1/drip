@@ -40,6 +40,13 @@ pub const TERMINAL_TITLE_ENABLED_SETTING_ID: &str = "runtime.terminal_title_enab
 pub const TERMINAL_TITLE_PROFILE_SETTING_ID: &str = "runtime.terminal_title_profile_id";
 pub const TERMINAL_TITLE_TIMEOUT_MS_SETTING_ID: &str = "runtime.terminal_title_timeout_ms";
 
+/// Optional per-loop skill classifier (the "jev" Decisions API). Off by
+/// default: an empty profile id means no classifier, no discovery and no
+/// HTTP. `--classifier <id>` overrides it for one run, `--no-classifier`
+/// hard-disables it.
+pub const CLASSIFIER_PROFILE_SETTING_ID: &str = "runtime.classifier_profile_id";
+pub const CLASSIFIER_TIMEOUT_MS_SETTING_ID: &str = "runtime.classifier_timeout_ms";
+
 // ---------------------------------------------------------------------------
 // InferenceProviderId
 // ---------------------------------------------------------------------------
@@ -62,6 +69,8 @@ pub enum InferenceProviderId {
     OpenAiCompatible,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    #[serde(rename = "typesafe")]
+    Typesafe,
     #[serde(rename = "xai")]
     Xai,
 }
@@ -77,6 +86,7 @@ impl InferenceProviderId {
             InferenceProviderId::OpenAi => "openai",
             InferenceProviderId::OpenAiCompatible => "openai-compatible",
             InferenceProviderId::OpenRouter => "openrouter",
+            InferenceProviderId::Typesafe => "typesafe",
             InferenceProviderId::Xai => "xai",
         }
     }
@@ -91,6 +101,7 @@ impl InferenceProviderId {
             "openai" => InferenceProviderId::OpenAi,
             "openai-compatible" => InferenceProviderId::OpenAiCompatible,
             "openrouter" => InferenceProviderId::OpenRouter,
+            "typesafe" => InferenceProviderId::Typesafe,
             "xai" => InferenceProviderId::Xai,
             _ => return None,
         })

@@ -289,6 +289,7 @@ struct IndexSessionRow {
     cwd: String,
     goal_count: i64,
     last_goal: Option<String>,
+    parent_id: Option<String>,
     status: String,
     updated_at: String,
 }
@@ -298,7 +299,7 @@ struct IndexSessionRow {
 fn load_session_row(db: &Connection, id: &str) -> Option<IndexSessionRow> {
     let mut stmt = db
         .prepare(
-            "SELECT cwd, created_at, updated_at, status, goal_count, last_goal FROM sessions WHERE id = ?1",
+            "SELECT cwd, created_at, updated_at, status, goal_count, last_goal, parent_id FROM sessions WHERE id = ?1",
         )
         .expect("prepare source session row query");
     let mut rows = stmt.query([id]).expect("query source session row");
@@ -310,6 +311,7 @@ fn load_session_row(db: &Connection, id: &str) -> Option<IndexSessionRow> {
             status: row.get(3).expect("status"),
             goal_count: row.get(4).expect("goal_count"),
             last_goal: row.get(5).expect("last_goal"),
+            parent_id: row.get(6).expect("parent_id"),
         })
     } else {
         None
@@ -400,8 +402,8 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
                 target
                     .conn
                     .execute(
-                        "INSERT OR REPLACE INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         rusqlite::params![
                             move_.id,
                             move_.to_slug,
@@ -410,7 +412,8 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
                             row.updated_at,
                             row.status,
                             row.goal_count,
-                            row.last_goal
+                            row.last_goal,
+                            row.parent_id
                         ],
                     )
                     .expect("upsert target session row");
@@ -422,13 +425,17 @@ pub fn apply_session_backfill(moves: &[BackfillMove]) {
                     Some(s) => s.to_string(),
                     None => updated_at.clone(),
                 };
+                // session.json is the only provenance a row-less session has
+                // left, and it has carried parentId since the parent link
+                // existed; a pre-link meta file simply reads as a root.
+                let parent_id = meta.get("parentId").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
 
                 target
                     .conn
                     .execute(
-                        "INSERT OR IGNORE INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal)
-                         VALUES (?, ?, ?, ?, ?, 'idle', 0, NULL)",
-                        rusqlite::params![move_.id, move_.to_slug, move_.cwd, created_at, updated_at],
+                        "INSERT OR IGNORE INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id)
+                         VALUES (?, ?, ?, ?, ?, 'idle', 0, NULL, ?)",
+                        rusqlite::params![move_.id, move_.to_slug, move_.cwd, created_at, updated_at, parent_id],
                     )
                     .expect("insert rebuilt target session row");
             }
@@ -600,6 +607,7 @@ mod tests {
             &index,
             CreateSessionArgs {
                 cwd: join!(&linked, "src"),
+                parent_id: None,
                 project: &stale_project,
                 now: "2026-07-01T00:00:00.000Z",
             },
@@ -608,6 +616,7 @@ mod tests {
             &index,
             CreateSessionArgs {
                 cwd: join!(&main, ".worktrees", "gone1234", "src"),
+                parent_id: None,
                 project: &stale_project,
                 now: "2026-07-01T01:00:00.000Z",
             },
@@ -616,6 +625,7 @@ mod tests {
             &index,
             CreateSessionArgs {
                 cwd: main.clone(),
+                parent_id: None,
                 project: &stale_project,
                 now: "2026-07-01T02:00:00.000Z",
             },
@@ -625,6 +635,7 @@ mod tests {
             &index,
             CreateSessionArgs {
                 cwd: join!(&main, ".worktrees", "outer", ".worktrees", "inner", "src"),
+                parent_id: None,
                 project: &stale_project,
                 now: "2026-07-01T03:00:00.000Z",
             },
@@ -749,6 +760,9 @@ mod tests {
             &index,
             CreateSessionArgs {
                 cwd: join!(&gone, "src"),
+                // A DELEGATE child keyed to another checkout is the case the
+                // parent link exists for; the move must carry it across.
+                parent_id: Some("spawning-session".to_string()),
                 project: &stale_project,
                 now: "",
             },
@@ -782,7 +796,56 @@ mod tests {
         assert_eq!(relocated.goal_count, 1);
         assert_eq!(relocated.last_goal.as_deref(), Some("ship it"));
         assert_eq!(relocated.status, "completed");
+        assert_eq!(relocated.parent_id.as_deref(), Some("spawning-session"), "the move must keep the parent link");
         assert!(plan_session_backfill(&home_root).is_empty());
+    }
+
+    /// A session whose index row is gone is rebuilt from session.json, and the
+    /// parentId recorded there must come back as the row's parent.
+    #[test]
+    fn a_row_rebuilt_from_session_json_keeps_its_parent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let root = root.path().to_str().unwrap();
+        let home_root = join!(root, "fake-home");
+        let main = join!(root, "repo");
+        let gone = join!(&main, ".worktrees", "gone1234");
+        let repo_slug = project_slug(&main);
+        let stale_project = ProjectPaths {
+            home_root: home_root.clone(),
+            memory_dir: join!(&home_root, "projects", &repo_slug, "memory"),
+            repo_root: main.clone(),
+            root: join!(&main, ".drip"),
+            sessions_dir: join!(&home_root, "projects", &repo_slug, "sessions"),
+            slug: repo_slug.clone(),
+            worktree_root: main.clone(),
+        };
+
+        fs::create_dir_all(join!(&main, ".git")).unwrap();
+        fs::create_dir_all(&stale_project.sessions_dir).unwrap();
+
+        let index = open_session_index(&join!(&home_root, "projects", &repo_slug, "index.sqlite"));
+        let session = create_session(
+            &index,
+            CreateSessionArgs {
+                cwd: join!(&gone, "src"),
+                parent_id: Some("spawning-session".to_string()),
+                project: &stale_project,
+                now: "",
+            },
+        );
+        // The row is lost (a wiped or rebuilt index); only session.json remains.
+        index.conn.execute("DELETE FROM sessions WHERE id = ?1", [&session.id]).unwrap();
+        index.close();
+
+        let moves = plan_session_backfill(&home_root);
+        assert_eq!(moves.len(), 1);
+        apply_session_backfill(&moves);
+
+        let target = open_session_index(&join!(&home_root, "projects", &moves[0].to_slug, "index.sqlite"));
+        let rebuilt = get_session(&target, &session.id).expect("rebuilt row");
+        target.close();
+        assert_eq!(rebuilt.status, "idle");
+        assert_eq!(rebuilt.parent_id.as_deref(), Some("spawning-session"));
     }
 
     #[test]

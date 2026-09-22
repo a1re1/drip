@@ -16,7 +16,7 @@ use crate::core::home::DripProject;
 use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRecord};
 use crate::watch::ansi::term;
-use crate::watch::data::{classify_sessions, sessions_under_dir, trim_transcript, TranscriptTail};
+use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
 use crate::watch::mouse::parse_sgr_mouse;
 use crate::watch::render::{diff_lines, render_frame, transcript_region, SessionsMode, WatchViewModel};
@@ -52,6 +52,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         now,
         mode: SessionsMode::Running,
         sessions: Vec::new(),
+        session_prefixes: Vec::new(),
         started_at_ms: HashMap::new(),
         focus: 1,
         sel_session: 0,
@@ -383,6 +384,7 @@ impl WatchApp {
                 self.running_sessions = Vec::new();
                 self.recent_sessions = Vec::new();
                 self.vm.sessions = Vec::new();
+                self.vm.session_prefixes = Vec::new();
                 self.vm.started_at_ms = HashMap::new();
                 self.pid_by_id = HashMap::new();
                 self.vm.shells = Vec::new();
@@ -433,7 +435,14 @@ impl WatchApp {
 
     /// Rebuild the visible Sessions rows from the cached classified lists.
     fn rebuild_sessions(&mut self) {
-        self.vm.sessions = visible_sessions(self.vm.mode, &self.running_sessions, &self.recent_sessions);
+        // `tree_rows` nests by id, not position, and keeps roots and siblings
+        // in input order: children of one parent stay newest-first among
+        // themselves, and in All mode a running child moves out of the running
+        // block to sit under its recent parent.
+        let visible = visible_sessions(self.vm.mode, &self.running_sessions, &self.recent_sessions);
+        let rows = tree_rows(&visible);
+        self.vm.session_prefixes = rows.iter().map(|row| row.prefix.clone()).collect();
+        self.vm.sessions = rows.into_iter().map(|row| row.record).collect();
     }
 
     fn clamp_selections(&mut self) {
@@ -736,6 +745,7 @@ mod tests {
             goal_count: 1,
             id: id.into(),
             last_goal: Some("a goal".into()),
+            parent_id: None,
             project_slug: "p".into(),
             status: "idle".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),

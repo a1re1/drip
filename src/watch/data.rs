@@ -210,6 +210,122 @@ impl TranscriptTail {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// session tree
+// ---------------------------------------------------------------------------
+
+/// One rendered Sessions row: the record plus the box-drawing connector that
+/// places it under its parent. Roots carry an empty prefix.
+#[derive(Debug, Clone)]
+pub struct SessionTreeRow {
+    pub record: SessionRecord,
+    pub prefix: String,
+}
+
+// The connector for a node at `depth` whose ancestors' "has a later sibling"
+// flags are `ancestor_later` (nearest ancestor last). The node's own line is
+// the last element and gets the elbow; the ancestor columns precede it, and
+// only an ancestor with later siblings keeps a vertical `│` below its elbow.
+fn tree_prefix(ancestor_later: &[bool], last: bool) -> String {
+    let mut out = String::new();
+    for &later in ancestor_later.iter().rev() {
+        out.push_str(if later { "│  " } else { "   " });
+    }
+    out.push_str(if last { "└─ " } else { "├─ " });
+    out
+}
+
+/// Flatten `records` into renderable rows: each root (parent_id absent, or a
+/// parent outside this slice — dripw only ever holds one project's sessions,
+/// so a parent in another project reads as an orphan) keeps its input position
+/// and is followed depth-first by its descendants. Input order is newest-first
+/// and is preserved at every level, so children stay newest-first too.
+///
+/// The parent indices are looked up by id in this slice, and a node whose
+/// parent chain loops (corrupt data) is dropped from its parent's child list
+/// and rendered as a root instead — every record appears exactly once, and
+/// nothing recurses forever.
+pub fn tree_rows(records: &[SessionRecord]) -> Vec<SessionTreeRow> {
+    let index: std::collections::HashMap<&str, usize> =
+        records.iter().enumerate().map(|(i, r)| (r.id.as_str(), i)).collect();
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+    let mut roots: Vec<usize> = Vec::new();
+
+    for (i, r) in records.iter().enumerate() {
+        let parent = r.parent_id.as_deref().and_then(|id| index.get(id).copied());
+        match parent {
+            // A self-parent is the smallest cycle; treat it like any other.
+            Some(p) if p != i && !reaches_self(records, &index, p, i) => children[p].push(i),
+            // A cycle is unrenderable as a subtree: the node becomes a root so
+            // the row still appears exactly once.
+            Some(_) => roots.push(i),
+            None => roots.push(i),
+        }
+    }
+
+    // `children` is acyclic by construction (an edge is only added when the
+    // parent's chain does not lead back to the child), and every node is a root
+    // or hangs off exactly one parent edge, so the root sweep visits each
+    // record exactly once.
+    let mut rows: Vec<SessionTreeRow> = Vec::with_capacity(records.len());
+    for &root in &roots {
+        push_subtree(records, &children, root, true, &mut Vec::new(), true, &mut rows);
+    }
+    debug_assert_eq!(rows.len(), records.len(), "every record renders exactly once");
+    rows
+}
+
+// True when the parent chain from `start` reaches `target`, which is how a
+// would-be child discovers that attaching it would close a loop. A chain that
+// loops without touching `target` also answers true: a node hanging off a
+// cycle renders as a root rather than under an unrenderable subtree.
+fn reaches_self(records: &[SessionRecord], index: &std::collections::HashMap<&str, usize>, start: usize, target: usize) -> bool {
+    let mut cursor = start;
+    let mut steps = 0;
+    while let Some(parent) = records[cursor].parent_id.as_deref().and_then(|id| index.get(id).copied()) {
+        if parent == target {
+            return true;
+        }
+        cursor = parent;
+        steps += 1;
+        if steps > records.len() {
+            return true;
+        }
+    }
+    false
+}
+
+// Emit `node` and its descendants. `ancestor_later` keeps one flag per
+// ancestor column above this node (nearest ancestor last), excluding roots: a
+// root draws no column of its own, so depth-1 rows are just their own elbow.
+fn push_subtree(
+    records: &[SessionRecord],
+    children: &[Vec<usize>],
+    node: usize,
+    is_root: bool,
+    ancestor_later: &mut Vec<bool>,
+    last: bool,
+    rows: &mut Vec<SessionTreeRow>,
+) {
+    let prefix = if is_root { String::new() } else { tree_prefix(ancestor_later, last) };
+    rows.push(SessionTreeRow { record: records[node].clone(), prefix });
+    let kids = &children[node];
+    for (position, &child) in kids.iter().enumerate() {
+        let child_last = position + 1 == kids.len();
+        // This node contributes the deepest column for its own children when it
+        // is not a root: descendants of an ancestor that still has later
+        // siblings keep that ancestor's vertical line.
+        if !is_root {
+            ancestor_later.push(!last);
+        }
+        push_subtree(records, &children, child, false, ancestor_later, child_last, rows);
+        if !is_root {
+            ancestor_later.pop();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +339,7 @@ mod tests {
             goal_count: 0,
             id: id.to_string(),
             last_goal: None,
+            parent_id: None,
             project_slug: "p".to_string(),
             status: "idle".to_string(),
             updated_at: updated_at.to_string(),
@@ -397,5 +514,146 @@ mod tests {
         let added = tail.poll();
         assert_eq!(added.len(), 1);
         assert!(matches!(&added[0], TranscriptEntry::Info(note) if note.text == "new"));
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn record(id: &str, parent_id: Option<&str>) -> SessionRecord {
+        SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            cwd: "/r".into(),
+            goal_count: 0,
+            id: id.into(),
+            last_goal: None,
+            parent_id: parent_id.map(str::to_string),
+            project_slug: "p".into(),
+            status: "idle".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    // (id, expected prefix) pairs, in the order tree_rows must emit them.
+    fn shaped(rows: &[SessionTreeRow]) -> Vec<(String, String)> {
+        rows.iter().map(|row| (row.record.id.clone(), row.prefix.clone())).collect()
+    }
+
+    #[test]
+    fn a_flat_list_is_unchanged_with_empty_prefixes() {
+        let records = vec![record("c", None), record("b", None), record("a", None)];
+        let rows = tree_rows(&records);
+        assert_eq!(
+            shaped(&rows),
+            vec![
+                ("c".to_string(), String::new()),
+                ("b".to_string(), String::new()),
+                ("a".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_parent_with_two_children_gets_an_elbow_then_a_last_elbow() {
+        let records = vec![record("p", None), record("c1", Some("p")), record("c2", Some("p"))];
+        let rows = tree_rows(&records);
+        assert_eq!(
+            shaped(&rows),
+            vec![
+                ("p".to_string(), String::new()),
+                ("c1".to_string(), "├─ ".to_string()),
+                ("c2".to_string(), "└─ ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_grandchild_under_the_first_of_two_children_keeps_the_vertical_line() {
+        let records = vec![
+            record("p", None),
+            record("c1", Some("p")),
+            record("g", Some("c1")),
+            record("c2", Some("p")),
+        ];
+        let rows = tree_rows(&records);
+        assert_eq!(
+            shaped(&rows),
+            vec![
+                ("p".to_string(), String::new()),
+                ("c1".to_string(), "├─ ".to_string()),
+                ("g".to_string(), "│  └─ ".to_string()),
+                ("c2".to_string(), "└─ ".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_orphan_whose_parent_is_absent_renders_as_a_root() {
+        let records = vec![record("solo", Some("missing")), record("root", None)];
+        let rows = tree_rows(&records);
+        assert_eq!(
+            shaped(&rows),
+            vec![("solo".to_string(), String::new()), ("root".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn a_two_record_cycle_renders_both_records_exactly_once() {
+        let records = vec![record("a", Some("b")), record("b", Some("a"))];
+        let rows = tree_rows(&records);
+        let shape = shaped(&rows);
+        assert_eq!(shape.len(), 2, "both records render: {shape:?}");
+        // Neither node can be a descendant of the other, so both are broken
+        // out as roots — in input order, each exactly once.
+        assert_eq!(
+            shape,
+            vec![("a".to_string(), String::new()), ("b".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn a_self_parent_renders_once_as_a_root() {
+        let rows = tree_rows(&[record("loop", Some("loop"))]);
+        assert_eq!(shaped(&rows), vec![("loop".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn a_cycle_reached_through_a_valid_parent_is_broken_not_dropped() {
+        // c -> b -> a -> c: the root sweep never enters the loop, so a and b
+        // are emitted by the safety net; every record still appears once.
+        let records = vec![record("x", None), record("a", Some("c")), record("b", Some("a")), record("c", Some("b"))];
+        let rows = tree_rows(&records);
+        let mut ids: Vec<String> = rows.iter().map(|row| row.record.id.clone()).collect();
+        assert_eq!(ids.len(), 4);
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b", "c", "x"]);
+    }
+
+    #[test]
+    fn deep_chains_keep_one_column_per_ancestor_with_later_siblings() {
+        // Two roots, each with a 3-deep chain: the ancestors that are not their
+        // parent's last child contribute a `│  ` column.
+        let records = vec![
+            record("p1", None),
+            record("p2", None),
+            record("a", Some("p2")),
+            record("b", Some("a")),
+            record("d", Some("b")),
+            record("c", Some("p1")),
+        ];
+        let rows = tree_rows(&records);
+        assert_eq!(
+            shaped(&rows),
+            vec![
+                ("p1".to_string(), String::new()),
+                ("c".to_string(), "└─ ".to_string()),
+                ("p2".to_string(), String::new()),
+                ("a".to_string(), "└─ ".to_string()),
+                ("b".to_string(), "   └─ ".to_string()),
+                ("d".to_string(), "      └─ ".to_string()),
+            ]
+        );
     }
 }

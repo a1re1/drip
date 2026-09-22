@@ -708,7 +708,12 @@ impl ReviewContext<'_> {
         let args = self.args;
         let index = open_session_index(&args.index_db_path);
         let project_paths = ProjectPaths::from(&args.project);
-        let child_session = create_session(&index, CreateSessionArgs { cwd: args.cwd.clone(), project: &project_paths, now: "" });
+        // A review has no session of its own to name as the parent. The
+        // DRIP_SESSION_ID fallback attaches its units to the goal session that
+        // shelled out to `drip --review`; a standalone review stays flat. The
+        // children run concurrently on pool threads, so they never export their
+        // own id into the process environment the way DELEGATE does.
+        let child_session = create_session(&index, CreateSessionArgs { cwd: args.cwd.clone(), parent_id: None, project: &project_paths, now: "" });
         let timebox = Timebox::new(wall_clock_ms, args.signal.as_ref());
         let usage = Arc::new(Mutex::new(ReviewUsage::default()));
         let model_texts = Arc::new(Mutex::new(Vec::new()));

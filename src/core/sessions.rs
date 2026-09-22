@@ -79,6 +79,9 @@ pub struct SessionRecord {
     pub goal_count: i64,
     pub id: String,
     pub last_goal: Option<String>,
+    /// Id of the session that spawned this one: a DELEGATE child, or a nested
+    /// `drip` invocation by one of this session's tools. None for a root.
+    pub parent_id: Option<String>,
     pub project_slug: String,
     pub status: String,
     pub updated_at: String,
@@ -159,7 +162,38 @@ pub fn open_session_index(db_path: &str) -> SessionIndex {
     )
     .expect("create tables");
 
+    // Databases written before sessions carried a parent link lack the
+    // parent_id column, so CREATE TABLE IF NOT EXISTS leaves them alone. The
+    // guard reads the schema itself instead of attempting the ALTER
+    // unconditionally: a registry whose sessions table has an unrelated column
+    // set must still OPEN (the malformed-fixture contract — its defect stays at
+    // query time), and an ALTER against such a table could fail loudly here.
+    if !sessions_has_column(&conn, "parent_id") {
+        // Two processes can open an old index at once (dripw sweeps every
+        // registry every couple of seconds while the CLI starts a session), and
+        // both see the column missing. The loser's ALTER fails with a duplicate
+        // column; that is a success as long as the column is there afterwards.
+        if let Err(error) = conn.execute_batch("ALTER TABLE sessions ADD COLUMN parent_id TEXT;") {
+            assert!(sessions_has_column(&conn, "parent_id"), "migrate sessions.parent_id: {error}");
+        }
+    }
+
     SessionIndex { conn }
+}
+
+// Whether the sessions table currently has `column`. A schema we cannot read
+// answers true so the migration is skipped: open_session_index must stay
+// total, which every registry sweep depends on.
+fn sessions_has_column(conn: &Connection, column: &str) -> bool {
+    conn.prepare("PRAGMA table_info(sessions)")
+        .and_then(|mut stmt| {
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(Result::ok)
+                .collect();
+            Ok(names.iter().any(|name| name == column))
+        })
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +209,7 @@ fn row_to_record(
     status: String,
     goal_count: i64,
     last_goal: Option<String>,
+    parent_id: Option<String>,
 ) -> SessionRecord {
     let status = if status == "completed" || status == "idle" {
         status
@@ -188,6 +223,7 @@ fn row_to_record(
         goal_count,
         id,
         last_goal,
+        parent_id,
         project_slug,
         status,
         updated_at,
@@ -200,11 +236,65 @@ fn row_to_record(
 // chrono's to_rfc3339()).
 // ---------------------------------------------------------------------------
 
+/// The environment variable a nested `drip` subprocess reads to record its
+/// parent session: a goal run exports its own id under this name, tool
+/// subprocesses inherit it, and `create_session` falls back to it when the
+/// caller passes no explicit parent.
+pub const SESSION_ENV_VAR: &str = "DRIP_SESSION_ID";
+
+/// Exports a session id under `SESSION_ENV_VAR` for a scope and puts the
+/// previous value back when dropped. A goal run holds one for its duration so
+/// tool subprocesses see the running session; DELEGATE nests one for its
+/// child. Restoring on drop (including an unwinding run) means a session
+/// created afterwards, such as the TUI's `/new`, is not mis-parented to a run
+/// that already ended.
+pub struct SessionEnvScope {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl SessionEnvScope {
+    pub fn enter(session_id: &str) -> Self {
+        Self::enter_var(SESSION_ENV_VAR, session_id)
+    }
+
+    pub fn enter_var(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var(name).ok();
+        std::env::set_var(name, value);
+        SessionEnvScope { name, previous }
+    }
+}
+
+impl Drop for SessionEnvScope {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
 pub struct CreateSessionArgs<'a> {
     pub cwd: String,
+    /// The spawning session's id, when the caller knows it (DELEGATE does).
+    /// None defers to `DRIP_SESSION_ID` — see resolve_parent_id.
+    pub parent_id: Option<String>,
     pub project: &'a ProjectPaths,
     /// Pre-formatted ISO 8601 timestamp. Pass "" to use the current time.
     pub now: &'a str,
+}
+
+/// The parent recorded for a new session: an explicit id wins, otherwise a
+/// non-empty `DRIP_SESSION_ID`. That variable is the one a nested `drip`
+/// invocation inherits — a skill that shells out to `drip ...` from inside a
+/// goal session runs its tool subprocess with this process's environment, so
+/// the child session attaches to the session that launched the shell. Blank
+/// values on either side mean "no parent", so an exported-but-empty variable
+/// never records a dangling "" parent.
+pub fn resolve_parent_id(explicit: Option<String>, env_value: Option<String>) -> Option<String> {
+    explicit
+        .filter(|id| !id.is_empty())
+        .or_else(|| env_value.filter(|id| !id.is_empty()))
 }
 
 pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionRecord {
@@ -232,11 +322,16 @@ pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionR
     let images_dir = session_dir.join("images");
     fs::create_dir_all(&images_dir).expect("create session dirs");
 
-    // Write session.json (provenance: id, cwd, projectSlug, createdAt).
+    let parent_id = resolve_parent_id(args.parent_id, std::env::var(SESSION_ENV_VAR).ok());
+
+    // Write session.json (provenance: id, cwd, projectSlug, createdAt, parentId).
+    // parentId is always present (null for a root) so a reader can tell "this
+    // session has no parent" from "this session predates the field".
     let meta = serde_json::json!({
         "createdAt": now,
         "cwd": args.cwd,
         "id": id,
+        "parentId": parent_id,
         "projectSlug": project_slug,
     });
     fs::write(
@@ -249,9 +344,9 @@ pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionR
     index
         .conn
         .execute(
-            "INSERT INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![id, project_slug, args.cwd, now, now, "active", 0i64, Option::<String>::None],
+            "INSERT INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![id, project_slug, args.cwd, now, now, "active", 0i64, Option::<String>::None, parent_id],
         )
         .expect("insert session row");
 
@@ -262,6 +357,7 @@ pub fn create_session(index: &SessionIndex, args: CreateSessionArgs) -> SessionR
         goal_count: 0,
         id,
         last_goal: None,
+        parent_id,
         project_slug,
         status: "active".to_string(),
         updated_at: now,
@@ -276,7 +372,7 @@ pub fn get_session(index: &SessionIndex, session_id: &str) -> Option<SessionReco
     index
         .conn
         .query_row(
-            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal FROM sessions WHERE id = ?1",
+            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id FROM sessions WHERE id = ?1",
             rusqlite::params![session_id],
             |row| {
                 Ok(row_to_record(
@@ -288,6 +384,7 @@ pub fn get_session(index: &SessionIndex, session_id: &str) -> Option<SessionReco
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
@@ -304,7 +401,7 @@ pub fn find_session_by_id_prefix(index: &SessionIndex, id_prefix: &str) -> Optio
     let mut stmt = index
         .conn
         .prepare(
-            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+            "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id
              FROM sessions WHERE id LIKE ?1 ORDER BY updated_at DESC LIMIT 2",
         )
         .expect("prepare find_by_prefix");
@@ -320,6 +417,7 @@ pub fn find_session_by_id_prefix(index: &SessionIndex, id_prefix: &str) -> Optio
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })
         .expect("query find_by_prefix")
@@ -346,14 +444,14 @@ pub fn list_sessions(index: &SessionIndex, limit: Option<i64>) -> Vec<SessionRec
         Some(_cap) => index
             .conn
             .prepare(
-                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id
                  FROM sessions ORDER BY updated_at DESC LIMIT ?1",
             )
             .expect("prepare list_sessions"),
         None => index
             .conn
             .prepare(
-                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id
                  FROM sessions ORDER BY updated_at DESC",
             )
             .expect("prepare list_sessions"),
@@ -370,6 +468,7 @@ pub fn list_sessions(index: &SessionIndex, limit: Option<i64>) -> Vec<SessionRec
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })
         .expect("list_sessions query")
@@ -736,7 +835,7 @@ pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -
             .index
             .conn
             .prepare(
-                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal
+                "SELECT id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal, parent_id
                  FROM sessions WHERE id LIKE ?1 ORDER BY updated_at DESC LIMIT 2",
             )
             .expect("prepare resolve_any_session_ref");
@@ -751,6 +850,7 @@ pub fn resolve_any_session_ref(project: &DripProject, reference: Option<&str>) -
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
+                    row.get(8)?,
                 ))
             })
             .expect("query resolve_any_session_ref")
@@ -963,5 +1063,157 @@ mod tests {
         );
 
         cleanup(&home);
+    }
+
+    /// A pre-parent_id index on disk: open_session_index migrates it in place,
+    /// and a row written before the column existed reads back as a root.
+    #[test]
+    fn opening_a_pre_parent_id_index_migrates_and_old_rows_have_no_parent() {
+        let home = temp_home("legacy-migrate");
+        let project_dir = home.join("projects").join("legacy");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let db_path = project_dir.join("index.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open raw fixture connection");
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    project_slug TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    goal_count INTEGER NOT NULL DEFAULT 0,
+                    last_goal TEXT
+                );
+                INSERT INTO sessions (id, project_slug, cwd, created_at, updated_at, status, goal_count, last_goal)
+                VALUES ('legacy-id', 'legacy', '/repo/l', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'completed', 2, NULL);",
+            )
+            .expect("create legacy sessions table");
+            conn.close().expect("close raw fixture connection");
+        }
+
+        let index = open_session_index(&db_path.to_string_lossy());
+        let rows = list_sessions(&index, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "legacy-id");
+        assert_eq!(rows[0].parent_id, None, "a pre-migration row has no parent");
+        // The column is really there, not just absent-tolerant: the ALTER ran.
+        assert!(get_session(&index, "legacy-id").is_some());
+        let columns: Vec<String> = index
+            .conn
+            .prepare("PRAGMA table_info(sessions)")
+            .expect("prepare table_info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table_info")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(columns.iter().any(|name| name == "parent_id"), "migration must add the column");
+        index.close();
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn explicit_parent_id_round_trips_through_the_index_and_session_json() {
+        let home = temp_home("parent-roundtrip");
+        let project_dir = home.join("projects").join("parented");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let project = ProjectPaths {
+            home_root: home.to_string_lossy().into_owned(),
+            memory_dir: project_dir.join("memory").to_string_lossy().into_owned(),
+            repo_root: "/repo/p".to_string(),
+            root: "/repo/p".to_string(),
+            sessions_dir: project_dir.join("sessions").to_string_lossy().into_owned(),
+            slug: "parented".to_string(),
+            worktree_root: "/repo/p".to_string(),
+        };
+        let index = open_session_index(&project_dir.join("index.sqlite").to_string_lossy());
+
+        let child = create_session(
+            &index,
+            CreateSessionArgs {
+                cwd: "/repo/p".to_string(),
+                parent_id: Some("parent-session-id".to_string()),
+                project: &project,
+                now: "2026-01-01T00:00:00Z",
+            },
+        );
+        assert_eq!(child.parent_id.as_deref(), Some("parent-session-id"));
+        assert_eq!(
+            get_session(&index, &child.id).expect("child row").parent_id.as_deref(),
+            Some("parent-session-id")
+        );
+        // list_sessions is the path dripw and --list read; it must carry it too.
+        assert_eq!(
+            list_sessions(&index, None)[0].parent_id.as_deref(),
+            Some("parent-session-id")
+        );
+        index.close();
+
+        let meta = fs::read_to_string(project_dir.join("sessions").join(&child.id).join("session.json"))
+            .expect("read child session.json");
+        let meta: serde_json::Value = serde_json::from_str(&meta).expect("child session.json parses");
+        assert_eq!(meta["parentId"], serde_json::json!("parent-session-id"));
+
+        // A session created without an explicit parent records whatever the
+        // process environment offers (the env fallback is DRIP_SESSION_ID, and
+        // tests share one process, so the expectation is read from the same
+        // environment rather than assumed). The key is always written.
+        let expected = resolve_parent_id(None, std::env::var(SESSION_ENV_VAR).ok());
+        let index = open_session_index(&project_dir.join("index.sqlite").to_string_lossy());
+        let root = create_session(
+            &index,
+            CreateSessionArgs {
+                cwd: "/repo/p".to_string(),
+                parent_id: None,
+                project: &project,
+                now: "2026-01-01T00:00:00Z",
+            },
+        );
+        assert_eq!(root.parent_id, expected);
+        index.close();
+        let root_meta = fs::read_to_string(project_dir.join("sessions").join(&root.id).join("session.json"))
+            .expect("read root session.json");
+        let root_meta: serde_json::Value = serde_json::from_str(&root_meta).expect("root session.json parses");
+        assert!(root_meta.get("parentId").is_some(), "parentId is always written");
+        assert_eq!(root_meta["parentId"], serde_json::json!(expected));
+
+        cleanup(&home);
+    }
+
+    #[test]
+    fn resolve_parent_id_prefers_an_explicit_id_over_a_nonempty_env_value() {
+        assert_eq!(resolve_parent_id(Some("p".into()), Some("e".into())).as_deref(), Some("p"));
+        assert_eq!(resolve_parent_id(None, Some("e".into())).as_deref(), Some("e"));
+        // A blank explicit id falls through to the environment…
+        assert_eq!(resolve_parent_id(Some(String::new()), Some("e".into())).as_deref(), Some("e"));
+        // …and a blank environment value means "no parent" rather than "".
+        assert_eq!(resolve_parent_id(None, Some(String::new())), None);
+        assert_eq!(resolve_parent_id(Some(String::new()), Some(String::new())), None);
+        assert_eq!(resolve_parent_id(None, None), None);
+    }
+
+    // A private variable name keeps this off DRIP_SESSION_ID, which other
+    // tests in this crate read while running in parallel.
+    const SCOPE_TEST_VAR: &str = "DRIP_SESSION_SCOPE_TEST";
+
+    #[test]
+    fn session_env_scope_points_at_the_child_and_restores_the_parent_on_drop() {
+        std::env::set_var(SCOPE_TEST_VAR, "parent-session");
+        {
+            let _scope = SessionEnvScope::enter_var(SCOPE_TEST_VAR, "child-session");
+            assert_eq!(std::env::var(SCOPE_TEST_VAR).as_deref(), Ok("child-session"));
+        }
+        assert_eq!(std::env::var(SCOPE_TEST_VAR).as_deref(), Ok("parent-session"));
+
+        std::env::remove_var(SCOPE_TEST_VAR);
+        let scope = SessionEnvScope::enter_var(SCOPE_TEST_VAR, "child-session");
+        // An unwinding child run drops the guard the same way.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _scope = scope;
+            panic!("child run failed");
+        }));
+        assert!(std::env::var(SCOPE_TEST_VAR).is_err(), "an unset variable is removed again, not left pointing at the child");
     }
 }

@@ -48,7 +48,7 @@ use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{
     create_session, has_any_session_index, latest_any_session, list_all_sessions, open_session_index,
     resolve_any_session_ref, session_paths_for, CreateSessionArgs, ProjectPaths, SessionIndex, SessionPaths,
-    SessionRecord,
+    SessionRecord, SESSION_ENV_VAR,
 };
 use crate::core::state::load_harness_state;
 use crate::core::types::HarnessEvent;
@@ -278,6 +278,7 @@ fn pick_session(index: &SessionIndex, args: &ParsedCliArgs, cwd: &str, project: 
             index,
             CreateSessionArgs {
                 cwd: cwd.to_string(),
+                parent_id: None,
                 project: &project_paths,
                 now: "",
             },
@@ -326,6 +327,7 @@ fn print_session_list(cwd: &str, json: bool, recursive: bool, home_root: &str, p
                     "goalCount": record.goal_count,
                     "id": record.id,
                     "lastGoal": record.last_goal,
+                    "parentId": record.parent_id,
                     "lastRun": last_run.map(|run| json!({ "endedAt": run.ended_at, "reason": run.reason, "taskStats": run.task_stats })),
                 });
                 if let LeaseStatus::Alive { lease } = &lease {
@@ -509,6 +511,7 @@ fn print_session_info(project: &DripProject, session: &SessionRecord, json: bool
             "goalCount": session.goal_count,
             "id": session.id,
             "lastGoal": session.last_goal,
+            "parentId": session.parent_id,
             "resultPath": paths.result_path,
             "statePath": paths.state_path,
             "status": session.status,
@@ -1175,6 +1178,13 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             tools
         }
     };
+
+    // Nested attribution: a skill that shells out to `drip ...` runs its tool
+    // subprocess with this process's environment, and the child records this
+    // session as its parent through the DRIP_SESSION_ID fallback in
+    // create_session. Set once here, before the goal runs; DELEGATE temporarily
+    // repoints it at the child it is running.
+    std::env::set_var(SESSION_ENV_VAR, &args.session.id);
 
     let mut outcome: SessionGoalOutcome = match run_session_goal(SessionGoalArgs {
         ask_user_enabled,
@@ -2684,6 +2694,7 @@ mod tests {
             goal_count: 1,
             id: id.to_string(),
             last_goal: Some("g".to_string()),
+            parent_id: None,
             project_slug: "p".to_string(),
             status: "idle".to_string(),
             updated_at: "t".to_string(),

@@ -49,7 +49,7 @@ use crate::core::env_vars::{load_env_vars, load_merged_env, lookup_env_var_sourc
 use crate::core::home::{DripHome, DripProject};
 use crate::core::sessions::{
     create_session, list_all_sessions, open_session_index, resolve_any_session_ref, session_paths_for, CreateSessionArgs,
-    ProjectPaths, SessionPaths, SessionRecord,
+    ProjectPaths, SessionEnvScope, SessionPaths, SessionRecord,
 };
 use crate::core::types::{
     HarnessEvent, HarnessEventType, HarnessSurveyAnswer, HarnessSurveyAnswers, QuestionSurvey,
@@ -2127,6 +2127,7 @@ impl TuiApp {
                     &index,
                     CreateSessionArgs {
                         cwd: self.bootstrap.cwd.clone(),
+                        parent_id: None,
                         project: &ProjectPaths::from(&self.bootstrap.project),
                         now: "",
                     },
@@ -2713,6 +2714,13 @@ impl TuiApp {
                 }
             };
             let index = open_session_index(&index_db_path);
+            // Same nested attribution as the headless path: a skill that shells
+            // out to `drip ...` from this run records this session as its
+            // parent through the DRIP_SESSION_ID fallback in create_session.
+            // Scoped to the run: once it ends the variable goes back to what it
+            // was, so a session `/new` creates afterwards is a root, not a child
+            // of a finished run.
+            let session_env = SessionEnvScope::enter(&session.id);
             let on_event: Arc<dyn Fn(HarnessEvent) + Send + Sync> = Arc::new(move |event: HarnessEvent| {
                 let _ = event_tx.send(Msg::Event(event));
             });
@@ -2759,6 +2767,9 @@ impl TuiApp {
                 mcp_servers: None,
             }));
             index.close();
+            // Restored before the main thread learns the run is over, so no
+            // command it handles next can see the finished run's id.
+            drop(session_env);
             guard.armed = false;
             let _ = tx.send(Msg::RunDone(result));
         });
@@ -3855,6 +3866,7 @@ mod rename_tests {
             &index,
             crate::core::sessions::CreateSessionArgs {
                 cwd: "/tmp".to_string(),
+                parent_id: None,
                 project: &crate::core::sessions::ProjectPaths::from(&project),
                 now: "",
             },
@@ -4096,6 +4108,7 @@ mod rename_tests {
             &index,
             crate::core::sessions::CreateSessionArgs {
                 cwd: app.bootstrap.cwd.clone(),
+                parent_id: None,
                 project: &crate::core::sessions::ProjectPaths::from(&app.bootstrap.project),
                 now: "",
             },
@@ -4292,6 +4305,7 @@ mod skill_activation_tests {
             goal_count: 0,
             id: "sess-skill-test".to_string(),
             last_goal: None,
+            parent_id: None,
             project_slug: "skill-test".to_string(),
             status: "active".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -4972,6 +4986,7 @@ mod prompt_history_wiring_tests {
             goal_count: 0,
             id: "sess-history-test".to_string(),
             last_goal: None,
+            parent_id: None,
             project_slug: "history-test".to_string(),
             status: "active".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -5266,6 +5281,7 @@ mod prompt_history_wiring_tests {
             goal_count: 0,
             id: "sess-history-two".to_string(),
             last_goal: None,
+            parent_id: None,
             project_slug: "history-test".to_string(),
             status: "active".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),

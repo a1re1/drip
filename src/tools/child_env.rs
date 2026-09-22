@@ -5,6 +5,12 @@
 // environment-sensitive tests behave the same inside a harness run as in a
 // clean shell. A command that legitimately needs a credential should receive
 // it via an explicit env override rather than inheriting it.
+//
+// DRIP_SESSION_ID is deliberately NOT scrubbed here: tool subprocesses inherit
+// it so a skill that shells out to `drip ...` from inside a goal session
+// records that session as the new session's parent (create_session's
+// DRIP_SESSION_ID fallback). Scrubbing it would flatten every cross-process
+// child into a root.
 
 use std::collections::BTreeMap;
 

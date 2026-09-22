@@ -5,7 +5,7 @@
 
 use crate::cli::images::GoalImageAttachment;
 use crate::tui::theme::{paint, ACCENT_COLOR, DIM_COLOR};
-use crate::watch::ansi::{fit, string_width, wrap_ansi};
+use crate::watch::ansi::{char_width, fit, string_width, wrap_ansi};
 
 use crate::cli::commands::SlashCommandSpec;
 
@@ -58,6 +58,161 @@ pub fn boxed_titled(
     out
 }
 
+/// Visual lines of the composer text: the char-index range of every row a
+/// terminal draws for `text_width` columns of body space. Paragraphs are split
+/// on `'\n'` and each is greedily word-wrapped: a word that would overflow
+/// starts on the next line, the space it broke at stays at the end of the
+/// upper line, and a single word wider than `text_width` is hard-broken. An
+/// empty text is one empty line (`0..0`), a trailing `'\n'` adds a final empty
+/// line, and the separator itself is never inside a range.
+pub fn composer_lines(text: &str, text_width: usize) -> Vec<std::ops::Range<usize>> {
+    let width = text_width.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut paragraph_start = 0usize;
+    loop {
+        match chars[paragraph_start..].iter().position(|&c| c == '\n') {
+            Some(offset) => {
+                let paragraph_end = paragraph_start + offset;
+                wrap_paragraph(&chars, paragraph_start, paragraph_end, width, &mut lines);
+                paragraph_start = paragraph_end + 1;
+            }
+            None => {
+                wrap_paragraph(&chars, paragraph_start, chars.len(), width, &mut lines);
+                break;
+            }
+        }
+    }
+    lines
+}
+
+fn wrap_paragraph(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    width: usize,
+    lines: &mut Vec<std::ops::Range<usize>>,
+) {
+    if start == end {
+        lines.push(start..end);
+        return;
+    }
+    let mut line_start = start;
+    while line_start < end {
+        let mut last_space: Option<usize> = None;
+        let mut column = 0usize;
+        let mut index = line_start;
+        let mut line_end = line_start;
+        while index < end {
+            let cell = char_width(chars[index] as u32);
+            if column + cell > width && index > line_start {
+                break;
+            }
+            if chars[index] == ' ' {
+                last_space = Some(index);
+            }
+            column += cell;
+            index += 1;
+            line_end = index;
+            if column >= width {
+                break;
+            }
+        }
+        if line_end < end {
+            if chars[line_end] == ' ' {
+                // The line filled exactly at a word boundary: the space
+                // belongs to the upper line (clipped when drawn) so the
+                // continuation row never starts with a stray blank.
+                line_end += 1;
+            } else if let Some(space) = last_space {
+                // Break at the last space so it stays on the upper line.
+                line_end = space + 1;
+            }
+        }
+        lines.push(line_start..line_end);
+        line_start = line_end;
+    }
+}
+
+/// Visual `(line_index, column)` of the char-index `cursor`: the display-column
+/// offset of `cursor` inside its wrapped line. A cursor exactly at a wrap point
+/// belongs to the column-0 start of the lower line.
+pub fn composer_cursor_position(text: &str, text_width: usize, cursor: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let lines = composer_lines(text, text_width);
+    let target = cursor.min(chars.len());
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains(&target) {
+            return (index, display_columns(text, line.start, target));
+        }
+        // A cursor sitting on a paragraph break renders at the end of the
+        // line that break closes, not at the start of the next one.
+        if line.end == target && chars.get(target) == Some(&'\n') {
+            return (index, display_columns(text, line.start, line.end));
+        }
+    }
+    let last = lines.len() - 1;
+    (last, display_columns(text, lines[last].start, lines[last].end))
+}
+
+/// Inverse of `composer_cursor_position`: the char index sitting `column`
+/// display columns into visual line `line_index`. The column is clamped to the
+/// line's end, and to the nearest char boundary when a wide char straddles it.
+pub fn composer_cursor_at(text: &str, text_width: usize, line_index: usize, column: usize) -> usize {
+    let lines = composer_lines(text, text_width);
+    let line = match lines.get(line_index) {
+        Some(line) => line.clone(),
+        None => return text.chars().count(),
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut used = 0usize;
+    let mut index = line.start;
+    while index < line.end {
+        let cell = char_width(chars[index] as u32);
+        if used + cell > column {
+            break;
+        }
+        used += cell;
+        index += 1;
+    }
+    index
+}
+
+fn display_columns(text: &str, start: usize, end: usize) -> usize {
+    text.chars()
+        .skip(start)
+        .take(end - start)
+        .map(|c| char_width(c as u32))
+        .sum()
+}
+
+/// The composer's top rule: a plain dim `─` line, or with a `/rename`
+/// caption, the name set into it right-aligned one dash in from the edge
+/// (`──── name ─`, the same placement the boxed picker uses). The caption is
+/// clipped so the rule always stays exactly `width` wide; a caption that
+/// cannot fit at all yields the plain rule.
+fn composer_rule(width: usize, title: Option<&str>) -> String {
+    let dim = paint(DIM_COLOR);
+    let plain = dim(&"─".repeat(width));
+    let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) else {
+        return plain;
+    };
+    // One leading dash, the spaces around the caption, and the trailing dash.
+    let Some(caption_room) = width.checked_sub(4).filter(|room| *room > 0) else {
+        return plain;
+    };
+    let caption = fit(title, caption_room, true).trim_end().to_string();
+    let lead = "─".repeat(width - string_width(&caption) - 3);
+    dim(&format!("{lead} {caption} ─"))
+}
+
+/// Display columns the composer body gets at terminal `width`: the two-column
+/// `❯ `/indent prefix and one spare column for the inverse cursor cell at the
+/// end of a full line are reserved, so a body row never exceeds `width`.
+pub fn composer_text_width(width: usize) -> usize {
+    width.max(6) - 3
+}
+
 /// The box's top rule: the plain `╭─...─╮` when there is no caption; with
 /// one, `╭` + leading dashes + ` caption ` + `─╮`, the caption clipped to the
 /// rule's interior so the row never grows past the box width. A caption that
@@ -94,7 +249,9 @@ pub struct ComposerProps<'a> {
     pub selected_skill_index: usize,
     pub selected_suggestion_index: usize,
     pub skill_suggestions: &'a [(String, String)],
-    pub queued_count: usize,
+    /// Prompts waiting for the next run, oldest first. They are listed above
+    /// the composer (never in the timeline) so the whole queue stays visible.
+    pub queued: &'a [String],
     /// The session's explicit `/rename` name, captioned into the box's top
     /// rule; `None` (never renamed) draws the plain rule.
     pub session_name: Option<&'a str>,
@@ -112,9 +269,34 @@ fn composer_hint_row(text: &str, width: usize) -> String {
     row
 }
 
+/// One dim row per queued prompt, listed in send order above the composer.
+/// Multi-line prompts show their first line, and long ones clip with an
+/// ellipsis, so the queue reads as a compact "what's next" list.
+fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
+    if queued.is_empty() {
+        return Vec::new();
+    }
+    let dim = paint(DIM_COLOR);
+    let line_width = width.max(6).saturating_sub(4).max(1);
+    let mut rows = Vec::with_capacity(queued.len() + 1);
+    let noun = if queued.len() == 1 { "message" } else { "messages" };
+    rows.push(dim(&fit(
+        &format!("{} queued {noun} for the next run", queued.len()),
+        width.max(1),
+        true,
+    )));
+    for (index, text) in queued.iter().enumerate() {
+        let first_line = text.lines().next().unwrap_or("").trim();
+        let more = if text.lines().count() > 1 { " …" } else { "" };
+        let line = fit(&format!("{}. {first_line}{more}", index + 1), line_width, true);
+        rows.push(dim(&format!("  {line}")));
+    }
+    rows
+}
+
 /// Port of the Ink `Composer` component.
 pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
-    let mut rows: Vec<String> = Vec::new();
+    let mut rows: Vec<String> = queued_rows(props.queued, width);
 
     if !props.attachments.is_empty() {
         let yellow = paint("yellow");
@@ -151,44 +333,78 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
 
     let border_color = if props.disabled { DIM_COLOR } else { ACCENT_COLOR };
     let prefix_paint = paint(border_color);
-    let body = if props.disabled {
-        let dim = paint(DIM_COLOR);
-        if props.text.is_empty() {
-            dim("running — press esc to stop the run")
-        } else {
-            dim(props.text)
-        }
+    let dim = paint(DIM_COLOR);
+    // A disabled composer with empty text shows the run placeholder instead.
+    let placeholder = props.disabled && props.text.is_empty();
+    let queued_placeholder = format!(
+        "{} queued — ctrl+s steers the run with them all",
+        props.queued.len()
+    );
+    let display: &str = if placeholder && !props.queued.is_empty() {
+        &queued_placeholder
+    } else if placeholder {
+        "running — press esc to stop the run"
     } else {
-        let before: String = props.text.chars().take(props.cursor).collect();
-        let at: String = props.text.chars().skip(props.cursor).take(1).collect();
-        let after: String = props.text.chars().skip(props.cursor + 1).collect();
-        // A cursor on a newline is drawn as an inverse cell at the line's end,
-        // then the break — never an inverse sequence spanning the split below.
-        let (at, after) = match at.as_str() {
-            "" => (" ".to_string(), after),
-            "\n" => (" ".to_string(), format!("\n{after}")),
-            _ => (at, after),
-        };
-        format!("{before}{INVERSE_ON}{at}{INVERSE_OFF}{after}")
+        props.text
     };
-    // The prompt is a fixed-width sibling of the text in ink, so every line of
-    // a multi-line goal (and every wrapped continuation) sits under the first
-    // character of the text, inside the box.
-    let inner = width.max(6) - 4;
-    let text_width = inner.saturating_sub(2).max(1);
-    let mut body_rows: Vec<String> = Vec::new();
-    for line in body.split('\n') {
-        // The inverse cursor cell drawn on a newline may sit one column past
-        // the text width; the box's inner width still has room for it, and
-        // wrap_ansi would otherwise drop it as a break space.
-        let line_width = if line.ends_with(&format!("{INVERSE_ON} {INVERSE_OFF}")) { text_width + 1 } else { text_width };
-        let pieces = if string_width(line) <= line_width { vec![line.to_string()] } else { wrap_ansi(line, line_width) };
-        for piece in pieces {
-            let lead = if body_rows.is_empty() { prefix_paint("❯ ") } else { "  ".to_string() };
-            body_rows.push(format!("{lead}{piece}"));
+    // Body rows: `❯ ` on the first row and a two-space indent on every
+    // continuation row, so the text starts at column 2 on every row. Wrapping
+    // comes from `composer_lines`, the same layout cursor movement uses, so
+    // the two can never disagree.
+    let text_width = composer_text_width(width);
+    let lines = composer_lines(display, text_width);
+    let cursor_line = if placeholder {
+        // Only the run placeholder hides the cursor: a draft typed while a
+        // goal runs keeps its cursor cell so the writer can see where they are.
+        usize::MAX
+    } else {
+        composer_cursor_position(display, text_width, props.cursor).0
+    };
+    let text_chars: Vec<char> = display.chars().collect();
+
+    let rule = dim(&"─".repeat(width));
+    rows.push(composer_rule(width, props.session_name));
+    for (index, line) in lines.iter().enumerate() {
+        let lead = if index == 0 {
+            prefix_paint("❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let mut cells: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for (offset, ch) in text_chars[line.start..line.end].iter().enumerate() {
+            let cell = char_width(*ch as u32);
+            // A wide char straddling the wrap column is clipped so the inverse
+            // cursor cell never escapes the body width.
+            if used + cell > text_width {
+                break;
+            }
+            used += cell;
+            if index == cursor_line && line.start + offset == props.cursor {
+                cells.push(format!("{INVERSE_ON}{ch}{INVERSE_OFF}"));
+            } else {
+                cells.push(ch.to_string());
+            }
         }
+        if index == cursor_line {
+            if props.cursor >= line.end {
+                // Cursor at the line end or on the newline after it: an
+                // inverse cell on the blank column (`composer_text_width`
+                // keeps one spare column for it on a full line).
+                cells.push(format!("{INVERSE_ON} {INVERSE_OFF}"));
+            } else if !cells.iter().any(|cell| cell.contains(INVERSE_ON)) {
+                // The cursor column lands inside a wide char: draw the inverse
+                // cell at the char boundary just before it.
+                cells.push(format!("{INVERSE_ON} {INVERSE_OFF}"));
+            }
+        }
+        let body = cells.concat();
+        // Only the placeholder is dimmed: a draft typed while a goal runs
+        // reads in the same colour as any other typing.
+        let body = if placeholder { dim(&body) } else { body };
+        rows.push(format!("{lead}{body}"));
     }
-    rows.extend(boxed_titled(body_rows, width, border_color, props.session_name));
+    rows.push(rule);
 
     let show_slash_menu = !props.disabled && !props.slash_suggestions.is_empty();
     let show_mention_menu =
@@ -232,18 +448,15 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
     let dim = paint(DIM_COLOR);
     // Kept short enough to survive one line at a normal terminal width.
     let hint = if props.disabled {
-        if props.queued_count > 0 {
-            "enter queues · shift+enter steers with next queued message".to_string()
+        if !props.queued.is_empty() {
+            "enter queues · ctrl+s steers the run (whole queue when empty)".to_string()
         } else {
-            "enter queues · shift+enter steers the run".to_string()
+            "enter queues · ctrl+s steers the run".to_string()
         }
-    } else if props.queued_count > 0 {
-        format!(
-            "{} queued — shift+enter steers the running goal with one",
-            props.queued_count
-        )
+    } else if !props.queued.is_empty() {
+        format!("{} queued — ctrl+s runs the next one", props.queued.len())
     } else {
-        "enter sends · shift+enter steers with a queued message".to_string()
+        "enter sends · ctrl+s steers with a queued message".to_string()
     };
     rows.push(dim(&composer_hint_row(&hint, width)));
 
@@ -368,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_captions_the_session_name_on_the_box() {
+    fn composer_captions_the_session_name_on_the_top_rule() {
         let props = ComposerProps {
             attachments: &[],
             cursor: 0,
@@ -377,17 +590,18 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: Some("test"),
             slash_suggestions: &[],
             text: "",
         };
         let rows = plain(&render_composer(&props, 40));
-        assert_eq!(rows[0], format!("╭{} test ─╮", "─".repeat(31)));
-        // While a run owns the composer the caption stays on the dimmed box.
+        assert_eq!(rows[0], format!("{} test ─", "─".repeat(33)));
+        assert_eq!(rows[0].chars().count(), 40, "the rule stays terminal-wide");
+        // While a run owns the composer the caption stays on the top rule.
         let running = ComposerProps { disabled: true, ..props };
         let rows = plain(&render_composer(&running, 40));
-        assert!(rows[0].ends_with(" test ─╮"), "{}", rows[0]);
+        assert!(rows[0].ends_with(" test ─"), "{}", rows[0]);
     }
 
     #[test]
@@ -400,7 +614,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "abc",
@@ -410,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_keeps_multi_line_text_inside_the_box() {
+    fn composer_renders_multi_line_text_between_rules() {
         let props = ComposerProps {
             attachments: &[],
             cursor: 8,
@@ -419,19 +633,127 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "line one\nline two",
         };
         let rows = plain(&render_composer(&props, 20));
-        // ╭, "❯ line one", "  line two", ╰, plus the enter/shift+enter hint
-        // row — continuation rows sit under the text; the cursor on the
-        // newline is an inverse cell after "one".
+        // Rule, "❯ line one" (the cursor on the newline is an inverse cell at
+        // the line end), the two-space continuation row, the closing rule, then
+        // the enter/ctrl+s hint.
         assert_eq!(rows.len(), 5, "{rows:?}");
-        assert_eq!(rows[1].trim_end_matches(" │").trim_end(), "│ ❯ line one");
-        assert_eq!(rows[2].trim_end_matches(" │").trim_end(), "│   line two");
-        assert!(rows.iter().all(|row| row.chars().count() == 20), "{rows:?}");
+        assert_eq!(rows[0], "─".repeat(20), "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "❯ line one", "{rows:?}");
+        assert_eq!(rows[2], "  line two", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(20), "{rows:?}");
+        assert!(rows[4].contains("enter sends"), "{rows:?}");
+    }
+
+    #[test]
+    fn composer_renders_wrapped_rows_with_a_two_space_indent() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: false,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &[],
+            session_name: None,
+            slash_suggestions: &[],
+            text: "aaaa bbbb cccc dddd eeee",
+        };
+        let rows = plain(&render_composer(&props, 20));
+        // Body width is 18, so the break space ends the first row and the tail
+        // continues under it, still starting at column 2.
+        assert_eq!(rows[0], "─".repeat(20), "{rows:?}");
+        assert_eq!(rows[1], "❯ aaaa bbbb cccc ", "{rows:?}");
+        assert_eq!(rows[2], "  dddd eeee", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(20), "{rows:?}");
+    }
+
+    #[test]
+    fn composer_lines_wraps_at_spaces_and_owns_the_break_space() {
+        // "one two" fills the 7 columns exactly; the space after it is
+        // absorbed by the upper line so "three" starts flush at column 0.
+        assert_eq!(composer_lines("one two three", 7), vec![0..8, 8..13]);
+        assert_eq!(composer_lines("one twos three", 7), vec![0..4, 4..9, 9..14]);
+        assert_eq!(
+            composer_lines("aaaa bbbb cccc dddd eeee", 18),
+            vec![0..15, 15..24]
+        );
+    }
+
+    #[test]
+    fn composer_lines_hard_breaks_a_word_longer_than_the_width() {
+        assert_eq!(composer_lines("abcdefghij", 4), vec![0..4, 4..8, 8..10]);
+        assert_eq!(composer_lines("abcdef", 6), vec![0..6]);
+    }
+
+    #[test]
+    fn composer_lines_splits_paragraphs_and_keeps_empty_lines() {
+        assert_eq!(composer_lines("", 10), vec![0..0]);
+        assert_eq!(composer_lines("aa\nbb", 10), vec![0..2, 3..5]);
+        assert_eq!(composer_lines("aa\n", 10), vec![0..2, 3..3]);
+        assert_eq!(composer_lines("aa\n\nbb", 10), vec![0..2, 3..3, 4..6]);
+    }
+
+    #[test]
+    fn composer_cursor_position_puts_a_wrap_point_on_the_lower_line() {
+        let text = "one twos three";
+        assert_eq!(composer_cursor_position(text, 7, 4), (1, 0));
+        assert_eq!(composer_cursor_at(text, 7, 1, 0), 4);
+        assert_eq!(composer_cursor_position(text, 7, 3), (0, 3));
+        assert_eq!(composer_cursor_position(text, 7, 14), (2, 5));
+        assert_eq!(
+            composer_cursor_at(text, 7, 2, 99),
+            14,
+            "column clamped to the line end"
+        );
+        // A cursor on the absorbed space after a full line stays on that line,
+        // one column past the text; the next index starts the lower line.
+        assert_eq!(composer_cursor_position("one two three", 7, 7), (0, 7));
+        assert_eq!(composer_cursor_position("one two three", 7, 8), (1, 0));
+        assert_eq!(composer_cursor_at(text, 7, 9, 0), 14, "line out of range");
+        // A cursor on a paragraph break belongs to the end of the upper line.
+        assert_eq!(composer_cursor_position("aa\nbb", 7, 2), (0, 2));
+        assert_eq!(composer_cursor_at("aa\nbb", 7, 0, 2), 2);
+    }
+
+    #[test]
+    fn composer_cursor_helpers_round_trip_every_boundary() {
+        for text in ["one two three", "aa\nbb", ""] {
+            let width = 7;
+            let total = text.chars().count();
+            for cursor in 0..=total {
+                let (line, column) = composer_cursor_position(text, width, cursor);
+                assert_eq!(
+                    composer_cursor_at(text, width, line, column),
+                    cursor,
+                    "text {text:?} cursor {cursor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn composer_cursor_helpers_clamp_wide_char_boundaries() {
+        let text = "你好世界";
+        assert_eq!(composer_lines(text, 4), vec![0..2, 2..4]);
+        assert_eq!(composer_cursor_position(text, 4, 2), (1, 0));
+        assert_eq!(composer_cursor_position(text, 4, 1), (0, 2));
+        assert_eq!(
+            composer_cursor_at(text, 4, 0, 1),
+            0,
+            "nearest boundary before the wide char"
+        );
+        assert_eq!(composer_cursor_at(text, 4, 0, 2), 1);
+        for cursor in 0..=text.chars().count() {
+            let (line, column) = composer_cursor_position(text, 4, cursor);
+            assert_eq!(composer_cursor_at(text, 4, line, column), cursor);
+        }
     }
 
     #[test]
@@ -445,7 +767,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "@hel",
@@ -456,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_menu_rows_render_above_the_composer_box() {
+    fn skill_menu_rows_render_above_the_top_rule() {
         let skills = vec![
             ("navis".to_string(), "test skill navis".to_string()),
             ("nada".to_string(), "test skill nada".to_string()),
@@ -469,7 +791,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/na",
@@ -480,15 +802,16 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[1].trim_end(), "    /nada — test skill nada");
-        assert!(rows[2].starts_with("╭"), "{rows:?}");
-        let box_index = rows.iter().position(|row| row.starts_with("╭")).unwrap();
-        assert!(
-            rows.iter()
-                .take(box_index)
-                .any(|row| row.contains("/navis")),
-            "menu rows must come before the box"
-        );
-        assert!(!rows.iter().skip(box_index).any(|row| row.contains("navis")));
+        assert_eq!(rows[2], "─".repeat(40), "{rows:?}");
+        let rule_index = rows
+            .iter()
+            .position(|row| row.chars().all(|c| c == '─'))
+            .unwrap();
+        assert_eq!(rule_index, 2, "menu rows must come before the top rule");
+        assert!(!rows
+            .iter()
+            .skip(rule_index)
+            .any(|row| row.contains("navis")));
     }
 
     #[test]
@@ -506,7 +829,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/navi",
@@ -526,7 +849,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -539,6 +862,26 @@ mod tests {
     }
 
     #[test]
+    fn composer_keeps_the_cursor_on_a_draft_typed_while_a_run_owns_it() {
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 3,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &[],
+            session_name: None,
+            slash_suggestions: &[],
+            text: "queued draft",
+        };
+        let rows = render_composer(&props, 60);
+        let body = rows.iter().find(|row| row.contains("ed draft")).unwrap();
+        assert!(body.contains(&format!("que{INVERSE_ON}u{INVERSE_OFF}ed")), "{body:?}");
+    }
+
+    #[test]
     fn composer_hints_queue_and_steer_while_a_run_owns_the_composer() {
         let props = ComposerProps {
             attachments: &[],
@@ -548,7 +891,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -560,13 +903,73 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("shift+enter steers the run")),
+                .any(|row| row.contains("ctrl+s steers the run")),
             "{rows:?}"
         );
     }
 
     #[test]
+    fn composer_lists_the_whole_queue_above_the_top_rule() {
+        let queued = vec![
+            "first queued".to_string(),
+            "second line one\nsecond line two".to_string(),
+        ];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 0,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &queued,
+            session_name: None,
+            slash_suggestions: &[],
+            text: "",
+        };
+        let rows = plain(&render_composer(&props, 60));
+        assert_eq!(rows[0].trim_end(), "2 queued messages for the next run", "{rows:?}");
+        assert_eq!(rows[1].trim_end(), "  1. first queued", "{rows:?}");
+        assert_eq!(rows[2].trim_end(), "  2. second line one …", "{rows:?}");
+        assert_eq!(rows[3], "─".repeat(60), "the rule follows the queue");
+        // With nothing typed the composer itself carries the steer-all hint,
+        // and no per-message hint is repeated anywhere.
+        assert!(
+            rows[4].contains("2 queued — ctrl+s steers the run with them all"),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("steers the running goal with it now")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn composer_draft_typed_mid_run_is_not_dimmed() {
+        let queued = vec!["first".to_string()];
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 5,
+            disabled: true,
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &queued,
+            session_name: None,
+            slash_suggestions: &[],
+            text: "draft",
+        };
+        let rows = render_composer(&props, 60);
+        let gray = paint(DIM_COLOR)("draft");
+        let body = rows.iter().find(|row| row.contains("draft")).unwrap();
+        assert!(!body.contains(&gray), "typed text must not be dimmed: {body:?}");
+        assert!(body.contains(&format!("draft{INVERSE_ON} {INVERSE_OFF}")), "{body:?}");
+    }
+
+    #[test]
     fn composer_counts_queued_prompts_once_idle() {
+        let queued = vec!["first".to_string(), "second".to_string()];
         let props = ComposerProps {
             attachments: &[],
             cursor: 0,
@@ -575,7 +978,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &[],
-            queued_count: 2,
+            queued: &queued,
             session_name: None,
             slash_suggestions: &[],
             text: "",
@@ -584,7 +987,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("2 queued")), "{rows:?}");
         assert!(
             rows.iter()
-                .any(|row| row.contains("shift+enter steers the running goal")),
+                .any(|row| row.contains("ctrl+s runs the next one")),
             "{rows:?}"
         );
     }
@@ -640,7 +1043,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/an",
@@ -666,7 +1069,7 @@ mod tests {
             selected_skill_index: 2,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/na",
@@ -675,7 +1078,7 @@ mod tests {
         assert!(rows[0].contains("    /navis — one"), "{rows:?}");
         assert!(rows[1].contains("    /nada — two"), "{rows:?}");
         assert!(rows[2].contains("▸ /nab — three"), "{rows:?}");
-        assert!(rows[3].starts_with("╭"), "{rows:?}");
+        assert!(rows[3].chars().all(|c| c == '─'), "{rows:?}");
     }
 
     #[test]
@@ -692,7 +1095,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &builtins,
             text: "/",
@@ -721,7 +1124,7 @@ mod tests {
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_suggestions: &skills,
-            queued_count: 0,
+            queued: &[],
             session_name: None,
             slash_suggestions: &[],
             text: "/navis",

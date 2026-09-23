@@ -953,16 +953,28 @@ warn or tool summary settled as the run advances. The clock of a folded
 tool row is the first call in that group.
 
 The count updates in place while the tools run, and the row is finalized
-once the cycle ends. Each new cycle begins with a short transition line
-(numbered cycle, task preview, budget) instead of per-tool chatter, so the
-scrollback reads as goals → tool summaries → model responses.
+once the cycle ends.
+
+In the Claude-style TUI those rows are **transient**. The folded tool
+summary, the cycle transition line and every op or warning row blink on the
+activity line directly above the composer, beside the braille spinner and
+the clock counting up from the run's start, and they are erased when the run
+ends. That block is debounced (`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that
+arrives inside the window opened by the last swap is queued instead of
+replacing what is on screen, so a burst of fast-arriving ops coalesces into
+one update instead of blinking, and a single blank row separates the status
+lines from the `working for …` line below them. Nothing on that line is
+written into scrollback, so returning to a
+transcript shows the goal and the model's answers instead of every tool
+call. The durable rows are goals, model text, run summaries, run ends and
+the operator info/error notices.
 
 This is a presentation-only projection: compaction is a TUI default and
 nothing is deleted from the record. The full transcript — every tool call,
 arguments, results and inference telemetry — is still written to the
 session JSONL and remains visible in `dripw`, the headless output and the
-logs. Replays, session switches and terminal resizes use the same compact
-projection, so raw tool rows are not re-revealed.
+logs. Replays, session switches and terminal resizes re-render only the
+durable rows, so tool chatter and op noise are not re-revealed.
 
 ## Queueing and steering mid-run (TUI)
 

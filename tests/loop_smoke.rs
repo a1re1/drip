@@ -1346,6 +1346,162 @@ fn role(name: &str) -> drip::harness::roles::HarnessRoleRuntime {
     }
 }
 
+/// The operator's summary preferences file reaches the run-summary request the
+/// harness sends, appended after the built-in contract.
+#[tokio::test]
+async fn an_operator_summary_preferences_file_reaches_the_run_summary_request() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+
+    // An input the operator wrote: read off disk the way the CLI reads it.
+    let preferences_path = temp.join("summary-preferences.md");
+    std::fs::write(
+        &preferences_path,
+        "Open with the failing test name, then the counts.\n",
+    )
+    .unwrap();
+    let preferences =
+        drip::core::home::load_summary_preferences_from(&preferences_path.to_string_lossy())
+            .expect("the operator's file loads");
+
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["work on the file"]}),
+        ),
+        tool_call_response(
+            "call-2",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "wrote it"}),
+        ),
+        // Run summary (text-only call).
+        text_response("All done: the file was written."),
+    ]);
+
+    let options = SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "write the file".to_string(),
+        max_iterations: Some(4),
+        model: Some("mock".to_string()),
+        // Some(true) is the operator asking for the model-written recap, which
+        // skips the composed shortcut so the request carries the composed prompt.
+        summarize_run: Some(true),
+        run_summary_preferences: Some(preferences),
+        state_path: Some(temp.join("state.json")),
+        latency_store: Some(temp.join("latency.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
+        url: Some(url),
+        ..Default::default()
+    };
+
+    let result = run_solid_state_harness(options).await.expect("run starts");
+    let bodies = server.join().unwrap();
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(bodies.len(), 3, "planning, task, summary");
+
+    let system = bodies[2]["messages"][0]["content"]
+        .as_str()
+        .expect("the summary request opens on a system message");
+    assert!(
+        system.contains("You are the reporting step at the end of a solid-state harness run"),
+        "the built-in contract still leads: {system}"
+    );
+    assert!(
+        system.contains("Testing & verification"),
+        "the built-in breakdown survives preferences: {system}"
+    );
+    assert!(
+        system.contains("Open with the failing test name, then the counts."),
+        "the operator's preferences reach the request: {system}"
+    );
+    assert!(
+        system.contains("summary_preferences (operator-authored"),
+        "the preferences arrive labelled as operator-authored: {system}"
+    );
+}
+
+/// A small completed run composes its recap from the tasks' own summaries plus
+/// the harness-recorded verification breakdown, with no model call at all.
+#[tokio::test]
+async fn a_completed_run_composes_a_summary_carrying_the_verification_breakdown() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+
+    // Exactly two endpoints: planning and the task. A composed summary calls no
+    // model, so `summary_preferences` stays None and summarize_run is unset.
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["work on the file"]}),
+        ),
+        tool_call_response(
+            "call-2",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "wrote it"}),
+        ),
+    ]);
+
+    let options = SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "write the file".to_string(),
+        max_iterations: Some(4),
+        model: Some("mock".to_string()),
+        state_path: Some(temp.join("state.json")),
+        latency_store: Some(temp.join("latency.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
+        url: Some(url),
+        ..Default::default()
+    };
+
+    let result = run_solid_state_harness(options).await.expect("run starts");
+    // A third connection would mean the model path ran; the scripted endpoint
+    // has no response for it and the join fails.
+    let bodies = server
+        .join()
+        .expect("the composed path makes no model call");
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(bodies.len(), 2, "planning and task only");
+
+    let summary = result
+        .state
+        .run_summary
+        .as_ref()
+        .expect("the run recorded a summary")
+        .text
+        .clone();
+    assert!(summary.contains("Completed 1 task(s)."), "{summary}");
+    assert!(
+        summary.contains("- task-1: work on the file — wrote it"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Testing & verification:"),
+        "the composed recap carries the verification breakdown: {summary}"
+    );
+}
+
 /// --max-loops bounds task loops directly: two loops of a two-task plan end
 /// the run as max-loops (not max-iterations, which is unset) with the
 /// remaining task still pending.

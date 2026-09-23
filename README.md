@@ -898,6 +898,28 @@ tool's `args`.
 
 ---
 
+## Run summary preferences
+
+A run that did not opt out of summaries (lite mode and review children do) ends
+with a recap. A small completed run composes it from the tasks' own `finish_task`
+summaries; otherwise the model writes it from the final state.
+Both paths show what each task actually did rather than only its one-line
+summary, and both append a `Testing & verification` breakdown naming each
+harness-recorded check, its outcome and its counts — or saying plainly that no
+verification ran.
+
+The recap's shape is yours to steer. `~/.drip/summary-preferences.md` is seeded on
+the first run (see `open_drip_home`) with an editable default; its text is
+appended after drip's built-in summary contract, so it can change *how* the
+summary reads but never *what* it may claim: counts come from `task_stats`, a
+``passed`` claim needs a harness-recorded verification record, and a tool or
+child session is named only when `tool_usage` counts it. Delete the file to fall back to
+the built-in prompt, and set `DRIP_SUMMARY_PREFERENCES` to a path to keep another
+prompt around. The file is read once when a run starts, so edits
+apply from the next run; `--home` / `DRIP_HOME` decide which home's file is read.
+
+---
+
 ## Session storage
 
 Sessions are stored under `~/.drip/projects/<slug>/sessions/<id>/`, keyed by the

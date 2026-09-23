@@ -8,6 +8,7 @@ use crate::tui::theme::{paint, ACCENT_COLOR, DIM_COLOR};
 use crate::watch::ansi::{char_width, fit, string_width, wrap_ansi};
 
 use crate::cli::commands::SlashCommandSpec;
+use std::time::Duration;
 
 const INVERSE_ON: &str = "\u{1b}[7m";
 const INVERSE_OFF: &str = "\u{1b}[27m";
@@ -717,7 +718,6 @@ fn paint_bold_title(title: &str) -> String {
 pub struct StatusBarProps<'a> {
     pub active_skill_names: &'a [String],
     pub cwd: &'a str,
-    pub model_label: &'a str,
     pub running: bool,
     pub running_detail: Option<&'a str>,
     pub session_id: &'a str,
@@ -739,9 +739,14 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
         ));
     }
     let dim = paint(DIM_COLOR);
+    // The active model and its reasoning effort are deliberately absent from
+    // this row: one drip run mixes models across roles, so a single pinned
+    // label at the bottom of the frame reads as the run's model when it is
+    // only one of them. `/config` prints the resolved profile, and a custom
+    // statusLine still receives model_id / model_display_name for callers
+    // that want the label.
     let mut line = format!(
-        "{} · session {}",
-        props.model_label,
+        "session {}",
         props.session_id.chars().take(8).collect::<String>()
     );
     if !props.active_skill_names.is_empty() {
@@ -750,6 +755,41 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
     line.push_str(&format!(" · {}", props.cwd));
     rows.push(dim(&fit(&line, width, true)));
     rows
+}
+
+/// The counting-up clock of the activity line: `12s`, `1m 05s`, `1h 02m 05s`.
+/// Pure arithmetic on the elapsed time — no percentage is ever invented.
+pub fn format_working_clock(elapsed: Duration) -> String {
+    let total = elapsed.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Claude-style activity line drawn directly above the chat while a goal run
+/// is in flight: one braille spinner frame plus "working for {clock}". The
+/// caller owns the frame (see `pane_title::frame_for`) and the elapsed time;
+/// this is pure formatting. A row that does not fit `width` is clipped with an
+/// ellipsis, and a zero-width row renders as nothing.
+pub fn render_working_line(frame: &str, elapsed: Duration, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let room = width.saturating_sub(string_width(frame));
+    let body = format!(" working for {}", format_working_clock(elapsed));
+    let body = if string_width(&body) <= room {
+        body
+    } else {
+        fit(&body, room, true)
+    };
+    let accent = paint(ACCENT_COLOR);
+    let dim = paint(DIM_COLOR);
+    format!("{}{}", accent(frame), dim(&body))
 }
 
 #[cfg(test)]
@@ -1319,7 +1359,6 @@ mod tests {
         let props = StatusBarProps {
             active_skill_names: &["a".to_string(), "b".to_string()],
             cwd: "/tmp",
-            model_label: "model-x",
             running: false,
             running_detail: None,
             session_id: "1234567890abcdef",
@@ -1327,6 +1366,26 @@ mod tests {
         let rows = plain(&render_status_bar(&props, 30));
         assert_eq!(rows.len(), 1);
         assert!(rows[0].chars().count() <= 30);
+    }
+
+    #[test]
+    fn status_bar_omits_the_active_model_and_reasoning_effort() {
+        // A drip run mixes models across roles, so the bottom bar must not
+        // pin one model (or its effort) as if it spoke for the whole run.
+        let props = StatusBarProps {
+            active_skill_names: &[],
+            cwd: "/tmp/project",
+            running: false,
+            running_detail: None,
+            session_id: "1234567890abcdef",
+        };
+        let rows = plain(&render_status_bar(&props, 80));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("session 12345678"), "{:?}", rows[0]);
+        assert!(rows[0].contains("/tmp/project"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("model"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("effort"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("deepseek"), "{:?}", rows[0]);
     }
 
     #[test]
@@ -1484,5 +1543,41 @@ mod tests {
             "{rows:?}"
         );
         assert!(rows.iter().any(|row| row.contains("nav▏")), "{rows:?}");
+    }
+
+    #[test]
+    fn working_clock_counts_up_in_seconds_minutes_and_hours() {
+        assert_eq!(format_working_clock(Duration::from_millis(0)), "0s");
+        assert_eq!(format_working_clock(Duration::from_secs(59)), "59s");
+        assert_eq!(format_working_clock(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(format_working_clock(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(
+            format_working_clock(Duration::from_secs(3600)),
+            "1h 00m 00s"
+        );
+        assert_eq!(
+            format_working_clock(Duration::from_secs(3725)),
+            "1h 02m 05s"
+        );
+    }
+
+    #[test]
+    fn working_line_paints_the_spinner_frame_before_the_counting_clock() {
+        let row = render_working_line("⠙", Duration::from_secs(65), 60);
+        assert!(
+            row.contains("\u{1b}["),
+            "the frame and the clock carry their own colours: {row:?}"
+        );
+        assert_eq!(plain(&[row])[0], "⠙ working for 1m 05s");
+    }
+
+    #[test]
+    fn working_line_clips_a_row_that_does_not_fit_the_width() {
+        let row = render_working_line("⠋", Duration::from_secs(3661), 12);
+        let plain_row = &plain(&[row])[0];
+        assert_eq!(string_width(plain_row), 12, "{plain_row:?}");
+        assert!(plain_row.ends_with('…'), "{plain_row:?}");
+        assert!(plain_row.starts_with("⠋ working"), "{plain_row:?}");
+        assert_eq!(render_working_line("⠋", Duration::from_secs(1), 0), "");
     }
 }

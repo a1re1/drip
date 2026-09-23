@@ -84,7 +84,7 @@ use crate::tui::terminal_title::{
 use crate::tui::widgets::{
     composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
     render_composer, render_picker, render_skill_picker, render_status_bar, render_survey,
-    ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
+    render_working_line, ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
 };
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -168,7 +168,7 @@ fn help_text() -> String {
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
-            "  esc — clear the composer, or stop the running goal",
+            "  esc — clear the composer, or stop the running goal and its commands",
             "  ctrl+c — exit",
         ]
         .iter()
@@ -639,6 +639,14 @@ struct TuiApp {
     rows: usize,
     running: bool,
     running_detail: Option<String>,
+    /// When the current (or last) goal run began — the activity line above the
+    /// composer counts its clock up from here. `None` whenever no run is in
+    /// flight, so nothing is painted above an idle composer.
+    run_started_at: Option<Instant>,
+    /// Next repaint deadline of the activity line animation; `None` when idle
+    /// (or when the run already ended), so the loop falls back to its plain
+    /// wait instead of busy-polling.
+    activity_next_tick: Option<Instant>,
     selected_skill_index: usize,
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
@@ -794,6 +802,8 @@ impl TuiApp {
             rows,
             running: false,
             running_detail: None,
+            run_started_at: None,
+            activity_next_tick: None,
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_catalog,
@@ -1010,6 +1020,20 @@ impl TuiApp {
                 ));
             }
         } else {
+            // Claude-style activity line directly above the chat: a braille
+            // spinner frame plus the clock counting up from the run's start.
+            // Only painted while a run is in flight; formatting happens here,
+            // the animation tick owns the repaints.
+            if self.running {
+                if let Some(started) = self.run_started_at {
+                    let elapsed = started.elapsed();
+                    rows.push(render_working_line(
+                        crate::tui::pane_title::frame_for(elapsed),
+                        elapsed,
+                        self.cols,
+                    ));
+                }
+            }
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
             let queued: Vec<String> = self.queued_prompts.iter().cloned().collect();
             rows.extend(render_composer(
@@ -1055,7 +1079,6 @@ impl TuiApp {
                 &StatusBarProps {
                     active_skill_names: &skill_names,
                     cwd: &self.bootstrap.cwd,
-                    model_label: &self.model_label(),
                     running: self.running,
                     running_detail: self.running_detail.as_deref(),
                     session_id: &self.session.id,
@@ -1688,6 +1711,19 @@ impl TuiApp {
                 Key::Escape => {
                     if let Some(abort) = &self.abort {
                         abort.abort();
+                    }
+                    // The abort signal alone is only observed BETWEEN harness
+                    // steps, so an in-flight BASH/VERIFY child kept running to
+                    // its own timeout (an operator had to wait out a `sleep`).
+                    // Esc now stops those children here, with exactly the
+                    // process-group SIGTERM/SIGKILL sweep a `drip --stop`
+                    // signal performs - the registry is process-wide, so every
+                    // running command of this run is reached.
+                    let stopped = crate::tools::child_process::terminate_active_processes();
+                    if stopped > 0 {
+                        self.push_info(format!(
+                            "esc — aborting the run and stopping {stopped} in-flight command(s)"
+                        ));
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
@@ -3279,6 +3315,10 @@ impl TuiApp {
         let goal_images = std::mem::take(&mut self.attachments);
         self.run_session_id = Some(self.session.id.clone());
         self.running = true;
+        // The activity line above the composer starts its clock here and
+        // animates on the shared spinner cadence while the run is in flight.
+        self.run_started_at = Some(Instant::now());
+        self.activity_next_tick = Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
         self.running_detail = Some("resolving context".to_string());
         // Mention resolution can read a whole directory tree; show the
         // "running" state before it starts.
@@ -3729,6 +3769,10 @@ impl TuiApp {
         self.finalize_compact();
         self.running = false;
         self.running_detail = None;
+        // The activity line goes with the run: its clock has nothing left to
+        // count and its animation must stop repainting.
+        self.run_started_at = None;
+        self.activity_next_tick = None;
         // Idle title (bare label, no spinner) whatever ended the run:
         // completion, cancel, or error.
         self.title_next_tick = None;
@@ -3820,6 +3864,21 @@ impl TuiApp {
                 }
             }
 
+            // Activity line above the composer: consume a due tick here and
+            // repaint, so the spinner frame and the counting clock advance
+            // without the paint path re-arming anything. Re-armed only while
+            // a run is in flight; the loop otherwise waits as before.
+            if let Some(at) = self.activity_next_tick {
+                if now >= at {
+                    self.activity_next_tick = None;
+                    if self.running {
+                        self.repaint();
+                        self.activity_next_tick =
+                            Some(now + Duration::from_millis(SPINNER_INTERVAL_MS));
+                    }
+                }
+            }
+
             // Custom status line: adopt finished jobs and re-arm the
             // interval refresh here, never in the paint path (drawing stays
             // side-effect-free). Non-blocking; failures never retry or log.
@@ -3831,6 +3890,7 @@ impl TuiApp {
                 self.resize_at,
                 self.status_line_next_refresh,
                 self.title_next_tick,
+                self.activity_next_tick,
             ]
             .into_iter()
             .flatten()
@@ -6625,5 +6685,135 @@ mod survey_tests {
             "space never advances a single-choice survey"
         );
         assert!(state.answers.is_empty());
+    }
+}
+
+/// Focused tests for the activity line above the composer: it is painted only
+/// while a run is in flight, it sits immediately above the composer, and its
+/// clock counts up from the run's start with the shared spinner cadence.
+#[cfg(test)]
+mod activity_line_tests {
+    use super::*;
+    use crate::watch::ansi::strip_ansi;
+
+    fn plain(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|row| strip_ansi(row)).collect()
+    }
+
+    fn elapsed(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .expect("the monotonic clock is older than the run")
+    }
+
+    #[test]
+    fn working_line_sits_immediately_above_the_composer_while_running() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(elapsed(65));
+        let rows = plain(&fixture.app.live_region());
+        let index = rows
+            .iter()
+            .position(|row| row.contains("working for 1m 05s"))
+            .expect("a live run must paint the activity line");
+        assert!(
+            crate::tui::pane_title::SPINNER_FRAMES
+                .iter()
+                .any(|frame| rows[index].starts_with(frame)),
+            "the line starts with a spinner frame: {:?}",
+            rows[index]
+        );
+        assert!(
+            rows[index + 1].starts_with('─') && rows[index + 2].contains('❯'),
+            "the activity line belongs directly above the composer box: {:?}",
+            &rows[index..=index + 2]
+        );
+    }
+
+    #[test]
+    fn no_working_line_is_painted_when_idle() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        // A stale start time with no run in flight must paint nothing.
+        fixture.app.run_started_at = Some(elapsed(3));
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            !rows.iter().any(|row| row.contains("working for")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn finish_run_clears_the_activity_line_state() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(Instant::now());
+        fixture.app.activity_next_tick = Some(Instant::now());
+        fixture.app.finish_run();
+        assert!(fixture.app.run_started_at.is_none());
+        assert!(fixture.app.activity_next_tick.is_none());
+        let rows = plain(&fixture.app.live_region());
+        assert!(!rows.iter().any(|row| row.contains("working for")));
+    }
+
+    #[test]
+    fn activity_tick_stops_rearming_once_the_run_ends() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.activity_next_tick = Some(Instant::now());
+        fixture.app.finish_run();
+        assert!(
+            fixture.app.activity_next_tick.is_none(),
+            "an idle composer must not keep repainting for the spinner"
+        );
+    }
+
+    #[test]
+    fn escape_stops_the_run_and_its_in_flight_commands() {
+        // `terminate_active_processes` sweeps EVERY in-flight child in the
+        // process, so hold the registry lock the other registry-firing tests
+        // hold before firing it from the esc key.
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        let signal = crate::harness::model_call::AbortSignal::new();
+        fixture.app.abort = Some(signal.clone());
+        // Stands in for the terminator a running BASH child registers: esc must
+        // run it, not merely flip the harness abort flag.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stopped);
+        let unregister =
+            crate::tools::child_process::register_process_terminator(Box::new(move || {
+                flag.store(true, Ordering::SeqCst);
+            }));
+
+        fixture.app.on_key(Key::Escape);
+
+        assert!(signal.is_aborted(), "esc must abort the run");
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "esc must stop the in-flight command, not only signal the harness"
+        );
+        assert!(
+            fixture.app.running,
+            "the run ends when the harness reports back, not on the keypress"
+        );
+        // The stop is visible: an operator who hits esc must see that the
+        // running command was killed rather than infer it from silence.
+        let note = fixture
+            .app
+            .pending_cells
+            .iter()
+            .chain(fixture.app.cells.iter())
+            .find_map(|entry| match entry {
+                TranscriptEntry::Info(note) if note.text.contains("in-flight command") => {
+                    Some(note.text.clone())
+                }
+                _ => None,
+            })
+            .expect("the killed command is reported in the transcript");
+        assert!(note.contains("aborting the run"), "unexpected note: {note}");
+        unregister();
     }
 }

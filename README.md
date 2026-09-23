@@ -1047,11 +1047,16 @@ dripw
 Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills & Tools, plus
 the transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
+With `[4]` focused, `j`/`k` (and the up/down arrows, and the scroll wheel) walk
+that pane's skills and tools one at a time, while `[/]` (or `h`/`l`) turns its
+page, since its list is paged rather than scrolled. Once a name is picked,
+`PageUp`/`PageDown` (or the wheel over the `[0]` column) scroll the read-up.
 Clicking a row of the Sessions, Tasks or Shells pane focuses that pane and
 selects the row under the pointer (clicking a session also focuses its
-transcript); the `[4]` Skills & Tools pane is read-only, so a click on it just
-focuses it. Hovering the transcript (or the shell log with `[3]` focused) and
-rolling the scroll wheel scrolls it too — older lines up, newer down.
+transcript); clicking a skill or tool in `[4]` focuses that pane and picks the
+name under the pointer — even a name that wrapped onto the next row. Hovering
+the transcript (or the shell log with `[3]` focused) and rolling the scroll
+wheel scrolls it too — older lines up, newer down.
 
 The `[4]` Skills & Tools pane shows what the focused session's loops actually
 had at their disposal. On every loop-start telemetry event the harness writes
@@ -1059,11 +1064,30 @@ the composed skill set — the classifier's picks plus the run's base-prompt
 `--skill` activations, deduped in composition order — and the loop's whole tool
 surface: the packed tools its role allowlist and the `--mcp` gate leave
 callable, plus the harness tools (`plan_tasks`, `finish_task`, `ask_user`, …).
-dripw reads those events straight out of the session transcript and lists a
+dripw reads those events straight out of the session transcript and shows a
 roll-up of every skill and every tool seen across the run with how many loops
-had it, then each loop's own skills and tools in order, so you can see what a
-run could reach for at a given point and how the surface moved as it ran.
-Sessions recorded before this telemetry existed just show the empty state.
+had it, then one block per loop, newest first, so you can see what a run could
+reach for now and how the surface moved as it ran. Names are printed as
+comma-separated lists that wrap to the pane width rather than one name per line,
+so a loop reaching for twenty tools costs a couple of rows; when the whole list
+still does not fit the pane it pages — `[/]` (or `h`/`l`) turn the page while `[4]`
+is focused, and the pane's last row reads `page 2/5 · [/] pages · j/k/↑↓ picks`
+(the same `j`/`k`/arrow pick as elsewhere). Sessions recorded before
+this telemetry existed just show the empty state.
+
+With `[4]` focused, `↑`/`↓` (or `j`/`k`, the wheel, or a click) move over those
+names individually — the picked name alone paints in reverse video (the rest of
+its row keeps its own colour) and the `[0]` column reads it up: a skill shows its
+`SKILL.md` with markdown rendered (resolved the same way the CLI resolves skills,
+so a project or user skill shadows the builtin of the same name), and a tool
+shows the listing the model gets in its context window — name, description and
+the JSON parameter schema, whether the tool is packed, an MCP passthrough, or one
+of the harness tools (`finish_task`, `plan_tasks`, `ask_user`, …) every loop is
+offered. The read-up is wrapped to the width of the `[0]` column it paints in and
+scrolls, so a long `SKILL.md` or schema stays readable end to end: `PageUp`/
+`PageDown`, or the wheel over that column, move through it, and the box's footer
+says where in the listing you are. Leaving `[4]` or switching sessions puts the
+transcript back in the `[0]` column.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 

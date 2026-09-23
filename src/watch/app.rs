@@ -47,6 +47,92 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// One styled row for a read-up box (RowCell is plain data; `plain` is private
+/// to the row renderer).
+fn cell(
+    text: impl Into<String>,
+    color: fn(&str) -> String,
+) -> crate::watch::transcript_view::RowCell {
+    crate::watch::transcript_view::RowCell {
+        text: text.into(),
+        color: Some(color),
+        selected: false,
+        sel_span: None,
+        rich: false,
+    }
+}
+
+/// The listing behind a builtin tool name — name, description, then the JSON
+/// parameter schema the model is handed in the context window. A name the pack
+/// does not carry here (an MCP tool, or a corpus-gated REFERENCE with no roots
+/// configured) says so instead of showing nothing.
+fn tool_listing_rows(name: &str, inner_w: usize) -> Vec<crate::watch::transcript_view::RowCell> {
+    use crate::watch::ansi::c;
+    let mut defs =
+        crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::default());
+    defs.extend(crate::tools::pack::get_framework_tool_definitions());
+    // A tool the [4] pane can list, resolved against the three surfaces a
+    // loop's tool list is built from: the packed tools the role allowlist and
+    // the `--mcp` gate leave callable, the harness (framework) tools every
+    // loop is offered, and the MCP passthrough tools.
+    let mut rows = Vec::new();
+    if let Some(def) = defs.into_iter().find(|d| d.name == name) {
+        rows.push(cell(def.name.clone(), c::accent_bold));
+        rows.push(cell("", c::dim));
+        for line in crate::watch::render::wrap_plain(&def.description, inner_w) {
+            rows.push(cell(line, c::white));
+        }
+        rows.push(cell("", c::dim));
+        push_parameters(
+            &mut rows,
+            &serde_json::to_value(&def.parameters).unwrap_or(serde_json::json!({})),
+            inner_w,
+        );
+    } else if let Some(function) = harness_tool_function(name) {
+        // Same listing the model is handed for the harness tools, out of the
+        // specs the loop builds its requests from.
+        rows.push(cell(name.to_string(), c::accent_bold));
+        rows.push(cell("", c::dim));
+        let description = function["description"].as_str().unwrap_or_default();
+        for line in crate::watch::render::wrap_plain(description, inner_w) {
+            rows.push(cell(line, c::white));
+        }
+        rows.push(cell("", c::dim));
+        let parameters = function
+            .get("parameters")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        push_parameters(&mut rows, &parameters, inner_w);
+    } else {
+        rows.push(cell("  no definition available in this checkout", c::dim));
+    }
+    rows
+}
+
+/// The `function` block of a harness tool definition, by name.
+fn harness_tool_function(name: &str) -> Option<serde_json::Value> {
+    crate::harness::harness_tools::harness_tool_definitions()
+        .into_iter()
+        .find(|definition| definition["function"]["name"].as_str() == Some(name))
+        .map(|definition| definition["function"].clone())
+}
+
+fn push_parameters(
+    rows: &mut Vec<crate::watch::transcript_view::RowCell>,
+    parameters: &serde_json::Value,
+    inner_w: usize,
+) {
+    use crate::watch::ansi::c;
+    rows.push(cell("parameters", c::accent));
+    if let Ok(pretty) = serde_json::to_string_pretty(parameters) {
+        for line in pretty.lines() {
+            for wrapped in crate::watch::render::wrap_plain(line, inner_w) {
+                rows.push(cell(wrapped, c::gray));
+            }
+        }
+    }
+}
+
 fn empty_vm(now: i64) -> WatchViewModel {
     WatchViewModel {
         now,
@@ -66,6 +152,10 @@ fn empty_vm(now: i64) -> WatchViewModel {
         tasks: Vec::new(),
         sel_task: 0,
         skill_loads: Vec::new(),
+        skill_page: 0,
+        sel_skill: None,
+        skill_detail: None,
+        skill_detail_scroll: 0,
     }
 }
 
@@ -223,6 +313,12 @@ impl WatchApp {
             }
             if WINCH.swap(false, Ordering::SeqCst) {
                 self.force_full = true;
+                // The read-up is wrapped to the [0] column, so a resize has to
+                // re-wrap it; the pick may also have moved out of the pane.
+                self.clamp_skill_selection();
+                if self.vm.sel_skill.is_some() {
+                    self.refresh_skill_detail();
+                }
                 self.draw();
             }
             if HALT.load(Ordering::SeqCst) {
@@ -342,6 +438,9 @@ impl WatchApp {
                 // loop-start telemetry, so it is refreshed with it — a skill
                 // loaded into a new loop appears the moment the loop starts.
                 self.vm.skill_loads = skill_loads(&self.vm.transcript);
+                // A pick can fall off the end when a shorter session's
+                // telemetry replaces the one it was made against.
+                self.clamp_skill_selection();
                 dirty = true;
             }
         }
@@ -526,6 +625,12 @@ impl WatchApp {
         self.vm.transcript = Vec::new();
         self.vm.following = true;
         self.vm.transcript_scroll = 0;
+        self.vm.skill_loads = Vec::new();
+        self.vm.skill_page = 0;
+        // A new session owns a new surface, so nothing stays picked and the
+        // [0] column goes back to the transcript.
+        self.vm.sel_skill = None;
+        self.vm.skill_detail = None;
         self.tail = None;
 
         let Some(record) = record else { return };
@@ -605,8 +710,9 @@ impl WatchApp {
             return;
         }
 
-        // Focus the Skills & Tools pane — a read-only projection of the
-        // focused session's loop-start telemetry, so there is nothing to select.
+        // Focus the Skills & Tools pane — a projection of the focused session's
+        // loop-start telemetry; ↑/↓, j/k, the wheel or a click then picks one
+        // skill/tool and the [0] column reads it up.
         if key == "4" {
             self.vm.focus = 4;
             self.draw();
@@ -638,27 +744,34 @@ impl WatchApp {
             return;
         }
 
-        // Move selection: j/k or arrows
+        // Move selection: j/k or arrows — in [4] that walks its skills/tools,
+        // one item per press, and the [0] column follows the cursor.
         if key == "j" || key == "\x1b[B" {
-            self.mv(1);
-            self.draw();
+            self.step(1);
             return;
         }
         if key == "k" || key == "\x1b[A" {
-            self.mv(-1);
+            self.step(-1);
+            return;
+        }
+
+        // PageUp / PageDown scroll the [0] read-up while [4] holds a pick: a
+        // SKILL.md or a tool schema is longer than the column, so the whole of
+        // it stays reachable.
+        if (key == "\x1b[5~" || key == "\x1b[6~") && self.vm.skill_detail.is_some() {
+            self.scroll_skill_detail(if key == "\x1b[5~" { -PAGE } else { PAGE });
             self.draw();
             return;
         }
 
-        // Page / scroll: [ ] or h / l — scroll the transcript pane
+        // Page / scroll: [ ] or h / l — scroll the transcript pane; with [4]
+        // focused they turn that pane's page.
         if key == "[" || key == "h" || key == "\x1b[D" {
-            self.scroll_transcript(-PAGE);
-            self.draw();
+            self.page_step(-1);
             return;
         }
         if key == "]" || key == "l" || key == "\x1b[C" {
-            self.scroll_transcript(PAGE);
-            self.draw();
+            self.page_step(1);
         }
     }
 
@@ -673,8 +786,8 @@ impl WatchApp {
 
     /// A left click on a list row focuses that pane and moves its selection to
     /// the row under the pointer — the navigation `j`/`k` and Tab give, aimed
-    /// with the mouse. Selecting a session also re-focuses its transcript; the
-    /// Skills & Tools pane has no selection, so a click on it only focuses it.
+    /// with the mouse. Selecting a session also re-focuses its transcript; a
+    /// click in the Skills & Tools pane also picks the skill/tool under it.
     /// anywhere else (a border, the transcript, blank space) is ignored, so the
     /// wheel keeps its scroll-only meaning.
     fn on_mouse_click(&mut self, col: usize, row: usize) {
@@ -705,8 +818,20 @@ impl WatchApp {
                 self.sync_shell_log();
             }
             _ => {
-                // The Skills & Tools pane is read-only: a click just focuses it.
+                // The Skills & Tools pane: focus it, and pick the skill/tool
+                // under the pointer — resolved by `skill_item_at` against the
+                // same wrapped rows the frame painted, so a name broken over
+                // two rows still resolves.
                 self.vm.focus = 4;
+                if let Some(item) =
+                    crate::watch::render::skill_item_at(&self.vm, cols, rows, col, row)
+                {
+                    let items = crate::watch::render::skill_items(&self.vm, self.skill_inner_w());
+                    if let Some(index) = items.iter().position(|e| e.item == item) {
+                        self.vm.sel_skill = Some(index);
+                        self.refresh_skill_detail();
+                    }
+                }
             }
         }
         self.draw();
@@ -717,6 +842,39 @@ impl WatchApp {
     /// over the list panes does not move the log ("hovering" behaviour).
     fn on_mouse_scroll(&mut self, scroll: crate::watch::mouse::MouseScroll) {
         let (cols, rows) = terminal_size();
+        self.scroll_at(scroll, cols, rows);
+    }
+
+    /// The wheel handler proper, with the frame size the report was measured
+    /// in — split from `on_mouse_scroll` so the routing can be unit-tested at a
+    /// fixed terminal size.
+    fn scroll_at(&mut self, scroll: crate::watch::mouse::MouseScroll, cols: usize, rows: usize) {
+        // A wheel over the focused [4] pane walks its skills/tools one step at
+        // a time — the same navigation the arrows and a click give.
+        if self.vm.focus == 4 {
+            if let Some(region) = crate::watch::render::panel_regions(&self.vm, cols, rows)
+                .into_iter()
+                .nth(3)
+            {
+                if scroll.inside(region) {
+                    let step = scroll.delta(1);
+                    self.move_skill_item(step);
+                    self.draw();
+                    return;
+                }
+            }
+        }
+        // A wheel over the [0] read-up scrolls the SKILL.md / tool listing it
+        // shows, so the whole file is reachable without leaving the pick.
+        if self.vm.focus == 4 && self.vm.skill_detail.is_some() {
+            if let Some(region) = transcript_region(&self.vm, cols, rows) {
+                if scroll.inside(region) {
+                    self.scroll_skill_detail(scroll.delta(WHEEL_LINES));
+                    self.draw();
+                    return;
+                }
+            }
+        }
         let Some(region) = transcript_region(&self.vm, cols, rows) else {
             return;
         };
@@ -757,6 +915,38 @@ impl WatchApp {
         }
     }
 
+    /// `j`/`k` and the up/down arrows: move the focused pane's cursor — in [4]
+    /// that walks the skills and tools one at a time.
+    fn step(&mut self, delta: i64) {
+        if self.vm.focus == 4 {
+            self.move_skill_item(delta);
+        } else {
+            self.mv(delta);
+        }
+        self.draw();
+    }
+
+    /// `[/]`, `h`/`l` and the left/right arrows: scroll the transcript, or turn
+    /// the [4] pane's page while it holds the focus.
+    fn page_step(&mut self, delta: i64) {
+        if self.vm.focus == 4 {
+            self.page_skills(delta);
+        } else {
+            self.scroll_transcript(delta * PAGE);
+        }
+        self.draw();
+    }
+
+    /// Turn the [4] Skills & Tools pane's page. Its content is a wrapped list
+    /// that pages rather than scrolls, so the index is clamped to the pages this
+    /// terminal actually seats (one while the content fits).
+    fn page_skills(&mut self, delta: i64) {
+        let (cols, rows) = terminal_size();
+        let pages = crate::watch::render::skill_page_count(&self.vm, cols, rows);
+        let page = self.vm.skill_page as i64 + delta;
+        self.vm.skill_page = page.clamp(0, pages.saturating_sub(1) as i64) as usize;
+    }
+
     // +delta scrolls toward newer lines (down), -delta toward older.
     fn scroll_transcript(&mut self, delta: i64) {
         let len = if self.vm.focus == 3 { self.vm.shell_log_lines.len() } else { self.vm.transcript.len() } as i64;
@@ -770,6 +960,133 @@ impl WatchApp {
                 self.vm.following = true;
             }
         }
+    }
+
+    // ── skill/tool read-up (the [4] pane's pick, read in the [0] column) ────
+
+    /// The inner width of the [4] pane in this terminal — the wrap the pane
+    /// painted with, so the hit test and the read-up agree with the frame.
+    fn skill_inner_w(&self) -> usize {
+        let (cols, rows) = terminal_size();
+        crate::watch::render::panel_regions(&self.vm, cols, rows)
+            .into_iter()
+            .nth(3)
+            .map(|(_, _, c0, c1)| c1.saturating_sub(c0 + 1).max(1))
+            .unwrap_or(40)
+    }
+
+    /// Scroll the [0] read-up by `delta` rows, clamped to what the listing
+    /// actually overflows by — so the top and the end of the file are floors.
+    fn scroll_skill_detail(&mut self, delta: i64) {
+        let (cols, rows) = terminal_size();
+        let max = crate::watch::render::skill_detail_max_scroll(&self.vm, cols, rows);
+        let next = self.vm.skill_detail_scroll as i64 + delta;
+        self.vm.skill_detail_scroll = next.clamp(0, max as i64) as usize;
+    }
+
+    /// The skill/tool currently picked in the [4] pane.
+    fn selected_skill_item(&self) -> Option<crate::watch::render::SkillItem> {
+        let items = crate::watch::render::skill_items(&self.vm, self.skill_inner_w());
+        self.vm
+            .sel_skill
+            .and_then(|i| items.get(i).map(|e| e.item.clone()))
+    }
+
+    /// Move the [4] pane's skill/tool cursor by `delta` and load the read-up
+    /// for what it lands on. Nothing picked yet enters the list at the end the
+    /// move came from, so the first `j` picks the first item and the first `k`
+    /// the last.
+    fn move_skill_item(&mut self, delta: i64) {
+        let len = crate::watch::render::skill_items(&self.vm, self.skill_inner_w()).len();
+        if len == 0 {
+            self.vm.sel_skill = None;
+            self.vm.skill_detail = None;
+            return;
+        }
+        let len = len as i64;
+        let next = match self.vm.sel_skill {
+            Some(i) => i as i64 + delta,
+            None if delta > 0 => 0,
+            None => len - 1,
+        };
+        self.vm.sel_skill = Some(next.clamp(0, len - 1) as usize);
+        self.refresh_skill_detail();
+    }
+
+    /// Put the [4] pane's cursor back inside a list that just changed under it:
+    /// a shorter session drops a selection past the end, an empty one clears it.
+    fn clamp_skill_selection(&mut self) {
+        let len = crate::watch::render::skill_items(&self.vm, self.skill_inner_w()).len();
+        match self.vm.sel_skill {
+            Some(_) if len == 0 => {
+                self.vm.sel_skill = None;
+                self.vm.skill_detail = None;
+            }
+            Some(i) if i >= len => {
+                self.vm.sel_skill = Some(len - 1);
+                self.refresh_skill_detail();
+            }
+            _ => {}
+        }
+    }
+
+    /// Load the read-up for the picked item: a skill's SKILL.md through the
+    /// same discovery the CLI uses (so a project or user skill shadows the
+    /// builtin it replaces), or a builtin tool's name, description and
+    /// parameters straight out of the pack it ships in.
+    fn refresh_skill_detail(&mut self) {
+        let (cols, rows) = terminal_size();
+        self.refresh_skill_detail_at(cols, rows);
+    }
+
+    /// The read-up loader, at a given frame size — split from
+    /// `refresh_skill_detail` so the wrap it applies can be unit-tested against
+    /// a fixed terminal instead of whatever the harness runs in.
+    fn refresh_skill_detail_at(&mut self, cols: usize, rows: usize) {
+        let Some(item) = self.selected_skill_item() else {
+            self.vm.skill_detail = None;
+            return;
+        };
+        let inner_w = crate::watch::render::read_up_inner_w(&self.vm, cols, rows);
+        // A fresh read-up starts at its top.
+        self.vm.skill_detail_scroll = 0;
+        let lines = match &item {
+            crate::watch::render::SkillItem::Skill(name) => match self.load_skill_markdown(name) {
+                Some(text) => crate::watch::transcript_view::markdown_rows(&text, inner_w, None),
+                None => vec![cell(
+                    "  no SKILL.md found for this skill in this checkout",
+                    crate::watch::ansi::c::dim,
+                )],
+            },
+            crate::watch::render::SkillItem::Tool(name) => tool_listing_rows(name, inner_w),
+        };
+        self.vm.skill_detail = Some(crate::watch::render::SkillDetail {
+            title: format!("{} · {}", item.kind_label(), item.name()),
+            lines,
+        });
+    }
+
+    /// The picked skill's SKILL.md text, from the pool the focused session's
+    /// loop loaded it out of: that session's project skills, this machine's
+    /// user skills, then the builtins (embedded, so they resolve anywhere).
+    fn load_skill_markdown(&self, name: &str) -> Option<String> {
+        let cwd = self
+            .selected_record()
+            .map(|r| r.cwd)
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| self.watch_dir.clone());
+        let home_skills = std::path::Path::new(&self.project.home_root).join("skills");
+        let skill = crate::cli::skills::discover_skills(
+            std::path::Path::new(&cwd),
+            &home_skills,
+            None,
+            None,
+        )
+        .into_iter()
+        .find(|s| s.name == name)?;
+        crate::cli::skills::load_skill_content(&skill, None)
+            .ok()
+            .map(|loaded| loaded.content)
     }
 
     // ── paint ────────────────────────────────────────────────────────────────
@@ -834,6 +1151,43 @@ pub fn run_watch_app(project: DripProject, watch_dir: String) {
 mod tests {
     use super::*;
     use crate::core::types::{HarnessTask, HarnessTaskStatus};
+
+    #[test]
+    fn the_harness_tools_read_up_the_schema_the_model_gets() {
+        let body = |name: &str| {
+            crate::watch::ansi::strip_ansi(
+                &tool_listing_rows(name, 60)
+                    .iter()
+                    .map(|r| r.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        };
+
+        // The [4] pane lists the harness tools every loop is offered, so the
+        // read-up has to resolve them to the very listing the request carried
+        // — not the "no definition" fallback.
+        let finish = body("finish_task");
+        assert!(!finish.contains("no definition available"), "{finish:?}");
+        assert!(finish.starts_with("finish_task"), "{finish:?}");
+        assert!(finish.contains("Finish the current task"), "{finish:?}");
+        assert!(finish.contains("parameters"), "{finish:?}");
+        assert!(finish.contains("\"anchor\""), "the JSON schema: {finish:?}");
+
+        // Every harness name the loop-start telemetry can list resolves.
+        for definition in crate::harness::harness_tools::harness_tool_definitions() {
+            let name = definition["function"]["name"].as_str().unwrap().to_string();
+            let body = body(&name);
+            assert!(body.starts_with(&name), "{name}: {body:?}");
+            assert!(
+                !body.contains("no definition available"),
+                "{name}: {body:?}"
+            );
+        }
+
+        // A name no surface carries still says so rather than painting nothing.
+        assert!(body("NOPE__missing").contains("no definition available"));
+    }
 
     fn record(id: &str) -> SessionRecord {
         SessionRecord {
@@ -1047,5 +1401,232 @@ mod tests {
         assert_eq!(app.vm.focus, 4);
         app.on_key("\t");
         assert_eq!(app.vm.focus, 1);
+    }
+
+    #[test]
+    fn the_focused_skills_pane_pages_with_brackets_and_walks_items_with_j_k() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = (1..=40)
+            .map(|i| crate::watch::render::SkillLoad {
+                iteration: i,
+                skills: vec![format!("skill-{i}")],
+                tools: vec![format!("TOOL-{i}")],
+            })
+            .collect();
+        app.vm.focus = 4;
+        assert!(crate::watch::render::skill_page_count(&app.vm, 80, 24) > 1);
+
+        // `[/]` (and h/l) still turn the page.
+        app.on_key("]");
+        assert_eq!(app.vm.skill_page, 1);
+        app.on_key("[");
+        assert_eq!(app.vm.skill_page, 0, "the first page is a floor");
+
+        // `j`/`k` walk the skills and tools one at a time instead, and never
+        // turn a page on the way.
+        app.on_key("j");
+        assert_eq!(app.vm.skill_page, 0);
+        assert_eq!(app.vm.sel_skill, Some(0));
+        app.on_key("j");
+        assert_eq!(app.vm.sel_skill, Some(1));
+        app.on_key("k");
+        app.on_key("k");
+        assert_eq!(app.vm.sel_skill, Some(0), "the first item is a floor");
+
+        // Everywhere else `j` still moves the session selection.
+        app.vm.focus = 1;
+        app.vm.sel_task = 0;
+        app.on_key("j");
+        assert_eq!(app.vm.skill_page, 0);
+        assert_eq!(
+            app.vm.sel_skill,
+            Some(0),
+            "the [4] cursor is left where it was"
+        );
+    }
+
+    #[test]
+    fn arrows_clicks_and_the_wheel_walk_the_skills_and_tools_and_read_them_up() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 1,
+            skills: vec!["tdd".into()],
+            tools: vec!["READ".into()],
+        }];
+        app.vm.focus = 4;
+        assert!(app.vm.sel_skill.is_none(), "nothing is picked until a move");
+
+        // `j` (and the down arrow) walk forward from nothing into the first
+        // item; the read-up follows and carries the SKILL.md body.
+        app.on_key("j");
+        assert_eq!(app.vm.sel_skill, Some(0));
+        let detail = app
+            .vm
+            .skill_detail
+            .as_ref()
+            .expect("a read-up for the pick");
+        assert_eq!(detail.title, "skill · tdd");
+        let body = crate::watch::ansi::strip_ansi(
+            &detail
+                .lines
+                .iter()
+                .map(|r| r.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert!(
+            body.contains("Test-first discipline"),
+            "the read-up shows the skill's SKILL.md: {body:?}"
+        );
+
+        app.on_key("\x1b[B");
+        assert_eq!(app.vm.sel_skill, Some(1));
+        assert_eq!(app.vm.skill_detail.as_ref().unwrap().title, "tool · READ");
+        app.on_key("k");
+        assert_eq!(app.vm.sel_skill, Some(0));
+        assert_eq!(app.vm.skill_detail.as_ref().unwrap().title, "skill · tdd");
+        // From nothing, `k` enters at the far end of the list — the last
+        // listing, which here is the loop block's own READ.
+        app.vm.sel_skill = None;
+        app.on_key("k");
+        assert_eq!(app.vm.sel_skill, Some(3));
+        assert_eq!(app.vm.skill_detail.as_ref().unwrap().title, "tool · READ");
+
+        // A click in [4] picks the name under the pointer.
+        app.vm.sel_skill = None;
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, c1) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];
+        let target = crate::watch::render::skill_items(&app.vm, c1 - c0 - 1)[1].clone();
+        app.click_at(c0 + 1 + target.first_col, r0 + 1 + target.first, cols, rows);
+        assert_eq!(app.vm.focus, 4);
+        assert_eq!(app.selected_skill_item(), Some(target.item));
+        assert!(app.vm.skill_detail.is_some());
+    }
+
+    #[test]
+    fn a_pick_survives_a_page_turn_and_clamps_when_the_surface_changes() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = (1..=8)
+            .map(|i| crate::watch::render::SkillLoad {
+                iteration: i,
+                skills: vec![format!("skill-{i}")],
+                tools: vec![format!("TOOL-{i}")],
+            })
+            .collect();
+        app.vm.focus = 4;
+        app.on_key("j");
+        app.on_key("j");
+        let picked = app.vm.sel_skill;
+        assert_eq!(picked, Some(1));
+        // Turning the page moves the window, not the cursor.
+        app.on_key("]");
+        assert_eq!(app.vm.sel_skill, picked);
+
+        // An index left past the end clamps to the last item...
+        app.vm.sel_skill = Some(999);
+        app.clamp_skill_selection();
+        let last = crate::watch::render::skill_items(&app.vm, app.skill_inner_w()).len() - 1;
+        assert_eq!(app.vm.sel_skill, Some(last));
+        assert!(app.vm.skill_detail.is_some());
+
+        // ...and a surface that goes away clears the pick and its read-up.
+        app.vm.skill_loads = Vec::new();
+        app.clamp_skill_selection();
+        assert_eq!(app.vm.sel_skill, None);
+        assert!(app.vm.skill_detail.is_none());
+    }
+
+    #[test]
+    fn the_read_up_wraps_to_the_transcript_column_and_scrolls_in_it() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 1,
+            skills: vec![],
+            tools: vec!["BASH_ASYNC".into()],
+        }];
+        app.vm.focus = 4;
+        app.on_key("j");
+        assert_eq!(
+            app.vm.skill_detail.as_ref().map(|d| d.title.as_str()),
+            Some("tool · BASH_ASYNC")
+        );
+
+        // The read-up targets the [0] column, which in a landscape terminal is
+        // wider than the [4] pane — wrapping to the pane is what left a dead
+        // margin down the read-up's right-hand side.
+        let (cols, rows) = (100usize, 30usize);
+        let read_up = crate::watch::render::read_up_inner_w(&app.vm, cols, rows);
+        let (_, _, p0, p1) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];
+        let pane_inner = p1 - p0 - 1;
+        assert!(
+            read_up > pane_inner,
+            "the read-up targets the wider column: {read_up} vs {pane_inner}"
+        );
+
+        // Rewrapped at that geometry it fills the column and never overflows it.
+        app.refresh_skill_detail_at(cols, rows);
+        let widest = app
+            .vm
+            .skill_detail
+            .as_ref()
+            .expect("a read-up for the pick")
+            .lines
+            .iter()
+            .map(|line| crate::watch::ansi::string_width(&line.text))
+            .max()
+            .expect("listing rows");
+        assert!(
+            widest <= read_up,
+            "wrapped to its column: {widest} vs {read_up}"
+        );
+        assert!(
+            widest > pane_inner,
+            "the listing fills the column, not the [4] pane: {widest} vs {pane_inner}"
+        );
+
+        // A read-up longer than the column scrolls in it, with both ends as
+        // floors, driven by PageUp/PageDown and by the wheel over the column.
+        app.vm.skill_detail = Some(crate::watch::render::SkillDetail {
+            title: "tool · X".into(),
+            lines: (0..200)
+                .map(|i| cell(format!("line {i:03}"), crate::watch::ansi::c::white))
+                .collect(),
+        });
+        app.vm.skill_detail_scroll = 0;
+        let (tcols, trows) = terminal_size();
+        let max = crate::watch::render::skill_detail_max_scroll(&app.vm, tcols, trows);
+        assert!(max > 0, "the listing outruns the column");
+        app.on_key("\x1b[5~");
+        assert_eq!(app.vm.skill_detail_scroll, 0, "the top is a floor");
+        app.on_key("\x1b[6~");
+        assert_eq!(app.vm.skill_detail_scroll, PAGE as usize);
+        for _ in 0..40 {
+            app.on_key("\x1b[6~");
+        }
+        assert_eq!(app.vm.skill_detail_scroll, max, "the end is a floor");
+
+        // The wheel over the [0] column scrolls the read-up, not the transcript
+        // behind it; its own region is the box the read-up paints in.
+        let (r0, _, c0, _) =
+            crate::watch::render::transcript_region(&app.vm, cols, rows).expect("the [0] column");
+        app.scroll_at(
+            crate::watch::mouse::MouseScroll {
+                wheel: crate::watch::mouse::MouseWheel::Up,
+                col: c0 + 1,
+                row: r0 + 1,
+            },
+            cols,
+            rows,
+        );
+        assert_eq!(
+            app.vm.skill_detail_scroll,
+            max.saturating_sub(WHEEL_LINES as usize),
+            "the wheel walks the read-up back"
+        );
+
+        // A new pick starts its own read-up at the top.
+        app.vm.sel_skill = None;
+        app.on_key("j");
+        assert_eq!(app.vm.skill_detail_scroll, 0);
     }
 }

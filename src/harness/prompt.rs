@@ -1,4 +1,7 @@
-use crate::core::types::{HarnessRunReason, HarnessState, HarnessTask, HarnessTaskStatus};
+use crate::core::types::{
+    HarnessRunReason, HarnessState, HarnessTask, HarnessTaskStatus, HarnessVerificationRecord,
+    VerificationAnchorKind, VerificationEvidence, VerificationEvidenceKind,
+};
 use crate::harness::chat_types::ChatRoleTag;
 use crate::harness::transport::{
     build_multimodal_user_content, TransportContent, TransportRequestMessage,
@@ -191,8 +194,22 @@ pub const RUN_SUMMARY_SYSTEM_PROMPT: &str = concat!(
     "You are the reporting step at the end of a solid-state harness run.",
     " You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes.",
     " Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why.",
+    " Structure it as: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did; a 'Testing & verification' section listing every harness-recorded verification command with its outcome, its counts and its anchor (or stating plainly that none was recorded); then anything blocked, dropped, or left unverified.",
     " Reply with plain markdown text. Do not call tools."
 );
+
+/// The run-summary system prompt: the built-in contract, then the operator's
+/// preferences file when one is set (see `core::home::DEFAULT_SUMMARY_PREFERENCES`).
+/// The contract goes first and keeps the grounding rules; the preferences only
+/// steer shape and emphasis, so what a summary may CLAIM is never editable away.
+pub fn compose_run_summary_system_prompt(preferences: Option<&str>) -> String {
+    match preferences.map(str::trim).filter(|text| !text.is_empty()) {
+        None => RUN_SUMMARY_SYSTEM_PROMPT.to_string(),
+        Some(preferences) => format!(
+            "{RUN_SUMMARY_SYSTEM_PROMPT}\n\nsummary_preferences (operator-authored, follow them for the summary's shape and emphasis; they never override the grounding rules above):\n{preferences}"
+        ),
+    }
+}
 
 // Load-bearing prompt fragments (debt audit T3): integration tests assert
 // through these constants instead of prose copies.
@@ -288,6 +305,9 @@ pub struct RunSummaryMessagesArgs<'a> {
     pub tool_usage: Option<std::collections::BTreeMap<String, u64>>,
     /// Ground-truth workspace facts gathered by the caller (e.g. git status) at run end.
     pub workspace_changes: Option<String>,
+    /// The operator's summary preferences (see `compose_run_summary_system_prompt`);
+    /// None keeps the built-in prompt.
+    pub summary_preferences: Option<&'a str>,
 }
 
 /// Builds the tool-usage line — names sorted by code point, zero counts dropped.
@@ -867,10 +887,19 @@ pub fn build_run_summary_messages(
             .filter(|task| task.status == HarnessTaskStatus::Dropped)
             .count();
 
+        // The title + finish summary alone does not show what the task DID; the
+        // harness-recorded footprint (files patched, commands run) does, and it is
+        // the same trail a reviewer reads.
         sections.push(
             ["tasks:".to_string()]
                 .into_iter()
-                .chain(state.tasks.iter().map(|task| format_task_line(task, None)))
+                .chain(state.tasks.iter().flat_map(|task| {
+                    let mut lines = vec![format_task_line(task, None)];
+                    for entry in task.footprint.as_deref().unwrap_or_default() {
+                        lines.push(format!("    footprint: {entry}"));
+                    }
+                    lines
+                }))
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -883,6 +912,10 @@ pub fn build_run_summary_messages(
     } else {
         sections.push("tasks: none were planned".to_string());
     }
+
+    // What the run actually TESTED, as the harness recorded it. Without this the
+    // summary can only restate task summaries — the shallowness this fixes.
+    sections.push(build_verification_breakdown_section(state));
 
     if !state.memory.is_empty() {
         sections.push(
@@ -951,15 +984,15 @@ pub fn build_run_summary_messages(
     }
 
     sections.push(
-        "instruction: The run has ended. Write a short message to the user summarizing the results: what was accomplished, and anything blocked or dropped and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
+        "instruction: The run has ended. Write a message to the user summarizing the results with enough depth that they can trust it without re-reading the run: what was accomplished, and anything blocked or dropped and why. Write it in this order: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did (use its footprint lines, not only its finish summary); a 'Testing & verification' section repeating every harness-recorded verification listed above with its command, outcome, executed/passed/failed counts and anchor, or saying plainly that no verification command was recorded; then anything blocked, dropped, or left unverified and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
             .to_string(),
     );
 
     vec![
         TransportRequestMessage {
-            content: Some(TransportContent::Text(
-                RUN_SUMMARY_SYSTEM_PROMPT.to_string(),
-            )),
+            content: Some(TransportContent::Text(compose_run_summary_system_prompt(
+                args.summary_preferences,
+            ))),
             role: ChatRoleTag::System,
             ..Default::default()
         },
@@ -1094,6 +1127,11 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
             task.title,
             task.summary.as_deref().unwrap_or_default().trim()
         ));
+        // What the task actually touched, so the recap is more than its
+        // finish_task one-liner.
+        for entry in task.footprint.as_deref().unwrap_or_default() {
+            lines.push(format!("  - {entry}"));
+        }
     }
     for review in &reviews {
         if let Some(summary) = review
@@ -1112,15 +1150,20 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
     if !state.anomalies.is_empty() {
         return None;
     }
+    // The composed path is the one a small completed run actually shows, so it
+    // carries the same testing breakdown the model path is handed.
+    lines.push(String::new());
+    lines.push(render_verification_breakdown(state));
     Some(lines.join("\n"))
 }
 
 pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason) -> String {
     if state.tasks.is_empty() {
         return format!(
-            "Run ended ({}): no tasks were planned. {}.",
+            "Run ended ({}): no tasks were planned. {}.\n\n{}",
             reason_wire_tag(reason),
-            run_reason_description(reason)
+            run_reason_description(reason),
+            render_verification_breakdown(state)
         );
     }
 
@@ -1184,6 +1227,9 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
             "Dropped tasks mean the goal was only partially accomplished — re-run the goal (or give more direction) to finish the rest.".to_string(),
         );
     }
+
+    lines.push(String::new());
+    lines.push(render_verification_breakdown(state));
 
     lines.join("\n")
 }
@@ -1674,5 +1720,280 @@ mod tests {
             "line should stay bounded, got {}",
             line.len()
         );
+    }
+}
+
+/// How many verification records the summary carries; earlier ones collapse to
+/// a count so a long run cannot flood the summary call.
+const MAX_SUMMARY_VERIFICATIONS: usize = 8;
+
+fn summary_verification_records(state: &HarnessState) -> Vec<&HarnessVerificationRecord> {
+    let mut records: Vec<&HarnessVerificationRecord> = Vec::new();
+    if let Some(timeline) = state.verifications.as_ref() {
+        records.extend(timeline.iter());
+    }
+    // A legacy state may predate the timeline and carry only the latest record.
+    if records.is_empty() {
+        if let Some(last) = state.last_verification.as_ref() {
+            records.push(last);
+        }
+    }
+    records
+}
+
+fn clamp_summary_line(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// One verification record as the summary reports it: identity, command,
+/// outcome, counts and anchor — the same vocabulary the driver sees.
+fn summary_verification_record_line(record: &HarnessVerificationRecord) -> String {
+    let mut line = format!(
+        "[{}] cycle {}: {} → {}{}",
+        record.id.as_deref().unwrap_or("-"),
+        record.at_iteration,
+        record.command,
+        crate::core::state::describe_verification_outcome(
+            record.failed,
+            record.ran_no_tests,
+            record.evidence.as_ref()
+        ),
+        summary_evidence_counts(record.evidence.as_ref()),
+    );
+    if !record.output_tail.trim().is_empty() {
+        line.push_str(&format!(
+            "\n    output tail: {}",
+            clamp_summary_line(record.output_tail.trim(), 240)
+        ));
+    }
+    line
+}
+
+/// The verification breakdown handed to the summary model: each record's
+/// command, outcome, counts and anchor — or an explicit statement that nothing
+/// was recorded, so the model cannot imply a check it has no record for.
+fn build_verification_breakdown_section(state: &HarnessState) -> String {
+    let records = summary_verification_records(state);
+    let mut lines =
+        vec!["verifications (harness-recorded for this run — cite THESE, not memory):".to_string()];
+    if records.is_empty() {
+        lines.push(
+            "none were recorded: no test, build, or typecheck command was captured for this run — say so plainly and never claim one passed."
+                .to_string(),
+        );
+        return lines.join("\n");
+    }
+    let hidden = records.len().saturating_sub(MAX_SUMMARY_VERIFICATIONS);
+    if hidden > 0 {
+        lines.push(format!("- …and {hidden} earlier verification(s) not shown"));
+    }
+    for record in records.iter().skip(hidden) {
+        lines.push(format!("- {}", summary_verification_record_line(record)));
+    }
+    lines.join("\n")
+}
+
+/// The counts and anchor of one record, spelled out: the summary must be able to
+/// state exactly what a check executed and how it was anchored, without the
+/// reader re-parsing a tail.
+fn summary_evidence_counts(evidence: Option<&VerificationEvidence>) -> String {
+    let Some(evidence) = evidence else {
+        return " (no structured evidence; unverified)".to_string();
+    };
+    let kind = match evidence.kind {
+        VerificationEvidenceKind::Tests => "tests",
+        VerificationEvidenceKind::Custom => "custom assertions",
+        VerificationEvidenceKind::Build => "build",
+        VerificationEvidenceKind::Typecheck => "typecheck",
+        VerificationEvidenceKind::Unverified => "unverified",
+    };
+    let anchor = match evidence.anchor.as_ref() {
+        Some(anchor) => match anchor.kind {
+            VerificationAnchorKind::External => "external",
+            VerificationAnchorKind::SelfAuthored => "self-authored",
+            VerificationAnchorKind::Undeclared => "undeclared",
+        },
+        None => "undeclared",
+    };
+    let skipped = evidence
+        .skipped
+        .map(|skipped| format!(", {skipped} skipped"))
+        .unwrap_or_default();
+    format!(
+        " ({kind}: {} executed, {} passed, {} failed{skipped}; anchor: {anchor})",
+        evidence.executed, evidence.passed, evidence.failed
+    )
+}
+
+/// The same breakdown as plain text, for the deterministic paths (composed and
+/// fallback) that no model rewrites.
+pub fn render_verification_breakdown(state: &HarnessState) -> String {
+    let records = summary_verification_records(state);
+    let mut lines = vec!["Testing & verification:".to_string()];
+    if records.is_empty() {
+        lines.push(
+            "- no verification command (tests, build, typecheck) was recorded for this run."
+                .to_string(),
+        );
+        return lines.join("\n");
+    }
+    let hidden = records.len().saturating_sub(MAX_SUMMARY_VERIFICATIONS);
+    if hidden > 0 {
+        lines.push(format!("- {hidden} earlier verification(s) not shown"));
+    }
+    for record in records.iter().skip(hidden) {
+        lines.push(format!("- {}", summary_verification_record_line(record)));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod run_summary_depth_tests {
+    use super::*;
+    use crate::core::state::create_harness_state;
+
+    fn task(id: &str, title: &str, summary: &str, footprint: Option<Vec<&str>>) -> HarnessTask {
+        let mut task: HarnessTask = serde_json::from_value(serde_json::json!({
+            "activations": 1, "createdAtIteration": 0, "id": id, "notes": [], "stallCount": 0,
+            "status": "completed", "title": title
+        }))
+        .unwrap();
+        task.summary = Some(summary.to_string());
+        task.footprint = footprint.map(|entries| entries.into_iter().map(str::to_string).collect());
+        task
+    }
+
+    fn record(command: &str) -> HarnessVerificationRecord {
+        HarnessVerificationRecord {
+            at_iteration: 3,
+            command: command.to_string(),
+            failed: false,
+            output_tail: "test result: ok. 12 passed; 0 failed".to_string(),
+            ran_no_tests: None,
+            evidence: Some(VerificationEvidence {
+                kind: VerificationEvidenceKind::Tests,
+                executed: 12,
+                passed: 12,
+                failed: 0,
+                skipped: None,
+                detail: None,
+                anchor: None,
+            }),
+            id: Some("v3".to_string()),
+        }
+    }
+
+    #[test]
+    fn composed_summary_carries_footprints_and_the_verification_breakdown() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![task(
+            "task-1",
+            "wire it",
+            "wired",
+            Some(vec!["edited src/a.rs", "ran cargo test --lib"]),
+        )];
+        state.verifications = Some(vec![record("cargo test --lib")]);
+
+        let text = build_composed_run_summary(&state, 6).expect("composed");
+        assert!(text.contains("  - edited src/a.rs"), "{text}");
+        assert!(text.contains("  - ran cargo test --lib"), "{text}");
+        assert!(text.contains("Testing & verification:"), "{text}");
+        assert!(text.contains("cargo test --lib"), "{text}");
+        assert!(
+            text.contains("tests: 12 executed, 12 passed, 0 failed"),
+            "{text}"
+        );
+        assert!(text.contains("anchor: undeclared"), "{text}");
+    }
+
+    #[test]
+    fn composed_summary_admits_when_no_verification_was_recorded() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![task("task-1", "wire it", "wired", None)];
+
+        let text = build_composed_run_summary(&state, 6).expect("composed");
+        assert!(
+            text.contains("no verification command (tests, build, typecheck) was recorded"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_model_path_is_handed_the_same_breakdown() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![task(
+            "task-1",
+            "wire it",
+            "wired",
+            Some(vec!["edited src/a.rs"]),
+        )];
+        state.verifications = Some(vec![record("cargo test --lib")]);
+
+        let messages = build_run_summary_messages(
+            &state,
+            &RunSummaryMessagesArgs {
+                current_date: "2026-09-01",
+                reason: HarnessRunReason::Completed,
+                tool_usage: None,
+                workspace_changes: None,
+                summary_preferences: None,
+            },
+        );
+        let user = match &messages[1].content {
+            Some(TransportContent::Text(text)) => text.clone(),
+            other => panic!("unexpected summary content: {other:?}"),
+        };
+        assert!(user.contains("footprint: edited src/a.rs"), "{user}");
+        assert!(user.contains("verifications (harness-recorded"), "{user}");
+        assert!(
+            user.contains("tests: 12 executed, 12 passed, 0 failed"),
+            "{user}"
+        );
+        assert!(user.contains("'Testing & verification' section"), "{user}");
+    }
+
+    #[test]
+    fn summary_preferences_are_appended_after_the_contract() {
+        assert_eq!(
+            compose_run_summary_system_prompt(None),
+            RUN_SUMMARY_SYSTEM_PROMPT
+        );
+        assert_eq!(
+            compose_run_summary_system_prompt(Some("   \n")),
+            RUN_SUMMARY_SYSTEM_PROMPT
+        );
+        let composed = compose_run_summary_system_prompt(Some("Lead with the test counts."));
+        assert!(
+            composed.starts_with(RUN_SUMMARY_SYSTEM_PROMPT),
+            "{composed}"
+        );
+        assert!(
+            composed.ends_with("Lead with the test counts."),
+            "{composed}"
+        );
+    }
+
+    #[test]
+    fn only_the_newest_verifications_are_listed_with_a_count_of_the_rest() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![task("task-1", "wire it", "wired", None)];
+        state.verifications = Some(
+            (1..=12)
+                .map(|i| record(&format!("cargo test run-{i}")))
+                .collect(),
+        );
+
+        let text = build_composed_run_summary(&state, 6).expect("composed");
+        assert!(
+            text.contains("4 earlier verification(s) not shown"),
+            "{text}"
+        );
+        assert!(text.contains("cargo test run-12"), "{text}");
+        assert!(!text.contains("cargo test run-1 →"), "{text}");
     }
 }

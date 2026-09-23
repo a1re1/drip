@@ -899,6 +899,28 @@ tool's `args`.
 
 ---
 
+## Run summary preferences
+
+A run that did not opt out of summaries (lite mode and review children do) ends
+with a recap. A small completed run composes it from the tasks' own `finish_task`
+summaries; otherwise the model writes it from the final state.
+Both paths show what each task actually did rather than only its one-line
+summary, and both append a `Testing & verification` breakdown naming each
+harness-recorded check, its outcome and its counts — or saying plainly that no
+verification ran.
+
+The recap's shape is yours to steer. `~/.drip/summary-preferences.md` is seeded on
+the first run (see `open_drip_home`) with an editable default; its text is
+appended after drip's built-in summary contract, so it can change *how* the
+summary reads but never *what* it may claim: counts come from `task_stats`, a
+``passed`` claim needs a harness-recorded verification record, and a tool or
+child session is named only when `tool_usage` counts it. Delete the file to fall back to
+the built-in prompt, and set `DRIP_SUMMARY_PREFERENCES` to a path to keep another
+prompt around. The file is read once when a run starts, so edits
+apply from the next run; `--home` / `DRIP_HOME` decide which home's file is read.
+
+---
+
 ## Session storage
 
 Sessions are stored under `~/.drip/projects/<slug>/sessions/<id>/`, keyed by the
@@ -960,6 +982,13 @@ steer is never lost silently.
 The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
 arrives as a single byte instead of pausing output; shift+enter is deliberately
 not a binding because most terminals report it as plain Enter.
+
+`Esc` while a run is in flight aborts the run **and** stops the commands it is
+running: the harness gives up at its next safe point, and every in-flight
+`BASH`/`VERIFY` child (a `sleep`, a long test run) gets the same process-group
+`SIGTERM`→`SIGKILL` sweep a `drip --stop` signal performs. A command that is
+mid-run is killed within about a second instead of running to its own timeout,
+and the transcript notes how many in-flight commands were stopped.
 
 ## Watch TUI (`dripw`)
 

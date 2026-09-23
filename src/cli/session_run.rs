@@ -297,6 +297,8 @@ pub async fn run_session_goal(
         skill_pool: args.skill_pool.clone(),
         ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: args.cwd.clone(),
+        // Read once per run: the file is the operator's live summary prompt.
+        summary_preferences: crate::core::home::load_summary_preferences(&args.project.home_root),
         goal: args.goal.clone(),
         goal_context: if goal_context.is_empty() {
             None

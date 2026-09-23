@@ -78,6 +78,9 @@ pub struct CliGoalRunArgs {
     pub skills: Vec<LoadedCliSkill>,
     pub state_path: PathBuf,
     pub summarize_run: Option<bool>,
+    /// The operator's summary preferences, read from the home the run's config
+    /// came from (`~/.drip/summary-preferences.md`).
+    pub summary_preferences: Option<String>,
     /// Draft mode (--lite): terminal reason "draft" and no run summary.
     pub lite: bool,
     /// Operator review/verify opt-out (implied by lite): no reviewer chain,
@@ -434,6 +437,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         signal: args.signal.clone(),
         state_path: Some(args.state_path.clone()),
         summarize_run: args.summarize_run,
+        run_summary_preferences: args.summary_preferences.clone(),
         lite: args.lite,
         no_review: args.no_review || args.lite,
         system_prompt: Some(compose_harness_system_prompt(Some(&persona_with_skills))),

@@ -5737,6 +5737,9 @@ pub struct SolidStateHarnessOptions {
     pub plan_mode: Option<String>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
+    /// The operator's summary preferences (~/.drip/summary-preferences.md),
+    /// read once by the caller; appended to the run-summary system prompt.
+    pub run_summary_preferences: Option<String>,
     /// Draft mode (--lite): single author lane; terminal reason "draft",
     /// no end-of-run summary, and (with no_review) no completion-anchor gate.
     pub lite: bool,
@@ -11640,6 +11643,17 @@ impl HarnessRun {
             }
         }
 
+        // Preferences come from the run when the caller resolved them against its
+        // own home (the CLI does, so --home is honoured); callers that pass none
+        // fall back to the global home file, which is what the TUI and the review
+        // path use.
+        let summary_preferences =
+            self.options.run_summary_preferences.clone().or_else(|| {
+                crate::core::home::load_summary_preferences(
+                    &crate::core::home::resolve_drip_home_root(),
+                )
+            });
+
         let workspace_changes = self
             .options
             .collect_run_facts
@@ -11653,6 +11667,7 @@ impl HarnessRun {
                 reason,
                 tool_usage: Some(self.run_tool_usage.clone()),
                 workspace_changes,
+                summary_preferences: summary_preferences.as_deref(),
             },
         );
         // The summary must never turn a finished run into a failure; fall back

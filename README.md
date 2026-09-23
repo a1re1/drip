@@ -931,6 +931,28 @@ tool's `args`.
 
 ---
 
+## Run summary preferences
+
+A run that did not opt out of summaries (lite mode and review children do) ends
+with a recap. A small completed run composes it from the tasks' own `finish_task`
+summaries; otherwise the model writes it from the final state.
+Both paths show what each task actually did rather than only its one-line
+summary, and both append a `Testing & verification` breakdown naming each
+harness-recorded check, its outcome and its counts — or saying plainly that no
+verification ran.
+
+The recap's shape is yours to steer. `~/.drip/summary-preferences.md` is seeded on
+the first run (see `open_drip_home`) with an editable default; its text is
+appended after drip's built-in summary contract, so it can change *how* the
+summary reads but never *what* it may claim: counts come from `task_stats`, a
+``passed`` claim needs a harness-recorded verification record, and a tool or
+child session is named only when `tool_usage` counts it. Delete the file to fall back to
+the built-in prompt, and set `DRIP_SUMMARY_PREFERENCES` to a path to keep another
+prompt around. The file is read once when a run starts, so edits
+apply from the next run; `--home` / `DRIP_HOME` decide which home's file is read.
+
+---
+
 ## Session storage
 
 Sessions are stored under `~/.drip/projects/<slug>/sessions/<id>/`, keyed by the
@@ -964,16 +986,28 @@ warn or tool summary settled as the run advances. The clock of a folded
 tool row is the first call in that group.
 
 The count updates in place while the tools run, and the row is finalized
-once the cycle ends. Each new cycle begins with a short transition line
-(numbered cycle, task preview, budget) instead of per-tool chatter, so the
-scrollback reads as goals → tool summaries → model responses.
+once the cycle ends.
+
+In the Claude-style TUI those rows are **transient**. The folded tool
+summary, the cycle transition line and every op or warning row blink on the
+activity line directly above the composer, beside the braille spinner and
+the clock counting up from the run's start, and they are erased when the run
+ends. That block is debounced (`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that
+arrives inside the window opened by the last swap is queued instead of
+replacing what is on screen, so a burst of fast-arriving ops coalesces into
+one update instead of blinking, and a single blank row separates the status
+lines from the `working for …` line below them. Nothing on that line is
+written into scrollback, so returning to a
+transcript shows the goal and the model's answers instead of every tool
+call. The durable rows are goals, model text, run summaries, run ends and
+the operator info/error notices.
 
 This is a presentation-only projection: compaction is a TUI default and
 nothing is deleted from the record. The full transcript — every tool call,
 arguments, results and inference telemetry — is still written to the
 session JSONL and remains visible in `dripw`, the headless output and the
-logs. Replays, session switches and terminal resizes use the same compact
-projection, so raw tool rows are not re-revealed.
+logs. Replays, session switches and terminal resizes re-render only the
+durable rows, so tool chatter and op noise are not re-revealed.
 
 ## Queueing and steering mid-run (TUI)
 
@@ -992,6 +1026,13 @@ steer is never lost silently.
 The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
 arrives as a single byte instead of pausing output; shift+enter is deliberately
 not a binding because most terminals report it as plain Enter.
+
+`Esc` while a run is in flight aborts the run **and** stops the commands it is
+running: the harness gives up at its next safe point, and every in-flight
+`BASH`/`VERIFY` child (a `sleep`, a long test run) gets the same process-group
+`SIGTERM`→`SIGKILL` sweep a `drip --stop` signal performs. A command that is
+mid-run is killed within about a second instead of running to its own timeout,
+and the transcript notes how many in-flight commands were stopped.
 
 ## Watch TUI (`dripw`)
 
@@ -1110,6 +1151,14 @@ next to `settings`:
 
 Behavior:
 
+- The built-in bottom bar shows the session id, the active skills and the
+  working directory — deliberately **not** the active model or its reasoning
+  effort. One drip run mixes models across roles (a planner, an author, a
+  reviewer on different profiles), so a single pinned label at the bottom of
+  the frame reads as *the* run's model when it is only one of them. `/config`
+  prints the resolved profile and route, and the statusLine JSON below still
+  carries `model.id` / `model.display_name` for a custom row that wants the
+  label.
 - No `statusLine` key (or `null`) keeps the built-in status bar unchanged. An
   invalid `statusLine` (wrong `type`, empty command, values out of range,
   wrong JSON shape) prints one nonfatal warning naming the config file and the

@@ -178,7 +178,13 @@ pub async fn generate_chat_title(route: ModelRoute, goal: &str, timeout_ms: u64)
         emit: Arc::new(|_| {}),
         fallback_route: None,
         get_iteration: Arc::new(|| 0),
-        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        // The route carries the credential; a text-only call never reads the
+        // route object for headers, so the resolved route's Authorization must
+        // land on the deps or the request goes out unauthenticated (401).
+        headers: crate::tui::session_name::session_name_headers(
+            vec![("content-type".to_string(), "application/json".to_string())],
+            &route,
+        ),
         model: route.model.clone(),
         on_retry_wait: Arc::new(|_| {}),
         on_usage: Arc::new(|_, _| {}),

@@ -129,6 +129,10 @@ const RESIZE_SETTLE_MS: u64 = 150;
 // Transient activity + notice rows kept on the live line above the composer at
 // once: the block blinks in one or two rows instead of growing with a run.
 const ACTIVITY_NOTICE_LIMIT: usize = 2;
+// Debounce window for the transient activity block: the rows above the working
+// line swap at most this often, so a burst of fast-arriving ops, cycle
+// transitions or warnings coalesces into one update instead of blinking.
+const ACTIVITY_DEBOUNCE_MS: u64 = 500;
 
 const SYNC_UPDATE_START: &str = "\u{1b}[?2026h";
 const SYNC_UPDATE_END: &str = "\u{1b}[?2026l";
@@ -657,6 +661,14 @@ struct TuiApp {
     /// never reach scrollback (the transcript JSONL keeps every one of them
     /// for `dripw`, the headless output and the logs).
     activity_notices: Vec<CompactCell>,
+    /// Transient rows that arrived inside the current debounce window: they
+    /// replace `activity_notices` once that window elapses (see
+    /// `ACTIVITY_DEBOUNCE_MS`), so a burst of fast messages coalesces into a
+    /// single swap instead of blinking across the line.
+    activity_pending: Vec<CompactCell>,
+    /// When the displayed transient block was last swapped. `None` means no
+    /// block is on screen yet, so the next batch lands immediately.
+    activity_shown_at: Option<Instant>,
     selected_skill_index: usize,
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
@@ -888,6 +900,8 @@ impl TuiApp {
             run_started_at: None,
             activity_next_tick: None,
             activity_notices: Vec::new(),
+            activity_pending: Vec::new(),
+            activity_shown_at: None,
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_catalog,
@@ -928,19 +942,69 @@ impl TuiApp {
     /// Keeps the transient rows of a batch for the live activity line: they
     /// blink above the composer while the run is in flight and are dropped at
     /// the run boundary, so no tool/op/warning noise settles into scrollback.
-    fn remember_activity_notices(&mut self, cells: &[CompactCell]) {
+    ///
+    /// The swap is debounced by `ACTIVITY_DEBOUNCE_MS`: a batch that lands
+    /// inside the window opened by the last swap is queued instead of
+    /// replacing what is on screen, so messages that come through extremely
+    /// quickly coalesce into one update rather than blinking.
+    fn remember_activity_notices(&mut self, now: Instant, cells: &[CompactCell]) {
+        let mut fresh: Vec<CompactCell> = Vec::new();
         for cell in cells {
             if !is_scrollback_cell(cell) {
-                self.activity_notices.push(cell.clone());
+                fresh.push(cell.clone());
             }
         }
-        let drop = self
-            .activity_notices
-            .len()
-            .saturating_sub(ACTIVITY_NOTICE_LIMIT);
-        if drop > 0 {
-            self.activity_notices.drain(..drop);
+        if fresh.is_empty() {
+            return;
         }
+        let inside_window = self
+            .activity_shown_at
+            .is_some_and(|shown| now < shown + Duration::from_millis(ACTIVITY_DEBOUNCE_MS));
+        if inside_window {
+            // Coalesce. The deadline stays anchored to the last swap, so a
+            // continuous stream still updates once per window instead of
+            // starving the block.
+            self.activity_pending.extend(fresh);
+            let drop = self
+                .activity_pending
+                .len()
+                .saturating_sub(ACTIVITY_NOTICE_LIMIT);
+            if drop > 0 {
+                self.activity_pending.drain(..drop);
+            }
+            return;
+        }
+        self.activity_notices = fresh;
+        self.activity_shown_at = Some(now);
+        self.activity_pending.clear();
+    }
+
+    /// Applies the queued transient batch once its debounce window has
+    /// elapsed. Called from the event loop -- never from the paint path, which
+    /// stays side-effect-free. Returns whether the block changed.
+    fn settle_activity_notices(&mut self, now: Instant) -> bool {
+        if self.activity_pending.is_empty() {
+            return false;
+        }
+        let due = self
+            .activity_shown_at
+            .is_none_or(|shown| now >= shown + Duration::from_millis(ACTIVITY_DEBOUNCE_MS));
+        if !due {
+            return false;
+        }
+        self.activity_notices = std::mem::take(&mut self.activity_pending);
+        self.activity_shown_at = Some(now);
+        true
+    }
+
+    /// When a queued transient batch goes up, if one is waiting for its
+    /// debounce window to close.
+    fn activity_debounce_deadline(&self) -> Option<Instant> {
+        if self.activity_pending.is_empty() {
+            return None;
+        }
+        self.activity_shown_at
+            .map(|shown| shown + Duration::from_millis(ACTIVITY_DEBOUNCE_MS))
     }
 
     /// Prints cells above the live region (Ink's <Static>).
@@ -957,7 +1021,7 @@ impl TuiApp {
             self.cells.extend(entries);
         }
         if self.running {
-            self.remember_activity_notices(&cells);
+            self.remember_activity_notices(Instant::now(), &cells);
         }
 
         let rows = self.projected_rows(&cells);
@@ -982,8 +1046,11 @@ impl TuiApp {
     fn rebuild_compact(&mut self, entries: &[TranscriptEntry]) -> Vec<String> {
         self.compact.rebuild(entries);
         // Replay is not a live run: no transient row of an old cycle may
-        // flash on the activity line of the next one.
+        // flash on the activity line of the next one -- and the debounce
+        // window restarts with the fresh run.
         self.activity_notices.clear();
+        self.activity_pending.clear();
+        self.activity_shown_at = None;
         self.projected_rows(&self.compact.projection.cells)
     }
 
@@ -1145,7 +1212,13 @@ impl TuiApp {
                     // instead of growing with the run.
                     transient = transient.split_off(transient.len() - ACTIVITY_NOTICE_LIMIT);
                 }
+                let status_rows = !transient.is_empty();
                 rows.extend(transient);
+                if status_rows && self.run_started_at.is_some() {
+                    // One blank row between the in-progress status lines and
+                    // the working line, so the block is not flush against it.
+                    rows.push(String::new());
+                }
                 if let Some(started) = self.run_started_at {
                     let elapsed = started.elapsed();
                     rows.push(render_working_line(
@@ -3881,6 +3954,8 @@ impl TuiApp {
         // count, its transient rows are erased (a live view, never scrollback)
         // and its animation must stop repainting.
         self.activity_notices.clear();
+        self.activity_pending.clear();
+        self.activity_shown_at = None;
         self.run_started_at = None;
         self.activity_next_tick = None;
         // Idle title (bare label, no spinner) whatever ended the run:
@@ -3956,6 +4031,13 @@ impl TuiApp {
                     self.flush_pending_cells();
                 }
             }
+            // A queued transient batch goes up when its own window closes,
+            // not only when the spinner tick happens to land.
+            if let Some(at) = self.activity_debounce_deadline() {
+                if now >= at && self.running && self.settle_activity_notices(now) {
+                    self.repaint();
+                }
+            }
 
             // Pane-title spinner: consume a due tick here, never in the paint
             // path. The deadline is taken before ticking so a throttled frame
@@ -3982,6 +4064,9 @@ impl TuiApp {
                 if now >= at {
                     self.activity_next_tick = None;
                     if self.running {
+                        // A queued transient batch goes up at its debounce
+                        // deadline, from the loop, never from the paint path.
+                        self.settle_activity_notices(now);
                         self.repaint();
                         self.activity_next_tick =
                             Some(now + Duration::from_millis(SPINNER_INTERVAL_MS));
@@ -4001,6 +4086,7 @@ impl TuiApp {
                 self.status_line_next_refresh,
                 self.title_next_tick,
                 self.activity_next_tick,
+                self.activity_debounce_deadline(),
             ]
             .into_iter()
             .flatten()
@@ -6940,7 +7026,7 @@ mod compact_ephemeral_tests {
 
     fn feed(app: &mut TuiApp) -> Vec<CompactCell> {
         let cells = app.compact.absorb(&one_cycle());
-        app.remember_activity_notices(&cells);
+        app.remember_activity_notices(Instant::now(), &cells);
         cells
     }
 
@@ -7016,5 +7102,121 @@ mod compact_ephemeral_tests {
         // The dropped rows are the ones the activity line shows: the folded
         // tool summary, the cycle transition and the warning.
         assert_eq!(cells.len() - durable.len(), 3, "{cells:?}");
+    }
+
+    /// Transient cells of a batch, exactly as `emit_static` would keep them.
+    fn transient_of(emitter: &mut CompactEmitter, entries: &[TranscriptEntry]) -> Vec<CompactCell> {
+        emitter
+            .absorb(entries)
+            .into_iter()
+            .filter(|cell| !is_scrollback_cell(cell))
+            .collect()
+    }
+
+    fn warning_batch(emitter: &mut CompactEmitter, detail: &str) -> Vec<CompactCell> {
+        let entries = vec![event(HarnessEventType::RunWarning, 1, detail, None)];
+        let cells = transient_of(emitter, &entries);
+        assert!(!cells.is_empty(), "{detail} must project one transient row");
+        cells
+    }
+
+    fn notice_detail(cell: &CompactCell) -> String {
+        match cell {
+            CompactCell::Passthrough(TranscriptEntry::Event(event)) => event.detail.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fast_transient_batches_coalesce_behind_the_debounce_window() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        let app = &mut fixture.app;
+        app.running = true;
+        let t0 = Instant::now();
+
+        let first = warning_batch(&mut app.compact, "first");
+        app.remember_activity_notices(t0, &first);
+        assert_eq!(
+            app.activity_shown_at,
+            Some(t0),
+            "the first batch of a run lands immediately"
+        );
+        assert_eq!(notice_detail(&app.activity_notices[0]), "first");
+
+        // 100 ms later -- well inside the 500 ms window -- the new row may not
+        // replace what is on screen yet.
+        let soon = t0 + Duration::from_millis(100);
+        let second = warning_batch(&mut app.compact, "second");
+        app.remember_activity_notices(soon, &second);
+        assert_eq!(
+            notice_detail(&app.activity_notices[0]),
+            "first",
+            "a fast batch must not blink over the displayed one"
+        );
+        assert!(
+            !app.settle_activity_notices(soon),
+            "the window is still open"
+        );
+
+        // Deadline reached: the coalesced batch swaps in exactly once.
+        assert!(app.settle_activity_notices(t0 + Duration::from_millis(500)));
+        assert_eq!(notice_detail(&app.activity_notices[0]), "second");
+        assert!(app.activity_pending.is_empty());
+
+        // The deadline is anchored to the swap, not pushed back by arrivals:
+        // a continuous stream still updates once per window.
+        let third = warning_batch(&mut app.compact, "third");
+        app.remember_activity_notices(t0 + Duration::from_millis(600), &third);
+        assert_eq!(notice_detail(&app.activity_notices[0]), "second");
+        assert!(app.settle_activity_notices(t0 + Duration::from_millis(1000)));
+        assert_eq!(notice_detail(&app.activity_notices[0]), "third");
+    }
+
+    #[test]
+    fn the_debounce_state_dies_with_the_run() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        let app = &mut fixture.app;
+        app.running = true;
+        let t0 = Instant::now();
+        let first = warning_batch(&mut app.compact, "first");
+        app.remember_activity_notices(t0, &first);
+        let queued = warning_batch(&mut app.compact, "queued");
+        app.remember_activity_notices(t0 + Duration::from_millis(50), &queued);
+        assert!(!app.activity_pending.is_empty(), "the batch is queued");
+        app.finish_run();
+        assert!(app.activity_notices.is_empty(), "no row outlives the run");
+        assert!(
+            app.activity_pending.is_empty(),
+            "no queued row leaks into the next run"
+        );
+        assert!(
+            app.activity_shown_at.is_none(),
+            "the next run opens a fresh window"
+        );
+    }
+
+    #[test]
+    fn a_blank_row_gaps_the_status_lines_from_the_working_line() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(Instant::now());
+        feed(&mut fixture.app);
+        let live = plain(&fixture.app.live_region());
+        let spinner = live
+            .iter()
+            .position(|row| row.contains("working for"))
+            .expect("the activity line is painted while running");
+        assert!(spinner >= 2, "{live:?}");
+        assert_eq!(
+            live[spinner - 1],
+            "",
+            "one blank row separates the block from the working line: {live:?}"
+        );
+        assert!(
+            live[..spinner - 1]
+                .iter()
+                .any(|row| row.contains("Tool called")),
+            "the status lines stay above the gap: {live:?}"
+        );
     }
 }

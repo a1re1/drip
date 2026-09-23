@@ -937,7 +937,12 @@ In the Claude-style TUI those rows are **transient**. The folded tool
 summary, the cycle transition line and every op or warning row blink on the
 activity line directly above the composer, beside the braille spinner and
 the clock counting up from the run's start, and they are erased when the run
-ends. Nothing on that line is written into scrollback, so returning to a
+ends. That block is debounced (`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that
+arrives inside the window opened by the last swap is queued instead of
+replacing what is on screen, so a burst of fast-arriving ops coalesces into
+one update instead of blinking, and a single blank row separates the status
+lines from the `working for …` line below them. Nothing on that line is
+written into scrollback, so returning to a
 transcript shows the goal and the model's answers instead of every tool
 call. The durable rows are goals, model text, run summaries, run ends and
 the operator info/error notices.

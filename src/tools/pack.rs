@@ -33,12 +33,13 @@ use crate::tools::types::{
 };
 
 /// The names of the built-in pack, in registration order.
-pub const BUILTIN_TOOL_NAMES: [&str; 9] = [
+pub const BUILTIN_TOOL_NAMES: [&str; 10] = [
     "READ",
     "PATCH",
     "DIR",
     "BASH",
     "BASH_ASYNC",
+    "MONITOR",
     "GREP",
     "VERIFY",
     "FETCH",
@@ -478,6 +479,223 @@ pub fn async_bash_tool() -> ChatToolDefinition {
 }
 
 // ---------------------------------------------------------------------------
+// MONITOR — the structured wait-for-a-signal async tool
+//
+// Like BASH_ASYNC it returns a job id immediately, but the job itself is a
+// retry loop: run `check`, sleep intervalMs, run it again, until the check
+// exits 0 or the timeoutMs budget is spent. The harness reports the settled
+// result to the model on its own (report_settled_background_jobs), so no
+// round is ever spent on sleep-and-check probes.
+// ---------------------------------------------------------------------------
+
+/// How long a MONITOR call waits for an already-met signal before returning
+/// while the job keeps checking. Long enough that the common "the signal is
+/// already there" call reports inline; short enough not to stall a round.
+pub const MONITOR_GRACE_MS: i64 = 2_500;
+
+fn monitor_prepare(request: ChatToolPrepareRequest<'_>) -> Result<ChatToolPreparedInput, String> {
+    let args = parse_tool_arguments(request.raw_input).map_err(|error| error.to_string())?;
+    let check = get_required_string_argument(&args, "check").map_err(|error| error.to_string())?;
+    let raw_cwd = builtin::bash::get_optional_string_argument(&args, "cwd")
+        .map_err(|error| error.to_string())?;
+    let context_cwd = request.runtime_context.cwd.clone();
+    let absolute_cwd = resolve_tool_path(&context_cwd, raw_cwd.as_deref().unwrap_or(&context_cwd));
+    let display_cwd = format_tool_path(&context_cwd, &absolute_cwd);
+
+    // The check runs unwatched in the background — the same gate applies.
+    match crate::tools::command_policy::evaluate_command_policy(&check, &context_cwd) {
+        crate::tools::command_policy::CommandPolicyVerdict::Block { rule, why } => {
+            if crate::tools::command_policy::allow_destructive_enabled() {
+                eprintln!(
+                    "[policy] allowing destructive command (rule {rule}, --allow-destructive): {check}"
+                );
+            } else {
+                return Err(crate::tools::command_policy::format_policy_refusal(
+                    &check, &rule, &why,
+                ));
+            }
+        }
+        crate::tools::command_policy::CommandPolicyVerdict::Allow => {}
+    }
+
+    let interval_ms = builtin::monitor::clamp_interval_ms(
+        get_optional_number_argument(&args, "intervalMs").map_err(|error| error.to_string())?,
+    );
+    let timeout_ms = builtin::monitor::clamp_timeout_ms(
+        get_optional_number_argument(&args, "timeoutMs").map_err(|error| error.to_string())?,
+    );
+    let description = builtin::bash::get_optional_string_argument(&args, "description")
+        .map_err(|error| error.to_string())?;
+    let title = builtin::monitor::monitor_title(description.as_deref(), &check);
+
+    Ok(ChatToolPreparedInput {
+        display_input: format!(
+            "{display_cwd}\ncheck {check} every {interval_ms}ms, timeout {timeout_ms}ms"
+        ),
+        input: json!({
+            "absoluteCwd": absolute_cwd.to_string_lossy(),
+            "check": check,
+            "description": description,
+            "displayCwd": display_cwd,
+            "intervalMs": interval_ms,
+            "timeoutMs": timeout_ms,
+            "title": title
+        }),
+        tags: None,
+    })
+}
+
+fn monitor_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolResult, String> {
+    let input = &request.prepared.input;
+    let absolute_cwd = input["absoluteCwd"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let display_cwd = input["displayCwd"].as_str().unwrap_or_default().to_string();
+    let check = input["check"].as_str().unwrap_or_default().to_string();
+    let title = input["title"].as_str().unwrap_or_default().to_string();
+    let description = input["description"].as_str().map(str::to_string);
+    let interval_ms = input["intervalMs"]
+        .as_i64()
+        .unwrap_or(builtin::monitor::DEFAULT_INTERVAL_MS);
+    let timeout_ms = input["timeoutMs"]
+        .as_i64()
+        .unwrap_or(builtin::monitor::DEFAULT_TIMEOUT_MS);
+
+    crate::tools::helpers::assert_directory_path(std::path::Path::new(&absolute_cwd), &display_cwd)
+        .map_err(|error| error.to_string())?;
+
+    let spec = builtin::monitor::MonitorSpec {
+        check: check.clone(),
+        cwd: absolute_cwd.clone(),
+        interval_ms,
+        timeout_ms,
+        description,
+    };
+    let run_spec = spec.clone();
+
+    let job = request
+        .services
+        .async_jobs
+        .start_task(ChatAsyncToolTaskRequest {
+            cwd: Some(absolute_cwd.clone()),
+            run: Box::new(move |logger| builtin::monitor::run_monitor(&run_spec, logger)),
+            title: Some(title.clone()),
+            tool_name: "MONITOR".to_string(),
+        })
+        .map_err(|error| error.to_string())?;
+
+    // Grace wait: a signal that is already there reports inline.
+    let wait_result = request
+        .services
+        .async_jobs
+        .wait_for_job(&job.id, Some(MONITOR_GRACE_MS))
+        .map_err(|error| error.to_string())?;
+    let tail = request
+        .services
+        .async_jobs
+        .tail_job(&job.id, Some(60))
+        .map(|tail| tail.output)
+        .unwrap_or_default();
+    let started_at = job.started_at.clone();
+    let finished_job = wait_result.job.clone();
+    let elapsed_ms = crate::tools::async_jobs::session_age_ms(&started_at).unwrap_or(0);
+
+    let (output_text, status) = if wait_result.completed {
+        let met = finished_job.status == ChatAsyncToolJobStatus::Completed;
+        let headline = if met {
+            format!("Signal met in {:.1}s.", elapsed_ms as f64 / 1000.0)
+        } else {
+            format!("The signal did not appear within {timeout_ms}ms.")
+        };
+        (
+            headline,
+            job_status_to_tool_call_status(finished_job.status),
+        )
+    } else {
+        (
+            format!("Monitor started; still waiting after {MONITOR_GRACE_MS}ms. The harness reports the settled result at the next round; in chat/TUI collect it with ASYNC_WAIT/ASYNC_TAIL. Do not sleep-and-poll in BASH."),
+            ToolCallStatus::Running,
+        )
+    };
+
+    Ok(ChatToolResult {
+        async_job: Some(if wait_result.completed {
+            finished_job
+        } else {
+            job
+        }),
+        data: Some(json!({
+            "check": check,
+            "completed": wait_result.completed,
+            "cwd": absolute_cwd,
+            "elapsedMs": elapsed_ms,
+            "intervalMs": interval_ms,
+            "tail": tail,
+            "timeoutMs": timeout_ms
+        })),
+        error: None,
+        output_text: Some(output_text),
+        status: Some(status),
+        tags: None,
+    })
+}
+
+fn monitor_complete(
+    request: ChatToolCompleteRequest<'_>,
+) -> Result<ChatToolCompletionResult, String> {
+    let data = request.result.data.clone().unwrap_or(Value::Null);
+    let completed = data["completed"].as_bool().unwrap_or(false);
+    let timeout_ms = data["timeoutMs"]
+        .as_i64()
+        .unwrap_or(builtin::monitor::DEFAULT_TIMEOUT_MS);
+    let check = data["check"].as_str().unwrap_or_default();
+    let tail = data["tail"].as_str().unwrap_or_default().trim().to_string();
+    let headline = request.result.output_text.clone().unwrap_or_default();
+
+    let (text, tool_content) = if completed {
+        let output = fallback_log_preview(&tail);
+        (
+            format!("{headline}\n{output}"),
+            format!("{headline}\nMonitor log (last lines):\n{output}"),
+        )
+    } else {
+        (
+            format!("{headline}\ncheck: {check}"),
+            format!(
+                "{headline}\nThe monitor keeps checking `{check}` in the background and the harness reports the result to you the moment it settles (either the signal appeared or the {timeout_ms}ms timeout expired). Do not spend rounds on sleep-and-check probes; continue with other work."
+            ),
+        )
+    };
+
+    Ok(ChatToolCompletionResult {
+        blocks: Some(vec![ChatMessageBlock::Text(TextBlock {
+            context_state: None,
+            tags: None,
+            text,
+        })]),
+        tool_content: Some(tool_content),
+        tags: None,
+    })
+}
+
+/// The MONITOR tool definition: wait for a signal in the background loop.
+pub fn monitor_tool() -> ChatToolDefinition {
+    let (name, description, parameters) = split_definition(&builtin::monitor::definition());
+
+    define_async_tool(ChatToolDefinition {
+        name,
+        description,
+        parameters,
+        mutates_workspace: false,
+        mode: ChatToolMode::Async,
+        prepare: Box::new(monitor_prepare),
+        execute: Box::new(monitor_execute),
+        complete: Box::new(monitor_complete),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // ASYNC_TAIL / ASYNC_WAIT — helpers around async background tool jobs
 // ---------------------------------------------------------------------------
 
@@ -800,6 +1018,7 @@ pub fn builtin_tool_pack(options: BuiltinToolOptions) -> Vec<ChatToolDefinition>
             Arc::new(|raw_input: &str, ctx: &ToolCtx| builtin::bash::execute(raw_input, ctx)),
         ),
         async_bash_tool(),
+        monitor_tool(),
         sync_tool(
             builtin::grep::definition(),
             false,
@@ -1023,10 +1242,11 @@ mod tests {
             .map(|tool| tool.mode)
             .collect();
         assert_eq!(modes[4], ChatToolMode::Async);
+        assert_eq!(modes[5], ChatToolMode::Async);
         assert!(modes
             .iter()
             .enumerate()
-            .all(|(index, mode)| index == 4 || *mode == ChatToolMode::Sync));
+            .all(|(index, mode)| index == 4 || index == 5 || *mode == ChatToolMode::Sync));
     }
 
     // REFERENCE is corpus-gated: absent with no roots, appended last with them.
@@ -1090,6 +1310,7 @@ mod tests {
             builtin::dir::definition(),
             builtin::bash::definition(),
             builtin::bash::async_definition(),
+            builtin::monitor::definition(),
             builtin::grep::definition(),
             builtin::verify::definition(),
             builtin::fetch::definition(),
@@ -1097,7 +1318,7 @@ mod tests {
         ];
 
         // The corpus-gated tool goes through the same adapter, so its schema is
-        // round-tripped too rather than only the unconditional nine.
+        // round-tripped too rather than only the unconditional ten.
         let configured = builtin_tool_pack(BuiltinToolOptions {
             allow_net: false,
             reference_roots: vec![PathBuf::from("/corpus/wiki")],

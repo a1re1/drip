@@ -369,5 +369,41 @@
         "type": "object"
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "MONITOR",
+      "description": "Wait for a signal without spending model rounds. Runs `check` (a bash command, `bash -lc`) every intervalMs in a background job and finishes the moment it exits 0; on timeout it finishes as failed with the last check output. Returns inline when the signal is already met. Otherwise it keeps checking on its own: in the harness loop the settled result is reported to you at the next round, and in interactive chat/TUI collect it with ASYNC_WAIT or ASYNC_TAIL — never spend rounds on sleep-and-check loops in BASH.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "description": "The signal probe: a bash command run with `bash -lc` on every attempt. Exit code 0 means the signal is here; any other exit code (or a check timeout) means keep waiting.",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Optional working directory for the check, relative to the current working directory or absolute. Defaults to the workspace cwd.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Optional human-readable description of the signal (shown in the job title and the timeout report).",
+            "type": "string"
+          },
+          "intervalMs": {
+            "description": "Milliseconds to sleep between checks (10-60000, default 1000). No check runs while sleeping.",
+            "type": "number"
+          },
+          "timeoutMs": {
+            "description": "Total milliseconds to keep waiting before the monitor fails (0-3600000, default 60000).",
+            "type": "number"
+          }
+        },
+        "required": [
+          "check"
+        ],
+        "type": "object"
+      }
+    }
   }
 ]

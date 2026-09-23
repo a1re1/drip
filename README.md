@@ -298,7 +298,7 @@ applies.
 
 ---
 
-## Tool pack (9 tools)
+## Tool pack (10 tools)
 
 | Tool | What it does |
 |------|-------------|
@@ -317,6 +317,7 @@ report "not found".
 | DIR | Show project structure as a tree view |
 | BASH | Run a bash command and wait for it to finish |
 | BASH_ASYNC | Run a bash command in a detached tmux session (background) |
+| MONITOR | Wait for a signal (a file, a port, a build) by retrying `check` in a background job — sleeps between attempts and hands the settled result to the harness, so no sleep-and-poll rounds |
 | GREP | Search files with a regex |
 | VERIFY | Run a shell command and parse structured test verdicts (bun, vitest, pytest, unittest, cargo, go, tsc) |
 | FETCH | HTTP GET a URL and return text content (requires `DRIP_ALLOW_NET=1`) |

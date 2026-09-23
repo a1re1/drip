@@ -1583,6 +1583,127 @@ pub fn git_head(cwd: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+/// The background work a finished run never tore down, in the shape the run
+/// result and the loop-end report use. Two kinds exist: tmux sessions
+/// (BASH_ASYNC and friends) and async tool jobs with no tmux session behind
+/// them — a MONITOR still checking its signal rides the async job manager
+/// only, so a report built from `tmux_sessions` alone would lose it. A job
+/// that backs a listed session is skipped, so nothing is reported twice.
+pub fn leaked_background_jobs(
+    sessions: Vec<crate::tools::types::ChatTmuxSession>,
+    running_jobs: Vec<crate::tools::types::ChatAsyncToolJob>,
+) -> Vec<crate::core::types::HarnessLeakedJob> {
+    let tmux_job_ids: HashSet<String> = sessions
+        .iter()
+        .map(|session| session.job_id.clone())
+        .collect();
+    let mut jobs: Vec<crate::core::types::HarnessLeakedJob> = sessions
+        .into_iter()
+        .map(|session| crate::core::types::HarnessLeakedJob {
+            command: session.title,
+            kill_command: session.kill_command,
+            session_name: session.session_name,
+            started_at: session.started_at,
+        })
+        .collect();
+    jobs.extend(
+        running_jobs
+            .into_iter()
+            .filter(|job| !tmux_job_ids.contains(&job.id))
+            .map(|job| crate::core::types::HarnessLeakedJob {
+                command: job.title,
+                // Nothing to kill: the job is a thread that ends at its own
+                // timeout, so the note says that instead of naming a command
+                // that does not exist.
+                kill_command: format!(
+                    "(no kill command: {} job {} ends at its own timeoutMs)",
+                    job.tool_name, job.id
+                ),
+                session_name: job.id,
+                started_at: job.started_at,
+            }),
+    );
+    jobs
+}
+
+/// The wire label for an async job status (the loop-end report uses it).
+fn job_status_label(status: crate::tools::types::ChatAsyncToolJobStatus) -> &'static str {
+    match status {
+        crate::tools::types::ChatAsyncToolJobStatus::Completed => "completed",
+        crate::tools::types::ChatAsyncToolJobStatus::Failed => "failed",
+        crate::tools::types::ChatAsyncToolJobStatus::Running => "running",
+    }
+}
+
+#[cfg(test)]
+mod leaked_background_jobs_tests {
+    use super::leaked_background_jobs;
+    use crate::core::types::HarnessLeakedJob;
+    use crate::tools::types::{ChatAsyncToolJob, ChatAsyncToolJobStatus, ChatTmuxSession};
+
+    fn session(job_id: &str) -> ChatTmuxSession {
+        ChatTmuxSession {
+            attach_command: format!("tmux attach -t {job_id}"),
+            cwd: "/tmp".to_string(),
+            job_id: job_id.to_string(),
+            kill_command: format!("tmux kill-session -t {job_id}"),
+            session_name: job_id.to_string(),
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+            title: format!("dev server {job_id}"),
+            tool_name: "BASH_ASYNC".to_string(),
+        }
+    }
+
+    fn job(id: &str, tool_name: &str, status: ChatAsyncToolJobStatus) -> ChatAsyncToolJob {
+        ChatAsyncToolJob {
+            command: None,
+            cwd: "/tmp".to_string(),
+            error: None,
+            exit_code: None,
+            finished_at: None,
+            id: id.to_string(),
+            log_path: format!("/tmp/{id}.log"),
+            started_at: "2026-01-01T00:00:01.000Z".to_string(),
+            status,
+            title: format!("monitor: {id}"),
+            tool_name: tool_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_monitor_still_running_is_reported_alongside_tmux_sessions() {
+        let jobs: Vec<HarnessLeakedJob> = leaked_background_jobs(
+            vec![session("job-tmux")],
+            vec![job(
+                "job-monitor",
+                "MONITOR",
+                ChatAsyncToolJobStatus::Running,
+            )],
+        );
+
+        let names: Vec<&str> = jobs.iter().map(|job| job.session_name.as_str()).collect();
+        assert_eq!(names, vec!["job-tmux", "job-monitor"]);
+        assert_eq!(jobs[1].command, "monitor: job-monitor");
+        assert!(jobs[1].kill_command.contains("ends at its own timeoutMs"));
+    }
+
+    #[test]
+    fn a_tmux_backed_async_job_is_reported_once() {
+        let jobs = leaked_background_jobs(
+            vec![session("job-tmux")],
+            vec![job(
+                "job-tmux",
+                "BASH_ASYNC",
+                ChatAsyncToolJobStatus::Running,
+            )],
+        );
+
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].session_name, "job-tmux");
+        assert_eq!(jobs[0].kill_command, "tmux kill-session -t job-tmux");
+    }
+}
+
 /// The reviewer's opening note: the run's change set (diff against the
 /// run-start HEAD, plus untracked files) and its verification records.
 pub fn build_review_brief(cwd: &str, run_start_head: Option<&str>, state: &HarnessState) -> String {
@@ -11496,22 +11617,37 @@ impl HarnessRun {
             self.generate_run_summary(reason).await;
         }
 
+        // A job that settled after the last round was reported nowhere: say so
+        // before the run result is built, so its output is not silently lost.
+        for job in self.tool_services.async_jobs.take_settled_unreported() {
+            let status = job_status_label(job.status);
+            let error = job
+                .error
+                .as_deref()
+                .map(|error| format!(" — {}", truncate_text(error, 200)))
+                .unwrap_or_default();
+            self.emit(HarnessEvent {
+                data: None,
+                detail: format!(
+                    "background job {} ({}) settled after the last round: {status}{error} — its log is at {}",
+                    job.id,
+                    truncate_text(&job.title, 80),
+                    job.log_path
+                ),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::RunWarning,
+            });
+        }
+
         // Background jobs the run started and never tore down: report them so
         // the driver knows a dev server/watcher is still holding the port
         // (and how to kill it) instead of discovering it three runs later.
-        // Background tmux jobs that outlived the run.
-        let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = self
-            .tool_services
-            .tmux_sessions
-            .list_sessions()
-            .into_iter()
-            .map(|session| crate::core::types::HarnessLeakedJob {
-                command: session.title,
-                kill_command: session.kill_command,
-                session_name: session.session_name,
-                started_at: session.started_at,
-            })
-            .collect();
+        // Both tmux sessions (BASH_ASYNC) and non-tmux async jobs (a MONITOR
+        // still checking) count, so nothing outlives a run invisibly.
+        let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = leaked_background_jobs(
+            self.tool_services.tmux_sessions.list_sessions(),
+            self.tool_services.async_jobs.running_jobs(),
+        );
 
         if !leaked_jobs.is_empty() {
             let running = leaked_jobs

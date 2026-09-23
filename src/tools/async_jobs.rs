@@ -508,6 +508,19 @@ impl AsyncToolJobManager {
             .collect()
     }
 
+    /// Jobs whose process or thread is still running.
+    pub fn running_jobs(&self) -> Vec<ChatAsyncToolJob> {
+        let guard = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .iter()
+            .filter(|record| record.job.status == ChatAsyncToolJobStatus::Running)
+            .map(|record| record.job.clone())
+            .collect()
+    }
+
     /// Lines clamp to [1, 400] and the log is tail-trimmed; appends are
     /// serialized, so the log is complete when read.
     pub fn tail_job(&self, job_id: &str, lines: i64) -> Result<ChatAsyncToolTailResult> {
@@ -878,6 +891,10 @@ impl ChatAsyncToolRuntime for Arc<AsyncToolJobManager> {
 
     fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
         AsyncToolJobManager::take_settled_unreported(self)
+    }
+
+    fn running_jobs(&self) -> Vec<ChatAsyncToolJob> {
+        AsyncToolJobManager::running_jobs(self)
     }
 }
 

@@ -74,6 +74,7 @@ fn fixture_covers_exactly_the_built_in_pack() {
             "DIR",
             "FETCH",
             "GREP",
+            "MONITOR",
             "PATCH",
             "READ",
             "VERIFY"
@@ -123,6 +124,15 @@ fn bash_async_definition_matches_the_fixture() {
         canonical(&drip::tools::builtin::bash::async_definition()),
         canonical(&fixture_entry("BASH_ASYNC")),
         "BASH_ASYNC definition drifted from tools/bash-tool.ts"
+    );
+}
+
+#[test]
+fn monitor_definition_matches_the_fixture() {
+    assert_eq!(
+        canonical(&drip::tools::builtin::monitor::definition()),
+        canonical(&fixture_entry("MONITOR")),
+        "MONITOR definition drifted from tools/monitor-tool.ts"
     );
 }
 

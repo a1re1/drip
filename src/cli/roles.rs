@@ -108,12 +108,13 @@ pub struct ResolvedRoleSetup {
 // Harness ops (plan_tasks, finish_task, remember, ...) are deliberately absent:
 // the loop appends them to every role unconditionally, so naming them here only
 // produces a spurious "unknown tool(s)" issue on every preset run.
-pub const ALL_STANDARD_TOOL_NAMES: [&str; 10] = [
+pub const ALL_STANDARD_TOOL_NAMES: [&str; 11] = [
     "READ",
     "PATCH",
     "DIR",
     "BASH",
     "BASH_ASYNC",
+    "MONITOR",
     "GREP",
     "VERIFY",
     "FETCH",

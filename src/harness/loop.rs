@@ -50,6 +50,14 @@ pub const BACKGROUND_REPORT_PREFIX: &str = "harness:";
 pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
 pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
+/// A loop whose model walked away while a MONITOR it started is still
+/// checking does not end around that job: it holds, polling in slices this
+/// long (abort-aware), until the signal settles.
+pub const MONITOR_HOLD_POLL_MS: u64 = 250;
+/// How long that hold may last before the loop gives up and ends anyway (the
+/// job's settle is then reported at the next loop). Bounded so a monitor with
+/// a one-hour timeoutMs cannot pin a loop open for its whole budget.
+pub const MONITOR_HOLD_MAX_MS: i64 = 3_600_000;
 
 /// The freshest READ of up to this many distinct files is kept unfolded past
 /// the hot window (see `fold_cold_tool_results`). Transcript audits of the
@@ -8352,7 +8360,15 @@ impl HarnessRun {
 
                     match self.run_round(&mut scope, cycle, round).await {
                         RoundOutcome::Continue => {}
-                        RoundOutcome::Break => break,
+                        RoundOutcome::Break => {
+                            // Operator directive: a loop does not end with a
+                            // MONITOR it started still checking. Hold until it
+                            // settles, then run the round that receives it.
+                            if self.hold_for_pending_monitor(&mut scope).await {
+                                continue;
+                            }
+                            break;
+                        }
                         RoundOutcome::Aborted => {
                             self.aborted = true;
                             break;
@@ -9699,6 +9715,108 @@ impl HarnessRun {
                 r#type: HarnessEventType::HarnessOp,
             });
         }
+    }
+
+    /// Operator directive: a task loop that would conclude while a MONITOR it
+    /// started is still checking does not end with that work in flight. It
+    /// holds here — abort-aware, in short slices — until the job settles,
+    /// drains the settled result into the transcript, and re-enters the round
+    /// loop so the model wakes up with the result instead of the run ending
+    /// around it. Returns true when a round is worth running again.
+    async fn hold_for_pending_monitor(&mut self, scope: &mut LoopScope) -> bool {
+        if self.aborted
+            || self.run_error.is_some()
+            || self.ask_user_awaiting
+            || scope.task_finished
+            || scope.planned_and_yielded
+        {
+            return false;
+        }
+
+        let pending: Vec<String> = self
+            .tool_services
+            .async_jobs
+            .running_jobs()
+            .into_iter()
+            .filter(|job| job.tool_name == "MONITOR")
+            .map(|job| job.id)
+            .collect();
+        if pending.is_empty() {
+            return false;
+        }
+
+        let detail = format!(
+            "loop would end with {} still-checking MONITOR job(s) ({}) — waiting for the signal instead",
+            pending.len(),
+            truncate_text(&pending.join(", "), MAX_DIGEST_ACTION_CHARS)
+        );
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                ..Default::default()
+            }),
+            detail: detail.clone(),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.digest_actions.push(detail);
+
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(MONITOR_HOLD_MAX_MS as u64);
+        while std::time::Instant::now() < deadline {
+            if self.signal_aborted() {
+                self.aborted = true;
+                break;
+            }
+            let still_checking = self
+                .tool_services
+                .async_jobs
+                .running_jobs()
+                .iter()
+                .any(|job| job.tool_name == "MONITOR");
+            if !still_checking {
+                break;
+            }
+            crate::harness::model_call::sleep_unless_aborted(
+                MONITOR_HOLD_POLL_MS,
+                self.options.signal.as_ref(),
+            )
+            .await;
+        }
+
+        if self.aborted {
+            return false;
+        }
+
+        // Drain the settled result BEFORE the round that will read it, so the
+        // model sees the signal in its next request instead of a bare
+        // "background" note it has to poll for.
+        let before = scope.digest_actions.len();
+        self.report_settled_background_jobs(scope);
+        if scope.digest_actions.len() > before {
+            scope.concluded_naturally = false;
+            scope.progress_this_cycle = true;
+            scope.made_progress = true;
+            return true;
+        }
+
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                ..Default::default()
+            }),
+            detail: format!(
+                "MONITOR job(s) still checking after {MONITOR_HOLD_MAX_MS}ms — the loop ends here; the settled result is reported at the next loop",
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::RunWarning,
+        });
+        scope
+            .digest_actions
+            .push("MONITOR still checking at the hold limit".to_string());
+        false
     }
 
     pub async fn run_round(

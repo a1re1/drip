@@ -374,7 +374,7 @@
     "type": "function",
     "function": {
       "name": "MONITOR",
-      "description": "Wait for a signal without spending model rounds. Runs `check` (a bash command, `bash -lc`) every intervalMs in a background job and finishes the moment it exits 0; on timeout it finishes as failed with the last check output. Returns inline when the signal is already met. Otherwise it keeps checking on its own: in the harness loop the settled result is reported to you at the next round, and in interactive chat/TUI collect it with ASYNC_WAIT or ASYNC_TAIL — never spend rounds on sleep-and-check loops in BASH.",
+      "description": "Wait for a signal without spending model rounds. Runs `check` (a bash command, `bash -lc`) every intervalMs in a background job and finishes the moment it exits 0; on timeout it finishes as failed with the last check output. Returns inline when the signal is already met. Otherwise it keeps checking on its own: in the harness loop the settled result is reported to you at the next round and a task loop that would end while the monitor is still checking waits for the signal and resumes with the result, and in interactive chat/TUI collect it with ASYNC_WAIT or ASYNC_TAIL — never spend rounds on sleep-and-check loops in BASH.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

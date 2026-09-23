@@ -112,6 +112,15 @@ warning and exposes fewer tools. MCP calls never count as workspace progress
 for stall accounting, `--plan` keeps its reader-only surface, and `--review`
 children, `DELEGATE` children, and the watch TUI get no MCP surface.
 
+Interactive `drip --tui` sessions honour the same rules: roles resolve fresh
+per goal, every server any of those roles names is spawned for that run, and a
+server that only the config defines stays off until a role opts in. Inside the
+TUI, `/mcp` lists the configured servers with their current status and the
+command each would run, `/mcp <server>` turns a server on for the whole run
+(the set `--mcp` would pass, replacing the role-owned default for loops whose
+role names none), `/mcp off` spawns nothing, and `/mcp roles` hands the
+decision back to each loop's role.
+
 ## Quickstart
 
 ```sh

@@ -192,6 +192,12 @@ pub trait ChatAsyncToolRuntime: Send + Sync {
     fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
         Vec::new()
     }
+    /// Jobs whose work is still in flight. Read at loop end so background
+    /// work that outlived the run — a MONITOR still checking, which rides no
+    /// tmux session — is reported instead of vanishing.
+    fn running_jobs(&self) -> Vec<ChatAsyncToolJob> {
+        Vec::new()
+    }
 }
 
 // export type ChatToolRuntimeServices = { asyncJobs, tmuxSessions }

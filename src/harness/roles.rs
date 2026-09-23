@@ -217,10 +217,10 @@ pub fn filter_tools_for_role<T: NamedTool>(
     };
 
     let mut allowed: HashSet<&str> = tool_names.iter().map(String::as_str).collect();
-    // A role that may start background jobs must be able to wait for and
-    // read them; without ASYNC_WAIT/ASYNC_TAIL models fall back to
-    // "sleep N; cat log" probes, one model round each.
-    if allowed.contains("BASH_ASYNC") {
+    // A role that may start background jobs (or monitors a signal) must be
+    // able to wait for and read them; without ASYNC_WAIT/ASYNC_TAIL models
+    // fall back to "sleep N; cat log" probes, one model round each.
+    if allowed.contains("BASH_ASYNC") || allowed.contains("MONITOR") {
         allowed.insert("ASYNC_WAIT");
         allowed.insert("ASYNC_TAIL");
     }
@@ -428,6 +428,31 @@ mod tests {
             .map(|tool| tool.name)
             .collect();
         assert_eq!(kept, vec!["BASH_ASYNC", "ASYNC_WAIT", "ASYNC_TAIL"]);
+    }
+
+    #[test]
+    fn monitor_roles_always_get_the_wait_and_tail_helpers() {
+        let tools = vec![
+            Tool {
+                name: "MONITOR".to_string(),
+            },
+            Tool {
+                name: "ASYNC_WAIT".to_string(),
+            },
+            Tool {
+                name: "ASYNC_TAIL".to_string(),
+            },
+            Tool {
+                name: "PATCH".to_string(),
+            },
+        ];
+        let mut role = role("reviewer");
+        role.tool_names = Some(vec!["MONITOR".to_string()]);
+        let kept: Vec<String> = filter_tools_for_role(tools, Some(&role))
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(kept, vec!["MONITOR", "ASYNC_WAIT", "ASYNC_TAIL"]);
     }
 
     #[test]

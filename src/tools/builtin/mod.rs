@@ -11,6 +11,7 @@ pub mod check;
 pub mod dir;
 pub mod fetch;
 pub mod grep;
+pub mod monitor;
 pub mod patch;
 pub mod read;
 pub mod reference;

@@ -50,6 +50,19 @@ pub const BACKGROUND_REPORT_PREFIX: &str = "harness:";
 pub const MAX_RESULT_EVENT_CHARS: usize = 2000;
 pub const FOLDED_RESULT_MARKER: &str = "[folded]";
 pub const MAX_FOLDED_PREVIEW_CHARS: usize = 240;
+/// A loop whose model walked away while a MONITOR it started is still
+/// checking does not end around that job: it holds, polling in slices this
+/// long (abort-aware), until the signal settles.
+pub const MONITOR_HOLD_POLL_MS: u64 = 250;
+/// How long that hold may last before the loop gives up and ends anyway (the
+/// job's settle is then reported at the next loop). Bounded so a monitor with
+/// a one-hour timeoutMs cannot pin a loop open for its whole budget.
+pub const MONITOR_HOLD_MAX_MS: i64 = 3_600_000;
+/// How many delivery cycles one task loop may spend handing the model a settled
+/// MONITOR result it would otherwise never see. A delivery cycle exists only to
+/// carry that result over, so it is exempt from the cycle budget — this bound
+/// is what keeps that exemption from running forever.
+pub const MONITOR_DELIVERY_MAX_CYCLES: i64 = 3;
 
 /// The freshest READ of up to this many distinct files is kept unfolded past
 /// the hot window (see `fold_cold_tool_results`). Transcript audits of the
@@ -1581,6 +1594,127 @@ pub fn git_head(cwd: &str) -> Option<String> {
     git_output(cwd, &["rev-parse", "HEAD"])
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+/// The background work a finished run never tore down, in the shape the run
+/// result and the loop-end report use. Two kinds exist: tmux sessions
+/// (BASH_ASYNC and friends) and async tool jobs with no tmux session behind
+/// them — a MONITOR still checking its signal rides the async job manager
+/// only, so a report built from `tmux_sessions` alone would lose it. A job
+/// that backs a listed session is skipped, so nothing is reported twice.
+pub fn leaked_background_jobs(
+    sessions: Vec<crate::tools::types::ChatTmuxSession>,
+    running_jobs: Vec<crate::tools::types::ChatAsyncToolJob>,
+) -> Vec<crate::core::types::HarnessLeakedJob> {
+    let tmux_job_ids: HashSet<String> = sessions
+        .iter()
+        .map(|session| session.job_id.clone())
+        .collect();
+    let mut jobs: Vec<crate::core::types::HarnessLeakedJob> = sessions
+        .into_iter()
+        .map(|session| crate::core::types::HarnessLeakedJob {
+            command: session.title,
+            kill_command: session.kill_command,
+            session_name: session.session_name,
+            started_at: session.started_at,
+        })
+        .collect();
+    jobs.extend(
+        running_jobs
+            .into_iter()
+            .filter(|job| !tmux_job_ids.contains(&job.id))
+            .map(|job| crate::core::types::HarnessLeakedJob {
+                command: job.title,
+                // Nothing to kill: the job is a thread that ends at its own
+                // timeout, so the note says that instead of naming a command
+                // that does not exist.
+                kill_command: format!(
+                    "(no kill command: {} job {} ends at its own timeoutMs)",
+                    job.tool_name, job.id
+                ),
+                session_name: job.id,
+                started_at: job.started_at,
+            }),
+    );
+    jobs
+}
+
+/// The wire label for an async job status (the loop-end report uses it).
+fn job_status_label(status: crate::tools::types::ChatAsyncToolJobStatus) -> &'static str {
+    match status {
+        crate::tools::types::ChatAsyncToolJobStatus::Completed => "completed",
+        crate::tools::types::ChatAsyncToolJobStatus::Failed => "failed",
+        crate::tools::types::ChatAsyncToolJobStatus::Running => "running",
+    }
+}
+
+#[cfg(test)]
+mod leaked_background_jobs_tests {
+    use super::leaked_background_jobs;
+    use crate::core::types::HarnessLeakedJob;
+    use crate::tools::types::{ChatAsyncToolJob, ChatAsyncToolJobStatus, ChatTmuxSession};
+
+    fn session(job_id: &str) -> ChatTmuxSession {
+        ChatTmuxSession {
+            attach_command: format!("tmux attach -t {job_id}"),
+            cwd: "/tmp".to_string(),
+            job_id: job_id.to_string(),
+            kill_command: format!("tmux kill-session -t {job_id}"),
+            session_name: job_id.to_string(),
+            started_at: "2026-01-01T00:00:00.000Z".to_string(),
+            title: format!("dev server {job_id}"),
+            tool_name: "BASH_ASYNC".to_string(),
+        }
+    }
+
+    fn job(id: &str, tool_name: &str, status: ChatAsyncToolJobStatus) -> ChatAsyncToolJob {
+        ChatAsyncToolJob {
+            command: None,
+            cwd: "/tmp".to_string(),
+            error: None,
+            exit_code: None,
+            finished_at: None,
+            id: id.to_string(),
+            log_path: format!("/tmp/{id}.log"),
+            started_at: "2026-01-01T00:00:01.000Z".to_string(),
+            status,
+            title: format!("monitor: {id}"),
+            tool_name: tool_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_monitor_still_running_is_reported_alongside_tmux_sessions() {
+        let jobs: Vec<HarnessLeakedJob> = leaked_background_jobs(
+            vec![session("job-tmux")],
+            vec![job(
+                "job-monitor",
+                "MONITOR",
+                ChatAsyncToolJobStatus::Running,
+            )],
+        );
+
+        let names: Vec<&str> = jobs.iter().map(|job| job.session_name.as_str()).collect();
+        assert_eq!(names, vec!["job-tmux", "job-monitor"]);
+        assert_eq!(jobs[1].command, "monitor: job-monitor");
+        assert!(jobs[1].kill_command.contains("ends at its own timeoutMs"));
+    }
+
+    #[test]
+    fn a_tmux_backed_async_job_is_reported_once() {
+        let jobs = leaked_background_jobs(
+            vec![session("job-tmux")],
+            vec![job(
+                "job-tmux",
+                "BASH_ASYNC",
+                ChatAsyncToolJobStatus::Running,
+            )],
+        );
+
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        assert_eq!(jobs[0].session_name, "job-tmux");
+        assert_eq!(jobs[0].kill_command, "tmux kill-session -t job-tmux");
+    }
 }
 
 /// The reviewer's opening note: the run's change set (diff against the
@@ -5947,6 +6081,13 @@ pub struct LoopScope {
     /// The cycle currently running (1-based; 0 before the first begins).
     pub cycle: i64,
     pub task_finished: bool,
+    /// This loop is running one extra round past `task_finished` so the model
+    /// receives a MONITOR result it would otherwise lose (operator directive:
+    /// the run always delivers the result, including a failure).
+    pub delivering_settled_monitor: bool,
+    /// Delivery cycles this loop has spent past `task_finished` on that result
+    /// (bounded by MONITOR_DELIVERY_MAX_CYCLES).
+    pub delivery_cycles: i64,
     pub made_progress: bool,
     /// A workspace edit or verification happened in the current cycle —
     /// the cycle-extension signal (reset in begin_cycle).
@@ -8215,11 +8356,33 @@ impl HarnessRun {
 
             let mut cycle: i64 = 0;
             loop {
+                // Operator directive: a MONITOR this run started always reaches
+                // the model — a check that timed out or errored as much as one
+                // that fired. A finished task used to be the end of the loop,
+                // so the result had nowhere left to land: hold here for a
+                // pending MONITOR and spend one delivery cycle handing the
+                // settled result to the model, which can then decide what to do
+                // next with it in hand.
+                if scope.task_finished && !scope.delivering_settled_monitor {
+                    if scope.delivery_cycles >= MONITOR_DELIVERY_MAX_CYCLES {
+                        break;
+                    }
+                    if !self.hold_for_pending_monitor(&mut scope).await {
+                        break;
+                    }
+                    scope.delivery_cycles += 1;
+                }
+
                 cycle += 1;
-                if cycle > scope.loop_budget.max_cycles + scope.cycle_extensions {
+                // A delivery cycle exists only to carry a MONITOR result to the
+                // model, so the cycle budget does not close it —
+                // `delivery_cycles` bounds it instead.
+                if cycle > scope.loop_budget.max_cycles + scope.cycle_extensions
+                    && !scope.delivering_settled_monitor
+                {
                     break;
                 }
-                if scope.task_finished || scope.concluded_naturally || self.aborted {
+                if scope.concluded_naturally || self.aborted {
                     break;
                 }
 
@@ -8228,17 +8391,36 @@ impl HarnessRun {
                 }
 
                 for round in 0..scope.loop_budget.max_tool_rounds_per_cycle {
-                    if scope.task_finished {
+                    let delivery_round = scope.delivering_settled_monitor;
+                    if scope.task_finished && !delivery_round {
                         break;
                     }
 
                     match self.run_round(&mut scope, cycle, round).await {
                         RoundOutcome::Continue => {}
-                        RoundOutcome::Break => break,
+                        RoundOutcome::Break => {
+                            // Operator directive: a loop does not end with a
+                            // MONITOR it started still checking. Hold until it
+                            // settles, then run the round that receives it —
+                            // even when the task already finished: the settled
+                            // result (completed OR failed) is the model's to
+                            // act on.
+                            if !delivery_round && self.hold_for_pending_monitor(&mut scope).await {
+                                continue;
+                            }
+                            break;
+                        }
                         RoundOutcome::Aborted => {
                             self.aborted = true;
                             break;
                         }
+                    }
+
+                    // The delivery round is the loop's last one: it existed only
+                    // to hand the model the settled MONITOR result.
+                    scope.delivering_settled_monitor = false;
+                    if delivery_round {
+                        break;
                     }
 
                     if self.run_error.is_some() {
@@ -8758,6 +8940,8 @@ impl HarnessRun {
             affordable_cycles,
             cycle: 0,
             task_finished: false,
+            delivering_settled_monitor: false,
+            delivery_cycles: 0,
             made_progress: false,
             read_only_calls_this_loop: 0,
             persisted_this_loop: false,
@@ -9549,8 +9733,15 @@ impl HarnessRun {
                 .flatten()
                 .map(|code| format!(" (exit {code})"))
                 .unwrap_or_default();
+            // A failed job names its error in the headline: "timed out without
+            // the signal" is the actionable part when a check never fired.
+            let error = job
+                .error
+                .as_deref()
+                .map(|error| format!(" — {}", truncate_text(error, 200)))
+                .unwrap_or_default();
             let headline = format!(
-                "background job {} ({}) finished: {status}{exit}",
+                "background job {} ({}) finished: {status}{exit}{error}",
                 job.id,
                 truncate_text(&job.title, 80)
             );
@@ -9581,6 +9772,110 @@ impl HarnessRun {
                 r#type: HarnessEventType::HarnessOp,
             });
         }
+    }
+
+    /// Operator directive: a task loop that would conclude while a MONITOR it
+    /// started is still checking does not end with that work in flight. It
+    /// holds here — abort-aware, in short slices — until the job settles,
+    /// drains the settled result into the transcript, and re-enters the round
+    /// loop so the model wakes up with the result instead of the run ending
+    /// around it. Returns true when a round is worth running again.
+    async fn hold_for_pending_monitor(&mut self, scope: &mut LoopScope) -> bool {
+        if self.aborted
+            || self.run_error.is_some()
+            || self.ask_user_awaiting
+            || scope.planned_and_yielded
+        {
+            return false;
+        }
+
+        let pending = self.running_monitor_job_ids();
+        if pending.is_empty() {
+            return false;
+        }
+
+        let detail = format!(
+            "loop would end with {} still-checking MONITOR job(s) ({}) — waiting for the signal instead",
+            pending.len(),
+            truncate_text(&pending.join(", "), MAX_DIGEST_ACTION_CHARS)
+        );
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                ..Default::default()
+            }),
+            detail: detail.clone(),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::HarnessOp,
+        });
+        scope.digest_actions.push(detail);
+
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(MONITOR_HOLD_MAX_MS as u64);
+        while std::time::Instant::now() < deadline {
+            if self.signal_aborted() {
+                self.aborted = true;
+                break;
+            }
+            if self.running_monitor_job_ids().is_empty() {
+                break;
+            }
+            crate::harness::model_call::sleep_unless_aborted(
+                MONITOR_HOLD_POLL_MS,
+                self.options.signal.as_ref(),
+            )
+            .await;
+        }
+
+        if self.aborted {
+            return false;
+        }
+
+        // Drain the settled result BEFORE the round that will read it, so the
+        // model sees the signal in its next request instead of a bare
+        // "background" note it has to poll for.
+        let before = scope.digest_actions.len();
+        self.report_settled_background_jobs(scope);
+        if scope.digest_actions.len() > before {
+            scope.concluded_naturally = false;
+            scope.progress_this_cycle = true;
+            scope.made_progress = true;
+            // A finished task does not close the loop on a result the model has
+            // not read yet: this round is the one that hands it over.
+            if scope.task_finished {
+                scope.delivering_settled_monitor = true;
+            }
+            return true;
+        }
+
+        self.emit(HarnessEvent {
+            data: Some(HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                ..Default::default()
+            }),
+            detail: format!(
+                "MONITOR job(s) still checking after {MONITOR_HOLD_MAX_MS}ms — the loop ends here; if one settles later it is surfaced as a run warning, not handed to the model",
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::RunWarning,
+        });
+        scope
+            .digest_actions
+            .push("MONITOR still checking at the hold limit".to_string());
+        false
+    }
+
+    /// Ids of the MONITOR jobs this run started that are still checking.
+    fn running_monitor_job_ids(&self) -> Vec<String> {
+        self.tool_services
+            .async_jobs
+            .running_jobs()
+            .into_iter()
+            .filter(|job| job.tool_name == "MONITOR")
+            .map(|job| job.id)
+            .collect()
     }
 
     pub async fn run_round(
@@ -10301,6 +10596,8 @@ impl HarnessRun {
         .await;
     }
 
+    /// Operator directive: a MONITOR this run started always reaches the model,
+    /// so a `finish_task` in the delivery round is not refused as a late call.
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
         scope.failed_calls_this_response.clear();
         let response_has_finish = calls.iter().any(|call| call.tool_name == "finish_task");
@@ -10327,6 +10624,7 @@ impl HarnessRun {
             // own freshly spawned review (or drop it). Additive ops (plan_tasks,
             // notes, memory) still run.
             if scope.task_finished
+                && !scope.delivering_settled_monitor
                 && (tool_name == "finish_task"
                     || tool_name == "drop_task"
                     || tool_name == "revise_task")
@@ -11499,22 +11797,37 @@ impl HarnessRun {
             self.generate_run_summary(reason).await;
         }
 
+        // A job that settled after the last round was reported nowhere: say so
+        // before the run result is built, so its output is not silently lost.
+        for job in self.tool_services.async_jobs.take_settled_unreported() {
+            let status = job_status_label(job.status);
+            let error = job
+                .error
+                .as_deref()
+                .map(|error| format!(" — {}", truncate_text(error, 200)))
+                .unwrap_or_default();
+            self.emit(HarnessEvent {
+                data: None,
+                detail: format!(
+                    "background job {} ({}) settled after the last round: {status}{error} — its log is at {}",
+                    job.id,
+                    truncate_text(&job.title, 80),
+                    job.log_path
+                ),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::RunWarning,
+            });
+        }
+
         // Background jobs the run started and never tore down: report them so
         // the driver knows a dev server/watcher is still holding the port
         // (and how to kill it) instead of discovering it three runs later.
-        // Background tmux jobs that outlived the run.
-        let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = self
-            .tool_services
-            .tmux_sessions
-            .list_sessions()
-            .into_iter()
-            .map(|session| crate::core::types::HarnessLeakedJob {
-                command: session.title,
-                kill_command: session.kill_command,
-                session_name: session.session_name,
-                started_at: session.started_at,
-            })
-            .collect();
+        // Both tmux sessions (BASH_ASYNC) and non-tmux async jobs (a MONITOR
+        // still checking) count, so nothing outlives a run invisibly.
+        let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = leaked_background_jobs(
+            self.tool_services.tmux_sessions.list_sessions(),
+            self.tool_services.async_jobs.running_jobs(),
+        );
 
         if !leaked_jobs.is_empty() {
             let running = leaked_jobs

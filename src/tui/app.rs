@@ -168,7 +168,7 @@ fn help_text() -> String {
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
-            "  esc — clear the composer, or stop the running goal",
+            "  esc — clear the composer, or stop the running goal and its commands",
             "  ctrl+c — exit",
         ]
         .iter()
@@ -1711,6 +1711,19 @@ impl TuiApp {
                 Key::Escape => {
                     if let Some(abort) = &self.abort {
                         abort.abort();
+                    }
+                    // The abort signal alone is only observed BETWEEN harness
+                    // steps, so an in-flight BASH/VERIFY child kept running to
+                    // its own timeout (an operator had to wait out a `sleep`).
+                    // Esc now stops those children here, with exactly the
+                    // process-group SIGTERM/SIGKILL sweep a `drip --stop`
+                    // signal performs - the registry is process-wide, so every
+                    // running command of this run is reached.
+                    let stopped = crate::tools::child_process::terminate_active_processes();
+                    if stopped > 0 {
+                        self.push_info(format!(
+                            "esc — aborting the run and stopping {stopped} in-flight command(s)"
+                        ));
                     }
                 }
                 Key::Ctrl('c') => self.quit = true,
@@ -6752,5 +6765,55 @@ mod activity_line_tests {
             fixture.app.activity_next_tick.is_none(),
             "an idle composer must not keep repainting for the spinner"
         );
+    }
+
+    #[test]
+    fn escape_stops_the_run_and_its_in_flight_commands() {
+        // `terminate_active_processes` sweeps EVERY in-flight child in the
+        // process, so hold the registry lock the other registry-firing tests
+        // hold before firing it from the esc key.
+        let _guard = crate::tools::child_process::REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        let signal = crate::harness::model_call::AbortSignal::new();
+        fixture.app.abort = Some(signal.clone());
+        // Stands in for the terminator a running BASH child registers: esc must
+        // run it, not merely flip the harness abort flag.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stopped);
+        let unregister =
+            crate::tools::child_process::register_process_terminator(Box::new(move || {
+                flag.store(true, Ordering::SeqCst);
+            }));
+
+        fixture.app.on_key(Key::Escape);
+
+        assert!(signal.is_aborted(), "esc must abort the run");
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "esc must stop the in-flight command, not only signal the harness"
+        );
+        assert!(
+            fixture.app.running,
+            "the run ends when the harness reports back, not on the keypress"
+        );
+        // The stop is visible: an operator who hits esc must see that the
+        // running command was killed rather than infer it from silence.
+        let note = fixture
+            .app
+            .pending_cells
+            .iter()
+            .chain(fixture.app.cells.iter())
+            .find_map(|entry| match entry {
+                TranscriptEntry::Info(note) if note.text.contains("in-flight command") => {
+                    Some(note.text.clone())
+                }
+                _ => None,
+            })
+            .expect("the killed command is reported in the transcript");
+        assert!(note.contains("aborting the run"), "unexpected note: {note}");
+        unregister();
     }
 }

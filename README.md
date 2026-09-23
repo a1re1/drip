@@ -960,6 +960,13 @@ The TUI runs the terminal in raw mode with flow control off, so `Ctrl+S`
 arrives as a single byte instead of pausing output; shift+enter is deliberately
 not a binding because most terminals report it as plain Enter.
 
+`Esc` while a run is in flight aborts the run **and** stops the commands it is
+running: the harness gives up at its next safe point, and every in-flight
+`BASH`/`VERIFY` child (a `sleep`, a long test run) gets the same process-group
+`SIGTERM`→`SIGKILL` sweep a `drip --stop` signal performs. A command that is
+mid-run is killed within about a second instead of running to its own timeout,
+and the transcript notes how many in-flight commands were stopped.
+
 ## Watch TUI (`dripw`)
 
 `dripw` is a read-only, lazygit-style watcher for drip sessions — run it in a

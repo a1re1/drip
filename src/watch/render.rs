@@ -90,9 +90,65 @@ pub struct WatchViewModel {
     /// read from the loop-start telemetry of `transcript`. Empty when the
     /// session recorded none (or predates the field).
     pub skill_loads: Vec<SkillLoad>,
-    /// Page shown by the read-only [4] Skills & Tools pane when its wrapped
-    /// content does not fit the pane (the renderer clamps it to the real pages).
+    /// Page shown by the [4] Skills & Tools pane when its wrapped content does
+    /// not fit the pane (the renderer clamps it to the real pages).
     pub skill_page: usize,
+    /// Global index into `skill_items` of the skill/tool picked in the [4]
+    /// pane — `None` means nothing picked, and the [0] column keeps showing
+    /// the transcript.
+    pub sel_skill: Option<usize>,
+    /// The picked item's read-up (SKILL.md / tool listing), loaded by the app
+    /// because the renderer does no I/O. `None` while nothing is picked.
+    pub skill_detail: Option<SkillDetail>,
+    /// Rows scrolled into the read-up body while it holds more than the [0]
+    /// column seats. The box clamps it; the app zeroes it on a new pick.
+    pub skill_detail_scroll: usize,
+}
+
+/// A skill or tool the [4] pane lists, named as the pane shows it — the
+/// telemetry name, no `(2 loops)` count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillItem {
+    Skill(String),
+    Tool(String),
+}
+
+impl SkillItem {
+    /// The bare name (what the pane's labels carry, minus any count suffix).
+    pub fn name(&self) -> &str {
+        match self {
+            SkillItem::Skill(name) | SkillItem::Tool(name) => name,
+        }
+    }
+
+    /// `skill` / `tool` — the word the read-up title uses.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            SkillItem::Skill(_) => "skill",
+            SkillItem::Tool(_) => "tool",
+        }
+    }
+}
+
+/// Where one item's label sits in the [4] pane's wrapped content: `first` is
+/// the content-relative row its name starts on (column `first_col` of it) and
+/// `last` the last row it spans (ending at column `last_col`). Two names that
+/// share a row therefore still resolve apart, by the column clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillItemRow {
+    pub item: SkillItem,
+    pub first: usize,
+    pub first_col: usize,
+    pub last: usize,
+    pub last_col: usize,
+}
+
+/// The read-up shown in the [0] column while a skill/tool is picked in [4]:
+/// the title (`skill · navis`) and the already-rendered body rows.
+#[derive(Debug, Clone)]
+pub struct SkillDetail {
+    pub title: String,
+    pub lines: Vec<RowCell>,
 }
 
 // ── Time helpers (pure; exported for tests) ──────────────────────────────────
@@ -133,11 +189,23 @@ pub fn diff_lines(prev: &[String], next: &[String]) -> Vec<usize> {
 }
 
 fn plain(text: impl Into<String>, color: fn(&str) -> String) -> RowCell {
-    RowCell { text: text.into(), color: Some(color), selected: false, rich: false }
+    RowCell {
+        text: text.into(),
+        color: Some(color),
+        selected: false,
+        sel_span: None,
+        rich: false,
+    }
 }
 
 fn selectable(text: impl Into<String>, color: fn(&str) -> String, selected: bool) -> RowCell {
-    RowCell { text: text.into(), color: Some(color), selected, rich: false }
+    RowCell {
+        text: text.into(),
+        color: Some(color),
+        selected,
+        sel_span: None,
+        rich: false,
+    }
 }
 
 // ── Pane chrome ──────────────────────────────────────────────────────────────
@@ -182,11 +250,21 @@ pub fn render_pane(width: usize, height: usize, title: &str, focused: bool, rows
             }
             Some(row) => {
                 let fitted = fit(&row.text, inner_w, true);
-                if row.selected {
+                let paint = row.color.unwrap_or(c::white);
+                match (row.selected, row.sel_span) {
+                    // A span pick (the [4] pane's skill/tool) lights its own
+                    // columns only: the rest of the row keeps its colour, so a
+                    // row shared with other names reads as one picked name
+                    // instead of a lit-up line.
+                    (true, Some((a, b))) => match split_cols(&fitted, a, b) {
+                        Some((lead, mid, tail)) => {
+                            format!("{}{}{}", paint(&lead), c::on_cyan(&mid), paint(&tail))
+                        }
+                        None => c::on_cyan(&fitted),
+                    },
                     // on_cyan already pairs cyan bg with dark fg (46;30)
-                    c::on_cyan(&fitted)
-                } else {
-                    (row.color.unwrap_or(c::white))(&fitted)
+                    (true, None) => c::on_cyan(&fitted),
+                    _ => paint(&fitted),
                 }
             }
         };
@@ -227,6 +305,39 @@ fn fit_ansi_line(line: &str, width: usize) -> String {
     }
     // Shouldn't happen for our borders; fall back to plain fit of stripped text.
     fit(&strip_ansi(line), width, true)
+}
+
+/// How wide the [0] read-up may wrap in a `cols` x `rows` terminal: the inner
+/// width of the column it paints in, so its text reaches both borders instead
+/// of stopping short of the right one.
+pub fn read_up_inner_w(vm: &WatchViewModel, cols: usize, rows: usize) -> usize {
+    transcript_region(vm, cols, rows)
+        .map(|(_, _, c0, c1)| c1.saturating_sub(c0 + 1).max(1))
+        .unwrap_or(40)
+}
+
+/// Split a fitted, ANSI-free row into the columns before, inside and after the
+/// inclusive visible-column span `a..=b`. The three pieces re-join to the row,
+/// so a partial highlight colours it without moving a character; `None` when
+/// the span holds no column of this row (a truncated row, or an empty pick).
+fn split_cols(text: &str, a: usize, b: usize) -> Option<(String, String, String)> {
+    if b < a {
+        return None;
+    }
+    let (mut lead, mut mid, mut tail) = (String::new(), String::new(), String::new());
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let target = if col < a {
+            &mut lead
+        } else if col <= b {
+            &mut mid
+        } else {
+            &mut tail
+        };
+        target.push(ch);
+        col += char_width(ch as u32);
+    }
+    (!mid.is_empty()).then_some((lead, mid, tail))
 }
 
 // ── Layout helpers ───────────────────────────────────────────────────────────
@@ -687,26 +798,41 @@ pub fn all_loaded_tools(loads: &[SkillLoad]) -> Vec<(String, usize)> {
     roll_up(loads, |load| &load.tools)
 }
 
-/// Rows for the [4] Skills & Tools pane: the run-wide roll-up of every skill
-/// and every tool the focused session's loops had, then one block per loop,
-/// newest first. Names are joined into comma-separated lists that wrap to the
-/// pane width — a loop that reached for twenty tools costs a couple of rows
-/// instead of twenty.
-fn skill_lines(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
+/// The [4] pane's content rows plus, for every skill/tool it lists, the rows
+/// (content-relative) its label occupies — the surface a click and the arrow
+/// keys resolve against. Built in one pass, so the pane and the hit test can
+/// never disagree about which line an item sits on.
+struct SkillSurface {
+    rows: Vec<RowCell>,
+    items: Vec<SkillItemRow>,
+}
+
+fn skill_surface(vm: &WatchViewModel, inner_w: usize) -> SkillSurface {
     if vm.skill_loads.is_empty() {
-        return vec![plain("  no loop telemetry yet", c::dim)];
+        return SkillSurface {
+            rows: vec![plain("  no loop telemetry yet", c::dim)],
+            items: Vec::new(),
+        };
     }
     let skills = all_loaded_skills(&vm.skill_loads);
     let tools = all_loaded_tools(&vm.skill_loads);
-    let mut rows = vec![plain(
+    let mut rows: Vec<RowCell> = vec![plain(
         format!("all loaded skills ({})", skills.len()),
         c::accent,
     )];
-    push_list(
+    let mut items: Vec<SkillItemRow> = Vec::new();
+    let labels = comma_list(&skills);
+    let kinds: Vec<SkillItem> = skills
+        .iter()
+        .map(|(name, _)| SkillItem::Skill(name.clone()))
+        .collect();
+    push_surface(
         &mut rows,
+        &mut items,
         "  ",
         "  ",
-        &comma_list(&skills),
+        &labels,
+        &kinds,
         c::white,
         inner_w,
     );
@@ -714,11 +840,18 @@ fn skill_lines(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
         format!("all available tools ({})", tools.len()),
         c::accent,
     ));
-    push_list(
+    let labels = comma_list(&tools);
+    let kinds: Vec<SkillItem> = tools
+        .iter()
+        .map(|(name, _)| SkillItem::Tool(name.clone()))
+        .collect();
+    push_surface(
         &mut rows,
+        &mut items,
         "  ",
         "  ",
-        &comma_list(&tools),
+        &labels,
+        &kinds,
         c::white,
         inner_w,
     );
@@ -740,24 +873,70 @@ fn skill_lines(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
             ),
             c::accent,
         ));
-        push_list(
+        let kinds: Vec<SkillItem> = load
+            .skills
+            .iter()
+            .map(|n| SkillItem::Skill(n.clone()))
+            .collect();
+        push_surface(
             &mut rows,
+            &mut items,
             "  skills  ",
             "          ",
             &load.skills,
+            &kinds,
             c::gray,
             inner_w,
         );
-        push_list(
+        let kinds: Vec<SkillItem> = load
+            .tools
+            .iter()
+            .map(|n| SkillItem::Tool(n.clone()))
+            .collect();
+        push_surface(
             &mut rows,
+            &mut items,
             "  tools   ",
             "          ",
             &load.tools,
+            &kinds,
             c::gray,
             inner_w,
         );
     }
-    rows
+    // The picked item paints in reverse video (render_pane's on_cyan) on its
+    // own columns: the row it shares with other names keeps its colour, so the
+    // highlight marks the picked skill/tool rather than the whole line.
+    if let Some(entry) = vm.sel_skill.and_then(|i| items.get(i)) {
+        let last_row = entry.last.min(rows.len().saturating_sub(1));
+        for r in entry.first..=last_row {
+            if let Some(row) = rows.get_mut(r) {
+                // The label begins on `first_col` of its first row and ends on
+                // `last_col` of its last; the rows between exist only because
+                // the name wrapped, so they belong to it entirely.
+                let start = if r == entry.first { entry.first_col } else { 0 };
+                let end = if r == entry.last {
+                    entry.last_col
+                } else {
+                    inner_w.saturating_sub(1)
+                };
+                row.selected = true;
+                row.sel_span = Some((start, end));
+            }
+        }
+    }
+    SkillSurface { rows, items }
+}
+
+/// The [4] pane's content rows, unpaged (the pane's window is `skill_rows`).
+fn skill_lines(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
+    skill_surface(vm, inner_w).rows
+}
+
+/// Every skill/tool the [4] pane lists at `inner_w`, in pane order, each with
+/// the rows its label spans (content-relative).
+pub fn skill_items(vm: &WatchViewModel, inner_w: usize) -> Vec<SkillItemRow> {
+    skill_surface(vm, inner_w).items
 }
 
 /// The roll-up's names as display strings — `navis (2 loops)`, `tdd` — keeping
@@ -776,69 +955,107 @@ fn comma_list(entries: &[(String, usize)]) -> Vec<String> {
         .collect()
 }
 
-/// Push `names` as a comma-separated list wrapped to the pane's `inner_w`,
-/// `first` leading the first row and `cont` every continuation row — both the
-/// same visible width, so a broken list keeps a hanging indent. An empty list
-/// adds no row at all.
-fn push_list(
+/// The selectable surface: a wrapped comma-separated list of rows, plus one
+/// `SkillItemRow` per entry recording the content rows its label spans —
+/// the map a click and the arrow keys navigate. `labels` and `kinds` are
+/// parallel: one display label per item, in pane order.
+#[allow(clippy::too_many_arguments)]
+fn push_surface(
     rows: &mut Vec<RowCell>,
+    items: &mut Vec<SkillItemRow>,
     first: &str,
     cont: &str,
-    names: &[String],
+    labels: &[String],
+    kinds: &[SkillItem],
     color: fn(&str) -> String,
     inner_w: usize,
 ) {
-    if names.is_empty() {
+    if kinds.is_empty() {
         return;
     }
     let lead_w = string_width(first).max(string_width(cont));
     let wrap_w = inner_w.saturating_sub(lead_w).max(1);
-    for (i, line) in wrap_names(names, wrap_w).iter().enumerate() {
-        rows.push(plain(
-            format!("{}{line}", if i == 0 { first } else { cont }),
-            color,
-        ));
+    let section_start = rows.len();
+    let mut cur = String::new();
+    for (i, kind) in kinds.iter().enumerate() {
+        let label = labels.get(i).map(String::as_str).unwrap_or(kind.name());
+        if !cur.is_empty() {
+            if string_width(&cur) + 2 + string_width(label) <= wrap_w {
+                cur.push_str(", ");
+            } else {
+                push_surface_row(rows, first, cont, section_start, &cur, color);
+                cur.clear();
+            }
+        }
+        // `cur` now begins this item's label, so the rows and columns the
+        // label lands on are the item's span: a click anywhere on a broken name
+        // picks it, and two names sharing a row stay apart by column.
+        let start_col = lead_w + string_width(&cur);
+        let mut pushed_end = start_col;
+        let first_row = rows.len();
+        let mut rest = label;
+        while string_width(rest) > wrap_w.saturating_sub(string_width(&cur)) {
+            let (chunk, rem) = split_at_width(rest, wrap_w.saturating_sub(string_width(&cur)));
+            cur.push_str(chunk);
+            pushed_end = lead_w + string_width(&cur).saturating_sub(1);
+            push_surface_row(rows, first, cont, section_start, &cur, color);
+            cur.clear();
+            rest = rem;
+        }
+        cur.push_str(rest);
+        // An empty `cur` here means the last chunk consumed the label exactly
+        // to the row's end, so that pushed row is the one that ends the span;
+        // otherwise the label ends on the row `rows.len()` names.
+        let (last_row, last_col) = if cur.is_empty() {
+            (rows.len().saturating_sub(1).max(first_row), pushed_end)
+        } else {
+            (rows.len(), lead_w + string_width(&cur).saturating_sub(1))
+        };
+        items.push(SkillItemRow {
+            item: kind.clone(),
+            first: first_row,
+            first_col: start_col,
+            last: last_row,
+            last_col,
+        });
+    }
+    if !cur.is_empty() {
+        push_surface_row(rows, first, cont, section_start, &cur, color);
     }
 }
 
-/// Pack `names` into `", "`-joined lines no wider than `width`, breaking
-/// BETWEEN names so a name is only split when it alone is wider than the line.
-fn wrap_names(names: &[String], width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for name in names {
-        let fits = !cur.is_empty() && string_width(&cur) + 2 + string_width(name) <= width;
-        if fits {
-            cur.push_str(", ");
-            cur.push_str(name);
-        } else {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
-            cur = name.clone();
+/// One rendered row of a wrapped surface line: `first` leads the section's
+/// first row, `cont` every row after it.
+fn push_surface_row(
+    rows: &mut Vec<RowCell>,
+    first: &str,
+    cont: &str,
+    section_start: usize,
+    text: &str,
+    color: fn(&str) -> String,
+) {
+    let prefix = if rows.len() == section_start {
+        first
+    } else {
+        cont
+    };
+    rows.push(plain(format!("{prefix}{text}"), color));
+}
+
+/// Split `text` at the last char boundary that fits `room` visible columns —
+/// always at least one char, so a degenerate row cannot loop forever.
+fn split_at_width(text: &str, room: usize) -> (&str, &str) {
+    let mut cut = 0usize;
+    let mut w = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let cw = char_width(ch as u32);
+        if w + cw > room {
+            break;
         }
-        // A name wider than the whole line still has to be broken somewhere.
-        while string_width(&cur) > width {
-            let mut cut = 0usize;
-            let mut w = 0usize;
-            for (i, ch) in cur.char_indices() {
-                let cw = crate::watch::ansi::char_width(ch as u32);
-                if w + cw > width {
-                    break;
-                }
-                w += cw;
-                cut = i + ch.len_utf8();
-            }
-            let cut = cut.max(1).min(cur.len());
-            out.push(cur[..cut].to_string());
-            cur = cur[cut..].to_string();
-        }
+        w += cw;
+        cut = idx + ch.len_utf8();
     }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
+    text.split_at(cut.max(1).min(text.len()))
 }
 
 /// The [4] pane's visible rows in an `inner_w` × `inner_h` box: the wrapped
@@ -856,7 +1073,7 @@ fn skill_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCel
     let end = (start + size).min(all.len());
     let mut out: Vec<RowCell> = all[start..end].to_vec();
     let pager = plain(
-        format!("  page {}/{} · j/k or [/] pages", page + 1, pages),
+        format!("  page {}/{} · [/] pages · j/k/↑↓ picks", page + 1, pages),
         c::dim,
     );
     if out.len() < inner_h {
@@ -915,6 +1132,110 @@ pub fn skill_page_count(vm: &WatchViewModel, cols: usize, rows: usize) -> usize 
 
 // ── Titles / footer notes ────────────────────────────────────────────────────
 
+/// The [4] pane's content row under a 1-based cell, as the item it lists —
+/// `None` for a border, the empty state, or the pager row. `vm.skill_page` is
+/// honoured, so a click lands on the item the user actually sees.
+pub fn skill_item_at(
+    vm: &WatchViewModel,
+    cols: usize,
+    rows: usize,
+    col: usize,
+    row: usize,
+) -> Option<SkillItem> {
+    let (r0, r1, c0, c1) = panel_regions(vm, cols, rows).into_iter().nth(3)?;
+    if row <= r0 || row >= r1 || col < c0 || col > c1 {
+        return None;
+    }
+    let inner_w = c1.saturating_sub(c0 + 1).max(1);
+    let inner_h = r1.saturating_sub(r0 + 1).max(1);
+    let items = skill_items(vm, inner_w);
+    if items.is_empty() {
+        return None;
+    }
+    let content = skill_lines(vm, inner_w).len();
+    let (size, pages) = page_window(content, inner_h);
+    let page = vm.skill_page.min(pages.saturating_sub(1));
+    let within = row - (r0 + 1);
+    // A pager row is a control, not an item.
+    if pages > 1 && within >= size {
+        return None;
+    }
+    let line = page * size + within;
+    let col_rel = col.saturating_sub(c0 + 1);
+    // The innermost (latest-starting) item whose box holds the cell, so a click
+    // lands on the name the pointer was actually over.
+    items
+        .into_iter()
+        .filter(|entry| {
+            let at_or_after =
+                line > entry.first || (line == entry.first && col_rel >= entry.first_col);
+            let at_or_before =
+                line < entry.last || (line == entry.last && col_rel <= entry.last_col);
+            at_or_after && at_or_before
+        })
+        .max_by_key(|entry| entry.first)
+        .map(|entry| entry.item)
+}
+
+/// The [4] pane's read-up for the [0] column while a skill/tool is picked:
+/// `height` lines of a titled box around `vm.skill_detail`'s rows. `None`
+/// while nothing is picked (the column keeps the transcript).
+pub fn skill_detail_box(vm: &WatchViewModel, width: usize, height: usize) -> Option<Vec<String>> {
+    // Only while the pick is being browsed: leaving [4] puts the transcript
+    // back in the column, with the pick still standing for the way back.
+    if vm.focus != 4 {
+        return None;
+    }
+    let detail = vm.skill_detail.as_ref()?;
+    let mut all = detail.lines.clone();
+    if all.is_empty() {
+        all.push(plain("  (no content)", c::dim));
+    }
+    // The body scrolls: a SKILL.md or a tool schema is longer than the column,
+    // and the whole of it has to stay reachable. `vm.skill_detail_scroll` is
+    // clamped here, so a value left over from a taller terminal still paints.
+    let inner_h = height.saturating_sub(2).max(1);
+    let total = all.len();
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = vm.skill_detail_scroll.min(max_scroll);
+    let rows: Vec<RowCell> = all.into_iter().skip(scroll).collect();
+    let note = if max_scroll == 0 {
+        "↑/↓ or click picks a skill/tool · [4]".to_string()
+    } else {
+        format!(
+            "{}-{} of {} · PgUp/PgDn or wheel scrolls",
+            scroll + 1,
+            (scroll + inner_h).min(total),
+            total
+        )
+    };
+    Some(render_pane(
+        width,
+        height,
+        &format!("[0] {}", detail.title),
+        true,
+        &rows,
+        Some(note.as_str()),
+    ))
+}
+
+/// How far the [0] read-up can scroll in a `cols` x `rows` terminal: the rows
+/// its body overflows the box by (`0` while it all fits), so the app can clamp
+/// its wheel and PageDown steps to a listing that ends.
+pub fn skill_detail_max_scroll(vm: &WatchViewModel, cols: usize, rows: usize) -> usize {
+    let Some(layout) = pane_layout(vm, cols, rows) else {
+        return 0;
+    };
+    let inner_h = layout.zero_h.saturating_sub(2).max(1);
+    vm.skill_detail
+        .as_ref()
+        .map(|detail| detail.lines.len())
+        .unwrap_or(0)
+        .saturating_sub(inner_h)
+}
+
+// ── Titles / footer notes ────────────────────────────────────────────────────
+
 fn sessions_title(vm: &WatchViewModel) -> String {
     format!("[1] Sessions · {} ({})", vm.mode.label(), vm.sessions.len())
 }
@@ -956,7 +1277,8 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 
 // ── Frame ────────────────────────────────────────────────────────────────────
 
-const FOOTER_HINT: &str = "1/2/3/4 focus · tab cycle · r mode · click/j/k move · [/] h/l/wheel scroll log · q quit";
+const FOOTER_HINT: &str =
+    "1/2/3/4 focus · tab cycle · r mode · j/k move · [/] h/l page · [4] PgUp/Dn read-up · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -1081,10 +1403,14 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
         )
     };
 
-    // The [0] column: the transcript normally; a shell-detail box over a raw
-    // stdout/stderr tail box when the Shells pane is focused (sub-zero's
-    // renderRight). Always emits exactly `height` lines.
+    // The [0] column: the transcript normally; a skill/tool read-up while one
+    // is picked in [4]; a shell-detail box over a raw stdout/stderr tail box
+    // when the Shells pane is focused (sub-zero's renderRight). Always emits
+    // exactly `height` lines.
     let mk_zero = |w: usize, height: usize| -> Vec<String> {
+        if let Some(box_lines) = skill_detail_box(vm, w, height) {
+            return box_lines;
+        }
         if vm.focus != 3 {
             let mut rows = model_header_rows(&vm.transcript, w.saturating_sub(2));
             // The header eats into the scrolling viewport, never the pane height.
@@ -1261,6 +1587,9 @@ mod tests {
             sel_task: 0,
             skill_loads: vec![],
             skill_page: 0,
+            sel_skill: None,
+            skill_detail: None,
+            skill_detail_scroll: 0,
         }
     }
 
@@ -1463,7 +1792,16 @@ mod tests {
     fn render_pane_emits_exact_box() {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
-        let rows = vec![plain("hello", c::white), RowCell { text: "rich".into(), color: None, selected: false, rich: true }];
+        let rows = vec![
+            plain("hello", c::white),
+            RowCell {
+                text: "rich".into(),
+                color: None,
+                selected: false,
+                sel_span: None,
+                rich: true,
+            },
+        ];
         let lines = render_pane(20, 5, "T", true, &rows, Some("1/2"));
         assert_eq!(lines.len(), 5);
         assert!(lines.iter().all(|line| string_width(line) == 20), "{lines:?}");
@@ -1871,7 +2209,7 @@ mod tests {
         assert_eq!(rows.len(), 8);
         assert_eq!(
             rows.last().unwrap().text,
-            format!("  page 1/{pages} · j/k or [/] pages")
+            format!("  page 1/{pages} · [/] pages · j/k/↑↓ picks")
         );
 
         // Every page stays inside the box: never more rows than it seats, and
@@ -1900,7 +2238,7 @@ mod tests {
         let second = skill_rows(&vm, 40, 8);
         assert_eq!(
             second.last().unwrap().text,
-            format!("  page 2/{pages} · j/k or [/] pages")
+            format!("  page 2/{pages} · [/] pages · j/k/↑↓ picks")
         );
         assert_ne!(second[0].text, rows[0].text, "the window moved");
 
@@ -1909,7 +2247,7 @@ mod tests {
         let last = skill_rows(&vm, 40, 8);
         assert_eq!(
             last.last().unwrap().text,
-            format!("  page {pages}/{pages} · j/k or [/] pages")
+            format!("  page {pages}/{pages} · [/] pages · j/k/↑↓ picks")
         );
 
         // Content that fits is never paged.
@@ -1983,5 +2321,228 @@ mod tests {
         let vm = empty_vm();
         assert_eq!(task_count_note(&vm.tasks), None);
         assert_eq!(task_rows(&vm, 24, 5)[0].text, "  no task ledger yet");
+    }
+
+    #[test]
+    fn skill_items_map_every_listed_name_to_the_rows_it_spans() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![
+            SkillLoad {
+                iteration: 1,
+                skills: vec!["navis".into()],
+                tools: vec!["READ".into()],
+            },
+            SkillLoad {
+                iteration: 2,
+                skills: vec!["navis".into(), "tdd".into()],
+                tools: vec!["READ".into(), "GREP".into()],
+            },
+        ];
+
+        let inner_w = 30;
+        let rows = skill_lines(&vm, inner_w);
+        let items = skill_items(&vm, inner_w);
+
+        // Every name is listed once in the roll-up, then again in each loop
+        // block that had it: 4 roll-up entries + 4 in the newest loop + 2 in
+        // the older one.
+        assert_eq!(items.len(), 10, "{items:?}");
+        for entry in &items {
+            assert!(entry.first <= entry.last, "{entry:?}");
+            assert!(entry.last < rows.len(), "{entry:?}");
+            assert!(
+                rows[entry.first].text.contains(entry.item.name()),
+                "{entry:?} does not start on row {} ({:?})",
+                entry.first,
+                rows[entry.first].text
+            );
+        }
+        // Pane order: the roll-up (skills then tools, most loops first), then
+        // the newest loop, then the older one.
+        let names: Vec<&str> = items.iter().map(|e| e.item.name()).collect();
+        assert_eq!(
+            names,
+            vec!["navis", "tdd", "READ", "GREP", "navis", "tdd", "READ", "GREP", "navis", "READ"]
+        );
+        assert!(matches!(items[0].item, SkillItem::Skill(_)));
+        assert!(matches!(items[2].item, SkillItem::Tool(_)));
+        // The first `skill_items` entry is the row the pane paints it on.
+        assert_eq!(items[0].first, 1, "the roll-up's skill row");
+    }
+
+    #[test]
+    fn skill_item_at_resolves_a_painted_cell_and_the_pick_paints_its_rows() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![SkillLoad {
+            iteration: 1,
+            skills: vec!["navis".into(), "tdd".into()],
+            tools: vec!["READ".into()],
+        }];
+        vm.focus = 4;
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, c1) = panel_regions(&vm, cols, rows)[3];
+        let inner_w = c1 - c0 - 1;
+        let items = skill_items(&vm, inner_w);
+        assert_eq!(items.len(), 6, "{items:?}");
+
+        // Every item's own recorded start cell resolves back to it, even when
+        // two names share a row.
+        for entry in &items {
+            assert_eq!(
+                skill_item_at(
+                    &vm,
+                    cols,
+                    rows,
+                    c0 + 1 + entry.first_col,
+                    r0 + 1 + entry.first
+                ),
+                Some(entry.item.clone()),
+                "{entry:?}"
+            );
+        }
+        // A border cell is not an item, and neither is the row after the last
+        // one.
+        assert_eq!(skill_item_at(&vm, cols, rows, c0 + 1, r0), None);
+        assert_eq!(
+            skill_item_at(&vm, cols, rows, c0 + 3, r0 + 1 + items[5].last + 1),
+            None
+        );
+
+        // The pick paints reverse video on its own rows and nowhere else.
+        vm.sel_skill = Some(1);
+        let painted = skill_lines(&vm, inner_w);
+        for (i, row) in painted.iter().enumerate() {
+            let mine = i >= items[1].first && i <= items[1].last;
+            assert_eq!(row.selected, mine, "row {i} ({:?})", row.text);
+        }
+    }
+
+    #[test]
+    fn the_read_up_box_only_replaces_the_transcript_while_the_pane_is_focused() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_detail = Some(SkillDetail {
+            title: "skill · tdd".into(),
+            lines: vec![plain("body", c::white)],
+        });
+
+        // With nothing picked and the transcript owning the column, no box.
+        assert!(skill_detail_box(&vm, 40, 10).is_none());
+        vm.focus = 4;
+        let box_lines = skill_detail_box(&vm, 40, 10).expect("the read-up box");
+        assert_eq!(
+            box_lines.len(),
+            10,
+            "the box is exactly as tall as its column"
+        );
+        assert!(box_lines[0].contains("skill · tdd"), "{:?}", box_lines[0]);
+        let frame = strip_ansi(&render_frame(&vm, 100, 30));
+        assert!(
+            frame.contains("skill · tdd"),
+            "the frame carries the read-up"
+        );
+
+        // Unpicked, the same frame is the transcript again.
+        vm.skill_detail = None;
+        assert!(!strip_ansi(&render_frame(&vm, 100, 30)).contains("skill · tdd"));
+        // An empty read-up still paints a box, never a blank column.
+        vm.skill_detail = Some(SkillDetail {
+            title: "tool · READ".into(),
+            lines: Vec::new(),
+        });
+        assert_eq!(skill_detail_box(&vm, 40, 10).map(|l| l.len()), Some(10));
+    }
+
+    #[test]
+    fn the_pick_lights_only_its_own_name() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(true);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![SkillLoad {
+            iteration: 1,
+            skills: vec!["navis".into(), "tdd".into()],
+            tools: vec![],
+        }];
+        vm.focus = 4;
+        let inner_w = 30;
+        let items = skill_items(&vm, inner_w);
+        let pick = items
+            .iter()
+            .position(|entry| entry.item.name() == "tdd")
+            .expect("the rolled-up pick");
+        vm.sel_skill = Some(pick);
+        let rows = skill_lines(&vm, inner_w);
+        let line = rows[items[pick].first].text.clone();
+        assert!(
+            line.contains("navis"),
+            "the picked name shares its row with another: {line:?}"
+        );
+
+        let painted = render_pane(
+            inner_w + 2,
+            3,
+            "T",
+            true,
+            &rows[items[pick].first..=items[pick].first],
+            None,
+        );
+        let body = &painted[1];
+        assert!(
+            body.contains(&c::on_cyan("tdd")),
+            "the pick paints in reverse video: {body:?}"
+        );
+        assert!(
+            !body.contains(&c::on_cyan("navis")),
+            "the rest of the row keeps its own colour: {body:?}"
+        );
+        assert_eq!(body.matches("\x1b[46;30m").count(), 1, "{body:?}");
+        assert_eq!(
+            strip_ansi(body).matches("navis, tdd").count(),
+            1,
+            "{body:?}"
+        );
+    }
+
+    #[test]
+    fn the_read_up_scrolls_through_the_whole_listing() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.focus = 4;
+        let lines: Vec<RowCell> = (0..40)
+            .map(|i| plain(format!("line {i:02}"), c::white))
+            .collect();
+        vm.skill_detail = Some(SkillDetail {
+            title: "skill · navis".into(),
+            lines,
+        });
+        let (cols, rows) = (100usize, 30usize);
+        let max = skill_detail_max_scroll(&vm, cols, rows);
+        assert!(
+            max > 0 && max < 40,
+            "the listing overflows the column: {max}"
+        );
+        let (w, h) = (60usize, 29usize);
+
+        // Unscrolled, the box starts at the top of the listing...
+        let first = strip_ansi(&skill_detail_box(&vm, w, h).unwrap().join("\n"));
+        assert!(first.contains("line 00"), "{first:?}");
+        assert!(!first.contains("line 39"), "{first:?}");
+
+        // ...and at the far end it seats the last line, with the footer saying
+        // where in the listing the box sits. An out-of-range offset clamps.
+        vm.skill_detail_scroll = 999;
+        let last = strip_ansi(&skill_detail_box(&vm, w, h).unwrap().join("\n"));
+        assert!(last.contains("line 39"), "{last:?}");
+        assert!(!last.contains("line 00"), "{last:?}");
+        assert!(
+            last.contains("of 40"),
+            "the footer counts the whole listing: {last:?}"
+        );
     }
 }

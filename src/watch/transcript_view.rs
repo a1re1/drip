@@ -29,6 +29,10 @@ pub struct RowCell {
     pub text: String,
     pub color: Option<fn(&str) -> String>,
     pub selected: bool,
+    /// With `selected`, only these visible columns (inclusive) paint in reverse
+    /// video — the [4] pane's pick lights its own name rather than the whole row
+    /// it shares with the other names.
+    pub sel_span: Option<(usize, usize)>,
     /// Carries pre-styled ANSI (e.g. terminal-markdown). Passed through
     /// render_pane verbatim (padded to inner_w) instead of fit/color.
     pub rich: bool,
@@ -40,6 +44,7 @@ impl RowCell {
             text: text.into(),
             color: Some(color),
             selected: false,
+            sel_span: None,
             rich: false,
         }
     }
@@ -476,6 +481,7 @@ pub fn markdown_rows(source: &str, inner_w: usize, max_lines: Option<usize>) -> 
                     text: text.clone(),
                     color: None,
                     selected: false,
+                    sel_span: None,
                     rich: true,
                 }
             }

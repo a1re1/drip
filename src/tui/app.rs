@@ -68,10 +68,17 @@ use crate::core::types::{
     HarnessEvent, HarnessEventType, HarnessSurveyAnswer, HarnessSurveyAnswers, QuestionSurvey,
 };
 use crate::harness::model_call::AbortSignal;
+use crate::tools::async_jobs::{
+    create_chat_tool_runtime_services, session_age_ms, CreateChatToolRuntimeServicesOptions,
+};
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
+use crate::tools::types::{ChatAsyncToolJob, ChatToolRuntimeServices};
 use crate::tui::compact::{
     render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
     CompactCell, CompactEmitter,
+};
+use crate::tui::jobs::{
+    background_counter, job_counts, render_job_detail, render_jobs_list, JOBS_REFRESH_MS,
 };
 use crate::tui::pane_title::{PaneTitle, FALLBACK_LABEL, SPINNER_INTERVAL_MS};
 use crate::tui::session_name::{
@@ -87,7 +94,9 @@ use crate::tui::widgets::{
     render_composer, render_picker, render_skill_picker, render_status_bar, render_survey,
     render_working_line, ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
 };
-use crate::watch::ansi::{string_width, wrap_ansi};
+use crate::watch::ansi::term::{DISABLE_MOUSE, ENABLE_MOUSE};
+use crate::watch::ansi::{string_width, strip_ansi, wrap_ansi};
+use crate::watch::mouse::{parse_mouse_event, MouseEvent};
 
 /// What `drip --tui` needs from entry.rs to start.
 pub struct TuiBootstrap {
@@ -176,6 +185,7 @@ fn help_text() -> String {
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
+            "  /jobs (or ctrl+b) — browse the background monitors and async shells; the status bar counts them while they run",
             "  esc — clear the composer, or stop the running goal and its commands",
             "  ctrl+c — exit",
         ]
@@ -222,6 +232,7 @@ fn short_id(id: &str) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum OverlayKind {
+    Jobs,
     Model,
     Prompt,
     Question,
@@ -395,6 +406,10 @@ enum Key {
     Down,
     Escape,
     Left,
+    /// One SGR mouse report (a wheel notch or a left-button click). The only
+    /// click the TUI acts on is the status-line background chip; everything
+    /// else a pointer can do is ignored.
+    Mouse(MouseEvent),
     Paste(String),
     Return,
     Right,
@@ -478,6 +493,18 @@ fn decode_plain(chunk: &[u8]) -> Vec<Key> {
             _ => 2,
         };
         let (sequence, rest) = chunk.split_at(end);
+        // SGR mouse reports (`ESC [ < Cb ; Cx ; Cy M`) ride the same CSI path
+        // as the arrow keys. Parsing them into a real event is what makes a
+        // click routable; a report that is not a click (wheel, release, other
+        // buttons) stays `Key::Ignored`, exactly as it decoded before mouse
+        // reporting existed.
+        if let Ok(report) = std::str::from_utf8(sequence) {
+            if let Some(event) = parse_mouse_event(report) {
+                let mut keys = vec![Key::Mouse(event)];
+                keys.extend(decode_plain(rest));
+                return keys;
+            }
+        }
         let key = match sequence {
             b"\x1b[A" | b"\x1bOA" => Key::Up,
             b"\x1b[B" | b"\x1bOB" => Key::Down,
@@ -703,6 +730,22 @@ struct TuiApp {
     /// Bumped on each /rename; stale in-flight renames are dropped.
     rename_epoch: u64,
     title_next_tick: Option<Instant>,
+    /// The runtime the background tools (MONITOR, BASH_ASYNC) start their jobs
+    /// on. The TUI holds the ONE instance the run thread is handed, so a job
+    /// that outlives its run -- a monitor still checking, an async shell still
+    /// building -- stays visible to the status-line counter and the /jobs
+    /// browser instead of dying with the run's own runtime.
+    tool_services: ChatToolRuntimeServices,
+    /// Live background jobs by kind (monitors, shells). Refreshed from
+    /// `tool_services` on a loop deadline -- never in the paint path.
+    job_counts: (usize, usize),
+    /// The running snapshot in display order, read alongside the counts.
+    job_rows: Vec<ChatAsyncToolJob>,
+    /// Which running job the /jobs browser is showing in detail; `None` is
+    /// the list itself.
+    job_detail: Option<usize>,
+    /// Next refresh deadline of the running-job snapshot.
+    jobs_next_refresh: Option<Instant>,
     tx: Sender<Msg>,
     /// Test injection: when Some, replaces the process environment in
     /// merged_env so credential resolution is deterministic regardless of
@@ -855,6 +898,17 @@ impl TuiApp {
             .clone()
             .map(crate::tui::status_line::StatusLineRunner::new);
 
+        // One runtime for the whole TUI session: it is handed to every run
+        // (see run_goal) so background jobs started by one run keep living in
+        // the counter and the browser after that run ends.
+        let tool_services =
+            create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+                cwd: Some(std::path::PathBuf::from(&bootstrap.cwd)),
+                jobs_root: None,
+            });
+        let job_rows = tool_services.async_jobs.running_jobs();
+        let job_counts = job_counts(&job_rows);
+
         // Skill catalog is discovered at construction; the edit and draw
         // paths only ever filter this cached copy. Command dispatch refreshes
         // it (refresh_skill_catalog) so skills installed after startup become
@@ -915,6 +969,11 @@ impl TuiApp {
             title_epoch: 0,
             rename_epoch: 0,
             title_next_tick: None,
+            tool_services,
+            job_counts,
+            job_rows,
+            job_detail: None,
+            jobs_next_refresh: Some(Instant::now() + Duration::from_millis(JOBS_REFRESH_MS)),
             status_line_output: None,
             status_line_request_width: None,
             status_line_runner,
@@ -1122,6 +1181,210 @@ impl TuiApp {
     /// The stepped survey layout for the live Question overlay: the survey
     /// state supplies the header, question, progress and the option list (the
     /// overlay keeps the items the key handling consumes).
+    // ----- background jobs -------------------------------------------------
+
+    /// Re-reads the running-job snapshot from the shared runtime and reports
+    /// whether anything the status line shows changed. Called from the event
+    /// loop on its own deadline -- never from the paint path.
+    fn refresh_jobs(&mut self, now: Instant) -> bool {
+        self.jobs_next_refresh = Some(now + Duration::from_millis(JOBS_REFRESH_MS));
+        let rows = self.tool_services.async_jobs.running_jobs();
+        let counts = job_counts(&rows);
+        let changed = counts != self.job_counts;
+        self.job_rows = rows;
+        self.job_counts = counts;
+        // A snapshot that shrank under an open detail frame (the job settled
+        // while being read) drops back to the list instead of showing a row
+        // that is no longer there.
+        if let Some(index) = self.job_detail {
+            if index >= self.job_rows.len() {
+                self.job_detail = None;
+            }
+        }
+        changed
+    }
+
+    /// `/jobs`: the browser. Nothing running still opens it -- the empty frame
+    /// says so, which is a better answer than a silent no-op.
+    fn jobs_command(&mut self, args: &str) {
+        self.refresh_jobs(Instant::now());
+        let index = args.trim().parse::<usize>().unwrap_or(0);
+        self.open_jobs();
+        if index >= 1 && index <= self.job_rows.len() {
+            self.open_job_detail(index - 1);
+        }
+    }
+
+    /// Opens the list frame over the current running snapshot.
+    fn open_jobs(&mut self) {
+        self.refresh_jobs(Instant::now());
+        self.job_detail = None;
+        let items = self.job_items();
+        self.overlay = Some(Overlay {
+            filter: String::new(),
+            items,
+            kind: OverlayKind::Jobs,
+            selected: 0,
+            title: "Background jobs".to_string(),
+        });
+        self.repaint();
+    }
+
+    /// One picker row per running job, in the snapshot's order. The id is the
+    /// row's index so `on_pick` re-reads the same position.
+    fn job_items(&self) -> Vec<PickerItem> {
+        self.job_rows
+            .iter()
+            .enumerate()
+            .map(|(index, job)| {
+                let kind = crate::tui::jobs::job_kind(job);
+                PickerItem {
+                    detail: Some(format!(
+                        "{} · {} · {}",
+                        kind,
+                        crate::tui::jobs::running_label(session_age_ms(&job.started_at)),
+                        job.id.chars().take(8).collect::<String>()
+                    )),
+                    id: index.to_string(),
+                    label: job.title.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// The browser's frame: the list, or the detail frame of the row it is
+    /// showing. Empty while no overlay is up.
+    fn jobs_rows(&self, overlay: &Overlay) -> Vec<String> {
+        match self.job_detail.and_then(|index| self.job_rows.get(index)) {
+            Some(job) => {
+                let output = self
+                    .tool_services
+                    .async_jobs
+                    .tail_job(&job.id, Some(60))
+                    .map(|tail| tail.output)
+                    .unwrap_or_default();
+                render_job_detail(job, session_age_ms(&job.started_at), &output, self.cols)
+            }
+            None => render_jobs_list(&self.job_rows, overlay.selected, self.cols),
+        }
+    }
+
+    /// Opens the detail frame of the running job at `index`, re-reading it so
+    /// a settled job is never shown as running.
+    fn open_job_detail(&mut self, index: usize) {
+        self.refresh_jobs(Instant::now());
+        if index >= self.job_rows.len() {
+            self.push_info("that background job is no longer running");
+            return;
+        }
+        self.job_detail = Some(index);
+        self.repaint();
+    }
+
+    /// Key handling for the browser. Returns true when the key was consumed.
+    /// Esc steps out one level at a time (detail, then the list), enter/space
+    /// opens the highlighted job, and the arrows move the selection.
+    fn on_jobs_key(&mut self, key: &Key) -> bool {
+        if self.overlay.as_ref().map(|overlay| overlay.kind) != Some(OverlayKind::Jobs) {
+            return false;
+        }
+        match key {
+            Key::Escape => {
+                if self.job_detail.take().is_some() {
+                    self.repaint();
+                } else {
+                    self.overlay = None;
+                    self.repaint();
+                }
+            }
+            Key::Left => {
+                if self.job_detail.take().is_some() {
+                    self.repaint();
+                }
+            }
+            // Enter (or space) opens the highlighted job; on the detail frame
+            // the same key closes it, matching the frame's own footer.
+            Key::Return => {
+                if self.job_detail.is_some() {
+                    self.overlay = None;
+                    self.job_detail = None;
+                    self.repaint();
+                } else if let Some(index) = self.overlay.as_ref().map(|overlay| overlay.selected) {
+                    self.open_job_detail(index);
+                }
+            }
+            Key::Text(text) if text == " " => {
+                if self.job_detail.is_some() {
+                    self.overlay = None;
+                    self.job_detail = None;
+                    self.repaint();
+                } else if let Some(index) = self.overlay.as_ref().map(|overlay| overlay.selected) {
+                    self.open_job_detail(index);
+                }
+            }
+            Key::Up => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+                self.job_detail = None;
+                self.repaint();
+            }
+            Key::Down | Key::Tab => {
+                if let Some(overlay) = self.overlay.as_mut() {
+                    overlay.selected =
+                        (overlay.selected + 1).min(overlay.items.len().saturating_sub(1));
+                }
+                self.job_detail = None;
+                self.repaint();
+            }
+            Key::Ctrl('c') => self.quit = true,
+            _ => {}
+        }
+        true
+    }
+
+    /// Mouse clicks (SGR reports; the TUI turns mouse reporting on while it
+    /// owns the terminal). The one click that does anything is a left press
+    /// on the status-line background chip: it opens the same jobs browser
+    /// `ctrl+b` and `/jobs` open, so the counter is a target and not just a
+    /// readout. Wheel notches, button releases and clicks on any other cell
+    /// are ignored.
+    fn on_mouse(&mut self, event: MouseEvent) {
+        let MouseEvent::Click { col, row } = event else {
+            return;
+        };
+        if self.background_chip_at(col, row) {
+            self.open_jobs();
+        }
+    }
+
+    /// Whether the 1-based screen cell `(col, row)` sits on the background
+    /// counter the status bar painted. The live region is the bottom of the
+    /// screen, so a screen row maps by its distance from the last painted
+    /// row; the chip is then located by searching that painted row for the
+    /// exact counter text, which keeps the hit box aligned with whatever the
+    /// bar actually drew at the current width -- a custom `statusLine` paints
+    /// no chip, so it has no clickable cell at all.
+    fn background_chip_at(&self, col: usize, row: usize) -> bool {
+        let Some(counts) = background_counter(self.job_counts.0, self.job_counts.1) else {
+            return false;
+        };
+        let live = self.live_region();
+        let from_bottom = self.rows.saturating_sub(row);
+        let Some(index) = live.len().checked_sub(from_bottom + 1) else {
+            return false;
+        };
+        let Some(painted) = live.get(index) else {
+            return false;
+        };
+        let plain = strip_ansi(painted);
+        let Some(offset) = plain.find(&counts) else {
+            return false;
+        };
+        let start = string_width(&plain[..offset]) + 1;
+        col >= start && col < start + string_width(&counts)
+    }
+
     fn survey_rows(&self, overlay: &Overlay) -> Vec<String> {
         let Some(state) = &self.survey else {
             return render_picker(&overlay.title, &overlay.items, overlay.selected, self.cols);
@@ -1184,6 +1447,8 @@ impl TuiApp {
                 rows.extend(self.survey_rows(overlay));
             } else if overlay.kind == OverlayKind::Skills {
                 rows.extend(self.skill_picker_rows(overlay));
+            } else if overlay.kind == OverlayKind::Jobs {
+                rows.extend(self.jobs_rows(overlay));
             } else {
                 rows.extend(render_picker(
                     &overlay.title,
@@ -1276,6 +1541,8 @@ impl TuiApp {
                     running: self.running,
                     running_detail: self.running_detail.as_deref(),
                     session_id: &self.session.id,
+                    monitors: self.job_counts.0,
+                    shells: self.job_counts.1,
                 },
                 self.cols,
             ));
@@ -1771,6 +2038,13 @@ impl TuiApp {
     // ----- keys -----------------------------------------------------------
 
     fn on_key(&mut self, key: Key) {
+        // Mouse reports are handled before every text entry point: a click can
+        // never be typed into the composer, a survey answer or a search field.
+        if let Key::Mouse(event) = &key {
+            self.on_mouse(*event);
+            return;
+        }
+
         // Free-text "Other…" survey answer: collected before the overlay arm
         // and the running guard so typing works mid-run.
         if self
@@ -1828,6 +2102,21 @@ impl TuiApp {
         // selection, and esc closes it without writing anything to the
         // transcript. Every other overlay keeps the shared arms below.
         if self.on_skill_picker_key(&key) {
+            return;
+        }
+
+        // The jobs browser owns its keys too: esc closes the detail frame
+        // first and the browser second, enter opens the highlighted job, and
+        // the arrows keep sliding the list from either level.
+        if self.on_jobs_key(&key) {
+            return;
+        }
+
+        // ctrl+b opens the jobs browser from both composer states -- idle and
+        // mid-run -- so the live background work is one key away whenever
+        // there is something to look at.
+        if matches!(key, Key::Ctrl('b')) && self.overlay.is_none() {
+            self.open_jobs();
             return;
         }
 
@@ -1964,7 +2253,7 @@ impl TuiApp {
                 // movement and history recall as an idle composer.
                 Key::Up => self.recall_older_prompt(),
                 Key::Down => self.recall_newer_prompt(),
-                Key::Tab | Key::Ctrl(_) | Key::Ignored => {}
+                Key::Tab | Key::Ctrl(_) | Key::Ignored | Key::Mouse(_) => {}
             }
             return;
         }
@@ -2074,7 +2363,7 @@ impl TuiApp {
             }
             Key::Paste(raw) => self.on_paste(&raw),
             Key::Text(text) => self.insert_text(&text),
-            Key::Ctrl(_) | Key::Ignored => {}
+            Key::Ctrl(_) | Key::Ignored | Key::Mouse(_) => {}
         }
     }
 
@@ -2135,6 +2424,9 @@ impl TuiApp {
             // The skills picker carries live rows and a search filter — opened
             // by open_skill_picker, never through this static menu path.
             OverlayKind::Skills => return,
+            // The jobs browser carries a live running-job snapshot — opened
+            // by open_jobs, never through this static menu path.
+            OverlayKind::Jobs => return,
             OverlayKind::Model => (
                 "model profiles",
                 list_cli_model_profiles(settings)
@@ -2540,6 +2832,14 @@ impl TuiApp {
                 // arm keeps the match exhaustive for any future caller.
                 let name = item.id.clone();
                 self.skills_toggle(&name);
+            }
+            OverlayKind::Jobs => {
+                // Index into the running snapshot; a job that settled since
+                // the list was drawn is re-read there, so a stale row cannot
+                // open a job that is already gone.
+                if let Ok(index) = item.id.parse::<usize>() {
+                    self.open_job_detail(index);
+                }
             }
             OverlayKind::Sessions => {
                 if let Some(record) =
@@ -2984,6 +3284,7 @@ impl TuiApp {
                     self.push_info(summary);
                 }
             }
+            "jobs" => self.jobs_command(args),
             "skills" => {
                 // Interactive picker instead of a transcript dump: search,
                 // cursor movement and on/off toggles, and nothing lands in
@@ -3614,6 +3915,9 @@ impl TuiApp {
             .map(|attachment| attachment.data_url.clone())
             .collect();
         let hooks = self.config.hooks.clone();
+        // Cloned before the run thread starts: the thread owns its own handle
+        // to the SAME runtime, so jobs it starts stay visible after it exits.
+        let tool_services = self.tool_services.clone();
 
         // The skill classifier is config-driven on every surface, the TUI
         // included: a resolved `runtime.classifier_profile_id` turns it on here
@@ -3754,7 +4058,7 @@ impl TuiApp {
                 lite: false,
                 no_review: false,
                 tools: builtin_tool_pack(tool_options.clone()),
-                tool_services: None,
+                tool_services: Some(tool_services),
                 // The watch view spawns no MCP clients, so its pack carries no
                 // MCP tools; None just leaves the (empty) gate to the roles.
                 mcp_servers: None,
@@ -4092,11 +4396,27 @@ impl TuiApp {
             // side-effect-free). Non-blocking; failures never retry or log.
             self.poll_status_line();
 
+            // Background jobs: re-read the shared runtime's running set on its
+            // own deadline (drawing stays side-effect-free), and repaint when
+            // the status-line counter changed or the browser is looking at a
+            // list that just moved under it.
+            if self.jobs_next_refresh.is_none_or(|at| now >= at) {
+                let changed = self.refresh_jobs(now);
+                let browsing = self
+                    .overlay
+                    .as_ref()
+                    .is_some_and(|overlay| overlay.kind == OverlayKind::Jobs);
+                if changed || browsing {
+                    self.repaint();
+                }
+            }
+
             let mut wait = Duration::from_millis(300);
             for deadline in [
                 self.flush_deadline,
                 self.resize_at,
                 self.status_line_next_refresh,
+                self.jobs_next_refresh,
                 self.title_next_tick,
                 self.activity_next_tick,
                 self.activity_debounce_deadline(),
@@ -4405,6 +4725,14 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
 
     let mut raw = RawMode::enable();
     write_out(ENABLE_BRACKETED_PASTE);
+    // Mouse reporting (normal tracking + SGR coordinates) so a left click on
+    // the status-line background chip reaches the input path as
+    // `ESC [ < 0 ; col ; row M`. Only for an interactive stdout: redirected
+    // output must not collect the escapes, and there is nothing to click.
+    let mouse_reporting = stdout_is_tty();
+    if mouse_reporting {
+        write_out(ENABLE_MOUSE);
+    }
 
     // Inline images are opted into exactly once, for an interactive stdout:
     // detection is a no-op for piped output, and `DRIP_IMAGE_PROTOCOL`
@@ -4415,7 +4743,8 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        write_out(&format!("{SHOW_CURSOR}{DISABLE_BRACKETED_PASTE}\n"));
+        let mouse = if mouse_reporting { DISABLE_MOUSE } else { "" };
+        write_out(&format!("{SHOW_CURSOR}{mouse}{DISABLE_BRACKETED_PASTE}\n"));
         previous_hook(info);
     }));
 
@@ -4429,6 +4758,9 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     app.push_info(inline_images_status);
     let code = app.run(rx);
 
+    if mouse_reporting {
+        write_out(DISABLE_MOUSE);
+    }
     write_out(DISABLE_BRACKETED_PASTE);
     raw.restore();
     let _ = std::panic::take_hook();
@@ -4570,6 +4902,7 @@ mod tests {
                 Key::Down => "down",
                 Key::Escape => "escape",
                 Key::Left => "left",
+                Key::Mouse(_) => "mouse",
                 Key::Paste(_) => "paste",
                 Key::Return => "return",
                 Key::Right => "right",
@@ -7281,5 +7614,425 @@ mod compact_ephemeral_tests {
                 .any(|row| row.contains("Tool called")),
             "the status lines stay above the gap: {live:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod background_jobs_tests {
+    use super::*;
+    use crate::tools::types::{
+        ChatAsyncToolCommandRequest, ChatAsyncToolJob, ChatAsyncToolJobStatus,
+        ChatAsyncToolRuntime, ChatAsyncToolTailResult, ChatAsyncToolTaskRequest,
+        ChatAsyncToolWaitResult, ChatTmuxSessionRuntime, ChatToolRuntimeServices,
+    };
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+
+    /// A runtime whose running set the test drives directly — the app under
+    /// test reads it exactly like it reads the real manager.
+    struct FakeJobs {
+        running: Mutex<Vec<ChatAsyncToolJob>>,
+    }
+
+    impl FakeJobs {
+        fn new(jobs: Vec<ChatAsyncToolJob>) -> Arc<Self> {
+            Arc::new(Self {
+                running: Mutex::new(jobs),
+            })
+        }
+
+        fn set(&self, jobs: Vec<ChatAsyncToolJob>) {
+            *self.running.lock().unwrap() = jobs;
+        }
+    }
+
+    impl ChatAsyncToolRuntime for FakeJobs {
+        fn get_job(&self, job_id: &str) -> Option<ChatAsyncToolJob> {
+            self.running
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|job| job.id == job_id)
+                .cloned()
+        }
+
+        fn start_command(
+            &self,
+            _request: ChatAsyncToolCommandRequest,
+        ) -> anyhow::Result<ChatAsyncToolJob> {
+            anyhow::bail!("the fake runtime starts no jobs")
+        }
+
+        fn start_task(
+            &self,
+            _request: ChatAsyncToolTaskRequest,
+        ) -> anyhow::Result<ChatAsyncToolJob> {
+            anyhow::bail!("the fake runtime starts no jobs")
+        }
+
+        fn tail_job(
+            &self,
+            job_id: &str,
+            _lines: Option<i64>,
+        ) -> anyhow::Result<ChatAsyncToolTailResult> {
+            let job = self
+                .get_job(job_id)
+                .ok_or_else(|| anyhow::anyhow!("no job {job_id}"))?;
+            Ok(ChatAsyncToolTailResult {
+                job,
+                lines: 60,
+                output: "the build is still going".to_string(),
+            })
+        }
+
+        fn wait_for_job(
+            &self,
+            _job_id: &str,
+            _timeout_ms: Option<i64>,
+        ) -> anyhow::Result<ChatAsyncToolWaitResult> {
+            anyhow::bail!("the fake runtime never waits")
+        }
+
+        /// Mirrors `AsyncToolJobManager::running_jobs`: settled jobs are
+        /// never part of the running snapshot.
+        fn running_jobs(&self) -> Vec<ChatAsyncToolJob> {
+            self.running
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|job| job.status == ChatAsyncToolJobStatus::Running)
+                .cloned()
+                .collect()
+        }
+    }
+
+    struct FakeTmux;
+
+    impl ChatTmuxSessionRuntime for FakeTmux {
+        fn get_session(&self, _session_name: &str) -> Option<crate::tools::types::ChatTmuxSession> {
+            None
+        }
+
+        fn list_sessions(&self) -> Vec<crate::tools::types::ChatTmuxSession> {
+            Vec::new()
+        }
+
+        fn register_session(&self, _session: crate::tools::types::ChatTmuxSession) {}
+    }
+
+    fn job(id: &str, tool_name: &str, title: &str) -> ChatAsyncToolJob {
+        ChatAsyncToolJob {
+            command: None,
+            cwd: "/tmp".to_string(),
+            error: None,
+            exit_code: None,
+            finished_at: None,
+            id: id.to_string(),
+            log_path: "/tmp/job.log".to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            status: ChatAsyncToolJobStatus::Running,
+            title: title.to_string(),
+            tool_name: tool_name.to_string(),
+        }
+    }
+
+    struct JobsFixture {
+        app: TuiApp,
+        jobs: Arc<FakeJobs>,
+        _cwd: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _project: tempfile::TempDir,
+        _rx: mpsc::Receiver<Msg>,
+        _mention_rx: mpsc::Receiver<(u64, String)>,
+    }
+
+    fn make_app(jobs: Vec<ChatAsyncToolJob>) -> JobsFixture {
+        let cwd = tempfile::tempdir().expect("cwd tempdir");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let home_root = home.path().to_string_lossy().into_owned();
+        let cwd_str = cwd.path().to_string_lossy().into_owned();
+        let project_str = project.path().to_string_lossy().into_owned();
+        let drip_home = crate::core::home::open_drip_home(&home_root);
+        let drip_project =
+            crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
+                .expect("resolve drip project");
+        let session = crate::core::sessions::SessionRecord {
+            sessions_dir: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cwd: cwd_str.clone(),
+            goal_count: 0,
+            id: "sess-jobs-test".to_string(),
+            last_goal: None,
+            parent_id: None,
+            project_slug: "jobs-test".to_string(),
+            status: "active".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let bootstrap = TuiBootstrap {
+            ask: false,
+            ask_timeout_secs: None,
+            allow_net: false,
+            reference_roots: Vec::new(),
+            config: crate::core::config::create_default_cli_config(),
+            cwd: cwd_str,
+            home: drip_home,
+            initial_goal: None,
+            max_iterations: None,
+            max_loops: None,
+            task_loop_limit: None,
+            review_waiver_lines: None,
+            plan_mode: None,
+            no_repo_memory: true,
+            project: drip_project,
+            roles_flag: None,
+            session,
+            status_line: None,
+            classifier: None,
+            no_classifier: false,
+        };
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let (mention_tx, mention_rx) = mpsc::channel::<(u64, String)>();
+        let mut app = TuiApp::new(bootstrap, tx, mention_tx);
+        let jobs = FakeJobs::new(jobs);
+        app.tool_services = ChatToolRuntimeServices {
+            async_jobs: jobs.clone(),
+            tmux_sessions: Arc::new(FakeTmux),
+        };
+        JobsFixture {
+            app,
+            jobs,
+            _cwd: cwd,
+            _home: home,
+            _project: project,
+            _rx: rx,
+            _mention_rx: mention_rx,
+        }
+    }
+
+    fn strip(rows: &[String]) -> Vec<String> {
+        let pattern = regex::Regex::new("\u{1b}\\[[0-9;]*m").expect("ansi regex");
+        rows.iter()
+            .map(|row| pattern.replace_all(row, "").into_owned())
+            .collect()
+    }
+
+    /// The status row the app actually paints, read off the live region.
+    fn status_row(app: &TuiApp) -> String {
+        strip(&app.live_region())
+            .into_iter()
+            .rev()
+            .find(|row| row.contains("session "))
+            .expect("the status bar is painted")
+    }
+
+    #[test]
+    fn the_status_bar_counts_live_monitors_and_shells() {
+        let mut fixture = make_app(vec![
+            job("monitor-1", "MONITOR", "monitor: watch the build"),
+            job("shell-1", "BASH_ASYNC", "cargo test --lib"),
+            job("shell-2", "BASH_ASYNC", "bun test"),
+        ]);
+        assert!(fixture.app.refresh_jobs(Instant::now()));
+        assert_eq!(fixture.app.job_counts, (1, 2));
+        let row = status_row(&fixture.app);
+        assert!(row.contains("1 monitor · 2 shells"), "{row}");
+    }
+
+    #[test]
+    fn the_counter_ignores_settled_jobs_and_clears_when_nothing_runs() {
+        let mut fixture = make_app(vec![job(
+            "monitor-1",
+            "MONITOR",
+            "monitor: watch the build",
+        )]);
+        fixture.app.refresh_jobs(Instant::now());
+        assert!(status_row(&fixture.app).contains("1 monitor"));
+
+        // A completed and a failed job both leave the running set: only live
+        // work is counted.
+        let mut completed = job("shell-done", "BASH_ASYNC", "cargo test");
+        completed.status = ChatAsyncToolJobStatus::Completed;
+        let mut failed = job("shell-failed", "BASH_ASYNC", "bun test");
+        failed.status = ChatAsyncToolJobStatus::Failed;
+        fixture.jobs.set(vec![completed, failed]);
+        assert!(fixture.app.refresh_jobs(Instant::now()));
+        assert_eq!(fixture.app.job_counts, (0, 0));
+        let row = status_row(&fixture.app);
+        assert!(!row.contains("monitor"), "{row}");
+        assert!(!row.contains("shell"), "{row}");
+    }
+
+    #[test]
+    fn ctrl_b_opens_the_browser_over_the_running_jobs() {
+        let mut fixture = make_app(vec![
+            job("monitor-1", "MONITOR", "monitor: watch the build"),
+            job("shell-1", "BASH_ASYNC", "cargo test --lib"),
+        ]);
+        fixture.app.on_key(Key::Ctrl('b'));
+        let overlay = fixture.app.overlay.as_ref().expect("the browser opened");
+        assert_eq!(overlay.kind, OverlayKind::Jobs);
+        assert_eq!(overlay.items.len(), 2);
+        assert_eq!(overlay.items[0].id, "0");
+        assert!(overlay.items[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("monitor"));
+        let rows = strip(&fixture.app.live_region()).join("\n");
+        assert!(
+            rows.contains("Background jobs · 1 monitor · 1 shell"),
+            "{rows}"
+        );
+        assert!(rows.contains("monitor: watch the build"), "{rows}");
+
+        // Esc closes it without writing anything to the transcript.
+        let before = fixture.app.cells.len();
+        fixture.app.on_key(Key::Escape);
+        assert!(fixture.app.overlay.is_none());
+        assert_eq!(fixture.app.cells.len(), before);
+    }
+
+    #[test]
+    fn enter_opens_the_detail_frame_and_esc_steps_back_out() {
+        let mut fixture = make_app(vec![job("shell-1", "BASH_ASYNC", "cargo test --lib")]);
+        fixture.app.dispatch_command("jobs", "");
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.job_detail, Some(0));
+        let rows = strip(&fixture.app.live_region()).join("\n");
+        assert!(rows.contains("Shell details"), "{rows}");
+        assert!(rows.contains("Status: running"), "{rows}");
+        assert!(rows.contains("cargo test --lib"), "{rows}");
+        assert!(rows.contains("the build is still going"), "{rows}");
+
+        // Esc drops the detail frame first, the browser second.
+        fixture.app.on_key(Key::Escape);
+        assert_eq!(fixture.app.job_detail, None);
+        assert!(fixture.app.overlay.is_some());
+        fixture.app.on_key(Key::Escape);
+        assert!(fixture.app.overlay.is_none());
+    }
+
+    #[test]
+    fn a_job_that_settles_while_open_drops_the_stale_row() {
+        let mut fixture = make_app(vec![job("shell-1", "BASH_ASYNC", "cargo test --lib")]);
+        fixture.app.dispatch_command("jobs", "");
+        fixture.app.on_key(Key::Return);
+        assert_eq!(fixture.app.job_detail, Some(0));
+
+        // The job finishes: the next refresh reads an empty running set and
+        // the detail frame must not keep showing it as running.
+        fixture.jobs.set(Vec::new());
+        fixture.app.refresh_jobs(Instant::now());
+        assert_eq!(fixture.app.job_detail, None);
+        assert_eq!(fixture.app.job_counts, (0, 0));
+        let rows = strip(&fixture.app.live_region()).join("\n");
+        assert!(rows.contains("nothing running"), "{rows}");
+    }
+
+    #[test]
+    fn the_jobs_command_jumps_straight_into_a_row() {
+        let mut fixture = make_app(vec![
+            job("monitor-1", "MONITOR", "monitor: watch the build"),
+            job("shell-1", "BASH_ASYNC", "cargo test --lib"),
+        ]);
+        fixture.app.dispatch_command("jobs", "2");
+        assert_eq!(fixture.app.job_detail, Some(1));
+        let rows = strip(&fixture.app.live_region()).join("\n");
+        assert!(rows.contains("Shell details"), "{rows}");
+        assert!(rows.contains("Script: cargo test --lib"), "{rows}");
+    }
+
+    #[test]
+    fn the_help_text_lists_the_jobs_command_and_its_key() {
+        let help = help_text();
+        assert!(help.contains("/jobs"), "{help}");
+        assert!(help.contains("ctrl+b"), "{help}");
+    }
+
+    #[test]
+    fn an_sgr_click_report_decodes_into_a_mouse_key() {
+        let mut paste = None;
+        let keys = decode_input(b"\x1b[<0;20;24M", &mut paste);
+        assert_eq!(keys.len(), 1);
+        match &keys[0] {
+            Key::Mouse(MouseEvent::Click { col, row }) => assert_eq!((*col, *row), (20, 24)),
+            _ => panic!("a click report must decode to a mouse key"),
+        }
+        // A wheel notch rides the same report path but is never a click, and
+        // the other buttons stay ignored.
+        assert!(matches!(
+            decode_input(b"\x1b[<64;20;24M", &mut paste).first(),
+            Some(Key::Mouse(MouseEvent::Wheel(_)))
+        ));
+        assert!(matches!(
+            decode_input(b"\x1b[<2;20;24M", &mut paste).first(),
+            Some(Key::Ignored)
+        ));
+        // A click still decodes when a key follows it in the same read.
+        let keys = decode_input(b"\x1b[<0;3;4Ma", &mut paste);
+        assert!(matches!(
+            keys.first(),
+            Some(Key::Mouse(MouseEvent::Click { .. }))
+        ));
+        assert!(matches!(keys.get(1), Some(Key::Text(text)) if text == "a"));
+    }
+
+    #[test]
+    fn clicking_the_status_line_counter_opens_the_browser() {
+        let mut fixture = make_app(vec![
+            job("monitor-1", "MONITOR", "monitor: watch the build"),
+            job("shell-1", "BASH_ASYNC", "cargo test --lib"),
+        ]);
+        assert!(fixture.app.refresh_jobs(Instant::now()));
+        // The live region sits at the bottom of the screen: a terminal exactly
+        // as tall as the frame makes the status row the last painted one.
+        let rows = fixture.app.live_region().len();
+        fixture.app.rows = rows;
+        let status = status_row(&fixture.app);
+        let col = status.find("1 monitor").expect("the chip is painted") + 1;
+        assert!(fixture.app.background_chip_at(col, rows), "{status}");
+
+        fixture
+            .app
+            .on_key(Key::Mouse(MouseEvent::Click { col, row: rows }));
+        let overlay = fixture.app.overlay.as_ref().expect("the browser opened");
+        assert_eq!(overlay.kind, OverlayKind::Jobs);
+        assert_eq!(overlay.items.len(), 2);
+        // The click opened a frame -- it never typed itself into the composer.
+        assert!(fixture.app.text.is_empty());
+    }
+
+    #[test]
+    fn a_click_off_the_chip_or_with_nothing_running_does_nothing() {
+        let mut fixture = make_app(vec![job(
+            "monitor-1",
+            "MONITOR",
+            "monitor: watch the build",
+        )]);
+        fixture.app.refresh_jobs(Instant::now());
+        let rows = fixture.app.live_region().len();
+        fixture.app.rows = rows;
+        // The session-id field left of the chip, and the row above it.
+        fixture
+            .app
+            .on_key(Key::Mouse(MouseEvent::Click { col: 3, row: rows }));
+        fixture.app.on_key(Key::Mouse(MouseEvent::Click {
+            col: 20,
+            row: rows - 1,
+        }));
+        assert!(fixture.app.overlay.is_none());
+
+        // Nothing running means no chip on the row, so no cell is a target.
+        fixture.jobs.set(Vec::new());
+        assert!(fixture.app.refresh_jobs(Instant::now()));
+        let rows = fixture.app.live_region().len();
+        fixture.app.rows = rows;
+        assert!(!fixture.app.background_chip_at(20, rows));
+        fixture
+            .app
+            .on_key(Key::Mouse(MouseEvent::Click { col: 20, row: rows }));
+        assert!(fixture.app.overlay.is_none());
+        assert!(fixture.app.text.is_empty());
     }
 }

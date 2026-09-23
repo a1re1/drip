@@ -50,6 +50,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "state",
     },
     SlashCommandSpec {
+        args: Some("[row]"),
+        description: "Browse the background monitors and async shells still running.",
+        name: "jobs",
+    },
+    SlashCommandSpec {
         args: None,
         description: "Pick skills interactively: search, move, toggle on/off.",
         name: "skills",

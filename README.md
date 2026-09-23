@@ -1035,6 +1035,36 @@ running: the harness gives up at its next safe point, and every in-flight
 mid-run is killed within about a second instead of running to its own timeout,
 and the transcript notes how many in-flight commands were stopped.
 
+## Background jobs (TUI)
+
+A `MONITOR` or a `BASH_ASYNC` shell keeps running in the background after the
+run that started it ends — the TUI hands every run one shared job runtime, so a
+monitor still checking or a build still going stays alive and inspectable. The
+built-in status bar counts that live work directly after the session id:
+`1 monitor`, `2 shells`, or `1 monitor · 2 shells` when both kinds are live.
+Completed and failed jobs leave the running set and drop off the count, and
+nothing running leaves the row exactly as it was.
+
+Three ways in:
+
+- `ctrl+b` or `/jobs` opens the background-jobs browser: one row per running
+  job (kind, title, counting runtime, short job id). `↑`/`↓` move the
+  highlight, `enter` (or `space`) opens the job's detail frame, `esc` closes
+  the browser.
+- `/jobs <n>` jumps straight into the detail frame of the n-th row.
+- **Click the counter.** The TUI turns on terminal mouse reporting while it
+  owns the screen, and a left click on the background counter opens the same
+  browser the keys open. The counter is the only clickable target: wheel
+  notches, releases and clicks anywhere else are ignored, so a stray click
+  never types into the composer. Mouse reporting does mean the terminal stops
+  doing its own drag-select while the TUI runs — hold `shift` to select text,
+  as in most mouse-aware TUIs.
+
+The detail frame shows the status, the runtime counted up from the job's start,
+the script (a monitor's `check` rides its title), the job log tail, and the
+keys back out: `←` returns to the list, `esc`/`enter`/`space` close. A job that
+settles while its frame is open is dropped rather than shown as still running.
+
 ## Watch TUI (`dripw`)
 
 `dripw` is a read-only, lazygit-style watcher for drip sessions — run it in a

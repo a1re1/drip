@@ -14,6 +14,7 @@ const BUILTIN_HOOKS_SETUP: &str = include_str!("../../skills/hooks-setup/SKILL.m
 const BUILTIN_MIGRATION_DISCIPLINE: &str =
     include_str!("../../skills/migration-discipline/SKILL.md");
 const BUILTIN_PRAEPARARE: &str = include_str!("../../skills/praeparare/SKILL.md");
+const BUILTIN_PROBATIO: &str = include_str!("../../skills/probatio/SKILL.md");
 const BUILTIN_REFACTOR_SAFELY: &str = include_str!("../../skills/refactor-safely/SKILL.md");
 const BUILTIN_REVIEW_INDEPENDENTLY: &str =
     include_str!("../../skills/review-independently/SKILL.md");
@@ -29,6 +30,7 @@ fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
         ("hooks-setup", BUILTIN_HOOKS_SETUP),
         ("migration-discipline", BUILTIN_MIGRATION_DISCIPLINE),
         ("praeparare", BUILTIN_PRAEPARARE),
+        ("probatio", BUILTIN_PROBATIO),
         ("refactor-safely", BUILTIN_REFACTOR_SAFELY),
         ("review-independently", BUILTIN_REVIEW_INDEPENDENTLY),
         ("tdd", BUILTIN_TDD),

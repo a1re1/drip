@@ -241,7 +241,7 @@ OPTIONS
 	                              .drip/policy.json {"allowCommands": ["<substring>"]}
 	--skills                      List discovered skills with source and description;
 	                              a built-in pack ships with drip
-	                              (verify-before-done, tdd, commit-discipline,
+	                              (verify-before-done, tdd, commit-discipline, probatio,
 	                              debug-root-cause, refactor-safely,
 	                              review-independently, migration-discipline,
 	                              praeparare),

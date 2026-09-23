@@ -820,6 +820,39 @@ precedence; unary minus; parentheses; and `max(a,b,...)`, `min(a,b,...)`,
 `clamp(x,lo,hi)`, `abs(x)`. An unknown variable or a syntax error drops that
 skill with a warning; division by zero yields 0.
 
+### Benchmarking the classifier (`probatio`)
+
+A `classifiers.json` is a small model someone has to tune, and the only honest
+signal is a context the classifier actually saw plus a human who did not know the
+answer. `/probatio` (or the `probatio` skill: *a test, trial, proof*) runs that
+measurement against the sessions already on disk, with
+[`evals/classifier/`](evals/classifier/README.md) as its harness:
+
+1. `harvest` scans `~/.drip/projects/*/sessions/*/transcript.jsonl` for
+   `loop-start` events — each records `data.skills`, the skills the classifier
+   composed — and pairs every loop with the goal text in force at that moment.
+2. `survey` samples N loops into a **blind** survey: the loop context and the
+   candidate skill list, with the classifier's own picks withheld in a separate
+   answer-only key file.
+3. The operator answers a multiselect from that list ("which skills should have
+   applied here?"), then `compare` scores it: agreement, `missed` (operator
+   picked, classifier did not — a false negative), `spurious` (classifier picked,
+   operator did not), and the match rate.
+4. `pin` appends every disagreement to `evals/classifier/cases.json` as a
+   regression case whose `target` is the operator's blind pick.
+5. `replay` re-runs the real classifier (`drip --json` per case, in a throwaway
+   workspace) and marks each case `pass`/`fail`; it exits non-zero when any case
+   fails, so pinned cases are a gate. The pool rules stay in the product — the
+   harness never reimplements the thresholds, caps or formulas.
+6. Tune the failing skill's `classifiers.json` questions or formula, re-replay,
+   and read the match rate before/after with `report`.
+
+`python3 -m unittest -q evals.classifier.test_bench` (run from the repo root)
+covers the harness itself;
+`evals/classifier/README.md` documents the full CLI and the case schema. A case
+is only a regression test once `replay` reports `pass` — an `open`/`fail` case is
+the tuning queue, and a pinned case is never weakened to make it pass.
+
 ## Code review (`--review`)
 
 `drip --review` reviews the branch's diff against the repo's default branch

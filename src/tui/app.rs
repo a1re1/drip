@@ -84,7 +84,7 @@ use crate::tui::terminal_title::{
 use crate::tui::widgets::{
     composer_cursor_at, composer_cursor_position, composer_lines, composer_text_width,
     render_composer, render_picker, render_skill_picker, render_status_bar, render_survey,
-    ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
+    render_working_line, ComposerProps, PickerItem, SkillPickerItem, StatusBarProps,
 };
 use crate::watch::ansi::{string_width, wrap_ansi};
 
@@ -639,6 +639,14 @@ struct TuiApp {
     rows: usize,
     running: bool,
     running_detail: Option<String>,
+    /// When the current (or last) goal run began — the activity line above the
+    /// composer counts its clock up from here. `None` whenever no run is in
+    /// flight, so nothing is painted above an idle composer.
+    run_started_at: Option<Instant>,
+    /// Next repaint deadline of the activity line animation; `None` when idle
+    /// (or when the run already ended), so the loop falls back to its plain
+    /// wait instead of busy-polling.
+    activity_next_tick: Option<Instant>,
     selected_skill_index: usize,
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
@@ -794,6 +802,8 @@ impl TuiApp {
             rows,
             running: false,
             running_detail: None,
+            run_started_at: None,
+            activity_next_tick: None,
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_catalog,
@@ -1010,6 +1020,20 @@ impl TuiApp {
                 ));
             }
         } else {
+            // Claude-style activity line directly above the chat: a braille
+            // spinner frame plus the clock counting up from the run's start.
+            // Only painted while a run is in flight; formatting happens here,
+            // the animation tick owns the repaints.
+            if self.running {
+                if let Some(started) = self.run_started_at {
+                    let elapsed = started.elapsed();
+                    rows.push(render_working_line(
+                        crate::tui::pane_title::frame_for(elapsed),
+                        elapsed,
+                        self.cols,
+                    ));
+                }
+            }
             let slash: Vec<&SlashCommandSpec> = get_slash_command_suggestions(&self.text);
             let queued: Vec<String> = self.queued_prompts.iter().cloned().collect();
             rows.extend(render_composer(
@@ -3278,6 +3302,10 @@ impl TuiApp {
         let goal_images = std::mem::take(&mut self.attachments);
         self.run_session_id = Some(self.session.id.clone());
         self.running = true;
+        // The activity line above the composer starts its clock here and
+        // animates on the shared spinner cadence while the run is in flight.
+        self.run_started_at = Some(Instant::now());
+        self.activity_next_tick = Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
         self.running_detail = Some("resolving context".to_string());
         // Mention resolution can read a whole directory tree; show the
         // "running" state before it starts.
@@ -3728,6 +3756,10 @@ impl TuiApp {
         self.finalize_compact();
         self.running = false;
         self.running_detail = None;
+        // The activity line goes with the run: its clock has nothing left to
+        // count and its animation must stop repainting.
+        self.run_started_at = None;
+        self.activity_next_tick = None;
         // Idle title (bare label, no spinner) whatever ended the run:
         // completion, cancel, or error.
         self.title_next_tick = None;
@@ -3819,6 +3851,21 @@ impl TuiApp {
                 }
             }
 
+            // Activity line above the composer: consume a due tick here and
+            // repaint, so the spinner frame and the counting clock advance
+            // without the paint path re-arming anything. Re-armed only while
+            // a run is in flight; the loop otherwise waits as before.
+            if let Some(at) = self.activity_next_tick {
+                if now >= at {
+                    self.activity_next_tick = None;
+                    if self.running {
+                        self.repaint();
+                        self.activity_next_tick =
+                            Some(now + Duration::from_millis(SPINNER_INTERVAL_MS));
+                    }
+                }
+            }
+
             // Custom status line: adopt finished jobs and re-arm the
             // interval refresh here, never in the paint path (drawing stays
             // side-effect-free). Non-blocking; failures never retry or log.
@@ -3830,6 +3877,7 @@ impl TuiApp {
                 self.resize_at,
                 self.status_line_next_refresh,
                 self.title_next_tick,
+                self.activity_next_tick,
             ]
             .into_iter()
             .flatten()
@@ -6624,5 +6672,85 @@ mod survey_tests {
             "space never advances a single-choice survey"
         );
         assert!(state.answers.is_empty());
+    }
+}
+
+/// Focused tests for the activity line above the composer: it is painted only
+/// while a run is in flight, it sits immediately above the composer, and its
+/// clock counts up from the run's start with the shared spinner cadence.
+#[cfg(test)]
+mod activity_line_tests {
+    use super::*;
+    use crate::watch::ansi::strip_ansi;
+
+    fn plain(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|row| strip_ansi(row)).collect()
+    }
+
+    fn elapsed(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .expect("the monotonic clock is older than the run")
+    }
+
+    #[test]
+    fn working_line_sits_immediately_above_the_composer_while_running() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(elapsed(65));
+        let rows = plain(&fixture.app.live_region());
+        let index = rows
+            .iter()
+            .position(|row| row.contains("working for 1m 05s"))
+            .expect("a live run must paint the activity line");
+        assert!(
+            crate::tui::pane_title::SPINNER_FRAMES
+                .iter()
+                .any(|frame| rows[index].starts_with(frame)),
+            "the line starts with a spinner frame: {:?}",
+            rows[index]
+        );
+        assert!(
+            rows[index + 1].starts_with('─') && rows[index + 2].contains('❯'),
+            "the activity line belongs directly above the composer box: {:?}",
+            &rows[index..=index + 2]
+        );
+    }
+
+    #[test]
+    fn no_working_line_is_painted_when_idle() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        // A stale start time with no run in flight must paint nothing.
+        fixture.app.run_started_at = Some(elapsed(3));
+        let rows = plain(&fixture.app.live_region());
+        assert!(
+            !rows.iter().any(|row| row.contains("working for")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn finish_run_clears_the_activity_line_state() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(Instant::now());
+        fixture.app.activity_next_tick = Some(Instant::now());
+        fixture.app.finish_run();
+        assert!(fixture.app.run_started_at.is_none());
+        assert!(fixture.app.activity_next_tick.is_none());
+        let rows = plain(&fixture.app.live_region());
+        assert!(!rows.iter().any(|row| row.contains("working for")));
+    }
+
+    #[test]
+    fn activity_tick_stops_rearming_once_the_run_ends() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.activity_next_tick = Some(Instant::now());
+        fixture.app.finish_run();
+        assert!(
+            fixture.app.activity_next_tick.is_none(),
+            "an idle composer must not keep repainting for the spinner"
+        );
     }
 }

@@ -86,6 +86,9 @@ pub struct DripHome {
     /// requirements the optional skill classifier keeps (incremental; safe to
     /// delete).
     pub skill_requirements_db_path: String,
+    /// <home>/summary-preferences.md — the operator-editable system prompt
+    /// appended to the run-summary instructions.
+    pub summary_preferences_path: String,
     /// The ~/.drip root this home lives under.
     pub root: String,
 }
@@ -197,6 +200,79 @@ fn collapse_non_alnum_runs(path: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// The file name the summary preferences live under inside a home.
+pub const SUMMARY_PREFERENCES_FILE_NAME: &str = "summary-preferences.md";
+
+/// The run-summary preferences file: `<home>/summary-preferences.md`, or an
+/// explicit non-empty `$DRIP_SUMMARY_PREFERENCES` path when one is set.
+pub fn resolve_summary_preferences_path(home_root: &str) -> String {
+    std::env::var("DRIP_SUMMARY_PREFERENCES")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            join(home_root, SUMMARY_PREFERENCES_FILE_NAME)
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+/// Seed the operator-editable summary preferences with the shipped default so
+/// there is something to edit. An existing file is left byte-identical.
+pub fn ensure_summary_preferences_file(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(path, DEFAULT_SUMMARY_PREFERENCES)?;
+    Ok(())
+}
+
+/// The preferences text for a home root, when the file exists and has content.
+pub fn load_summary_preferences(home_root: &str) -> Option<String> {
+    load_summary_preferences_from(&resolve_summary_preferences_path(home_root))
+}
+
+/// The preferences text at an explicit path; whitespace-only content is no
+/// preferences at all, so an emptied file restores the built-in prompt.
+pub fn load_summary_preferences_from(path: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// The shipped preferences file. It is a system prompt about HOW the summary
+/// is written; drip's built-in contract always goes first, so the grounding
+/// rules cannot be edited away from here.
+pub const DEFAULT_SUMMARY_PREFERENCES: &str = concat!(
+    "# How the run summary should be written\n",
+    "\n",
+    "Edit this file to change how drip's end-of-run summary reads. It is appended to\n",
+    "drip's built-in summary contract, which always keeps the grounding rules:\n",
+    "report task_stats exactly as given, claim a verification passed only when a\n",
+    "harness-recorded verification record says so, and name a tool or child session\n",
+    "only when tool_usage counts it. Preferences steer HOW the summary is written,\n",
+    "never WHAT it may claim. Delete or empty this file to get the built-in prompt.\n",
+    "\n",
+    "Defaults worth keeping unless you have a reason to change them:\n",
+    "- Open with one sentence on the outcome: what the goal was and whether it was met.\n",
+    "- Then a short 'What happened' list, one bullet per task, saying what each task\n",
+    "  actually did (use task_footprints) and not only its finish summary.\n",
+    "- Then a 'Testing & verification' breakdown: each recorded command, its outcome,\n",
+    "  and its counts (executed/passed/failed) and anchor. Say plainly when no\n",
+    "  verification command was recorded.\n",
+    "- Then anything blocked, dropped, deferred, or left unverified, with why.\n",
+    "- Prefer concrete nouns — file paths, commands, counts — over adjectives, and\n",
+    "  keep it under about 40 lines unless the run was large.\n",
+);
+
 pub fn open_drip_home(root: &str) -> DripHome {
     let home = DripHome {
         config_path: join(root, "config.json").to_string_lossy().into_owned(),
@@ -211,6 +287,7 @@ pub fn open_drip_home(root: &str) -> DripHome {
         skill_requirements_db_path: join(root, "skill-requirements.sqlite")
             .to_string_lossy()
             .into_owned(),
+        summary_preferences_path: resolve_summary_preferences_path(root),
         root: root.to_string(),
     };
 
@@ -219,6 +296,9 @@ pub fn open_drip_home(root: &str) -> DripHome {
     }
 
     let _ = ensure_env_vars_file(Path::new(&home.env_vars_path));
+    // Seeded once so there is always something to edit; an existing file is
+    // never overwritten, and emptying it restores the built-in prompt.
+    let _ = ensure_summary_preferences_file(Path::new(&home.summary_preferences_path));
 
     home
 }
@@ -562,6 +642,77 @@ mod tests {
             project_slug("/Users/tyler/src/weird name (v2)"),
             "-Users-tyler-src-weird-name-v2-"
         );
+    }
+
+    #[test]
+    fn seeds_and_loads_the_summary_preferences() {
+        let (_guard, root) = temp_root("drip-test-");
+        let home = open_drip_home(&s(&join(&root, ".drip")));
+
+        // The file is seeded on first open so there is always something to edit,
+        // and its path stays inside the home.
+        assert_eq!(
+            home.summary_preferences_path,
+            s(&join(&root, ".drip/summary-preferences.md"))
+        );
+        assert_eq!(
+            load_summary_preferences_from(&home.summary_preferences_path).as_deref(),
+            Some(DEFAULT_SUMMARY_PREFERENCES.trim())
+        );
+
+        // An edited file is what the run reads.
+        fs::write(
+            &home.summary_preferences_path,
+            "Two bullets, no adjectives.",
+        )
+        .unwrap();
+        assert_eq!(
+            load_summary_preferences_from(&home.summary_preferences_path).as_deref(),
+            Some("Two bullets, no adjectives.")
+        );
+
+        // Emptying it restores the built-in prompt.
+        fs::write(&home.summary_preferences_path, "  \n").unwrap();
+        assert_eq!(
+            load_summary_preferences_from(&home.summary_preferences_path),
+            None
+        );
+
+        // A second open never overwrites the operator's edits.
+        fs::write(&home.summary_preferences_path, "mine").unwrap();
+        let reopened = open_drip_home(&s(&join(&root, ".drip")));
+        assert_eq!(
+            load_summary_preferences_from(&reopened.summary_preferences_path).as_deref(),
+            Some("mine")
+        );
+    }
+
+    #[test]
+    fn the_summary_preferences_path_can_be_overridden_by_env() {
+        let (_guard, root) = temp_root("drip-test-");
+        let home_root = s(&join(&root, ".drip"));
+        let override_path = s(&join(&root, "my-summary-prompt.md"));
+        fs::write(&override_path, "Be terse.").unwrap();
+
+        let previous = std::env::var("DRIP_SUMMARY_PREFERENCES").ok();
+        std::env::set_var("DRIP_SUMMARY_PREFERENCES", &override_path);
+        assert_eq!(resolve_summary_preferences_path(&home_root), override_path);
+        assert_eq!(
+            load_summary_preferences(&home_root).as_deref(),
+            Some("Be terse.")
+        );
+
+        // A blank override is not an override: the home file is used again.
+        std::env::set_var("DRIP_SUMMARY_PREFERENCES", "  ");
+        assert_eq!(
+            resolve_summary_preferences_path(&home_root),
+            s(&join(&home_root, SUMMARY_PREFERENCES_FILE_NAME))
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("DRIP_SUMMARY_PREFERENCES", value),
+            None => std::env::remove_var("DRIP_SUMMARY_PREFERENCES"),
+        }
     }
 
     #[test]

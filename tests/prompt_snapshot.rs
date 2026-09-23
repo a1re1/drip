@@ -40,6 +40,85 @@ fn expect_value(fx: &Value, path: &[&str]) -> Value {
     v.clone()
 }
 
+/// Opt-in regeneration: `DRIP_UPDATE_PROMPT_FIXTURE=1 cargo test --test prompt_snapshot
+/// -- --include-ignored regenerate_fixture`. It rewrites the
+/// `RUN_SUMMARY_SYSTEM_PROMPT` copy plus the run-summary message/fallback
+/// entries (the text this feature changed) and leaves every other entry
+/// byte-identical, so an accidental edit elsewhere still fails the snapshot.
+#[test]
+#[ignore = "writes tests/fixtures/prompt.json when DRIP_UPDATE_PROMPT_FIXTURE=1"]
+fn regenerate_fixture() {
+    if std::env::var("DRIP_UPDATE_PROMPT_FIXTURE").as_deref() != Ok("1") {
+        panic!("set DRIP_UPDATE_PROMPT_FIXTURE=1 to regenerate the fixture");
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/prompt.json");
+    let raw = std::fs::read_to_string(&path).expect("fixture reads");
+    let mut fx: Value = serde_json::from_str(&raw).expect("fixture parses");
+    regenerate_run_summary_entries(&mut fx);
+    let text = serde_json::to_string_pretty(&fx).expect("fixture serializes") + "\n";
+    std::fs::write(&path, text).expect("fixture writes");
+}
+
+/// Rewrites the run-summary fixture entries in place to the current builders'.
+fn regenerate_run_summary_entries(fx: &mut Value) {
+    // The run-summary system prompt is part of this change; every other
+    // top-level constant must still match its frozen copy, so a leak of the
+    // regeneration into unrelated entries fails loudly instead of silently
+    // re-blessing it.
+    assert_eq!(
+        fx["DEFAULT_HARNESS_SYSTEM_PROMPT"],
+        Value::String(DEFAULT_HARNESS_SYSTEM_PROMPT.to_string()),
+        "regeneration must not touch the crate-level harness prompt"
+    );
+    fx["RUN_SUMMARY_SYSTEM_PROMPT"] = Value::String(RUN_SUMMARY_SYSTEM_PROMPT.to_string());
+    let empty: HarnessState =
+        serde_json::from_value(fx["states"]["empty"].clone()).expect("empty state");
+    let rich: HarnessState =
+        serde_json::from_value(fx["states"]["rich"].clone()).expect("rich state");
+    for (name, reason) in reasons() {
+        let workspace_changes = match name {
+            "completed" => Some(" M src/a.rs\n?? new.rs".to_string()),
+            _ => None,
+        };
+        let tool_usage = match name {
+            "completed" => Some(
+                [("DELEGATE", 1u64), ("PATCH", 3), ("READ", 4), ("VERIFY", 0)]
+                    .into_iter()
+                    .map(|(name, count)| (name.to_string(), count))
+                    .collect(),
+            ),
+            "partial" => Some(std::collections::BTreeMap::new()),
+            _ => None,
+        };
+        let got = build_run_summary_messages(
+            &rich,
+            &RunSummaryMessagesArgs {
+                current_date: DATE,
+                reason,
+                tool_usage,
+                workspace_changes,
+                summary_preferences: None,
+            },
+        );
+        fx["buildRunSummaryMessages"][name] = serde_json::to_value(&got).unwrap();
+        fx["buildFallbackRunSummary"][format!("rich:{name}")] =
+            Value::String(build_fallback_run_summary(&rich, reason));
+        fx["buildFallbackRunSummary"][format!("empty:{name}")] =
+            Value::String(build_fallback_run_summary(&empty, reason));
+    }
+    let got = build_run_summary_messages(
+        &empty,
+        &RunSummaryMessagesArgs {
+            current_date: DATE,
+            reason: HarnessRunReason::Completed,
+            tool_usage: None,
+            workspace_changes: None,
+            summary_preferences: None,
+        },
+    );
+    fx["buildRunSummaryMessages_empty"] = serde_json::to_value(&got).unwrap();
+}
+
 fn check(name: &str, actual: &str, expected: &str) {
     if actual != expected {
         let a: Vec<&str> = actual.lines().collect();
@@ -336,6 +415,7 @@ fn run_summary_messages_match() {
                 reason,
                 tool_usage,
                 workspace_changes,
+                summary_preferences: None,
             },
         );
         assert_eq!(
@@ -351,6 +431,7 @@ fn run_summary_messages_match() {
             reason: HarnessRunReason::Completed,
             tool_usage: None,
             workspace_changes: None,
+            summary_preferences: None,
         },
     );
     assert_eq!(
@@ -377,4 +458,38 @@ fn fallback_run_summary_matches() {
             &expect_str(&fx, &["buildFallbackRunSummary", &format!("empty:{name}")]),
         );
     }
+}
+
+#[test]
+fn an_edited_preferences_file_changes_the_summary_system_prompt() {
+    let fx = fixture();
+    let rich = state(&fx, "rich");
+    let args = |summary_preferences| RunSummaryMessagesArgs {
+        current_date: DATE,
+        reason: HarnessRunReason::Completed,
+        tool_usage: None,
+        workspace_changes: None,
+        summary_preferences,
+    };
+    let base = build_run_summary_messages(&rich, &args(None));
+    let edited = build_run_summary_messages(&rich, &args(Some("Lead with the failing test name.")));
+
+    let system_of =
+        |messages: &[drip::harness::transport::TransportRequestMessage]| match &messages[0].content
+        {
+            Some(drip::harness::transport::TransportContent::Text(text)) => text.clone(),
+            other => panic!("unexpected system content: {other:?}"),
+        };
+    let base_system = system_of(&base);
+    let edited_system = system_of(&edited);
+
+    // The built-in contract is unedited and still comes first; the operator's
+    // preferences are what changed.
+    assert_eq!(base_system, RUN_SUMMARY_SYSTEM_PROMPT);
+    assert!(edited_system.starts_with(RUN_SUMMARY_SYSTEM_PROMPT));
+    assert!(edited_system.ends_with("Lead with the failing test name."));
+
+    // Everything else about the call is untouched.
+    assert_eq!(base.len(), edited.len());
+    assert_eq!(base[1].content, edited[1].content);
 }

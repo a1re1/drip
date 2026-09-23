@@ -90,6 +90,9 @@ pub struct WatchViewModel {
     /// read from the loop-start telemetry of `transcript`. Empty when the
     /// session recorded none (or predates the field).
     pub skill_loads: Vec<SkillLoad>,
+    /// Page shown by the read-only [4] Skills & Tools pane when its wrapped
+    /// content does not fit the pane (the renderer clamps it to the real pages).
+    pub skill_page: usize,
 }
 
 // ── Time helpers (pure; exported for tests) ──────────────────────────────────
@@ -684,12 +687,12 @@ pub fn all_loaded_tools(loads: &[SkillLoad]) -> Vec<(String, usize)> {
     roll_up(loads, |load| &load.tools)
 }
 
-/// Rows for the [4] Skills & Tools pane: the roll-up of every skill and every
-/// tool the focused session's loops had, then each loop's own surface in load
-/// order. The pane answers both "what could this run reach for right now" (its
-/// newest loop is the last block) and "how did the surface move across the
-/// run".
-fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
+/// Rows for the [4] Skills & Tools pane: the run-wide roll-up of every skill
+/// and every tool the focused session's loops had, then one block per loop,
+/// newest first. Names are joined into comma-separated lists that wrap to the
+/// pane width — a loop that reached for twenty tools costs a couple of rows
+/// instead of twenty.
+fn skill_lines(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
     if vm.skill_loads.is_empty() {
         return vec![plain("  no loop telemetry yet", c::dim)];
     }
@@ -699,18 +702,33 @@ fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
         format!("all loaded skills ({})", skills.len()),
         c::accent,
     )];
-    for (name, count) in skills {
-        rows.push(plain(format!("  {name}{}", loops_suffix(count)), c::white));
-    }
+    push_list(
+        &mut rows,
+        "  ",
+        "  ",
+        &comma_list(&skills),
+        c::white,
+        inner_w,
+    );
     rows.push(plain(
         format!("all available tools ({})", tools.len()),
         c::accent,
     ));
-    for (name, count) in tools {
-        rows.push(plain(format!("  {name}{}", loops_suffix(count)), c::white));
-    }
-    rows.push(plain("", c::dim));
-    for load in &vm.skill_loads {
+    push_list(
+        &mut rows,
+        "  ",
+        "  ",
+        &comma_list(&tools),
+        c::white,
+        inner_w,
+    );
+    // Newest loop first: its block is the surface a new loop would run with.
+    let mut loads: Vec<&SkillLoad> = vm.skill_loads.iter().collect();
+    loads.sort_by_key(|l| std::cmp::Reverse(l.iteration));
+    for (i, load) in loads.iter().enumerate() {
+        if i > 0 {
+            rows.push(plain("", c::dim));
+        }
         rows.push(plain(
             format!(
                 "loop {} · {} skill{} · {} tool{}",
@@ -718,27 +736,150 @@ fn skill_rows(vm: &WatchViewModel) -> Vec<RowCell> {
                 load.skills.len(),
                 plural(load.skills.len()),
                 load.tools.len(),
-                plural(load.tools.len()),
+                plural(load.tools.len())
             ),
             c::accent,
         ));
-        for name in &load.skills {
-            rows.push(plain(format!("  skill · {name}"), c::gray));
-        }
-        for name in &load.tools {
-            rows.push(plain(format!("  tool · {name}"), c::gray));
-        }
+        push_list(
+            &mut rows,
+            "  skills  ",
+            "          ",
+            &load.skills,
+            c::gray,
+            inner_w,
+        );
+        push_list(
+            &mut rows,
+            "  tools   ",
+            "          ",
+            &load.tools,
+            c::gray,
+            inner_w,
+        );
     }
     rows
 }
 
-/// ` · N loops` when a roll-up entry was carried by more than one loop.
-fn loops_suffix(count: usize) -> String {
-    if count > 1 {
-        format!(" · {count} loops")
-    } else {
-        String::new()
+/// The roll-up's names as display strings — `navis (2 loops)`, `tdd` — keeping
+/// the loop count only where it says something (a name more than one loop
+/// reached for).
+fn comma_list(entries: &[(String, usize)]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|(name, count)| {
+            if *count > 1 {
+                format!("{name} ({count} loops)")
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
+}
+
+/// Push `names` as a comma-separated list wrapped to the pane's `inner_w`,
+/// `first` leading the first row and `cont` every continuation row — both the
+/// same visible width, so a broken list keeps a hanging indent. An empty list
+/// adds no row at all.
+fn push_list(
+    rows: &mut Vec<RowCell>,
+    first: &str,
+    cont: &str,
+    names: &[String],
+    color: fn(&str) -> String,
+    inner_w: usize,
+) {
+    if names.is_empty() {
+        return;
     }
+    let lead_w = string_width(first).max(string_width(cont));
+    let wrap_w = inner_w.saturating_sub(lead_w).max(1);
+    for (i, line) in wrap_names(names, wrap_w).iter().enumerate() {
+        rows.push(plain(
+            format!("{}{line}", if i == 0 { first } else { cont }),
+            color,
+        ));
+    }
+}
+
+/// Pack `names` into `", "`-joined lines no wider than `width`, breaking
+/// BETWEEN names so a name is only split when it alone is wider than the line.
+fn wrap_names(names: &[String], width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for name in names {
+        let fits = !cur.is_empty() && string_width(&cur) + 2 + string_width(name) <= width;
+        if fits {
+            cur.push_str(", ");
+            cur.push_str(name);
+        } else {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            cur = name.clone();
+        }
+        // A name wider than the whole line still has to be broken somewhere.
+        while string_width(&cur) > width {
+            let mut cut = 0usize;
+            let mut w = 0usize;
+            for (i, ch) in cur.char_indices() {
+                let cw = crate::watch::ansi::char_width(ch as u32);
+                if w + cw > width {
+                    break;
+                }
+                w += cw;
+                cut = i + ch.len_utf8();
+            }
+            let cut = cut.max(1).min(cur.len());
+            out.push(cur[..cut].to_string());
+            cur = cur[cut..].to_string();
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The [4] pane's visible rows in an `inner_w` × `inner_h` box: the wrapped
+/// content while it fits, otherwise the current page of it plus a pager row.
+/// `vm.skill_page` is clamped here, so an index left over from a taller
+/// terminal or a longer session still paints.
+fn skill_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<RowCell> {
+    let all = skill_lines(vm, inner_w);
+    let (size, pages) = page_window(all.len(), inner_h);
+    if pages <= 1 {
+        return all;
+    }
+    let page = vm.skill_page.min(pages - 1);
+    let start = page * size;
+    let end = (start + size).min(all.len());
+    let mut out: Vec<RowCell> = all[start..end].to_vec();
+    let pager = plain(
+        format!("  page {}/{} · j/k or [/] pages", page + 1, pages),
+        c::dim,
+    );
+    if out.len() < inner_h {
+        out.push(pager);
+    } else {
+        // A one-row box seats no pager row: the page still turns, the hint just
+        // has nowhere to go, and clipping it would hide a content row instead.
+        out.truncate(inner_h.max(1));
+    }
+    out
+}
+
+/// The rows in one page and how many pages `len` rows take in an `inner_h`-row
+/// box: every row in one page while it fits, otherwise the content rows plus a
+/// one-row pager (so a page is `inner_h - 1` rows).
+fn page_window(len: usize, inner_h: usize) -> (usize, usize) {
+    if inner_h == 0 || len <= inner_h {
+        return (len.max(1), 1);
+    }
+    // A pager row is only worth budgeting when the box seats it next to at
+    // least one content row, so a degenerate one-row pane still pages.
+    let size = if inner_h >= 2 { inner_h - 1 } else { inner_h };
+    (size, len.div_ceil(size.max(1)))
 }
 
 /// "s" for anything but one, so "1 skill" and "2 skills" both read right.
@@ -750,14 +891,26 @@ fn plural(count: usize) -> &'static str {
     }
 }
 
-/// How many real rows the [4] pane seats — the layout hugs the pane to its
-/// content with this, and the hit test counts rows with it. Zero when the pane
-/// shows its empty-state message, which is not a clickable row.
-fn skill_row_count(vm: &WatchViewModel) -> usize {
+/// How many rows the [4] pane's wrapped content wants at `inner_w` — the layout
+/// hugs the pane to it. Zero when the pane shows its empty-state message, which
+/// is not a clickable row.
+fn skill_row_count(vm: &WatchViewModel, inner_w: usize) -> usize {
     if vm.skill_loads.is_empty() {
         return 0;
     }
-    skill_rows(vm).len()
+    skill_lines(vm, inner_w).len()
+}
+
+/// How many pages the [4] pane's wrapped content needs in a `cols` x `rows`
+/// terminal - `1` while it fits, so the app can clamp its page index with this
+/// after a resize or a shorter session.
+pub fn skill_page_count(vm: &WatchViewModel, cols: usize, rows: usize) -> usize {
+    let Some(layout) = pane_layout(vm, cols, rows) else {
+        return 1;
+    };
+    let inner_w = layout.list_w.saturating_sub(2);
+    let inner_h = layout.heights[3].saturating_sub(2);
+    page_window(skill_lines(vm, inner_w).len(), inner_h).1
 }
 
 // ── Titles / footer notes ────────────────────────────────────────────────────
@@ -838,7 +991,16 @@ fn pane_layout(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<PaneLayo
     if cols < PORTRAIT_MAX_COLS {
         // Portrait: [1] / [2] / Shells / [0] stacked full-width; lists hug,
         // transcript absorbs the reclaimed rows.
-        let heights = portrait_heights(body_h, &[vm.sessions.len(), vm.tasks.len(), vm.shells.len(), skill_row_count(vm), 0]);
+        let heights = portrait_heights(
+            body_h,
+            &[
+                vm.sessions.len(),
+                vm.tasks.len(),
+                vm.shells.len(),
+                skill_row_count(vm, cols.saturating_sub(2)),
+                0,
+            ],
+        );
         return Some(PaneLayout {
             heights: [heights[0], heights[1], heights[2], heights[3]],
             list_w: cols,
@@ -853,7 +1015,7 @@ fn pane_layout(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<PaneLayo
     let list_w = (cols * 2 / 5).max(30).min(cols - 20);
     let sessions_desired = vm.sessions.len().max(1) + 2;
     let shells_desired = vm.shells.len().max(1) + 2;
-    let skills_desired = skill_row_count(vm).max(1) + 2;
+    let skills_desired = skill_row_count(vm, list_w.saturating_sub(2)).max(1) + 2;
     let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(3 * MIN_PANE)));
     let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + 2 * MIN_PANE)));
     let mut h4 = skills_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + MIN_PANE)));
@@ -909,7 +1071,14 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 
     let mk_skills = |w: usize, height: usize| -> Vec<String> {
         let note = if vm.skill_loads.is_empty() { None } else { Some(format!("{} loops", vm.skill_loads.len())) };
-        render_pane(w, height, &skills_title(), vm.focus == 4, &skill_rows(vm), note.as_deref())
+        render_pane(
+            w,
+            height,
+            &skills_title(),
+            vm.focus == 4,
+            &skill_rows(vm, w.saturating_sub(2), height.saturating_sub(2)),
+            note.as_deref(),
+        )
     };
 
     // The [0] column: the transcript normally; a shell-detail box over a raw
@@ -1054,7 +1223,7 @@ pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, ro
             0 => (vm.sessions.len(), vm.sel_session),
             1 => (ordered_tasks(&vm.tasks).len(), vm.sel_task),
             2 => (vm.shells.len(), vm.sel_shell),
-            _ => (skill_row_count(vm), 0),
+            _ => (skill_row_count(vm, c1.saturating_sub(c0 + 1).max(1)), 0),
         };
         if len == 0 {
             continue; // the pane shows its empty-state message, not rows
@@ -1091,6 +1260,7 @@ mod tests {
             tasks: vec![],
             sel_task: 0,
             skill_loads: vec![],
+            skill_page: 0,
         }
     }
 
@@ -1584,7 +1754,7 @@ mod tests {
         set_color_enabled(false);
         let mut vm = empty_vm();
         assert_eq!(skills_title(), "[4] Skills & Tools");
-        assert_eq!(skill_rows(&vm)[0].text, "  no loop telemetry yet");
+        assert_eq!(skill_rows(&vm, 40, 10)[0].text, "  no loop telemetry yet");
 
         vm.skill_loads = vec![
             SkillLoad {
@@ -1599,27 +1769,183 @@ mod tests {
             },
         ];
         assert_eq!(skills_title(), "[4] Skills & Tools");
-        let texts: Vec<String> = skill_rows(&vm).iter().map(|r| r.text.clone()).collect();
+        let texts: Vec<String> = skill_rows(&vm, 40, 20)
+            .iter()
+            .map(|r| r.text.clone())
+            .collect();
         assert_eq!(
             texts,
             vec![
                 "all loaded skills (2)",
-                "  navis · 2 loops",
-                "  tdd",
+                "  navis (2 loops), tdd",
                 "all available tools (2)",
-                "  READ · 2 loops",
-                "  PATCH",
+                "  READ (2 loops), PATCH",
+                "loop 2 · 2 skills · 2 tools",
+                "  skills  navis, tdd",
+                "  tools   READ, PATCH",
                 "",
                 "loop 1 · 1 skill · 1 tool",
-                "  skill · navis",
-                "  tool · READ",
-                "loop 2 · 2 skills · 2 tools",
-                "  skill · navis",
-                "  skill · tdd",
-                "  tool · READ",
-                "  tool · PATCH",
+                "  skills  navis",
+                "  tools   READ",
             ]
         );
+    }
+
+    #[test]
+    fn the_skills_and_tools_lists_wrap_into_a_few_comma_separated_rows() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![SkillLoad {
+            iteration: 1,
+            skills: vec!["navis".into(), "cs-reference".into(), "tdd".into()],
+            tools: (0..20).map(|i| format!("TOOL-{i}")).collect(),
+        }];
+        // Wide pane: every row fits, nothing is drawn one name per line.
+        let rows = skill_rows(&vm, 76, 100);
+        assert!(rows.iter().all(|r| string_width(&r.text) <= 76), "{rows:?}");
+        let joined = rows
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for name in ["navis", "cs-reference", "tdd", "TOOL-0", "TOOL-19"] {
+            assert!(joined.contains(name), "{name} missing from {joined:?}");
+        }
+        // 23 names cost a handful of wrapped rows, not 23.
+        let lines = skill_lines(&vm, 76);
+        assert!(
+            lines.len() < 14,
+            "{:?}",
+            lines.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        // Narrow panes wrap hard, but nothing overflows the width and no row
+        // breaks a name in half.
+        let narrow = skill_lines(&vm, 30);
+        assert!(
+            narrow.iter().all(|r| string_width(&r.text) <= 30),
+            "{:?}",
+            narrow.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+        assert!(
+            !narrow.iter().any(|r| r.text.trim_end().ends_with("TO")),
+            "{:?}",
+            narrow.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+
+        // A loop with no skills prints the roll-up header and no skills row.
+        vm.skill_loads = vec![SkillLoad {
+            iteration: 3,
+            skills: vec![],
+            tools: vec!["READ".into()],
+        }];
+        let texts: Vec<String> = skill_lines(&vm, 76)
+            .iter()
+            .map(|r| r.text.clone())
+            .collect();
+        assert!(texts.contains(&"all loaded skills (0)".to_string()));
+        assert!(
+            !texts.iter().any(|t| t.starts_with("  skills")),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"  tools   READ".to_string()));
+    }
+
+    #[test]
+    fn a_surface_too_long_for_the_pane_pages_instead_of_overflowing() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = (1..=30)
+            .map(|i| SkillLoad {
+                iteration: i,
+                skills: vec![format!("skill-{i}")],
+                tools: vec![format!("TOOL-{i}")],
+            })
+            .collect();
+        let full = skill_lines(&vm, 40).len();
+        assert!(full > 8, "the fixture must not fit the pane: {full}");
+        let pages = full.div_ceil(7);
+
+        let rows = skill_rows(&vm, 40, 8);
+        assert_eq!(rows.len(), 8);
+        assert_eq!(
+            rows.last().unwrap().text,
+            format!("  page 1/{pages} · j/k or [/] pages")
+        );
+
+        // Every page stays inside the box: never more rows than it seats, and
+        // never wider than it is, whatever page is shown.
+        for want in 0..pages {
+            vm.skill_page = want;
+            let page_rows = skill_rows(&vm, 40, 8);
+            // A short last page paints fewer rows; the pane pads the rest.
+            assert!(
+                !page_rows.is_empty() && page_rows.len() <= 8,
+                "page {}",
+                want + 1
+            );
+            assert!(page_rows.iter().all(|r| string_width(&r.text) <= 40));
+            assert!(
+                page_rows
+                    .last()
+                    .unwrap()
+                    .text
+                    .contains(&format!("page {}/{pages}", want + 1)),
+                "{page_rows:?}"
+            );
+        }
+
+        vm.skill_page = 1;
+        let second = skill_rows(&vm, 40, 8);
+        assert_eq!(
+            second.last().unwrap().text,
+            format!("  page 2/{pages} · j/k or [/] pages")
+        );
+        assert_ne!(second[0].text, rows[0].text, "the window moved");
+
+        // A stale index (a taller terminal, a shorter list) clamps.
+        vm.skill_page = 999;
+        let last = skill_rows(&vm, 40, 8);
+        assert_eq!(
+            last.last().unwrap().text,
+            format!("  page {pages}/{pages} · j/k or [/] pages")
+        );
+
+        // Content that fits is never paged.
+        vm.skill_loads.truncate(1);
+        let whole = skill_rows(&vm, 40, 8);
+        assert!(
+            !whole.iter().any(|r| r.text.contains("page ")),
+            "{:?}",
+            whole.iter().map(|r| &r.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_one_row_box_still_turns_its_pages() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = (1..=8)
+            .map(|i| SkillLoad {
+                iteration: i,
+                skills: vec![format!("skill-{i}")],
+                tools: vec![format!("TOOL-{i}")],
+            })
+            .collect();
+        let full = skill_lines(&vm, 30).len();
+        assert!(full > 1, "the fixture must not fit one row: {full}");
+        let expect_pages = full.div_ceil(1);
+
+        // A box too short for a pager row must never paint more rows than it
+        // seats (the frame invariant would break) and must still page.
+        for want in [0usize, 1, expect_pages - 1] {
+            vm.skill_page = want;
+            let rows = skill_rows(&vm, 30, 1);
+            assert_eq!(rows.len(), 1, "page {}", want + 1);
+            assert_eq!(rows[0].text, skill_lines(&vm, 30)[want].text);
+        }
     }
 
     #[test]

@@ -66,6 +66,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         tasks: Vec::new(),
         sel_task: 0,
         skill_loads: Vec::new(),
+        skill_page: 0,
     }
 }
 
@@ -526,6 +527,8 @@ impl WatchApp {
         self.vm.transcript = Vec::new();
         self.vm.following = true;
         self.vm.transcript_scroll = 0;
+        self.vm.skill_loads = Vec::new();
+        self.vm.skill_page = 0;
         self.tail = None;
 
         let Some(record) = record else { return };
@@ -638,27 +641,25 @@ impl WatchApp {
             return;
         }
 
-        // Move selection: j/k or arrows
+        // Move selection: j/k or arrows. The read-only [4] pane has no
+        // selection, so there the same keys turn its page instead.
         if key == "j" || key == "\x1b[B" {
-            self.mv(1);
-            self.draw();
+            self.step(1);
             return;
         }
         if key == "k" || key == "\x1b[A" {
-            self.mv(-1);
-            self.draw();
+            self.step(-1);
             return;
         }
 
-        // Page / scroll: [ ] or h / l — scroll the transcript pane
+        // Page / scroll: [ ] or h / l — scroll the transcript pane; with [4]
+        // focused they turn that pane's page.
         if key == "[" || key == "h" || key == "\x1b[D" {
-            self.scroll_transcript(-PAGE);
-            self.draw();
+            self.page_step(-1);
             return;
         }
         if key == "]" || key == "l" || key == "\x1b[C" {
-            self.scroll_transcript(PAGE);
-            self.draw();
+            self.page_step(1);
         }
     }
 
@@ -755,6 +756,38 @@ impl WatchApp {
             self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64 + delta, self.vm.shells.len());
             self.sync_shell_log();
         }
+    }
+
+    /// `j`/`k` and the up/down arrows: move the focused pane's cursor, or turn
+    /// the [4] pane's page while it holds the focus.
+    fn step(&mut self, delta: i64) {
+        if self.vm.focus == 4 {
+            self.page_skills(delta);
+        } else {
+            self.mv(delta);
+        }
+        self.draw();
+    }
+
+    /// `[/]`, `h`/`l` and the left/right arrows: scroll the transcript, or turn
+    /// the [4] pane's page while it holds the focus.
+    fn page_step(&mut self, delta: i64) {
+        if self.vm.focus == 4 {
+            self.page_skills(delta);
+        } else {
+            self.scroll_transcript(delta * PAGE);
+        }
+        self.draw();
+    }
+
+    /// Turn the [4] Skills & Tools pane's page. Its content is a wrapped list
+    /// that pages rather than scrolls, so the index is clamped to the pages this
+    /// terminal actually seats (one while the content fits).
+    fn page_skills(&mut self, delta: i64) {
+        let (cols, rows) = terminal_size();
+        let pages = crate::watch::render::skill_page_count(&self.vm, cols, rows);
+        let page = self.vm.skill_page as i64 + delta;
+        self.vm.skill_page = page.clamp(0, pages.saturating_sub(1) as i64) as usize;
     }
 
     // +delta scrolls toward newer lines (down), -delta toward older.
@@ -1047,5 +1080,35 @@ mod tests {
         assert_eq!(app.vm.focus, 4);
         app.on_key("\t");
         assert_eq!(app.vm.focus, 1);
+    }
+
+    #[test]
+    fn the_focused_skills_pane_pages_with_j_k_and_brackets() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.skill_loads = (1..=40)
+            .map(|i| crate::watch::render::SkillLoad {
+                iteration: i,
+                skills: vec![format!("skill-{i}")],
+                tools: vec![format!("TOOL-{i}")],
+            })
+            .collect();
+        app.vm.focus = 4;
+        assert!(crate::watch::render::skill_page_count(&app.vm, 80, 24) > 1);
+
+        app.on_key("j");
+        assert_eq!(app.vm.skill_page, 1);
+        app.on_key("]");
+        assert_eq!(app.vm.skill_page, 2);
+        app.on_key("[");
+        assert_eq!(app.vm.skill_page, 1);
+        app.on_key("k");
+        app.on_key("k");
+        assert_eq!(app.vm.skill_page, 0, "the first page is a floor");
+
+        // Everywhere else `j` still moves the session selection, never a page.
+        app.vm.focus = 1;
+        app.vm.sel_task = 0;
+        app.on_key("j");
+        assert_eq!(app.vm.skill_page, 0);
     }
 }

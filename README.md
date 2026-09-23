@@ -973,6 +973,8 @@ dripw
 Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills & Tools, plus
 the transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
+With `[4]` focused, `j`/`k` and `[/]` turn that pane's page instead, since its
+list is paged rather than scrolled.
 Clicking a row of the Sessions, Tasks or Shells pane focuses that pane and
 selects the row under the pointer (clicking a session also focuses its
 transcript); the `[4]` Skills & Tools pane is read-only, so a click on it just
@@ -985,11 +987,15 @@ the composed skill set — the classifier's picks plus the run's base-prompt
 `--skill` activations, deduped in composition order — and the loop's whole tool
 surface: the packed tools its role allowlist and the `--mcp` gate leave
 callable, plus the harness tools (`plan_tasks`, `finish_task`, `ask_user`, …).
-dripw reads those events straight out of the session transcript and lists a
+dripw reads those events straight out of the session transcript and shows a
 roll-up of every skill and every tool seen across the run with how many loops
-had it, then each loop's own skills and tools in order, so you can see what a
-run could reach for at a given point and how the surface moved as it ran.
-Sessions recorded before this telemetry existed just show the empty state.
+had it, then one block per loop, newest first, so you can see what a run could
+reach for now and how the surface moved as it ran. Names are printed as
+comma-separated lists that wrap to the pane width rather than one name per line,
+so a loop reaching for twenty tools costs a couple of rows; when the whole list
+still does not fit the pane it pages — `j`/`k` or `[/]` turn the page while `[4]`
+is focused, and the pane's last row reads `page 2/5`. Sessions recorded before
+this telemetry existed just show the empty state.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 

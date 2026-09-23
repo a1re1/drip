@@ -8,6 +8,7 @@ use crate::tui::theme::{paint, ACCENT_COLOR, DIM_COLOR};
 use crate::watch::ansi::{char_width, fit, string_width, wrap_ansi};
 
 use crate::cli::commands::SlashCommandSpec;
+use std::time::Duration;
 
 const INVERSE_ON: &str = "\u{1b}[7m";
 const INVERSE_OFF: &str = "\u{1b}[27m";
@@ -752,6 +753,41 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
     rows
 }
 
+/// The counting-up clock of the activity line: `12s`, `1m 05s`, `1h 02m 05s`.
+/// Pure arithmetic on the elapsed time — no percentage is ever invented.
+pub fn format_working_clock(elapsed: Duration) -> String {
+    let total = elapsed.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Claude-style activity line drawn directly above the chat while a goal run
+/// is in flight: one braille spinner frame plus "working for {clock}". The
+/// caller owns the frame (see `pane_title::frame_for`) and the elapsed time;
+/// this is pure formatting. A row that does not fit `width` is clipped with an
+/// ellipsis, and a zero-width row renders as nothing.
+pub fn render_working_line(frame: &str, elapsed: Duration, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let room = width.saturating_sub(string_width(frame));
+    let body = format!(" working for {}", format_working_clock(elapsed));
+    let body = if string_width(&body) <= room {
+        body
+    } else {
+        fit(&body, room, true)
+    };
+    let accent = paint(ACCENT_COLOR);
+    let dim = paint(DIM_COLOR);
+    format!("{}{}", accent(frame), dim(&body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,5 +1520,41 @@ mod tests {
             "{rows:?}"
         );
         assert!(rows.iter().any(|row| row.contains("nav▏")), "{rows:?}");
+    }
+
+    #[test]
+    fn working_clock_counts_up_in_seconds_minutes_and_hours() {
+        assert_eq!(format_working_clock(Duration::from_millis(0)), "0s");
+        assert_eq!(format_working_clock(Duration::from_secs(59)), "59s");
+        assert_eq!(format_working_clock(Duration::from_secs(60)), "1m 00s");
+        assert_eq!(format_working_clock(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(
+            format_working_clock(Duration::from_secs(3600)),
+            "1h 00m 00s"
+        );
+        assert_eq!(
+            format_working_clock(Duration::from_secs(3725)),
+            "1h 02m 05s"
+        );
+    }
+
+    #[test]
+    fn working_line_paints_the_spinner_frame_before_the_counting_clock() {
+        let row = render_working_line("⠙", Duration::from_secs(65), 60);
+        assert!(
+            row.contains("\u{1b}["),
+            "the frame and the clock carry their own colours: {row:?}"
+        );
+        assert_eq!(plain(&[row])[0], "⠙ working for 1m 05s");
+    }
+
+    #[test]
+    fn working_line_clips_a_row_that_does_not_fit_the_width() {
+        let row = render_working_line("⠋", Duration::from_secs(3661), 12);
+        let plain_row = &plain(&[row])[0];
+        assert_eq!(string_width(plain_row), 12, "{plain_row:?}");
+        assert!(plain_row.ends_with('…'), "{plain_row:?}");
+        assert!(plain_row.starts_with("⠋ working"), "{plain_row:?}");
+        assert_eq!(render_working_line("⠋", Duration::from_secs(1), 0), "");
     }
 }

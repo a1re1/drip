@@ -508,6 +508,23 @@ impl AsyncToolJobManager {
             .collect()
     }
 
+    /// Settled, not-yet-reported jobs WITHOUT marking them reported: a peek
+    /// for the harness, which asks whether a settled result is still waiting
+    /// for the round that will deliver it.
+    pub fn settled_unreported_jobs(&self) -> Vec<ChatAsyncToolJob> {
+        let guard = self
+            .records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .iter()
+            .filter(|record| {
+                record.job.status != ChatAsyncToolJobStatus::Running && !record.reported
+            })
+            .map(|record| record.job.clone())
+            .collect()
+    }
+
     /// Jobs whose process or thread is still running.
     pub fn running_jobs(&self) -> Vec<ChatAsyncToolJob> {
         let guard = self

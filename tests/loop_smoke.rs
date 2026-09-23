@@ -1917,3 +1917,122 @@ async fn a_loop_waits_for_a_pending_monitor_and_wakes_up_with_its_result() {
         "the round after the hold must carry the settled result: {bodies:#?}"
     );
 }
+
+/// Operator directive: the run always delivers a MONITOR result — a failed one
+/// as much as a successful one — so the model can decide what to do next from
+/// the goal and the result. Here the task finishes while the monitor is still
+/// checking and the monitor then settles FAILED (its check never succeeds and
+/// its timeout expires): the loop still holds for it, and a delivery cycle
+/// hands the model the failure instead of only a leaked-job warning.
+#[tokio::test]
+async fn a_failed_monitor_result_is_delivered_even_after_the_task_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["watch the port open"]}),
+        ),
+        // A check that never succeeds: attempts every 200ms for 6s, well past
+        // MONITOR's inline grace window, so the call returns "still waiting"
+        // with the job genuinely in flight when the model finishes its task.
+        tool_call_response(
+            "m",
+            "MONITOR",
+            serde_json::json!({
+                "check": "exit 1",
+                "description": "the port opens",
+                "intervalMs": 200,
+                "timeoutMs": 6_000
+            }),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({
+                "status": "completed",
+                "summary": "the task is done while the monitor is still checking",
+                "confidence": "high",
+                "anchor": "none",
+                "anchorNote": "this test is about delivery, not about an anchor"
+            }),
+        ),
+        // The delivery cycle: the model wakes up with the failed result.
+        text_response("The monitor never fired, so the port stays unverified."),
+        text_response("Run summary."),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Watch for the port to open while you finish the task.".into(),
+        max_iterations: Some(10),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let bodies = server.join().unwrap();
+
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(
+        bodies.len(),
+        5,
+        "the delivery cycle must have run after the finish: {bodies:#?}"
+    );
+
+    let details: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| event.detail.clone())
+        .collect();
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("still-checking MONITOR job")),
+        "the loop must hold for the pending monitor: {details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("finished: failed")),
+        "the FAILED result must be reported to the model: {details:?}"
+    );
+    // The report names WHY it failed, not just that it did: the monitor's own
+    // timeout message is the actionable part the model reasons from.
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("without the signal")),
+        "the delivered failure must carry the monitor's error: {details:?}"
+    );
+    // The report lands in the request AFTER the finish (call 4), not in the
+    // finish's own response: the model reads it and decides what to do next.
+    let delivery = bodies[3].to_string();
+    assert!(
+        delivery.contains("background job") && delivery.contains("finished: failed"),
+        "the delivery-round request must carry the failed result: {delivery}"
+    );
+    assert!(
+        !bodies[2].to_string().contains("finished: failed"),
+        "the failure was not settled when the task finished — this test needs it delivered late"
+    );
+}

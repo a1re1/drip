@@ -58,6 +58,11 @@ pub const MONITOR_HOLD_POLL_MS: u64 = 250;
 /// job's settle is then reported at the next loop). Bounded so a monitor with
 /// a one-hour timeoutMs cannot pin a loop open for its whole budget.
 pub const MONITOR_HOLD_MAX_MS: i64 = 3_600_000;
+/// How many delivery cycles one task loop may spend handing the model a settled
+/// MONITOR result it would otherwise never see. A delivery cycle exists only to
+/// carry that result over, so it is exempt from the cycle budget — this bound
+/// is what keeps that exemption from running forever.
+pub const MONITOR_DELIVERY_MAX_CYCLES: i64 = 3;
 
 /// The freshest READ of up to this many distinct files is kept unfolded past
 /// the hot window (see `fold_cold_tool_results`). Transcript audits of the
@@ -6076,6 +6081,13 @@ pub struct LoopScope {
     /// The cycle currently running (1-based; 0 before the first begins).
     pub cycle: i64,
     pub task_finished: bool,
+    /// This loop is running one extra round past `task_finished` so the model
+    /// receives a MONITOR result it would otherwise lose (operator directive:
+    /// the run always delivers the result, including a failure).
+    pub delivering_settled_monitor: bool,
+    /// Delivery cycles this loop has spent past `task_finished` on that result
+    /// (bounded by MONITOR_DELIVERY_MAX_CYCLES).
+    pub delivery_cycles: i64,
     pub made_progress: bool,
     /// A workspace edit or verification happened in the current cycle —
     /// the cycle-extension signal (reset in begin_cycle).
@@ -8344,11 +8356,33 @@ impl HarnessRun {
 
             let mut cycle: i64 = 0;
             loop {
+                // Operator directive: a MONITOR this run started always reaches
+                // the model — a check that timed out or errored as much as one
+                // that fired. A finished task used to be the end of the loop,
+                // so the result had nowhere left to land: hold here for a
+                // pending MONITOR and spend one delivery cycle handing the
+                // settled result to the model, which can then decide what to do
+                // next with it in hand.
+                if scope.task_finished && !scope.delivering_settled_monitor {
+                    if scope.delivery_cycles >= MONITOR_DELIVERY_MAX_CYCLES {
+                        break;
+                    }
+                    if !self.hold_for_pending_monitor(&mut scope).await {
+                        break;
+                    }
+                    scope.delivery_cycles += 1;
+                }
+
                 cycle += 1;
-                if cycle > scope.loop_budget.max_cycles + scope.cycle_extensions {
+                // A delivery cycle exists only to carry a MONITOR result to the
+                // model, so the cycle budget does not close it —
+                // `delivery_cycles` bounds it instead.
+                if cycle > scope.loop_budget.max_cycles + scope.cycle_extensions
+                    && !scope.delivering_settled_monitor
+                {
                     break;
                 }
-                if scope.task_finished || scope.concluded_naturally || self.aborted {
+                if scope.concluded_naturally || self.aborted {
                     break;
                 }
 
@@ -8357,7 +8391,8 @@ impl HarnessRun {
                 }
 
                 for round in 0..scope.loop_budget.max_tool_rounds_per_cycle {
-                    if scope.task_finished {
+                    let delivery_round = scope.delivering_settled_monitor;
+                    if scope.task_finished && !delivery_round {
                         break;
                     }
 
@@ -8366,8 +8401,11 @@ impl HarnessRun {
                         RoundOutcome::Break => {
                             // Operator directive: a loop does not end with a
                             // MONITOR it started still checking. Hold until it
-                            // settles, then run the round that receives it.
-                            if self.hold_for_pending_monitor(&mut scope).await {
+                            // settles, then run the round that receives it —
+                            // even when the task already finished: the settled
+                            // result (completed OR failed) is the model's to
+                            // act on.
+                            if !delivery_round && self.hold_for_pending_monitor(&mut scope).await {
                                 continue;
                             }
                             break;
@@ -8376,6 +8414,13 @@ impl HarnessRun {
                             self.aborted = true;
                             break;
                         }
+                    }
+
+                    // The delivery round is the loop's last one: it existed only
+                    // to hand the model the settled MONITOR result.
+                    scope.delivering_settled_monitor = false;
+                    if delivery_round {
+                        break;
                     }
 
                     if self.run_error.is_some() {
@@ -8895,6 +8940,8 @@ impl HarnessRun {
             affordable_cycles,
             cycle: 0,
             task_finished: false,
+            delivering_settled_monitor: false,
+            delivery_cycles: 0,
             made_progress: false,
             read_only_calls_this_loop: 0,
             persisted_this_loop: false,
@@ -9686,8 +9733,15 @@ impl HarnessRun {
                 .flatten()
                 .map(|code| format!(" (exit {code})"))
                 .unwrap_or_default();
+            // A failed job names its error in the headline: "timed out without
+            // the signal" is the actionable part when a check never fired.
+            let error = job
+                .error
+                .as_deref()
+                .map(|error| format!(" — {}", truncate_text(error, 200)))
+                .unwrap_or_default();
             let headline = format!(
-                "background job {} ({}) finished: {status}{exit}",
+                "background job {} ({}) finished: {status}{exit}{error}",
                 job.id,
                 truncate_text(&job.title, 80)
             );
@@ -9730,20 +9784,12 @@ impl HarnessRun {
         if self.aborted
             || self.run_error.is_some()
             || self.ask_user_awaiting
-            || scope.task_finished
             || scope.planned_and_yielded
         {
             return false;
         }
 
-        let pending: Vec<String> = self
-            .tool_services
-            .async_jobs
-            .running_jobs()
-            .into_iter()
-            .filter(|job| job.tool_name == "MONITOR")
-            .map(|job| job.id)
-            .collect();
+        let pending = self.running_monitor_job_ids();
         if pending.is_empty() {
             return false;
         }
@@ -9772,13 +9818,7 @@ impl HarnessRun {
                 self.aborted = true;
                 break;
             }
-            let still_checking = self
-                .tool_services
-                .async_jobs
-                .running_jobs()
-                .iter()
-                .any(|job| job.tool_name == "MONITOR");
-            if !still_checking {
+            if self.running_monitor_job_ids().is_empty() {
                 break;
             }
             crate::harness::model_call::sleep_unless_aborted(
@@ -9801,6 +9841,11 @@ impl HarnessRun {
             scope.concluded_naturally = false;
             scope.progress_this_cycle = true;
             scope.made_progress = true;
+            // A finished task does not close the loop on a result the model has
+            // not read yet: this round is the one that hands it over.
+            if scope.task_finished {
+                scope.delivering_settled_monitor = true;
+            }
             return true;
         }
 
@@ -9811,7 +9856,7 @@ impl HarnessRun {
                 ..Default::default()
             }),
             detail: format!(
-                "MONITOR job(s) still checking after {MONITOR_HOLD_MAX_MS}ms — the loop ends here; the settled result is reported at the next loop",
+                "MONITOR job(s) still checking after {MONITOR_HOLD_MAX_MS}ms — the loop ends here; if one settles later it is surfaced as a run warning, not handed to the model",
             ),
             iteration: self.state.iteration,
             r#type: HarnessEventType::RunWarning,
@@ -9820,6 +9865,17 @@ impl HarnessRun {
             .digest_actions
             .push("MONITOR still checking at the hold limit".to_string());
         false
+    }
+
+    /// Ids of the MONITOR jobs this run started that are still checking.
+    fn running_monitor_job_ids(&self) -> Vec<String> {
+        self.tool_services
+            .async_jobs
+            .running_jobs()
+            .into_iter()
+            .filter(|job| job.tool_name == "MONITOR")
+            .map(|job| job.id)
+            .collect()
     }
 
     pub async fn run_round(
@@ -10540,6 +10596,8 @@ impl HarnessRun {
         .await;
     }
 
+    /// Operator directive: a MONITOR this run started always reaches the model,
+    /// so a `finish_task` in the delivery round is not refused as a late call.
     pub async fn dispatch_tool_calls(&mut self, scope: &mut LoopScope, calls: Vec<NormalizedCall>) {
         scope.failed_calls_this_response.clear();
         let response_has_finish = calls.iter().any(|call| call.tool_name == "finish_task");
@@ -10566,6 +10624,7 @@ impl HarnessRun {
             // own freshly spawned review (or drop it). Additive ops (plan_tasks,
             // notes, memory) still run.
             if scope.task_finished
+                && !scope.delivering_settled_monitor
                 && (tool_name == "finish_task"
                     || tool_name == "drop_task"
                     || tool_name == "revise_task")

@@ -3874,12 +3874,12 @@ impl TuiApp {
                     disabled: false,
                     env: &env,
                     home: &self.bootstrap.home,
-                    // The TUI tool pack carries no MCP tools at all, so the
-                    // requirements pass sees no MCP capabilities here. The
-                    // headless path adds one entry per server it spawned; a
-                    // skill whose requirements need MCP is classified as
-                    // unsatisfiable in the TUI, which matches what the run can
-                    // actually invoke.
+                    // This pass is handed the built-in pack and no MCP
+                    // entries, so a skill whose requirements need MCP is
+                    // classified as unsatisfiable here. The headless path
+                    // passes one entry per server it spawned (see entry.rs,
+                    // which loops its `mcp_clients`); threading this run's
+                    // `mcp_clients` through is left as a separate change.
                     mcp_servers: Vec::new(),
                     profile_override: self.bootstrap.classifier.as_deref(),
                     settings: &settings,

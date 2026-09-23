@@ -85,6 +85,35 @@ pub fn build_session_name_prompt(goal: &str, transcript_digest: &str) -> String 
     )
 }
 
+/// Request headers for a one-shot side call whose route carries the
+/// credential: the resolved route's own headers (Authorization) are the request
+/// surface, because a text-only call (`include_tools: false`) never consults the
+/// route object for its credential. Dropping them sends the request
+/// unauthenticated — the provider answers 401 and the name generation silently
+/// resolves to `None`. A caller-supplied `base` list keeps its ordering and its
+/// entries win; route headers fill in whatever is missing.
+pub fn session_name_headers(
+    base: Vec<(String, String)>,
+    route: &ModelRoute,
+) -> Vec<(String, String)> {
+    let mut headers = base;
+    let route_headers = match &route.refresh_headers {
+        Some(refresh_headers) => {
+            refresh_headers().unwrap_or_else(|_| route.headers.clone().unwrap_or_default())
+        }
+        None => route.headers.clone().unwrap_or_default(),
+    };
+    for (name, value) in route_headers {
+        if !headers
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+        {
+            headers.push((name, value));
+        }
+    }
+    headers
+}
+
 /// One request, bounded prompt: mirrors `terminal_title::generate_chat_title`
 /// but enforces the 5-7 word session-name contract on the reply.
 pub async fn generate_session_name(
@@ -107,7 +136,10 @@ pub async fn generate_session_name(
         emit: Arc::new(|_| {}),
         fallback_route: None,
         get_iteration: Arc::new(|| 0),
-        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        headers: session_name_headers(
+            vec![("content-type".to_string(), "application/json".to_string())],
+            &route,
+        ),
         model: route.model.clone(),
         on_retry_wait: Arc::new(|_| {}),
         on_usage: Arc::new(|_, _| {}),

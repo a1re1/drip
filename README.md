@@ -1645,7 +1645,8 @@ reduced to a marker row:
 - The terminal is detected from `TERM`/`TERM_PROGRAM`, `KITTY_WINDOW_ID`,
   `GHOSTTY_RESOURCES_DIR` and `WEZTERM_PANE`. Set
   `DRIP_IMAGE_PROTOCOL=kitty|iterm2|none` to force a protocol or turn inline
-  images off.
+  images off. Nothing is printed about it at startup: the TUI transcript stays
+  clean, and attaching an image (`Ctrl+V`) reports the protocol in use.
 - Inline rows are only ever written when stdout is an interactive terminal:
   headless runs, `--json`, redirected output and the `dripw` watch pane keep
   the plain `[N images attached]` marker. Local markdown image links in model

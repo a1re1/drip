@@ -4408,9 +4408,10 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
 
     // Inline images are opted into exactly once, for an interactive stdout:
     // detection is a no-op for piped output, and `DRIP_IMAGE_PROTOCOL`
-    // overrides it either way.
+    // overrides it either way. Nothing is announced at startup — the session
+    // opens without debug noise; the active protocol is reported on demand
+    // (attaching an image with Ctrl+V) and documented in the README.
     crate::tui::images::set_inline_images(crate::tui::images::detect_image_protocol());
-    let inline_images_status = crate::tui::images::inline_status();
 
     // The terminal is restored even if a panic unwinds through the loop.
     let previous_hook = std::panic::take_hook();
@@ -4423,10 +4424,6 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     spawn_mention_indexer(cwd, mention_rx, tx.clone());
 
     let mut app = TuiApp::new(bootstrap, tx, mention_tx);
-    // Say which protocol (if any) was detected: the text marker alone is
-    // indistinguishable from "feature missing", especially on terminals that
-    // report a plain TERM (tmux, ssh, VS Code, pwrde/shpool).
-    app.push_info(inline_images_status);
     let code = app.run(rx);
 
     write_out(DISABLE_BRACKETED_PASTE);

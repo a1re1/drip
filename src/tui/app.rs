@@ -70,7 +70,8 @@ use crate::core::types::{
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
 use crate::tui::compact::{
-    render_compact_cell, render_tool_group, select_compact_tail_start, CompactCell, CompactEmitter,
+    render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
+    CompactCell, CompactEmitter,
 };
 use crate::tui::pane_title::{PaneTitle, FALLBACK_LABEL, SPINNER_INTERVAL_MS};
 use crate::tui::session_name::{
@@ -125,6 +126,9 @@ pub struct TuiBootstrap {
 // they queue briefly and land in a single repaint.
 const EVENT_BATCH_MS: u64 = 48;
 const RESIZE_SETTLE_MS: u64 = 150;
+// Transient activity + notice rows kept on the live line above the composer at
+// once: the block blinks in one or two rows instead of growing with a run.
+const ACTIVITY_NOTICE_LIMIT: usize = 2;
 
 const SYNC_UPDATE_START: &str = "\u{1b}[?2026h";
 const SYNC_UPDATE_END: &str = "\u{1b}[?2026l";
@@ -647,6 +651,12 @@ struct TuiApp {
     /// (or when the run already ended), so the loop falls back to its plain
     /// wait instead of busy-polling.
     activity_next_tick: Option<Instant>,
+    /// Transient rows of the current run (folded tool summary, cycle
+    /// transition, ops, warnings) painted on the activity line above the
+    /// composer. Cleared at the run boundary: they are a TUI-only view and
+    /// never reach scrollback (the transcript JSONL keeps every one of them
+    /// for `dripw`, the headless output and the logs).
+    activity_notices: Vec<CompactCell>,
     selected_skill_index: usize,
     selected_suggestion_index: usize,
     skill_catalog: Vec<(String, String)>,
@@ -686,6 +696,79 @@ struct TuiApp {
     /// merged_env so credential resolution is deterministic regardless of
     /// what the developer's shell exports (e.g. OPENROUTER_API_KEY).
     env_overlay: Option<BTreeMap<String, String>>,
+}
+
+/// Event kinds whose TUI rows are TRANSIENT: they blink on the activity line
+/// above the composer while the run needs them and never settle into
+/// scrollback. The transcript JSONL keeps every one of them, so `dripw`, the
+/// headless output and the logs are untouched -- this is a TUI-only view.
+fn is_transient_kind(kind: HarnessEventType) -> bool {
+    matches!(
+        kind,
+        HarnessEventType::ContextExpired
+            | HarnessEventType::ContextPromoted
+            | HarnessEventType::ContextRefreshed
+            | HarnessEventType::ContextWithheld
+            | HarnessEventType::HarnessOp
+            | HarnessEventType::Inference
+            | HarnessEventType::IterationStart
+            | HarnessEventType::LoopStart
+            | HarnessEventType::RateLimited
+            | HarnessEventType::RunComplete
+            | HarnessEventType::RunWarning
+            | HarnessEventType::StallRecovery
+            | HarnessEventType::TaskFinished
+            | HarnessEventType::ToolCall
+            | HarnessEventType::ToolResult
+    )
+}
+
+/// Whether a transcript entry is a durable TUI row. Goals, model text, run
+/// summaries/ends, operator notices (info/error) and survey questions stay in
+/// scrollback; tool activity, cycle transitions, ops and warnings do not.
+fn is_scrollback_entry(entry: &TranscriptEntry) -> bool {
+    match entry {
+        TranscriptEntry::Event(event) => !is_transient_kind(event.kind),
+        // Skill activation is an op; its notice is transient too.
+        TranscriptEntry::Skill(_) => false,
+        _ => true,
+    }
+}
+
+/// Whether a projected cell is a durable scrollback row. Folded tool groups
+/// and the transient op/cycle/warning rows are not: they render on the live
+/// activity line.
+fn is_scrollback_cell(cell: &CompactCell) -> bool {
+    match cell {
+        CompactCell::ToolGroup(_) => false,
+        CompactCell::Passthrough(entry) => is_scrollback_entry(entry),
+    }
+}
+
+/// The projected cells that may reach scrollback: folded tool groups and the
+/// transient rows are dropped here (they render on the live activity line).
+fn scrollback_cells(cells: &[CompactCell]) -> Vec<CompactCell> {
+    cells
+        .iter()
+        .filter(|cell| is_scrollback_cell(cell))
+        .cloned()
+        .collect()
+}
+
+/// One transient notice row: a folded tool summary keeps its
+/// `── N Tools called: … ──` row, a cycle transition keeps its numbered
+/// `[  2 14:23:41]` preview (`render_cycle_transition`), every other transient
+/// event renders as the ordinary timeline row.
+fn activity_notice_rows(cell: &CompactCell, width: usize) -> Vec<String> {
+    match cell {
+        CompactCell::ToolGroup(group) => render_tool_group(group, width),
+        CompactCell::Passthrough(TranscriptEntry::Event(event))
+            if event.kind == HarnessEventType::IterationStart =>
+        {
+            render_cycle_transition(event, width)
+        }
+        CompactCell::Passthrough(other) => crate::tui::timeline::render_timeline_cell(other, width),
+    }
 }
 
 /// Pure render decision: the painted custom status row for a finished job.
@@ -804,6 +887,7 @@ impl TuiApp {
             running_detail: None,
             run_started_at: None,
             activity_next_tick: None,
+            activity_notices: Vec::new(),
             selected_skill_index: 0,
             selected_suggestion_index: 0,
             skill_catalog,
@@ -829,32 +913,58 @@ impl TuiApp {
     // ----- timeline -------------------------------------------------------
 
     /// Rendered rows for projected compact cells (no trailing newlines).
+    ///
+    /// Only DURABLE cells reach scrollback. Folded tool groups and the
+    /// transient op/cycle/warning rows are skipped here -- they render on the
+    /// live activity line instead (see `scrollback_cells`).
     fn projected_rows(&self, cells: &[CompactCell]) -> Vec<String> {
         let mut out = Vec::new();
-        for cell in cells {
-            out.extend(render_compact_cell(cell, self.cols));
+        for cell in scrollback_cells(cells) {
+            out.extend(render_compact_cell(&cell, self.cols));
         }
         out
+    }
+
+    /// Keeps the transient rows of a batch for the live activity line: they
+    /// blink above the composer while the run is in flight and are dropped at
+    /// the run boundary, so no tool/op/warning noise settles into scrollback.
+    fn remember_activity_notices(&mut self, cells: &[CompactCell]) {
+        for cell in cells {
+            if !is_scrollback_cell(cell) {
+                self.activity_notices.push(cell.clone());
+            }
+        }
+        let drop = self
+            .activity_notices
+            .len()
+            .saturating_sub(ACTIVITY_NOTICE_LIMIT);
+        if drop > 0 {
+            self.activity_notices.drain(..drop);
+        }
     }
 
     /// Prints cells above the live region (Ink's <Static>).
     ///
     /// Raw entries still land in `cells` (repaint tail budgeting) and feed
     /// the compact projection, but scrollback shows the COMPACT view: tool
-    /// activity folds into one summary row per cycle while goals, model
-    /// text and boundaries stay visible. The active group is never painted
-    /// here -- it lives in the erasable live region until a boundary
-    /// finalizes it, and then it is emitted exactly once.
+    /// activity, cycle transitions, ops and warnings blink on the live
+    /// activity line and never settle here; goals, model text, run summaries,
+    /// run ends and the operator info/error notices do. The transient rows of
+    /// a live batch are kept for the next frame by `remember_activity_notices`.
     fn emit_static(&mut self, entries: Vec<TranscriptEntry>) {
         let cells = self.compact.absorb(&entries);
         if !entries.is_empty() {
             self.cells.extend(entries);
         }
+        if self.running {
+            self.remember_activity_notices(&cells);
+        }
 
         let rows = self.projected_rows(&cells);
         if rows.is_empty() {
-            // Telemetry-only batches change nothing on scrollback, but the
-            // live summary may have grown -- repaint it in place.
+            // Transient-only batches (tool activity, cycle transitions, ops,
+            // warnings) change nothing on scrollback, but the activity line
+            // may have changed -- repaint it in place.
             self.repaint();
             return;
         }
@@ -871,6 +981,9 @@ impl TuiApp {
     /// rows; an unfinished trailing group stays in the live region.
     fn rebuild_compact(&mut self, entries: &[TranscriptEntry]) -> Vec<String> {
         self.compact.rebuild(entries);
+        // Replay is not a live run: no transient row of an old cycle may
+        // flash on the activity line of the next one.
+        self.activity_notices.clear();
         self.projected_rows(&self.compact.projection.cells)
     }
 
@@ -982,13 +1095,6 @@ impl TuiApp {
     fn live_region(&self) -> Vec<String> {
         let mut rows = vec![String::new()]; // marginTop 1
 
-        // Erasable in-place summary of the current tool cycle: grows in one
-        // row above the composer and is finalized into scrollback exactly
-        // once, when a visible boundary flushes the projection.
-        if let Some(group) = self.compact.projection.active_group() {
-            rows.extend(render_tool_group(group, self.cols));
-        }
-
         if let Some(state) = self
             .survey
             .as_ref()
@@ -1020,11 +1126,26 @@ impl TuiApp {
                 ));
             }
         } else {
-            // Claude-style activity line directly above the chat: a braille
-            // spinner frame plus the clock counting up from the run's start.
-            // Only painted while a run is in flight; formatting happens here,
-            // the animation tick owns the repaints.
+            // Claude-style transient activity block directly above the chat:
+            // the folded tool summary and the most recent op/cycle/warning
+            // notice blink here beside the braille spinner and the clock
+            // counting up from the run's start, and are erased when the run
+            // ends. Nothing here is persisted into scrollback -- the full
+            // record stays in the transcript JSONL for `dripw` and the logs.
             if self.running {
+                let mut transient: Vec<String> = Vec::new();
+                if let Some(group) = self.compact.projection.active_group() {
+                    transient.extend(render_tool_group(group, self.cols));
+                }
+                for cell in &self.activity_notices {
+                    transient.extend(activity_notice_rows(cell, self.cols));
+                }
+                if transient.len() > ACTIVITY_NOTICE_LIMIT {
+                    // Newest rows only: the block blinks in one or two lines
+                    // instead of growing with the run.
+                    transient = transient.split_off(transient.len() - ACTIVITY_NOTICE_LIMIT);
+                }
+                rows.extend(transient);
                 if let Some(started) = self.run_started_at {
                     let elapsed = started.elapsed();
                     rows.push(render_working_line(
@@ -1133,11 +1254,11 @@ impl TuiApp {
     /// After a settle-repaint clears the screen, only the most recent cells
     /// that fit above the live region are re-emitted.
     fn full_repaint(&mut self) {
-        // Budget the tail over COMPACT cells so raw tool rows never re-appear
-        // after a resize; the active group is excluded here -- it is drawn by
-        // the live region (and accounted for via its own row there).
-        let finalized = &self.compact.projection.cells;
-        let start = select_compact_tail_start(finalized, self.rows);
+        // Budget the tail over the DURABLE compact cells so tool groups and
+        // transient op/warning rows never re-appear after a resize; whatever
+        // the live activity line shows is not part of this budget.
+        let finalized = scrollback_cells(&self.compact.projection.cells);
+        let start = select_compact_tail_start(&finalized, self.rows);
         let mut out = String::from(CLEAR_VISIBLE_SCREEN);
         for row in self.projected_rows(&finalized[start..]) {
             out.push_str(&row);
@@ -3756,8 +3877,10 @@ impl TuiApp {
         self.finalize_compact();
         self.running = false;
         self.running_detail = None;
-        // The activity line goes with the run: its clock has nothing left to
-        // count and its animation must stop repainting.
+        // The activity block goes with the run: its clock has nothing left to
+        // count, its transient rows are erased (a live view, never scrollback)
+        // and its animation must stop repainting.
+        self.activity_notices.clear();
         self.run_started_at = None;
         self.activity_next_tick = None;
         // Idle title (bare label, no spinner) whatever ended the run:
@@ -6752,5 +6875,146 @@ mod activity_line_tests {
             fixture.app.activity_next_tick.is_none(),
             "an idle composer must not keep repainting for the spinner"
         );
+    }
+}
+
+/// Durable vs transient TUI rows: tool activity, cycle transitions, ops and
+/// warnings blink on the activity line above the composer and never settle
+/// into scrollback, while the transcript keeps every one of them for `dripw`.
+#[cfg(test)]
+mod compact_ephemeral_tests {
+    use super::*;
+    use crate::watch::ansi::strip_ansi;
+
+    fn event(
+        kind: HarnessEventType,
+        iteration: i64,
+        detail: &str,
+        tool: Option<&str>,
+    ) -> TranscriptEntry {
+        TranscriptEntry::Event(TranscriptEventEntry {
+            at: "2026-01-01T00:00:00Z".to_string(),
+            data: tool.map(|name| crate::core::types::HarnessEventData {
+                tool_name: Some(name.to_string()),
+                ..Default::default()
+            }),
+            detail: detail.to_string(),
+            goal_id: "g".to_string(),
+            iteration,
+            kind,
+        })
+    }
+
+    /// The exact exchange the goal names: a cycle transition, a tool call, a
+    /// warning and the model's answer.
+    fn one_cycle() -> Vec<TranscriptEntry> {
+        vec![
+            TranscriptEntry::Goal(crate::cli::transcript::TranscriptGoalEntry {
+                at: "2026-01-01T00:00:00Z".to_string(),
+                goal_id: "g".to_string(),
+                images: Vec::new(),
+                mentions: Vec::new(),
+                text: "fix the flaky test".to_string(),
+            }),
+            event(
+                HarnessEventType::IterationStart,
+                1,
+                "cycle 1/2 — task-1: think",
+                None,
+            ),
+            event(
+                HarnessEventType::ToolCall,
+                1,
+                "READ {\"path\":\"x\"}",
+                Some("READ"),
+            ),
+            event(
+                HarnessEventType::RunWarning,
+                1,
+                "rate limited, waiting 2s",
+                None,
+            ),
+            event(HarnessEventType::ModelText, 1, "All done.", None),
+        ]
+    }
+
+    fn feed(app: &mut TuiApp) -> Vec<CompactCell> {
+        let cells = app.compact.absorb(&one_cycle());
+        app.remember_activity_notices(&cells);
+        cells
+    }
+
+    fn plain(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|row| strip_ansi(row)).collect()
+    }
+
+    #[test]
+    fn tool_ops_and_warnings_never_settle_into_scrollback() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        let cells = feed(&mut fixture.app);
+        let rows = plain(&fixture.app.projected_rows(&cells));
+
+        assert!(
+            rows.iter().any(|row| row.contains("fix the flaky test")),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|row| row.contains("All done.")), "{rows:?}");
+        for noise in ["cycle 1/2", "Tool called", "Tools called", "rate limited"] {
+            assert!(
+                !rows.iter().any(|row| row.contains(noise)),
+                "{noise} leaked into scrollback: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_rows_blink_above_the_composer_then_vanish_with_the_run() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        fixture.app.run_started_at = Some(Instant::now());
+        feed(&mut fixture.app);
+
+        let live = plain(&fixture.app.live_region());
+        let spinner = live
+            .iter()
+            .position(|row| row.contains("working for"))
+            .expect("the activity line is painted while running");
+        assert!(
+            live.iter().any(|row| row.contains("Tool called")),
+            "the folded tool summary blinks on the activity line: {live:?}"
+        );
+        assert!(
+            live[..spinner]
+                .iter()
+                .any(|row| row.contains("rate limited")),
+            "the newest op/warning row sits above the working line: {live:?}"
+        );
+        assert!(
+            live[spinner + 1].starts_with('─') && live[spinner + 2].contains('❯'),
+            "the transient block stays directly above the composer: {:?}",
+            &live[spinner..=spinner + 2]
+        );
+
+        fixture.app.finish_run();
+        let after = plain(&fixture.app.live_region());
+        for noise in ["Tool called", "Tools called", "rate limited", "cycle 1/2"] {
+            assert!(
+                !after.iter().any(|row| row.contains(noise)),
+                "{noise} outlived the run: {after:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_tail_budgets_only_durable_rows() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        let cells = fixture.app.compact.absorb(&one_cycle());
+        let durable = scrollback_cells(&cells);
+        assert_eq!(durable.len(), 2, "goal + model text only: {durable:?}");
+        assert!(durable.iter().all(is_scrollback_cell));
+        // The dropped rows are the ones the activity line shows: the folded
+        // tool summary, the cycle transition and the warning.
+        assert_eq!(cells.len() - durable.len(), 3, "{cells:?}");
     }
 }

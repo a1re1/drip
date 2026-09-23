@@ -717,7 +717,6 @@ fn paint_bold_title(title: &str) -> String {
 pub struct StatusBarProps<'a> {
     pub active_skill_names: &'a [String],
     pub cwd: &'a str,
-    pub model_label: &'a str,
     pub running: bool,
     pub running_detail: Option<&'a str>,
     pub session_id: &'a str,
@@ -739,9 +738,14 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
         ));
     }
     let dim = paint(DIM_COLOR);
+    // The active model and its reasoning effort are deliberately absent from
+    // this row: one drip run mixes models across roles, so a single pinned
+    // label at the bottom of the frame reads as the run's model when it is
+    // only one of them. `/config` prints the resolved profile, and a custom
+    // statusLine still receives model_id / model_display_name for callers
+    // that want the label.
     let mut line = format!(
-        "{} · session {}",
-        props.model_label,
+        "session {}",
         props.session_id.chars().take(8).collect::<String>()
     );
     if !props.active_skill_names.is_empty() {
@@ -1319,7 +1323,6 @@ mod tests {
         let props = StatusBarProps {
             active_skill_names: &["a".to_string(), "b".to_string()],
             cwd: "/tmp",
-            model_label: "model-x",
             running: false,
             running_detail: None,
             session_id: "1234567890abcdef",
@@ -1327,6 +1330,26 @@ mod tests {
         let rows = plain(&render_status_bar(&props, 30));
         assert_eq!(rows.len(), 1);
         assert!(rows[0].chars().count() <= 30);
+    }
+
+    #[test]
+    fn status_bar_omits_the_active_model_and_reasoning_effort() {
+        // A drip run mixes models across roles, so the bottom bar must not
+        // pin one model (or its effort) as if it spoke for the whole run.
+        let props = StatusBarProps {
+            active_skill_names: &[],
+            cwd: "/tmp/project",
+            running: false,
+            running_detail: None,
+            session_id: "1234567890abcdef",
+        };
+        let rows = plain(&render_status_bar(&props, 80));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("session 12345678"), "{:?}", rows[0]);
+        assert!(rows[0].contains("/tmp/project"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("model"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("effort"), "{:?}", rows[0]);
+        assert!(!rows[0].contains("deepseek"), "{:?}", rows[0]);
     }
 
     #[test]

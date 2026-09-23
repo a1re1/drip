@@ -1055,7 +1055,6 @@ impl TuiApp {
                 &StatusBarProps {
                     active_skill_names: &skill_names,
                     cwd: &self.bootstrap.cwd,
-                    model_label: &self.model_label(),
                     running: self.running,
                     running_detail: self.running_detail.as_deref(),
                     session_id: &self.session.id,

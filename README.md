@@ -1077,6 +1077,14 @@ next to `settings`:
 
 Behavior:
 
+- The built-in bottom bar shows the session id, the active skills and the
+  working directory — deliberately **not** the active model or its reasoning
+  effort. One drip run mixes models across roles (a planner, an author, a
+  reviewer on different profiles), so a single pinned label at the bottom of
+  the frame reads as *the* run's model when it is only one of them. `/config`
+  prints the resolved profile and route, and the statusLine JSON below still
+  carries `model.id` / `model.display_name` for a custom row that wants the
+  label.
 - No `statusLine` key (or `null`) keeps the built-in status bar unchanged. An
   invalid `statusLine` (wrong `type`, empty command, values out of range,
   wrong JSON shape) prints one nonfatal warning naming the config file and the

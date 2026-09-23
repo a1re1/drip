@@ -269,3 +269,99 @@ fn empty_goal_and_transcript_yields_none_without_a_model_call() {
         "whitespace-only context must not fabricate a name"
     );
 }
+/// Contract: credentials live on the route, and a text-only call never reads
+/// the route object, so these headers must be copied onto the caller's deps.
+#[test]
+fn session_name_headers_copy_the_route_credential_and_keep_base_order() {
+    let route = ModelRoute {
+        fallback_route: None,
+        headers: Some(vec![
+            ("X-Title".into(), "lci".into()),
+            ("Authorization".into(), "Bearer k".into()),
+        ]),
+        model: "m".into(),
+        provider: Some("openai".into()),
+        reasoning_effort: None,
+        refresh_headers: None,
+        url: "http://127.0.0.1:9/v1/chat/completions".into(),
+    };
+    let headers = session_name_headers(
+        vec![("content-type".into(), "application/json".into())],
+        &route,
+    );
+    assert_eq!(
+        headers,
+        vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("X-Title".to_string(), "lci".to_string()),
+            ("Authorization".to_string(), "Bearer k".to_string()),
+        ]
+    );
+    // A base entry already present wins: no duplicate header is emitted.
+    let overriding =
+        session_name_headers(vec![("Authorization".into(), "Bearer base".into())], &route);
+    assert_eq!(
+        overriding
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .count(),
+        1
+    );
+    assert_eq!(overriding[0].1, "Bearer base");
+}
+
+/// End to end: a mock endpoint that answers 401 to any request without the
+/// route's Authorization header and 200 with a valid name once it is present.
+/// This is the production /rename wire path (`include_tools: false`).
+#[test]
+fn generate_session_name_sends_the_route_authorization_header() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = std::io::Read::read(&mut stream, &mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+        let (status, body) = if request.contains("authorization: bearer test-key") {
+            (
+                "200 OK",
+                r#"{"choices":[{"message":{"content":"Fix Flaky Websocket Handshake Today"}}]}"#,
+            )
+        } else {
+            (
+                "401 Unauthorized",
+                r#"{"error":{"message":"No auth credentials found"}}"#,
+            )
+        };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+    });
+    let route = ModelRoute {
+        fallback_route: None,
+        headers: Some(vec![("Authorization".into(), "Bearer test-key".into())]),
+        model: "test-model".into(),
+        provider: Some("openai".into()),
+        reasoning_effort: None,
+        refresh_headers: None,
+        url: format!("http://{addr}/v1/chat/completions"),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let name = runtime.block_on(generate_session_name(
+        route,
+        "fix the flaky websocket handshake",
+        "User: please start",
+        5_000,
+    ));
+    assert_eq!(
+        name.as_deref(),
+        Some("Fix Flaky Websocket Handshake Today"),
+        "the route credential must ride the request headers, not be dropped"
+    );
+    server.join().unwrap();
+}

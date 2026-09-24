@@ -7173,18 +7173,13 @@ impl HarnessRun {
                 // it through the same scoped apply the live offer uses, or
                 // run_loops' unscoped reopen would revive a task the operator
                 // dropped and ignore the stop.
-                let late = is_late_blocker_survey(&survey);
-                let scope: Vec<String> = if late {
-                    core_state::operator_blocked_tasks(&self.state)
-                        .iter()
-                        .take(4)
-                        .map(|task| task.id.clone())
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                // The picks bind to the ids the survey was BUILT for, so they
+                // are read back out of the survey itself: re-deriving them from
+                // whatever is operator-blocked now would map an answer onto the
+                // wrong task if the blocked set changed while the run was down.
+                let scope = late_survey_scope(&survey);
                 self.accept_survey_answers(survey.clone(), entry.record.clone());
-                if late {
+                if let Some(scope) = scope {
                     self.late_survey_answer =
                         Some(self.apply_late_survey_answers(&scope, &survey, &entry.record));
                     self.late_survey_offered = true;
@@ -12155,16 +12150,33 @@ const LATE_UNBLOCK_DROP: &str = "Drop this task";
 const LATE_CONTINUE_RESUME: &str = "Resume the run now";
 const LATE_CONTINUE_STOP: &str = "Stop after this reply";
 
-/// Does this survey carry the terminal blocked-on-input decision form? Its
-/// closing question is the resume/stop one, which no ordinary mid-run
-/// clarification survey carries.
-fn is_late_blocker_survey(survey: &crate::core::types::QuestionSurvey) -> bool {
-    survey.questions.last().is_some_and(|question| {
-        question
-            .options
-            .iter()
-            .any(|option| option.label == LATE_CONTINUE_RESUME)
-    })
+/// The blocker task ids a terminal blocked-on-input survey was built for, read
+/// back out of the survey's own questions: `LateBlocker::question` spells
+/// `Task <id> is blocked on operator input`, and the closing resume/stop
+/// question no ordinary clarification survey carries marks the form. `None`
+/// means this is not that decision form (or one of its questions does not name
+/// a task id), so a model-composed survey can never reach the task-mutating
+/// apply path — and a preserved survey's picks bind to the ids it was built
+/// for rather than to whatever happens to be blocked when it is answered.
+fn late_survey_scope(survey: &crate::core::types::QuestionSurvey) -> Option<Vec<String>> {
+    let (closing, blockers) = survey.questions.split_last()?;
+    if !closing
+        .options
+        .iter()
+        .any(|option| option.label == LATE_CONTINUE_RESUME)
+    {
+        return None;
+    }
+    let mut scope = Vec::with_capacity(blockers.len());
+    for question in blockers {
+        let rest = question.question.strip_prefix("Task ")?;
+        let id = rest.split_once(" is blocked on operator input")?.0;
+        if id.is_empty() {
+            return None;
+        }
+        scope.push(id.to_string());
+    }
+    Some(scope)
 }
 
 /// One task the terminal blocked-on-input survey asks about.
@@ -12280,6 +12292,10 @@ fn late_survey_picks(
         "a late survey asks one question per blocked task plus 'Continue'"
     );
     let mut picks: Vec<(String, LateUnblockPick)> = Vec::new();
+    // Only reachable with the closing question unanswered, which
+    // `validate_survey_answers`' full coverage forbids today: the answer to the
+    // closing question always sets this. Resuming is the conservative default
+    // (a run that stops itself cannot be recovered without another --resume).
     let mut resume = true;
     for answer in &answers.answers {
         if answer.index < 0 {
@@ -13392,6 +13408,51 @@ mod ask_user_survey_tests {
                 .status,
             HarnessTaskStatus::Blocked,
             "a stop reply reopens nothing"
+        );
+    }
+
+    /// The picks bind to the ids the survey was built for, not to whatever is
+    /// operator-blocked when the answer is read: a survey staged for one task
+    /// must drop that task and take the resume decision from its closing
+    /// question, never the other blocker sitting in the state.
+    #[tokio::test]
+    async fn resume_binds_picks_to_the_surveys_own_task_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        let other = seed_operator_blocked_task(&mut run, "choose a provider", "which provider?");
+        let surveyed = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        // Staged for ONE blocker while both tasks are operator-blocked: a scope
+        // re-derived from the live blocked set would answer for `other`.
+        run.state.pending_questions = Some(late_blocker_survey(&[LateBlocker {
+            id: surveyed.clone(),
+            title: "add authentication".into(),
+            detail: "which app?".into(),
+        }]));
+        let path = run.answers_path().unwrap();
+        crate::core::state::answers::append_answers(
+            &path,
+            &late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
+        )
+        .unwrap();
+        run.resume_pending_survey().await;
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &surveyed)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Pending,
+            "the retry pick reopens the task the survey asked about, not the other blocker"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &other)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "a blocker the survey never asked about is not touched"
+        );
+        assert_eq!(
+            run.late_survey_answer,
+            Some(true),
+            "the closing question's resume pick is read at its own index"
         );
     }
 }

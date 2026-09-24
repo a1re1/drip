@@ -296,10 +296,20 @@ pub async fn run_session_goal(
         outer_on_event(event);
     });
 
+    // Prebuilt plans come from the operator's libraries, not from the caller:
+    // `<home>/plans` (shared by every project) plus `<cwd>/.drip/plans`. Built
+    // here so every surface that runs a goal — headless, TUI, review, delegate
+    // — offers the same plan pool to its planning loops.
+    let plan_pool = crate::cli::plans::build_plan_pool_skills(
+        std::path::Path::new(&args.cwd),
+        std::path::Path::new(&crate::core::home::open_drip_home(&args.project.home_root).plans_dir),
+    );
+
     let result = run_cli_goal(CliGoalRunArgs {
         ask_user_enabled: args.ask_user_enabled,
         classifier: args.classifier.clone(),
         skill_pool: args.skill_pool.clone(),
+        plan_pool,
         ask_user_timeout_seconds: args.ask_user_timeout_seconds,
         cwd: args.cwd.clone(),
         // Read once per run: the file is the operator's live summary prompt.

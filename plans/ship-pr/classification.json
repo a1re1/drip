@@ -1,0 +1,25 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "delivers_pr": {
+        "type": "noul",
+        "instructions": "Does the operator want the work delivered as a pull request that ends up reviewable (open a PR, push to the PR, ship this)?"
+      },
+      "needs_verification": {
+        "type": "noul",
+        "instructions": "Does the goal change code that must be verified (tests, build, lint) before it can be considered done?"
+      },
+      "asks_for_review": {
+        "type": "noul",
+        "instructions": "Does the operator expect an independent review, or CI checks going green, before they look at the work?"
+      },
+      "request_shape": {
+        "type": "choice",
+        "instructions": "How closely does the goal match 'build this and get it into a reviewable PR'?",
+        "criteria": { "direct": null, "indirect": null, "unrelated": null }
+      }
+    },
+    "formula": "clamp(0.40 * delivers_pr + 0.25 * needs_verification + 0.20 * asks_for_review + 0.15 * request_shape.direct, 0, 1)"
+  }
+}

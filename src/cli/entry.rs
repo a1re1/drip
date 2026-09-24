@@ -1746,7 +1746,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 16] = [
+    let exclusive_modes: [(&str, bool); 17] = [
         ("--answer", cli_args.answer),
         ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
@@ -1756,6 +1756,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--result", cli_args.result),
         ("--review", cli_args.review),
         ("--send", cli_args.send),
+        ("--plans", cli_args.plans),
         ("--skills", cli_args.skills),
         ("--praeparare", cli_args.praeparare),
         ("--state", cli_args.state),
@@ -2225,6 +2226,29 @@ pub async fn main(argv: Vec<String>) -> i32 {
             home.skills_dir,
             written.join(", ")
         );
+        return 0;
+    }
+
+    if cli_args.plans {
+        let plans = crate::cli::plans::discover_plans(Path::new(&cwd), Path::new(&home.plans_dir));
+
+        if cli_args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plans).unwrap_or_default()
+            );
+            return 0;
+        }
+
+        if plans.is_empty() {
+            println!(
+                "No plans found. Add PLAN.md files under {}/<name>/ or ./.drip/plans/<name>/.",
+                home.plans_dir
+            );
+            return 0;
+        }
+
+        print!("{}", crate::cli::plans::format_plans_human(&plans));
         return 0;
     }
 

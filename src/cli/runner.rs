@@ -31,6 +31,8 @@ pub struct CliGoalRunArgs {
     pub classifier: Option<crate::harness::classifier::ClassifierRoute>,
     /// Discovered skills the classifier may compose per loop.
     pub skill_pool: Vec<crate::harness::classifier::DynamicSkill>,
+    /// Prebuilt plan templates the classifier may compose on a planning loop.
+    pub plan_pool: Vec<crate::harness::classifier::DynamicSkill>,
     pub cwd: String,
     pub goal: String,
     pub goal_context: Option<String>,
@@ -386,6 +388,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
     let options = SolidStateHarnessOptions {
         classifier: args.classifier.clone(),
         skill_pool: args.skill_pool.clone(),
+        plan_pool: args.plan_pool.clone(),
         // The explicit --skill activations are already inside
         // `persona_with_skills` below; naming them here only feeds the
         // loop-start skill telemetry (see SolidStateHarnessOptions::base_skills).

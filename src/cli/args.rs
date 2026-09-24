@@ -113,6 +113,8 @@ pub struct ParsedCliArgs {
     /// Undo the last N journaled PATCH edits and exit.
     pub undo_last: bool,
     pub undo_last_count: Option<i64>,
+    /// List the discovered plan pool and exit.
+    pub plans: bool,
     /// List the discovered skill pool and exit.
     pub skills: bool,
     /// Restore the shipped default skills into the home and exit.
@@ -269,6 +271,7 @@ impl Default for ParsedCliArgs {
             dry_run: false,
             undo_last: false,
             undo_last_count: None,
+            plans: false,
             skills: false,
             install_skills: false,
             stop: false,
@@ -657,6 +660,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--json" => {
                 parsed.json = true;
+            }
+            "--plans" => {
+                parsed.plans = true;
             }
             "--skills" => {
                 parsed.skills = true;
@@ -1622,6 +1628,8 @@ mod tests {
         assert_eq!(parsed.goal.as_deref(), Some("goal text"));
         assert!(parse(&["--skills"]).skills);
         assert!(parse(&["--install-skills"]).install_skills);
+        assert!(parse(&["--plans"]).plans);
+        assert!(!parse(&["--plans"]).skills);
         assert!(!parse(&["--skill"]).errors.is_empty());
         assert!(parse(&["--no-skills"]).no_skills);
     }

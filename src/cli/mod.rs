@@ -15,6 +15,7 @@ pub mod inspect;
 pub mod marketplaces;
 pub mod mentions;
 pub mod paste;
+pub mod plans;
 pub mod profile_dirs;
 pub mod prompt_dirs;
 pub mod queue;

@@ -15,7 +15,10 @@
 // Two pieces keep the legacy setting working:
 //   * `migrate_legacy_system_prompt_profiles` lifts the entries still listed in
 //     `runtime.system_prompt_profiles` into directories and clears the setting
-//     once every entry is accounted for. It is called from load_cli_config.
+//     once every entry is accounted for. It is called from load_cli_config. A
+//     directory that already names the id but carries no prompt at all adopts
+//     the legacy prompt into `prompt.md` first, so clearing the setting never
+//     drops prose that only the setting held.
 //   * `merge_dir_profiles_into_settings` folds the directory profiles into an
 //     in-memory settings map, so every existing resolve path
 //     (resolve_cli_inference, the /prompt picker) sees them without having to
@@ -96,6 +99,9 @@ pub fn load_prompts_from_dir(
     dirs.sort();
 
     let mut profiles: Vec<SystemPromptProfile> = Vec::new();
+    // id → the origin label of the directory that defined it, so a collision can
+    // name both locations.
+    let mut seen_ids: Vec<(String, String)> = Vec::new();
     for dir in dirs {
         let slug = dir
             .file_name()
@@ -156,7 +162,22 @@ pub fn load_prompts_from_dir(
         }
 
         match normalize_system_prompt_profile(&value, profiles.len()) {
-            Ok(profile) => profiles.push(profile),
+            Ok(profile) => {
+                // `id` is authoritative, so two directories can claim one
+                // profile and the directory names cannot tell them apart. The
+                // resolver rejects duplicate ids outright: name both
+                // directories here instead of letting it fail later without
+                // saying where the collision is.
+                match seen_ids.iter().find(|(seen, _)| *seen == profile.id) {
+                    Some((_, first)) => issues.push(format!(
+                        "{origin_label}: duplicate profile id \"{}\" (already defined by {first}); \
+                         rename one of the two directories or ids",
+                        profile.id
+                    )),
+                    None => seen_ids.push((profile.id.clone(), origin_label.clone())),
+                }
+                profiles.push(profile);
+            }
             Err(error) => issues.push(format!("{origin_label}: {error}")),
         }
     }
@@ -214,7 +235,10 @@ pub fn ensure_prompts_dir(home_root: &Path) {
 ///
 /// Returns true only when every entry in the setting is accounted for on disk:
 /// the profiles were written now, or a directory for them already existed (a
-/// migration that already ran, or a hand-authored profile with the same id).
+/// migration that already ran, or a hand-authored profile with the same id) —
+/// and a directory that names the id but carries no prompt at all has adopted
+/// the legacy prompt first, so clearing the setting never drops the only copy
+/// of that prose.
 /// Anything that leaves an entry unaccounted for — a write failure, a duplicate
 /// id, or an entry the profile normalizer could not lift — reports its issue and
 /// leaves the setting alone, so the next load retries. Clearing the setting
@@ -280,11 +304,17 @@ pub fn migrate_legacy_system_prompt_profiles(
         seen_ids.push(profile.id.clone());
 
         let base = profile_dir_name(&profile.id);
-        match dir_holds_prompt(&root.join(&base), &profile.id) {
+        let dir_path = root.join(&base);
+        match dir_holds_prompt(&dir_path, &profile.id) {
             // Already on disk under its own id — hand-authored, or an earlier
-            // migration run. Never overwrite it.
+            // migration run. Its own files are never overwritten, but a
+            // directory that carries no prompt at all adopts the legacy one
+            // before the setting may clear: the setting then holds the only
+            // copy of that text, and clearing would delete it with no trace.
             Some(true) => {
-                settled += 1;
+                if adopt_existing_prompt_dir(&dir_path, &profile) {
+                    settled += 1;
+                }
                 continue;
             }
             // An existing directory whose config.json omits `id`: the loader
@@ -292,13 +322,13 @@ pub fn migrate_legacy_system_prompt_profiles(
             // profile. Never overwrite it, but never call the legacy entry
             // migrated either — clearing the setting here would discard it with
             // no trace.
-            None if root.join(&base).join(PROMPT_CONFIG_FILE).exists() => {
+            None if dir_path.join(PROMPT_CONFIG_FILE).exists() => {
                 eprintln!(
                     "warning: {}: {} has no \"id\" and {} takes its id from the \
                      directory; add an \"id\" (or remove the directory) so migration can place \
                      \"{}\". {SYSTEM_PROMPT_PROFILES_SETTING_ID} is kept until every entry migrates",
                     config_path.display(),
-                    root.join(&base).join(PROMPT_CONFIG_FILE).display(),
+                    dir_path.join(PROMPT_CONFIG_FILE).display(),
                     PROMPT_PROMPT_FILE,
                     profile.id
                 );
@@ -362,6 +392,66 @@ fn dir_holds_prompt(dir: &Path, id: &str) -> Option<bool> {
         return None;
     }
     Some(existing.trim() == id.trim())
+}
+
+/// Adopts an existing `<root>/<base>` directory that already names `id` as the
+/// home of the legacy entry.
+///
+/// The directory is never rewritten — a prompt the user authored is theirs, and
+/// an inline `prompt` in its `config.json` counts as prose too. What this does
+/// cover is the shape a half-finished migration leaves behind: the profile blob
+/// landed, `prompt.md` did not (a full disk, a crash), or a hand-authored
+/// directory claims the id without ever holding a prompt. The legacy entry is
+/// then the only copy of that text, so it is written out as `prompt.md` before
+/// the setting is allowed to clear.
+///
+/// Returns true when the directory and the legacy entry now agree; false only
+/// when the prompt could not be written, which keeps the setting in place for
+/// the next load to retry.
+fn adopt_existing_prompt_dir(dir: &Path, profile: &SystemPromptProfile) -> bool {
+    let prompt = profile.prompt.trim_end();
+    if prompt.trim().is_empty() || dir_has_a_prompt(dir) {
+        return true;
+    }
+    match crate::lib_fs::write_file_atomic(
+        &dir.join(PROMPT_PROMPT_FILE),
+        &format!("{prompt}\n"),
+        true,
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "warning: {}: {} names \"{}\" but {PROMPT_PROMPT_FILE} could not be written: {error}; \
+                 {SYSTEM_PROMPT_PROFILES_SETTING_ID} is kept until every entry migrates",
+                dir.display(),
+                PROMPT_CONFIG_FILE,
+                profile.id
+            );
+            false
+        }
+    }
+}
+
+/// Whether the directory already carries a prompt: `prompt.md` with text in it,
+/// or an inline `prompt` field in its `config.json`, which the loader falls back
+/// to when `prompt.md` is empty.
+fn dir_has_a_prompt(dir: &Path) -> bool {
+    if let Ok(prompt) = fs::read_to_string(dir.join(PROMPT_PROMPT_FILE)) {
+        if !prompt.trim().is_empty() {
+            return true;
+        }
+    }
+    let Ok(raw) = fs::read_to_string(dir.join(PROMPT_CONFIG_FILE)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    value
+        .get("prompt")
+        .and_then(|prompt| prompt.as_str())
+        .map(|prompt| !prompt.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// The first free `<root>/<base>[-N]` directory name, ignoring names already
@@ -652,5 +742,128 @@ mod tests {
         assert_eq!(fs::read_to_string(&readme).unwrap(), "mine\n");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_id_match_directory_without_a_prompt_adopts_the_legacy_prompt() {
+        let dir = temp_dir("adopt-prompt");
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        // The shape a half-finished migration leaves behind: the profile blob
+        // landed, prompt.md did not. The legacy setting holds the only copy of
+        // the prompt, so clearing it would delete that text.
+        let existing = dir.join(PROMPTS_DIR_NAME).join("code-reviewer");
+        fs::create_dir_all(&existing).unwrap();
+        fs::write(
+            existing.join(PROMPT_CONFIG_FILE),
+            r#"{"id":"code-reviewer","label":"Code reviewer","toolAccess":"all"}"#,
+        )
+        .unwrap();
+
+        let mut settings: IndexMap<String, String> = IndexMap::new();
+        settings.insert(
+            SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(),
+            r#"[{"id":"code-reviewer","label":"Code reviewer","prompt":"The only copy.","toolAccess":"all"}]"#
+                .to_string(),
+        );
+
+        assert!(migrate_legacy_system_prompt_profiles(
+            &config_path,
+            &mut settings
+        ));
+        assert_eq!(
+            settings
+                .get(SYSTEM_PROMPT_PROFILES_SETTING_ID)
+                .map(String::as_str),
+            Some("[]")
+        );
+        assert_eq!(
+            fs::read_to_string(existing.join(PROMPT_PROMPT_FILE)).unwrap(),
+            "The only copy.\n",
+            "the prompt the setting alone carried is written out before the setting clears"
+        );
+        // The directory's own profile blob is untouched.
+        let blob: Value =
+            serde_json::from_str(&fs::read_to_string(existing.join(PROMPT_CONFIG_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(blob["label"], "Code reviewer");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_id_match_directory_that_already_has_a_prompt_is_never_rewritten() {
+        let dir = temp_dir("adopt-keep");
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        let prose = dir.join(PROMPTS_DIR_NAME).join("code-reviewer");
+        fs::create_dir_all(&prose).unwrap();
+        fs::write(
+            prose.join(PROMPT_CONFIG_FILE),
+            r#"{"id":"code-reviewer","label":"Code reviewer"}"#,
+        )
+        .unwrap();
+        fs::write(prose.join(PROMPT_PROMPT_FILE), "Mine, keep it.\n").unwrap();
+
+        // An inline prompt counts too: prompt.md is absent, and the loader falls
+        // back to the field, so nothing is missing from this directory either.
+        let inline = dir.join(PROMPTS_DIR_NAME).join("scout");
+        fs::create_dir_all(&inline).unwrap();
+        let inline_blob = r#"{"id":"scout","prompt":"Inline, keep it.","label":"Scout"}"#;
+        fs::write(inline.join(PROMPT_CONFIG_FILE), inline_blob).unwrap();
+
+        let mut settings: IndexMap<String, String> = IndexMap::new();
+        settings.insert(
+            SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(),
+            r#"[{"id":"code-reviewer","prompt":"Theirs."},{"id":"scout","prompt":"Theirs too."}]"#
+                .to_string(),
+        );
+
+        assert!(migrate_legacy_system_prompt_profiles(
+            &config_path,
+            &mut settings
+        ));
+        assert_eq!(
+            fs::read_to_string(prose.join(PROMPT_PROMPT_FILE)).unwrap(),
+            "Mine, keep it.\n",
+            "a prompt the user wrote is never overwritten"
+        );
+        assert_eq!(
+            fs::read_to_string(inline.join(PROMPT_CONFIG_FILE)).unwrap(),
+            inline_blob,
+            "an inline prompt is left byte-identical"
+        );
+        assert!(!inline.join(PROMPT_PROMPT_FILE).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_directories_with_one_id_are_reported_with_both_locations() {
+        let root = temp_dir("dup-id").join(PROMPTS_DIR_NAME);
+        // A profile needs a prompt: it lives in prompt.md here so both
+        // directories are otherwise valid profiles that collide on `id`.
+        for (slug, prompt) in [("shared", "First."), ("shared-two", "Second.")] {
+            let target = root.join(slug);
+            fs::create_dir_all(&target).unwrap();
+            fs::write(
+                target.join(PROMPT_CONFIG_FILE),
+                r#"{"id":"shared","label":"Shared"}"#,
+            )
+            .unwrap();
+            fs::write(target.join(PROMPT_PROMPT_FILE), format!("{prompt}\n")).unwrap();
+        }
+
+        let mut issues = Vec::new();
+        let profiles = load_prompts_from_dir(&root, PROMPTS_ORIGIN, &mut issues);
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(profiles[0].id, profiles[1].id);
+        assert!(issues[0].contains("shared"), "{issues:?}");
+        assert!(issues[0].contains("shared-two"), "{issues:?}");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

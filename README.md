@@ -644,9 +644,9 @@ $EDITOR ~/.drip/prompts/code-reviewer/prompt.md
 ```
 
 Unlike role profiles these are user-scoped only: they sit next to the config
-file they were loaded from, and every consumer — the model request, the TUI's
-system-prompt picker, `--prompt` — resolves the directories plus any entry still
-left in `runtime.system_prompt_profiles`, with the inline entry winning on an id
+file they were loaded from, and every consumer — the model request and the TUI's
+system-prompt picker — resolves the directories plus any entry still left in
+`runtime.system_prompt_profiles`, with the inline entry winning on an id
 collision. The merged view is in memory only; a save never writes it back, so the
 directories stay the single source for those profiles on disk.
 
@@ -655,7 +655,10 @@ directories stay the single source for those profiles on disk.
 next time the config is loaded — each entry becomes `<dir>/config.json` with its
 prompt split out to `prompt.md` — and the setting is cleared. A profile that
 already has a directory of its own is never overwritten, and an id collision gets
-a `-2` suffix directory. An entry that cannot be placed (a directory whose
+a `-2` suffix directory. A directory that already names the id but carries no
+prompt at all — no `prompt.md` and no inline `prompt` — takes the setting's
+prompt into its `prompt.md` first, so clearing the setting never drops the only
+copy of that prose. An entry that cannot be placed (a directory whose
 `config.json` omits `id`, or a duplicate id) keeps the whole setting in place so
 the next load retries, rather than dropping it silently.
 

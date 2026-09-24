@@ -16,6 +16,7 @@ pub mod marketplaces;
 pub mod mentions;
 pub mod paste;
 pub mod profile_dirs;
+pub mod prompt_dirs;
 pub mod queue;
 pub mod review;
 pub mod review_report;

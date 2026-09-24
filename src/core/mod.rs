@@ -4,6 +4,7 @@ pub mod backfill;
 pub mod config;
 pub mod env_vars;
 pub mod home;
+pub mod startup;
 pub mod inference;
 pub mod lease;
 pub mod sessions;

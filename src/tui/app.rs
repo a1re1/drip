@@ -120,6 +120,10 @@ pub struct TuiBootstrap {
     /// `--no-classifier`: hard off inside the TUI too, whatever the setting
     /// says.
     pub no_classifier: bool,
+    /// Rendered startup banner (`~/.drip/startup-message.sh`), resolved and run
+    /// by entry.rs before the TUI takes the terminal; `None` paints no banner.
+    /// It is already plain text — never a command to run here.
+    pub startup_message: Option<String>,
 }
 
 // Harness events can arrive far faster than the terminal can usefully paint;
@@ -893,6 +897,7 @@ impl TuiApp {
             .status_line
             .clone()
             .map(crate::tui::status_line::StatusLineRunner::new);
+        let startup_message = bootstrap.startup_message.clone();
 
         // Skill catalog is discovered at construction; the edit and draw
         // paths only ever filter this cached copy. Command dispatch refreshes
@@ -906,7 +911,7 @@ impl TuiApp {
                 .collect();
         let skill_rows = collect_skill_rows(Path::new(&bootstrap.cwd), &bootstrap.home);
 
-        Self {
+        let mut app = Self {
             abort: None,
             active_skills: Vec::new(),
             attachments: Vec::new(),
@@ -961,7 +966,20 @@ impl TuiApp {
             text: String::new(),
             tx,
             env_overlay: None,
+        };
+        // The banner is the first scrollback row, painted before the first
+        // frame; it is never persisted, so reopening a session does not replay
+        // an old greeting.
+        if let Some(text) = startup_message {
+            app.push_cell(
+                TranscriptEntry::Info(TranscriptNoteEntry {
+                    at: now_iso(),
+                    text,
+                }),
+                false,
+            );
         }
+        app
     }
 
     // ----- timeline -------------------------------------------------------
@@ -5215,6 +5233,7 @@ mod rename_tests {
             roles_flag: None,
             session,
             status_line: None,
+            startup_message: None,
             classifier: None,
             no_classifier: false,
         };
@@ -5675,6 +5694,7 @@ mod skill_activation_tests {
             roles_flag: None,
             session,
             status_line: None,
+            startup_message: None,
             classifier: None,
             no_classifier: false,
         };
@@ -6463,6 +6483,7 @@ mod prompt_history_wiring_tests {
             roles_flag: None,
             session,
             status_line: None,
+            startup_message: None,
             classifier: None,
             no_classifier: false,
         };

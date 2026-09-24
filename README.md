@@ -109,7 +109,7 @@ a server name containing `__` (it separates `MCP__<server>__<tool>`) is
 skipped with a warning; its siblings still load.
 
 Roles opt in with `mcpServers` — a list of server names — in any role source
-(`runtime.role_profiles` in the config, `.drip/roles.json`, or a `--roles`
+(`~/.drip/profiles/`, `<repo>/.drip/profiles/`, `.drip/roles.json`, or a `--roles`
 file). A role's `tools` allowlist never has to name MCP tools: `mcpServers`
 is their opt-in, and a role without one sees no MCP tools at all. For a run
 without roles, or for loops whose role sets no `mcpServers`, pass
@@ -456,7 +456,7 @@ and closes the exits that let an anomaly be explained away:
   0, and `anomalies` ride in the result payload. Surfacing an anomaly is
   cheaper than arguing it into plausibility.
 - **Blind roles.** A role with `blind: true` (the reviewer preset defaults to
-  it; set it on any role in `~/.drip/config.json` or `.drip/roles.json`) starts its loops without the
+  it; set it on any role in `~/.drip/profiles/` or `.drip/roles.json`) starts its loops without the
   previous loop's tool exchanges and without the author's footprint, emitting a
   `context-withheld` event instead of `context-refreshed`. The reviewer sees the
   goal and the artifact, not the derivation, so its agreement is independent by
@@ -579,10 +579,53 @@ drip --resume <sessionId> --roles reviewed --skill verify-before-done --new-goal
 
 ---
 
+## Role profiles (`~/.drip/profiles/`)
+
+Role profiles — the roles a run's loops are worked by — live in one directory
+per profile, so a prompt is prose you can read and edit instead of a JSON
+string buried in `~/.drip/config.json`:
+
+```
+~/.drip/profiles/author/
+  config.json    the role definition: name, description, model, tools, mcpServers, ...
+  prompt.md      this role's prompt
+```
+
+`prompt.md` wins over any `prompt` field left in `config.json`, and `name` is
+optional there — a directory without one takes its directory name, so
+`~/.drip/profiles/scout/config.json` with `{}` defines the role `scout`.
+Editing a prompt is then editing a Markdown file:
+
+```sh
+$EDITOR ~/.drip/profiles/author/prompt.md
+```
+
+**Repo-scoped profiles.** A repo can carry its own, more specific profiles at
+`<repo>/.drip/profiles/<name>/` in exactly the same shape. Precedence, lowest
+to highest: marketplace agents, `~/.drip/profiles/`, `<repo>/.drip/roles.json`,
+`<repo>/.drip/profiles/`, `--roles`. A later source overrides only the fields
+it sets, so a repo profile can re-point one field and keep the rest of the
+user-level role:
+
+```
+<repo>/.drip/profiles/reviewer/config.json   {"model":"a-stronger-reviewer"}
+```
+
+**Migration is automatic.** Profiles that still sit in the legacy
+`runtime.role_profiles` setting inside `~/.drip/config.json` are lifted into
+`~/.drip/profiles/` the next time the config is loaded — each entry becomes
+`<dir>/config.json` with its prompt split out to `prompt.md` — and the setting
+is cleared. A profile that already has a directory of its own is never
+overwritten, and a name collision gets a `-2` suffix directory. Nothing to do
+for an existing user; the file is only rewritten when there was something to
+lift.
+
+---
+
 ## Built-in role presets
 
-A role a later source defines again (`.drip/roles.json` over the config,
-a `--roles` file over both) overrides only the fields it sets, so
+A role a later source defines again (a profile directory, the config setting,
+`.drip/roles.json`, or a `--roles` file last) overrides only the fields it sets, so
 `{"roles":[{"name":"planner","reasoningEffort":"medium"}]}` keeps the config
 planner's model and prompt; replacing the whole definition used to drop the
 model silently and run the planning loop on the base model.
@@ -632,8 +675,8 @@ longer enforced.
 
 The `reviewer` role is also `blind`: its loops never inherit the author's tool
 exchanges or footprint, so it judges the artifact against the goal and against
-anchors the author did not write. Any role definition (`~/.drip/config.json`
-or `.drip/roles.json`) can set `blind: true`.
+anchors the author did not write. Any role definition (`~/.drip/profiles/`
+or `.drip/profiles/`) can set `blind: true`.
 
 Any role can also set `reasoningEffort` (`"low"`, `"medium"`, `"high"`) to
 override the model profile's own setting for that role's loops. Tool-round
@@ -645,7 +688,7 @@ Every preset role pins its own model profile, so a preset routes reproducibly
 regardless of the caller's active profile or `--profile`. Reviewer roles pin a
 *different* model from the role they verify, so the verifying opinion never
 comes from the model that wrote the code. Override a pin by defining a role of
-the same name in `~/.drip/config.json` or `.drip/roles.json` — except that a
+the same name in `~/.drip/profiles/` or `.drip/roles.json` — except that a
 `--roles` preset takes precedence on name collision, so to re-pin a preset
 role, copy the preset into a roles.json file and pass its path instead.
 
@@ -994,8 +1037,8 @@ apply from the next run; `--home` / `DRIP_HOME` decide which home's file is read
 
 Sessions are stored under `~/.drip/projects/<slug>/sessions/<id>/`, keyed by the
 project root's path slug — the same scheme the memory bank uses. Repo-scoped
-data (`patches.jsonl`, `async-tools/`, `skills/`, `roles.json`, `plugins.json`)
-stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
+data (`patches.jsonl`, `async-tools/`, `skills/`, `roles.json`, `plugins.json`,
+`profiles/`) stays in `<repo>/.drip/`. `DRIP_HOME` relocates the home directory;
 `DRIP_PROJECT_DIR` / `--project-dir` pins the project root.
 
 **Renaming a session.** Type `/rename` in the TUI composer and the configured model distills the
@@ -1538,7 +1581,7 @@ covers a similar lifecycle with different payload conventions.
 ## Config file: nested JSON and automatic migration
 
 Structured settings inside `~/.drip/config.json` are stored as real nested
-JSON — `runtime.role_profiles`, `runtime.model_profiles`,
+JSON — `runtime.model_profiles`,
 `runtime.system_prompt_profiles`, and `credentials.stored_api_keys` as JSON
 arrays, and `runtime.role_bindings` as a JSON object mapping role names to
 their loop bindings (`task`, `planning`, and optionally `replanning` — the role
@@ -1550,10 +1593,7 @@ gets the first try and the expensive planner only runs when it gets nowhere):
 {
   "settings": {
     "runtime.active_profile_id": "glm-5-3-flash",
-    "runtime.role_profiles": [
-      { "id": "planner", "description": "Plans the loop", "model": "glm-5-3-flash" },
-      { "id": "author", "model": "glm-5-3-flash", "mcpServers": ["github"] }
-    ],
+    "runtime.role_profiles": [],
     "runtime.role_bindings": { "planner": "author" },
     "credentials.stored_api_keys": []
   },
@@ -1574,7 +1614,9 @@ unflattened. Any string setting that
 merely *looks* like JSON (prompts, key references, notes) is always left
 untouched. Profile lists are never filled in from drip's compiled-in
 catalogs — an absent or empty list stays empty, and missing profile ids must
-be added to `~/.drip/config.json` by hand.
+be added to `~/.drip/config.json` by hand. `runtime.role_profiles` is the
+legacy home of role profiles: it is lifted into `~/.drip/profiles/` on load
+(see [Role profiles](#role-profiles-dripprofiles)) and left empty thereafter.
 
 ## Terminal pane title
 
@@ -2262,3 +2304,4 @@ detector) and refuses to pin any read a later shell command names. Sixty percent
 of the high-round sessions in the audit ran at least one such shell edit, so
 this closes the one stale-content gap #120 left open; reads of files the command
 did not touch stay pinned.
+

@@ -1120,7 +1120,10 @@ mod setting_map_codec {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CliConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // The file this config was loaded from. Never persisted: it exists so the
+    // role loader can find the profile directories that sit beside it
+    // (~/.drip/profiles/) without every caller passing a home through.
+    #[serde(default, skip)]
     pub path: Option<PathBuf>,
     #[serde(with = "setting_map_codec")]
     pub settings: IndexMap<String, String>,
@@ -1196,7 +1199,8 @@ fn upgrade_cerebras_profiles(settings: &mut IndexMap<String, String>) {
 // {"settings": {...}, "version": 1} wrapper is required or the load fails.
 pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     if !path.exists() {
-        let config = create_default_cli_config();
+        let mut config = create_default_cli_config();
+        config.path = Some(path.to_path_buf());
 
         save_cli_config(path, &config)?;
 
@@ -1204,7 +1208,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     }
 
     let content = std::fs::read_to_string(path)?;
-    let parsed_value: serde_json::Value = serde_json::from_str(&content)
+    let mut parsed_value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|error| anyhow!("Failed to parse {}: {}", path.display(), error))?;
 
     let settings_value = parsed_value.get("settings");
@@ -1218,9 +1222,30 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     let mut settings =
         normalize_web_setting_values(settings_value.unwrap_or(&serde_json::Value::Null));
 
+    let mut role_profiles_migrated = false;
+
     // config.json is the only source of profiles once the file exists: the
     // compiled-in catalogs are never merged, backfilled, or looked up here.
     upgrade_cerebras_profiles(&mut settings);
+
+    // Backwards compatibility: lift legacy `runtime.role_profiles` entries into
+    // ~/.drip/profiles/<name>/{config.json,prompt.md} and clear the setting.
+    // A profile that already has a directory is never overwritten, so a
+    // hand-authored profile survives; a write failure leaves the setting in
+    // place for the next load to retry. The cleared value is folded into the
+    // same on-disk rewrite below, so the file changes exactly once.
+    if crate::cli::profile_dirs::migrate_legacy_role_profiles(path, &mut settings) {
+        role_profiles_migrated = true;
+        if let Some(object) = parsed_value
+            .get_mut("settings")
+            .and_then(|settings| settings.as_object_mut())
+        {
+            object.insert(
+                ROLE_PROFILES_SETTING_ID.to_string(),
+                serde_json::Value::String("[]".to_string()),
+            );
+        }
+    }
 
     // hooks are opt-in and never fatal: a malformed entry warns and the
     // rest of the config still loads. No process is spawned here.
@@ -1276,7 +1301,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let migrated_settings = migrated_settings_object(&original_settings);
-    if migrated_settings != original_settings {
+    if migrated_settings != original_settings || role_profiles_migrated {
         let mut document = parsed_value.clone();
         document["settings"] = migrated_settings;
         match serde_json::to_string_pretty(&document) {
@@ -1300,7 +1325,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
     }
 
     Ok(CliConfig {
-        path: None,
+        path: Some(path.to_path_buf()),
         settings,
         status_line,
         hooks,
@@ -2544,6 +2569,66 @@ mod tests {
         .unwrap();
         let config = load_cli_config(&path).unwrap();
         assert!(config.hooks.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Backwards compatibility: a config still carrying `runtime.role_profiles`
+    // is loaded, its profiles appear on disk as directories, and the setting is
+    // cleared in the file — all without the user doing anything.
+    #[test]
+    fn load_cli_config_migrates_role_profiles_into_directories() {
+        let dir = unique_config_dir("role-profile-migration");
+        let path = dir.join("config.json");
+        let body = r#"{
+  "settings": {
+    "runtime.role_profiles": [
+      {
+        "name": "author",
+        "model": "glm-5-3-flash",
+        "prompt": "You are the author agent.\n"
+      },
+      { "name": "Reviewer One", "prompt": "Review hard.\n" }
+    ]
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, body).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+        // The profiles are usable straight from the loader, which now finds them
+        // as directories.
+        let mut issues: Vec<String> = Vec::new();
+        let source = crate::cli::roles::load_roles_from_config(&config, &mut issues);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(source.roles.len(), 2, "{:?}", source.roles);
+        assert!(source.roles.iter().any(|role| role.name == "author"));
+        assert!(source.roles.iter().any(|role| role.name == "Reviewer One"));
+
+        // config.json plus prompt.md, with the prompt no longer in the blob.
+        let author = dir.join("profiles").join("author");
+        let blob: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(author.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(blob["model"], "glm-5-3-flash");
+        assert!(blob.get("prompt").is_none(), "{blob}");
+        assert_eq!(
+            std::fs::read_to_string(author.join("prompt.md")).unwrap(),
+            "You are the author agent.\n"
+        );
+
+        // The legacy setting is cleared on disk, so a second load is a no-op.
+        let reloaded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            reloaded["settings"]["runtime.role_profiles"],
+            serde_json::json!([]),
+            "{reloaded}"
+        );
+        let config = load_cli_config(&path).unwrap();
+        let mut issues: Vec<String> = Vec::new();
+        let source = crate::cli::roles::load_roles_from_config(&config, &mut issues);
+        assert_eq!(source.roles.len(), 2, "{:?}", source.roles);
 
         std::fs::remove_dir_all(&dir).ok();
     }

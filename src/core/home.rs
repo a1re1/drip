@@ -6,7 +6,7 @@
 //                                      the CHECKOUT the run happened in.
 //   <project>/.drip                  — repo-scoped data (skills/, roles.json,
 //                                      plugins.json, patches.jsonl,
-//                                      async-tools/).
+//                                      async-tools/, profiles/).
 //
 // ~/.drip is shared because credentials and config are machine-wide; the
 // per-project tree is split by slug so two checkouts of the same repo never
@@ -304,6 +304,10 @@ pub fn open_drip_home(root: &str) -> DripHome {
     let _ = crate::core::startup::ensure_startup_message_file(Path::new(
         &crate::core::startup::resolve_startup_message_path(root),
     ));
+    // <home>/profiles/ is where role profiles live — one directory per profile,
+    // holding config.json and prompt.md. Seeding it (plus a README) means the
+    // layout is discoverable without reading these sources.
+    crate::cli::profile_dirs::ensure_profiles_dir(Path::new(&home.root));
 
     home
 }
@@ -728,6 +732,15 @@ mod tests {
         assert!(Path::new(&home.root).exists());
         assert!(Path::new(&home.skills_dir).exists());
         assert!(Path::new(&home.marketplaces_dir).exists());
+        // The profiles root is created with a README; an edited README survives.
+        let profiles = join(&root, ".drip/profiles");
+        assert!(Path::new(&profiles).join("README.md").is_file());
+        fs::write(join(&profiles, "README.md"), "mine").unwrap();
+        open_drip_home(&s(&join(&root, ".drip")));
+        assert_eq!(
+            fs::read_to_string(join(&profiles, "README.md")).unwrap(),
+            "mine"
+        );
         assert_eq!(home.skills_dir, s(&join(&root, ".drip/skills")));
         assert_eq!(home.marketplaces_dir, s(&join(&root, ".drip/marketplaces")));
     }

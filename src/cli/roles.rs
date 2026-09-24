@@ -1,5 +1,7 @@
-// The CLI-facing role loader: user-authored RoleDefinition objects (config
-// profiles, .drip/roles.json, or a marketplace plugin's agents/ directory)
+// The CLI-facing role loader: user-authored RoleDefinition objects (profile
+// directories — ~/.drip/profiles/<name>/ and <repo>/.drip/profiles/<name>/ —
+// the legacy config setting, .drip/roles.json, or a marketplace plugin's
+// agents/ directory)
 // resolved into the harness's runtime shape (HarnessRoleRuntime), the built-in
 // role presets ("reviewed", "research", "team", "planned"), and the --roles flag parser.
 //
@@ -515,7 +517,7 @@ fn parse_role_setup_source(parsed: &serde_json::Value, origin: &str) -> RoleSetu
     RoleSetupSource { bindings, roles }
 }
 
-fn normalize_role_definition(
+pub fn normalize_role_definition(
     value: &serde_json::Value,
     origin: &str,
     issues: &mut Vec<String>,
@@ -638,6 +640,27 @@ fn normalize_bindings(value: Option<&serde_json::Value>) -> Option<HarnessRoleBi
     })
 }
 
+/// The user-level profiles root: `<dir holding config.json>/profiles`.
+///
+/// Derived from the loaded config's own path so every caller of
+/// resolve_role_setup gets user profiles without threading a home through
+/// each call site; a config built in memory (tests, the web bridge) has no
+/// path and simply contributes no user profiles.
+fn user_profiles_dir(config: &CliConfig) -> Option<std::path::PathBuf> {
+    config
+        .path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(|dir| dir.join(crate::cli::profile_dirs::PROFILES_DIR_NAME))
+}
+
+/// The repo-scoped profiles root: `<cwd>/.drip/profiles`.
+pub fn project_profiles_dir(cwd: &str) -> std::path::PathBuf {
+    Path::new(cwd)
+        .join(".drip")
+        .join(crate::cli::profile_dirs::PROFILES_DIR_NAME)
+}
+
 pub fn load_roles_from_config(config: &CliConfig, issues: &mut Vec<String>) -> RoleSetupSource {
     let mut roles: Vec<RoleDefinition> = Vec::new();
     let raw_profiles = config
@@ -681,6 +704,15 @@ pub fn load_roles_from_config(config: &CliConfig, issues: &mut Vec<String>) -> R
         }
         Err(_) => {
             issues.push("config role_bindings: not valid JSON".to_string());
+        }
+    }
+
+    // User-level profile directories (~/.drip/profiles/<name>/). The legacy
+    // setting above migrates into this layout, so after the first load it is
+    // the only config-side profile source left.
+    if let Some(root) = user_profiles_dir(config) {
+        for role in crate::cli::profile_dirs::load_profiles_from_dir(&root, "profiles", issues) {
+            roles.push(role);
         }
     }
 
@@ -820,6 +852,16 @@ fn merge_role_definitions(
 
     for role in &project_source.roles {
         overlay_into(&mut definitions, role.clone());
+    }
+
+    // Repo-scoped profile directories (<repo>/.drip/profiles/<name>/) beat the
+    // repo's roles.json: a directory is the more specific, more editable form.
+    for role in crate::cli::profile_dirs::load_profiles_from_dir(
+        &project_profiles_dir(&args.cwd),
+        ".drip/profiles",
+        issues,
+    ) {
+        overlay_into(&mut definitions, role);
     }
 
     if let Some(extra) = &args.extra_roles {

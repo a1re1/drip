@@ -881,3 +881,186 @@ fn skill_role_hints_parity_between_cli_and_role_loaders() {
     assert_eq!(a.role_hints.unwrap().default_role(), Some("planner"));
     assert!(a.content.contains("vitest"));
 }
+
+// ---------------------------------------------------------------------------
+// Profile directories (the storage format that replaced one-line JSON blobs)
+// ---------------------------------------------------------------------------
+
+/// Writes `<root>/profiles/<slug>/{config.json,prompt.md}`.
+fn write_profile(root: &std::path::Path, slug: &str, config_json: &str, prompt: Option<&str>) {
+    let dir = root.join("profiles").join(slug);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.json"), config_json).unwrap();
+    if let Some(prompt) = prompt {
+        fs::write(dir.join("prompt.md"), prompt).unwrap();
+    }
+}
+
+#[test]
+fn user_profile_directories_supply_roles_with_their_prompt_md() {
+    let root = make_temp_root("drip-user-profiles-");
+    write_profile(
+        &root,
+        "reviewer",
+        r#"{"model":"fast","tools":["READ"],"description":"From the profile dir."}"#,
+        Some("From prompt.md.\n"),
+    );
+
+    // The config knows which directory it was loaded from, so profiles beside
+    // it are found without any extra argument at the call site.
+    let mut config = default_config();
+    config.path = Some(root.join("config.json"));
+
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        // READ must be in the loaded pack or the allowlist filter drops it.
+        tool_names: vec!["READ".to_string()],
+        mcp_server_names: vec![],
+    });
+
+    let reviewer = setup
+        .roles
+        .iter()
+        .find(|role| role.name == "reviewer")
+        .unwrap_or_else(|| panic!("reviewer role missing from {:?}", setup.roles));
+    assert_eq!(
+        reviewer.system_prompt_suffix.as_deref(),
+        Some("From prompt.md.")
+    );
+    assert_eq!(
+        reviewer.description.as_deref(),
+        Some("From the profile dir.")
+    );
+    assert_eq!(
+        reviewer.tool_names.as_deref(),
+        Some(["READ"].map(String::from).as_slice())
+    );
+}
+
+#[test]
+fn a_profile_directory_without_a_name_field_takes_the_directory_name() {
+    let root = make_temp_root("drip-anon-profile-");
+    write_profile(
+        &root,
+        "scout",
+        r#"{"prompt":"inline"}"#,
+        Some("Scout it.\n"),
+    );
+
+    let mut config = default_config();
+    config.path = Some(root.join("config.json"));
+
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+        mcp_server_names: vec![],
+    });
+
+    let scout = setup
+        .roles
+        .iter()
+        .find(|role| role.name == "scout")
+        .unwrap_or_else(|| panic!("scout role missing from {:?}", setup.roles));
+    assert_eq!(scout.system_prompt_suffix.as_deref(), Some("Scout it."));
+}
+
+#[test]
+fn a_repo_profile_directory_overrides_the_repo_roles_json_and_the_user_profile() {
+    let root = make_temp_root("drip-repo-profiles-");
+    // User-scope profile: the same name, a different prompt.
+    write_profile(
+        &root,
+        "reviewer",
+        r#"{"prompt":"user scope"}"#,
+        Some("User reviewer.\n"),
+    );
+    let mut config = default_config();
+    config.path = Some(root.join("config.json"));
+
+    // Repo-scope roles.json and repo-scope profile directory for the same name.
+    let repo = root.join("repo");
+    fs::create_dir_all(repo.join(".drip")).unwrap();
+    fs::write(
+        repo.join(".drip/roles.json"),
+        r#"{"roles":[{"name":"reviewer","prompt":"roles.json scope"}]}"#,
+    )
+    .unwrap();
+    let repo_profiles = repo.join(".drip");
+    write_profile(
+        &repo_profiles,
+        "reviewer",
+        r#"{"description":"Repo profile dir."}"#,
+        Some("Repo reviewer.\n"),
+    );
+
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: repo.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+        mcp_server_names: vec![],
+    });
+
+    let reviewer = setup
+        .roles
+        .iter()
+        .find(|role| role.name == "reviewer")
+        .unwrap_or_else(|| panic!("reviewer role missing from {:?}", setup.roles));
+    // The repo directory wins over both the repo's roles.json and the user
+    // profile.
+    assert_eq!(
+        reviewer.system_prompt_suffix.as_deref(),
+        Some("Repo reviewer.")
+    );
+    assert_eq!(reviewer.description.as_deref(), Some("Repo profile dir."));
+}
+
+#[test]
+fn a_config_without_a_path_degrades_to_no_user_profiles() {
+    let root = make_temp_root("drip-pathless-config-");
+    let mut config = default_config();
+    config.settings.insert(
+        ROLE_PROFILES_SETTING_ID.to_string(),
+        r#"[{"name":"author","prompt":"Config author."}]"#.to_string(),
+    );
+
+    let setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        config: &config,
+        cwd: root.to_str().unwrap().to_string(),
+        env: None,
+        extra_roles: None,
+        extra_bindings: None,
+        marketplace_roles: None,
+        skills: vec![],
+        tool_names: vec![],
+        mcp_server_names: vec![],
+    });
+
+    // No profiles directory is invented, and the legacy setting still loads.
+    assert!(!root.join("profiles").exists());
+    let author = setup
+        .roles
+        .iter()
+        .find(|role| role.name == "author")
+        .unwrap_or_else(|| panic!("author role missing from {:?}", setup.roles));
+    assert_eq!(
+        author.system_prompt_suffix.as_deref(),
+        Some("Config author.")
+    );
+}

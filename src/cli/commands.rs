@@ -96,6 +96,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "rename",
     },
     SlashCommandSpec {
+        args: Some("[question]"),
+        description: "Ask a separate drip a sidebar question about this session's transcript.",
+        name: "btw",
+    },
+    SlashCommandSpec {
         args: None,
         description: "Exit drip.",
         name: "quit",

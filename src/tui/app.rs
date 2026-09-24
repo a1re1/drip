@@ -69,6 +69,10 @@ use crate::core::types::{
 };
 use crate::harness::model_call::AbortSignal;
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions};
+use crate::tui::btw::{
+    ask_btw, btw_chat_lines, build_btw_digest, build_btw_system_prompt, BtwThread, BtwTurn,
+    BTW_DIGEST_CHARS, BTW_TIMEOUT_MS,
+};
 use crate::tui::compact::{
     render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
     CompactCell, CompactEmitter,
@@ -177,6 +181,8 @@ fn help_text() -> String {
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
+            "  /btw [question] — ask a separate drip about this session's transcript; the sidebar knows it is a side chat, not the run, and answers conversationally instead of summarising the run",
+            "  /btw reset (or /btw with no question to review the thread) — clear or show the sidebar conversation",
             "  esc — clear the composer, or stop the running goal and its commands",
             "  ctrl+c — exit",
         ]
@@ -326,8 +332,8 @@ fn path_tokens(path: &str) -> usize {
         .unwrap_or(1)
 }
 
-/// Build the picker's row cache: every enabled project/user/builtin and
-/// marketplace skill plus the marketplace skills the registry currently gates
+/// Build the picker's row cache: every enabled project/user and marketplace
+/// skill plus the marketplace skills the registry currently gates
 /// (shown locked). Files are read here only, on dispatch; the paint path
 /// always renders from this cache.
 fn collect_skill_rows(cwd: &Path, home: &crate::core::home::DripHome) -> Vec<SkillRow> {
@@ -419,6 +425,13 @@ enum Msg {
     Rename {
         epoch: u64,
         name: Option<String>,
+    },
+    /// A /btw sidebar answer finished on a background thread. `reply` is None
+    /// on any failure (no profile, offline, timeout, malformed output).
+    Btw {
+        epoch: u64,
+        question: String,
+        reply: Option<String>,
     },
 }
 
@@ -742,6 +755,12 @@ struct TuiApp {
     title_epoch: u64,
     /// Bumped on each /rename; stale in-flight renames are dropped.
     rename_epoch: u64,
+    /// The /btw sidebar's own turns. They live here and nowhere else, so a
+    /// sidebar conversation never enters the session's context.
+    btw_thread: BtwThread,
+    /// Bumped on /btw reset and on session switch; a stale sidebar reply is
+    /// dropped instead of landing in the wrong conversation.
+    btw_epoch: u64,
     title_next_tick: Option<Instant>,
     tx: Sender<Msg>,
     /// Test injection: when Some, replaces the process environment in
@@ -1026,6 +1045,8 @@ impl TuiApp {
             title_requested: false,
             title_epoch: 0,
             rename_epoch: 0,
+            btw_thread: BtwThread::new(),
+            btw_epoch: 0,
             title_next_tick: None,
             status_line_output: None,
             status_line_request_width: None,
@@ -1722,12 +1743,13 @@ impl TuiApp {
 
         // A run in flight can still be typed to, but enter must not start a
         // second run against the same session: it queues the prompt instead.
-        // /rename is the exception: it never touches the run (only the pane
-        // title and session.json), so it applies immediately instead of
-        // sitting in the queue until the goal finishes.
+        // /rename and /btw are the exceptions: neither touches the run
+        // (/rename writes only the pane title and session.json; /btw reads the
+        // transcript and answers in a sidebar), so they apply immediately
+        // instead of sitting in the queue until the goal finishes.
         if self.running {
             match command {
-                Some(command) if command.name == "rename" => {
+                Some(command) if command.name == "rename" || command.name == "btw" => {
                     self.dispatch_command(&command.name, &command.args);
                 }
                 _ => self.queue_prompt(submitted),
@@ -2703,6 +2725,10 @@ impl TuiApp {
         // reply must fail the epoch guard in apply_rename_result instead of
         // clobbering this session's restored or fallback label.
         self.rename_epoch = self.rename_epoch.wrapping_add(1);
+        // A sidebar belongs to the session it was opened against: its thread
+        // and any in-flight answer are dropped with the switch.
+        self.btw_epoch = self.btw_epoch.wrapping_add(1);
+        self.btw_thread.reset();
         if let Some(title) = self.pane_title.as_mut() {
             let escape = title.set_label(FALLBACK_LABEL, Instant::now());
             crate::tui::pane_title::emit(escape.as_deref());
@@ -3081,6 +3107,7 @@ impl TuiApp {
             "quit" | "exit" => self.quit = true,
             "model" => self.open_overlay(OverlayKind::Model),
             "rename" => self.rename(args),
+            "btw" => self.btw(args),
             "toolmodel" => self.open_overlay(OverlayKind::ToolModel),
             "prompt" => self.open_overlay(OverlayKind::Prompt),
             "new" => {
@@ -3253,10 +3280,19 @@ impl TuiApp {
             }
             "praeparare" => {
                 // The TUI face of `drip --praeparare`: activate the praeparare
-                // skill for the session (built-in pack, or a same-named
+                // skill for the session (the seeded default, or a same-named
                 // discovered skill — the same mechanism as --skill) AND submit
                 // the shared canned goal through the ordinary run path.
                 // Activation alone would leave the run unstarted.
+                //
+                // The skill is an ordinary user skill, so restore the shipped
+                // template when the operator deleted it before activating.
+                crate::cli::skills::ensure_default_skill(
+                    &self.bootstrap.home.root,
+                    std::path::Path::new(&self.bootstrap.home.skills_dir),
+                    "praeparare",
+                );
+                self.refresh_skill_catalog();
                 self.enable_skill_if_discovered("praeparare");
                 // Non-empty args are extra operator context, appended through
                 // the SAME helper the CLI face uses — never silently dropped
@@ -4337,6 +4373,109 @@ impl TuiApp {
         self.push_info(format!("Session renamed to \"{name}\"."));
     }
 
+    // ----- /btw -----------------------------------------------------------
+
+    /// `/btw [question]` — a sidebar conversation about this session, spawned
+    /// as its own drip.
+    ///
+    /// With a question: ask the sidebar (a separate background call that reads
+    /// the session's transcript digest) and print its reply into the chat.
+    /// With no argument: show the thread and where the sidebar reads from.
+    /// `reset` clears the thread. Works while a goal runs: the sidebar reads
+    /// the transcript as it stands and never touches the run, so it applies
+    /// immediately instead of queuing behind the goal.
+    fn btw(&mut self, args: &str) {
+        let question = args.trim();
+        match question {
+            "" => self.show_btw_state(),
+            "reset" | "end" | "clear" => {
+                self.btw_epoch = self.btw_epoch.wrapping_add(1);
+                self.btw_thread.reset();
+                self.push_info("btw: sidebar conversation cleared.");
+            }
+            _ => self.ask_btw(question),
+        }
+    }
+
+    /// `/btw` with no question: state the thread, the run state, and the
+    /// transcript path the sidebar reads, so the operator knows where the
+    /// sidebar's answers come from.
+    fn show_btw_state(&mut self) {
+        let asks = self.btw_thread.ask_count();
+        let state = if self.running {
+            "a run is in flight; the sidebar reads the transcript as it grows"
+        } else {
+            "no run in flight; the sidebar reads the transcript as it stands"
+        };
+        let head = format!(
+            "btw: sidebar conversation — {asks} question(s) asked, {state}. Ask with /btw <question>, clear with /btw reset, or ask about {}.",
+            self.paths.transcript_path
+        );
+        self.push_info(head);
+        for line in self.btw_thread.tail_lines(4) {
+            self.push_info(line);
+        }
+    }
+
+    /// Sends one sidebar question on its own thread. The call is tool-free and
+    /// bounded, so the UI never blocks; the reply lands via Msg::Btw.
+    fn ask_btw(&mut self, question: &str) {
+        let env = self.merged_env();
+        let settings = self.config.settings.clone();
+        let Some(route) = resolve_session_route(&settings, Some(&env)) else {
+            self.push_error("/btw needs a configured inference profile (see /model).");
+            return;
+        };
+        // The digest is built from the same cells the chat displays, so a
+        // sidebar asked mid-run sees everything that has landed so far.
+        let digest = build_btw_digest(
+            &self.cells,
+            &self.session.id,
+            &self.paths.transcript_path,
+            self.running,
+            self.session.last_goal.as_deref(),
+            BTW_DIGEST_CHARS,
+        );
+        let system = build_btw_system_prompt(&digest);
+        let turns: Vec<BtwTurn> = self.btw_thread.turns().to_vec();
+        for line in btw_chat_lines(question, "") {
+            self.push_info(line);
+        }
+        self.btw_thread.push_user(question);
+        self.btw_epoch = self.btw_epoch.wrapping_add(1);
+        let epoch = self.btw_epoch;
+        let question_owned = question.to_string();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let reply = ask_btw_thread(route, system, turns, &question_owned, BTW_TIMEOUT_MS);
+            let _ = tx.send(Msg::Btw {
+                epoch,
+                question: question_owned,
+                reply,
+            });
+        });
+    }
+
+    /// Applies a sidebar reply: stale epochs (from /btw reset or a session
+    /// switch) are dropped, the reply is printed as sidebar lines, and the
+    /// turn joins the thread so the next question continues the conversation.
+    fn apply_btw_result(&mut self, msg_epoch: u64, question: &str, reply: Option<String>) {
+        if msg_epoch != self.btw_epoch {
+            return;
+        }
+        let Some(reply) = reply else {
+            self.push_error(format!(
+                "btw: no answer to \"{question}\" (the sidebar call failed, timed out, or the profile is offline)."
+            ));
+            return;
+        };
+        // The question line is already on screen; print the answer only.
+        for line in reply.lines() {
+            self.push_info(format!("btw | {line}"));
+        }
+        self.btw_thread.push_assistant(&reply);
+    }
+
     fn finish_run(&mut self) {
         self.abort = None;
         self.pending_detail = None;
@@ -4572,6 +4711,14 @@ impl TuiApp {
                     self.apply_rename_result(epoch, name);
                     self.repaint();
                 }
+                Ok(Msg::Btw {
+                    epoch,
+                    question,
+                    reply,
+                }) => {
+                    self.apply_btw_result(epoch, &question, reply);
+                    self.repaint();
+                }
                 Ok(Msg::Info(text)) => self.push_info(text),
                 Ok(Msg::Error(text)) => self.push_error(text),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -4747,6 +4894,22 @@ fn generate_title_label(
         .build()
         .ok()?;
     runtime.block_on(generate_chat_title(route, &goal, timeout_ms))
+}
+
+/// Thread-side /btw half: the sidebar call is a plain request/response, so it
+/// needs only a current-thread runtime; every failure is None.
+fn ask_btw_thread(
+    route: crate::harness::model_call::ModelRoute,
+    system: String,
+    turns: Vec<BtwTurn>,
+    question: &str,
+    timeout_ms: u64,
+) -> Option<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(ask_btw(route, &system, &turns, question, timeout_ms))
 }
 
 /// Thread-side /rename half: resolve through the shared session route and run
@@ -5782,6 +5945,13 @@ mod skill_activation_tests {
         let project_str = project.path().to_string_lossy().into_owned();
 
         let drip_home = crate::core::home::open_drip_home(&home_root);
+        // The shipped default skills are copied into the home on first start
+        // (entry does this too), so the fixture sees them like any other user
+        // skill rather than from an embedded pack.
+        crate::cli::skills::seed_default_skills_once(
+            &home_root,
+            std::path::Path::new(&drip_home.skills_dir),
+        );
         let drip_project =
             crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
                 .expect("resolve drip project");
@@ -6086,8 +6256,8 @@ mod skill_activation_tests {
                 .app
                 .skill_rows
                 .iter()
-                .any(|row| row.source == SkillSource::Builtin),
-            "built-in skills are listed too"
+                .any(|row| row.name == "tdd" && row.source == SkillSource::User),
+            "the seeded default skills are listed as user skills"
         );
     }
 
@@ -6722,6 +6892,13 @@ mod prompt_history_wiring_tests {
         let cwd_str = cwd.path().to_string_lossy().into_owned();
         let project_str = project.path().to_string_lossy().into_owned();
         let drip_home = crate::core::home::open_drip_home(&home_root);
+        // The shipped default skills are copied into the home on first start
+        // (entry does this too), so the fixture sees them like any other user
+        // skill rather than from an embedded pack.
+        crate::cli::skills::seed_default_skills_once(
+            &home_root,
+            std::path::Path::new(&drip_home.skills_dir),
+        );
         let drip_project =
             crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
                 .expect("resolve drip project");

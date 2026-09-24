@@ -261,11 +261,13 @@ pub enum HarnessOp {
     },
     /// forget
     Forget { scope: MemoryScope, note_id: String },
+    /// report
+    Report { headline: String, body: String },
     /// ask_user: clarification survey; the run loop blocks on answers.jsonl.
     AskUser { survey: QuestionSurvey },
 }
 
-/// The 11 harness (framework) tool definitions as OpenAI function-call
+/// The 12 harness (framework) tool definitions as OpenAI function-call
 /// specs, in HARNESS_TOOL_SPECS order (the same order the fixture dumps
 /// them in).
 pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
@@ -649,6 +651,27 @@ pub fn harness_tool_definitions() -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["questions"],
+                    "type": "object"
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "report",
+                "description": "Add a short write-up of what you just did and how it went to the run's report — the running markdown document the end-of-run executive summary is synthesized from. Call it when a task finishes and when a cycle ends with something worth recording (a decision, a finding, a surprise, a check that failed). One short headline plus a few sentences of detail; it is source material for the operator's end-of-run report, not a second summary.",
+                "parameters": {
+                    "properties": {
+                        "body": {
+                            "description": "A few sentences of detail: what changed, what it proved, and anything surprising or left unresolved.",
+                            "type": "string"
+                        },
+                        "headline": {
+                            "description": "One short line naming what this write-up is about (e.g. 'task-3: wired the summary link').",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["headline", "body"],
                     "type": "object"
                 }
             }
@@ -1372,6 +1395,7 @@ pub fn is_harness_tool(tool_name: &str) -> bool {
             | "plan_tasks"
             | "recall"
             | "remember"
+            | "report"
             | "respond"
             | "revise_task"
     )
@@ -2103,6 +2127,10 @@ pub fn parse_harness_op_with_gate(
             note: string_or_default(&input, "note", ""),
             task_id: string_or_none(&input, "taskId"),
         }),
+        "report" => Ok(HarnessOp::Report {
+            headline: string_or_default(&input, "headline", ""),
+            body: string_or_default(&input, "body", ""),
+        }),
         "remember" => Ok(HarnessOp::Remember {
             scope: parse_scope(&input),
             note: string_or_default(&input, "note", ""),
@@ -2614,6 +2642,10 @@ pub struct HarnessOpContext {
     /// edit) and the whole change is small: the reviewer loop is waived for a
     /// single-task run. The text says why (lines changed, check run).
     pub review_waived: Option<String>,
+    /// Path of the session's running markdown report (`<session dir>/report.md`).
+    /// None when the run has no session directory to append to; the tool then
+    /// records the entry on the state only.
+    pub report_path: Option<std::path::PathBuf>,
 }
 
 /// Whether a task title demands reviewer work: it starts with "Review" (a
@@ -3990,6 +4022,57 @@ pub fn apply_harness_op(
             HarnessOpOutcome {
                 text,
                 state_changed: saved_any,
+                task_finished: false,
+                ended_loop: false,
+                direct_response: None,
+            }
+        }
+        HarnessOp::Report { headline, body } => {
+            let headline = headline.trim().to_string();
+            let body = body.trim().to_string();
+
+            if headline.is_empty() || body.is_empty() {
+                return HarnessOpOutcome {
+                    text: "Provide both a headline and a body for the report entry.".to_string(),
+                    state_changed: false,
+                    task_finished: false,
+                    ended_loop: false,
+                    direct_response: None,
+                };
+            }
+
+            let entry = crate::core::types::HarnessTaskReport {
+                at_iteration: state.iteration,
+                at_loop: i64::from(ctx.loop_number),
+                task_id: ctx.current_task_id.clone(),
+                headline,
+                body,
+            };
+
+            let count = state.task_reports.len() + 1;
+            let mut text = format!(
+                "Report entry recorded ({} entry{} so far).",
+                count,
+                if count == 1 { "" } else { "ies" }
+            );
+            state.task_reports.push(entry.clone());
+
+            match ctx.report_path.as_deref() {
+                Some(path) => {
+                    match crate::harness::report::append_report_entry(path, &state.goal, &entry) {
+                        Ok(()) => {
+                            text.push_str(&format!("\nWritten to {}.", path.display()));
+                        }
+                        Err(error) => text
+                            .push_str(&format!("\nThe report file could not be written: {error}")),
+                    }
+                }
+                None => text.push_str("\nNo report file is configured for this run."),
+            }
+
+            HarnessOpOutcome {
+                text,
+                state_changed: true,
                 task_finished: false,
                 ended_loop: false,
                 direct_response: None,
@@ -6923,6 +7006,70 @@ mod review_opt_out_enforcement_tests {
             review_opt_out: true,
             ..HarnessOpContext::default()
         }
+    }
+
+    #[test]
+    fn the_report_op_records_the_entry_and_appends_it_to_the_session_report() {
+        let dir = std::env::temp_dir().join(format!(
+            "drip-report-op-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let report_path = dir.join("report.md");
+
+        let mut state = crate::core::state::create_harness_state("ship the report");
+        state.iteration = 4;
+        let ctx = HarnessOpContext {
+            loop_number: 2,
+            current_task_id: Some("task-7".to_string()),
+            report_path: Some(report_path.clone()),
+            ..HarnessOpContext::default()
+        };
+
+        let outcome = apply_harness_op(
+            &mut state,
+            HarnessOp::Report {
+                headline: "  task-7: wired the link  ".to_string(),
+                body: "  the link line prints after the summary  ".to_string(),
+            },
+            &ctx,
+        );
+
+        assert!(outcome.state_changed);
+        assert_eq!(state.task_reports.len(), 1);
+        let entry = &state.task_reports[0];
+        assert_eq!(entry.headline, "task-7: wired the link");
+        assert_eq!(entry.body, "the link line prints after the summary");
+        assert_eq!(entry.at_iteration, 4);
+        assert_eq!(entry.at_loop, 2);
+        assert_eq!(entry.task_id.as_deref(), Some("task-7"));
+
+        let text = std::fs::read_to_string(&report_path).expect("report file written");
+        assert!(text.contains("Goal: ship the report"), "{text}");
+        assert!(text.contains("## task-7: wired the link"), "{text}");
+        assert!(
+            text.contains("the link line prints after the summary"),
+            "{text}"
+        );
+        assert!(outcome.text.contains("1 entry"), "{}", outcome.text);
+
+        // An empty headline or body is refused, not recorded.
+        let refused = apply_harness_op(
+            &mut state,
+            HarnessOp::Report {
+                headline: "  ".to_string(),
+                body: "body".to_string(),
+            },
+            &ctx,
+        );
+        assert!(!refused.state_changed);
+        assert_eq!(state.task_reports.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A reviewed-style gate: author carries verified_by=reviewer and the

@@ -1493,6 +1493,17 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             println!("{}", summary.text);
         }
 
+        // The executive summary is a digest; the running report holds the
+        // detail. Offer the operator the full document when one was written.
+        let report_path = std::path::Path::new(&paths.state_path)
+            .parent()
+            .map(|dir| dir.join(crate::harness::report::RUN_REPORT_FILE_NAME))
+            .filter(|path| path.exists());
+        if let Some(path) = report_path {
+            println!();
+            println!("{}", crate::harness::report::report_link_line(&path));
+        }
+
         // Name the credential env vars that were withheld from tool
         // subprocesses, so a check that passes inside drip failing in the
         // operator's own shell is not a mystery.

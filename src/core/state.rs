@@ -60,6 +60,7 @@ pub fn create_harness_state(goal: &str) -> HarnessState {
         memory: Vec::new(),
         observations: Vec::new(),
         promoted_context: Vec::new(),
+        task_reports: Vec::new(),
         run_summary: None,
         tasks: Vec::new(),
         telemetry: IndexMap::new(),
@@ -83,6 +84,7 @@ pub fn start_follow_up_goal(state: &mut HarnessState, goal: &str) {
     state.tasks = Vec::new();
     state.last_activation = None;
     state.run_summary = None;
+    state.task_reports = Vec::new();
     state.direct_response = None;
     // A new goal must not inherit the previous goal's test outcome as "current"
     // — nor its verification timeline, failure streak, or staleness counter

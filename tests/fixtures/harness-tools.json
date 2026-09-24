@@ -459,5 +459,29 @@
         "type": "object"
       }
     }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "report",
+      "description": "Add a short write-up of what you just did and how it went to the run's report — the running markdown document the end-of-run executive summary is synthesized from. Call it when a task finishes and when a cycle ends with something worth recording (a decision, a finding, a surprise, a check that failed). One short headline plus a few sentences of detail; it is source material for the operator's end-of-run report, not a second summary.",
+      "parameters": {
+        "properties": {
+          "body": {
+            "description": "A few sentences of detail: what changed, what it proved, and anything surprising or left unresolved.",
+            "type": "string"
+          },
+          "headline": {
+            "description": "One short line naming what this write-up is about (e.g. 'task-3: wired the summary link').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "headline",
+          "body"
+        ],
+        "type": "object"
+      }
+    }
   }
 ]

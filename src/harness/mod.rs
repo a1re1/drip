@@ -13,6 +13,7 @@ pub mod model_call;
 pub mod outline;
 pub mod prompt;
 pub mod redact;
+pub mod report;
 pub mod roles;
 pub mod telemetry;
 pub mod transport;

@@ -192,10 +192,34 @@ mod anchoring_render_tests {
 
 pub const RUN_SUMMARY_SYSTEM_PROMPT: &str = concat!(
     "You are the reporting step at the end of a solid-state harness run.",
-    " You are given the goal, the final todo list with per-task summaries, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes.",
-    " Write a concise message directly to the user: summarize what was accomplished, and call out anything blocked or dropped and why.",
-    " Structure it as: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did; a 'Testing & verification' section listing every harness-recorded verification command with its outcome, its counts and its anchor (or stating plainly that none was recorded); then anything blocked, dropped, or left unverified.",
+    " You are given the goal, the final todo list with per-task summaries, the agent's own report write-ups, shared memory notes, session history from earlier goals, and (when available) ground-truth workspace changes.",
+    " Write the run's executive summary: a one-pager a busy operator can read in twenty seconds and trust.",
+    " Structure it as: (1) a first paragraph of two to four sentences — one plain sentence on whether the goal was met, then only the two or three things that actually matter, including anything the operator must decide;",
+    " (2) one 'Testing & verification:' line naming the strongest check as command plus executed/passed/failed counts and its anchor, and how many further checks were recorded — or saying plainly that none was recorded;",
+    " (3) at most five bullets, one short line each, naming a notable outcome or an open item (blocked, dropped, deferred, unverified, or a failure the run worked around);",
+    " (4) a final 'Details: report.md' line pointing at the full run report.",
+    " Keep the whole thing under about twenty lines: no per-task walkthrough, no section beyond those, and no repeating a count or command that already appeared.",
+    " Report task counts exactly as given in task_stats, and only when they help the reader.",
+    " Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary, a verification record, or a memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead.",
+    " Mention a tool, a child session, or a delegation only if tool_usage counts it.",
+    " Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done.",
     " Reply with plain markdown text. Do not call tools."
+);
+
+/// The instruction block handed to the summary call, next to the data sections.
+/// Same one-pager contract as [`RUN_SUMMARY_SYSTEM_PROMPT`], phrased as the
+/// operator of this specific call so the two never drift apart.
+pub const RUN_SUMMARY_INSTRUCTION: &str = concat!(
+    "instruction: The run has ended. Write the run's executive summary for the operator: a one-pager that fits on one screen and can be trusted without re-reading the run.",
+    " Open with two to four sentences: one plain sentence on whether the goal was met, then only the two or three things that matter most and anything the operator must decide.",
+    " Then one 'Testing & verification:' line: the strongest check's command with its executed/passed/failed counts and its anchor, plus how many further checks were recorded — or plainly that none was recorded.",
+    " Then at most five bullets, one short line each, for the notable outcomes and the open items (blocked, dropped, deferred, unverified).",
+    " Then a final 'Details: report.md' line.",
+    " No per-task walkthrough, no section beyond these, and no repeating a count or command already given; keep it under about twenty lines.",
+    " Report task counts exactly as given in task_stats, and only when they help the reader.",
+    " Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary, a verification record, or a memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead.",
+    " Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done and mention any partial progress.",
+    " Plain markdown text only; no tool calls."
 );
 
 /// The run-summary system prompt: the built-in contract, then the operator's
@@ -917,6 +941,30 @@ pub fn build_run_summary_messages(
     // summary can only restate task summaries — the shallowness this fixes.
     sections.push(build_verification_breakdown_section(state));
 
+    // The agent's own per-task write-ups, kept in the session's running report
+    // file. They are source material for the executive summary: the summary
+    // step SYNTHESIZES them instead of restating them, so the section says so.
+    if !state.task_reports.is_empty() {
+        let entries = state
+            .task_reports
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- [{}] {} (iteration {}, loop {})\n    {}",
+                    entry.task_id.as_deref().unwrap_or("run"),
+                    entry.headline,
+                    entry.at_iteration,
+                    entry.at_loop,
+                    entry.body.replace('\n', " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!(
+            "report_writeups — the agent's own write-ups of what each task and cycle did (source material for the executive summary):\nsynthesize them rather than restating them; pick the two or three things that matter and leave the rest to the full report.\n{entries}"
+        ));
+    }
+
     if !state.memory.is_empty() {
         sections.push(
             ["memory:".to_string()]
@@ -983,10 +1031,7 @@ pub fn build_run_summary_messages(
         sections.push(build_tool_usage_line(tool_usage));
     }
 
-    sections.push(
-        "instruction: The run has ended. Write a message to the user summarizing the results with enough depth that they can trust it without re-reading the run: what was accomplished, and anything blocked or dropped and why. Write it in this order: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did (use its footprint lines, not only its finish summary); a 'Testing & verification' section repeating every harness-recorded verification listed above with its command, outcome, executed/passed/failed counts and anchor, or saying plainly that no verification command was recorded; then anything blocked, dropped, or left unverified and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
-            .to_string(),
-    );
+    sections.push(RUN_SUMMARY_INSTRUCTION.to_string());
 
     vec![
         TransportRequestMessage {
@@ -1082,6 +1127,23 @@ mod composed_summary_tests {
     }
 }
 
+/// Collapse a free-form text to a single line and clip it to `limit`
+/// characters, so a bullet in the one-pager recap never sprawls over the
+/// screen. The untruncated text stays in the run report.
+fn recap_one_line(text: &str, limit: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= limit {
+        return collapsed;
+    }
+    let kept: String = collapsed.chars().take(limit.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Character caps for the recap's per-task bullets: a title fits one line, a
+/// summary gets the roomier second line.
+const RECAP_TITLE_CHARS: usize = 72;
+const RECAP_BULLET_CHARS: usize = 160;
+
 /// A run summary composed from the tasks' own finish_task summaries, for a
 /// completed run with at most `max_tasks` author tasks that each carry a
 /// non-empty summary. None when the run is bigger or a summary is missing,
@@ -1124,14 +1186,12 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
         lines.push(format!(
             "- {}: {} — {}",
             task.id,
-            task.title,
-            task.summary.as_deref().unwrap_or_default().trim()
+            recap_one_line(&task.title, RECAP_TITLE_CHARS),
+            recap_one_line(
+                task.summary.as_deref().unwrap_or_default(),
+                RECAP_BULLET_CHARS
+            )
         ));
-        // What the task actually touched, so the recap is more than its
-        // finish_task one-liner.
-        for entry in task.footprint.as_deref().unwrap_or_default() {
-            lines.push(format!("  - {entry}"));
-        }
     }
     for review in &reviews {
         if let Some(summary) = review
@@ -1142,8 +1202,11 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
             lines.push(format!(
                 "- {} (review of {}): {}",
                 review.id,
-                review.review_of.as_deref().unwrap_or_default(),
-                summary.trim()
+                recap_one_line(
+                    review.review_of.as_deref().unwrap_or_default(),
+                    RECAP_TITLE_CHARS
+                ),
+                recap_one_line(summary, RECAP_BULLET_CHARS)
             ));
         }
     }
@@ -1202,9 +1265,15 @@ pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason
     )];
 
     for task in &blocked_tasks {
+        let title = recap_one_line(&task.title, RECAP_TITLE_CHARS);
         lines.push(match &task.summary {
-            Some(summary) => format!("- {} blocked: {} — {}", task.id, task.title, summary),
-            None => format!("- {} blocked: {}", task.id, task.title),
+            Some(summary) => format!(
+                "- {} blocked: {} — {}",
+                task.id,
+                title,
+                recap_one_line(summary, RECAP_BULLET_CHARS)
+            ),
+            None => format!("- {} blocked: {}", task.id, title),
         });
     }
 
@@ -1741,19 +1810,10 @@ fn summary_verification_records(state: &HarnessState) -> Vec<&HarnessVerificatio
     records
 }
 
-fn clamp_summary_line(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max_chars).collect();
-    out.push('…');
-    out
-}
-
 /// One verification record as the summary reports it: identity, command,
 /// outcome, counts and anchor — the same vocabulary the driver sees.
 fn summary_verification_record_line(record: &HarnessVerificationRecord) -> String {
-    let mut line = format!(
+    format!(
         "[{}] cycle {}: {} → {}{}",
         record.id.as_deref().unwrap_or("-"),
         record.at_iteration,
@@ -1764,14 +1824,7 @@ fn summary_verification_record_line(record: &HarnessVerificationRecord) -> Strin
             record.evidence.as_ref()
         ),
         summary_evidence_counts(record.evidence.as_ref()),
-    );
-    if !record.output_tail.trim().is_empty() {
-        line.push_str(&format!(
-            "\n    output tail: {}",
-            clamp_summary_line(record.output_tail.trim(), 240)
-        ));
-    }
-    line
+    )
 }
 
 /// The verification breakdown handed to the summary model: each record's
@@ -1830,26 +1883,25 @@ fn summary_evidence_counts(evidence: Option<&VerificationEvidence>) -> String {
     )
 }
 
-/// The same breakdown as plain text, for the deterministic paths (composed and
-/// fallback) that no model rewrites.
+/// The verification line for the deterministic paths (composed and fallback)
+/// that no model rewrites: the strongest check on one line, plus a count of the
+/// rest — the same one-pager shape the model is asked for, so the recap never
+/// turns into a per-record dump the operator has to scroll past.
 pub fn render_verification_breakdown(state: &HarnessState) -> String {
     let records = summary_verification_records(state);
-    let mut lines = vec!["Testing & verification:".to_string()];
-    if records.is_empty() {
-        lines.push(
-            "- no verification command (tests, build, typecheck) was recorded for this run."
-                .to_string(),
-        );
-        return lines.join("\n");
+    let Some(latest) = records.last() else {
+        return "Testing & verification: no check (tests, build, typecheck) was recorded for this run."
+            .to_string();
+    };
+    let mut line = format!(
+        "Testing & verification: {}",
+        summary_verification_record_line(latest)
+    );
+    let earlier = records.len() - 1;
+    if earlier > 0 {
+        line.push_str(&format!("; {earlier} earlier check(s) recorded"));
     }
-    let hidden = records.len().saturating_sub(MAX_SUMMARY_VERIFICATIONS);
-    if hidden > 0 {
-        lines.push(format!("- {hidden} earlier verification(s) not shown"));
-    }
-    for record in records.iter().skip(hidden) {
-        lines.push(format!("- {}", summary_verification_record_line(record)));
-    }
-    lines.join("\n")
+    line
 }
 
 #[cfg(test)]
@@ -1889,7 +1941,7 @@ mod run_summary_depth_tests {
     }
 
     #[test]
-    fn composed_summary_carries_footprints_and_the_verification_breakdown() {
+    fn composed_summary_stays_a_one_pager_with_a_single_verification_line() {
         let mut state = create_harness_state("goal");
         state.tasks = vec![task(
             "task-1",
@@ -1900,15 +1952,20 @@ mod run_summary_depth_tests {
         state.verifications = Some(vec![record("cargo test --lib")]);
 
         let text = build_composed_run_summary(&state, 6).expect("composed");
-        assert!(text.contains("  - edited src/a.rs"), "{text}");
-        assert!(text.contains("  - ran cargo test --lib"), "{text}");
-        assert!(text.contains("Testing & verification:"), "{text}");
-        assert!(text.contains("cargo test --lib"), "{text}");
+        // A one-pager: outcome line, one bullet, one verification line — no
+        // per-task footprint walkthrough and no per-record breakdown.
+        assert_eq!(text.lines().count(), 4, "{text}");
+        assert!(
+            text.contains("Testing & verification: [v3] cycle 3: cargo test --lib → passed"),
+            "{text}"
+        );
         assert!(
             text.contains("tests: 12 executed, 12 passed, 0 failed"),
             "{text}"
         );
         assert!(text.contains("anchor: undeclared"), "{text}");
+        assert!(!text.contains("  - edited src/a.rs"), "{text}");
+        assert!(!text.contains("output tail"), "{text}");
     }
 
     #[test]
@@ -1918,7 +1975,7 @@ mod run_summary_depth_tests {
 
         let text = build_composed_run_summary(&state, 6).expect("composed");
         assert!(
-            text.contains("no verification command (tests, build, typecheck) was recorded"),
+            text.contains("no check (tests, build, typecheck) was recorded"),
             "{text}"
         );
     }
@@ -1954,7 +2011,9 @@ mod run_summary_depth_tests {
             user.contains("tests: 12 executed, 12 passed, 0 failed"),
             "{user}"
         );
-        assert!(user.contains("'Testing & verification' section"), "{user}");
+        // The instruction asks for the one-pager, not a per-record dump.
+        assert!(user.contains("one-pager"), "{user}");
+        assert!(user.contains("'Testing & verification:' line"), "{user}");
     }
 
     #[test]
@@ -1979,7 +2038,7 @@ mod run_summary_depth_tests {
     }
 
     #[test]
-    fn only_the_newest_verifications_are_listed_with_a_count_of_the_rest() {
+    fn the_composed_recap_names_the_newest_check_and_counts_the_rest() {
         let mut state = create_harness_state("goal");
         state.tasks = vec![task("task-1", "wire it", "wired", None)];
         state.verifications = Some(
@@ -1990,10 +2049,43 @@ mod run_summary_depth_tests {
 
         let text = build_composed_run_summary(&state, 6).expect("composed");
         assert!(
-            text.contains("4 earlier verification(s) not shown"),
+            text.contains("Testing & verification: [v3] cycle 3: cargo test run-12 → passed"),
             "{text}"
         );
-        assert!(text.contains("cargo test run-12"), "{text}");
-        assert!(!text.contains("cargo test run-1 →"), "{text}");
+        assert!(text.contains("11 earlier check(s) recorded"), "{text}");
+        assert!(!text.contains("cargo test run-11"), "{text}");
+
+        // The source section for the model still bounds the list it is given.
+        let section = build_verification_breakdown_section(&state);
+        assert!(
+            section.contains("4 earlier verification(s) not shown"),
+            "{section}"
+        );
+        assert!(!section.contains("output tail"), "{section}");
+    }
+
+    #[test]
+    fn composed_recap_clips_long_task_bullets_to_one_line_each() {
+        let mut state = create_harness_state("goal");
+        let long_title = "this doesn't seem much better ".repeat(20);
+        let long_summary = "Rewrote the recap as a one-pager. ".repeat(30);
+        state.tasks = vec![task(
+            "task-1",
+            long_title.as_str(),
+            long_summary.as_str(),
+            None,
+        )];
+        state.verifications = Some(vec![record("cargo test --lib")]);
+
+        let text = build_composed_run_summary(&state, 6).expect("composed");
+        assert!(
+            text.lines().all(|line| line.chars().count() <= 250),
+            "{text}"
+        );
+        assert!(text.lines().any(|line| line.ends_with('…')), "{text}");
+        assert!(!text.contains(&long_summary), "{text}");
+        assert!(!text.contains(&long_title), "{text}");
+        // Still exactly one bullet per task plus the outcome and check lines.
+        assert_eq!(text.lines().count(), 4, "{text}");
     }
 }

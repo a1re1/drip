@@ -946,10 +946,13 @@ tool's `args`.
 A run that did not opt out of summaries (lite mode and review children do) ends
 with a recap. A small completed run composes it from the tasks' own `finish_task`
 summaries; otherwise the model writes it from the final state.
-Both paths show what each task actually did rather than only its one-line
-summary, and both append a `Testing & verification` breakdown naming each
-harness-recorded check, its outcome and its counts — or saying plainly that no
-verification ran.
+Both paths aim at a **one-pager**: a couple of sentences on the outcome and what
+matters, one `Testing & verification:` line naming the strongest harness-recorded
+check with its counts and anchor (and how many further checks were recorded), and
+at most a few short bullets for the notable outcomes and anything blocked,
+dropped or left unverified — or plainly that no check ran. The per-task detail
+lives in the run report below, not in the recap — each bullet is collapsed to a
+single line and clipped when a task's title or summary runs long.
 
 The recap's shape is yours to steer. `~/.drip/summary-preferences.md` is seeded on
 the first run (see `open_drip_home`) with an editable default; its text is

@@ -19,6 +19,22 @@ cargo install --path .        # puts `drip`, `dripw`, and `drip-mcp` on your PAT
 cargo build --release && ./target/release/drip "goal"
 ```
 
+## Skills
+
+The default skills ship as **templates**, not as magic built-ins. On the first
+start drip copies each one into `<home>/skills/<name>/SKILL.md` — ordinary user
+skills from then on, editable and shadowable by a project skill of the same
+name. Once copied, a default skill stays gone if you delete it: a marker beside
+`skills/` records the names this home has already been given, so drip will not
+put a deleted one back. Ask for them again with:
+
+```sh
+drip --install-skills   # re-copy every shipped default template and exit
+```
+
+`drip --praeparare` (and `/praeparare` in the TUI) re-restores its own
+`praeparare` template if that one was deleted, since the mode needs it.
+
 ## MCP server (drip-mcp)
 
 Claude Code normally drives drip through the Bash tool. With Bash disabled,
@@ -142,10 +158,17 @@ drip "repair the corrupted shards" --max-loops 30
 # --plan-mode always|auto|direct: how a run gets its first task list; auto skips the planner
 # for small goals that declare their own check
 
-# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
-# skills appear above the input line; up/down selects, tab completes, and
-# enter enables the skill for that session. Typing a full skill name as a
-# command (e.g. `/navis`) also enables it without starting a run.
+# In the TUI: `/` is the skill trigger anywhere in the message, not just at
+# the start — typing "i still /na" opens the skill menu above the input line
+# (three matches at a time, further matches page in as you move); up/down
+# selects, tab completes just that token (the surrounding text is kept), and
+# enter submits. Any `/name` naming a discovered skill is painted green and is
+# invoked on enter, and the message around it runs as the goal: "/navis ship
+# this" runs "ship this" with navis active, and "i still /navis ship" runs
+# "i still ship". A `/token` that names no skill (e.g. /etc/hosts) is left in
+# the message and sent unchanged. An explicitly enabled skill outranks
+# anything the classifier would have found on its own: it is composed into the
+# base prompt and excluded from the classifier's pool.
 
 # Machine-readable output (NDJSON; final line is the result)
 drip "goal" --json
@@ -978,6 +1001,23 @@ replaces the window title and is persisted verbatim to the session's `session.js
 resume keeps it; the visible pane title trims it to at most 5 words / 48 characters. On any
 failure the current name is kept. Both forms work while a goal is running: `/rename` applies
 immediately rather than queuing for the next run, and the busy spinner keeps going under the new name.
+
+**Sidebar conversations with `/btw`.** `/btw <question>` spawns a second, separate drip to talk
+about the session you are already in: it reads that session's transcript — goals, the model's own
+replies, tool calls and their results, warnings, run ends, and the full `transcript.jsonl` path — and
+answers in prose. It is framed as a *sidebar*, not the agent working the goal, so it never runs
+tools, never edits anything, and never changes the session: asking a side question cannot pollute the
+main chat or its context. Replies are printed into the chat as `btw | …` lines rather than a run
+summary, because a chat answer is more useful than a status report for "what is it doing?" or "why
+is it stuck?".
+
+`/btw` works while a goal is running (the sidebar reads the transcript as it grows) and on a
+finished or resumed session alike — resuming is the way to ask a past run questions without reviving
+it. The sidebar keeps its own conversation: follow-up `/btw` questions continue the same thread, and
+that thread lives only in the sidebar's memory, never in the session. `/btw` with no question shows
+the thread and the transcript path; `/btw reset` clears it. A sidebar answer takes the configured
+inference profile (`/model`), times out after 60s, and its size and the transcript digest are both
+bounded, so asking is cheap. It applies immediately during a run instead of queuing behind the goal.
 
 ---
 

@@ -240,12 +240,14 @@ OPTIONS
 	                              this run; a repo can allowlist specific commands in
 	                              .drip/policy.json {"allowCommands": ["<substring>"]}
 	--skills                      List discovered skills with source and description;
-	                              a built-in pack ships with drip
+	                              the default pack ships with drip
 	                              (verify-before-done, tdd, commit-discipline, probatio,
 	                              debug-root-cause, refactor-safely,
 	                              review-independently, migration-discipline,
-	                              praeparare),
-	                              shadowable by name
+	                              praeparare) and is copied into <home>/skills on the
+	                              first start, where it is ordinary and deletable
+	--install-skills              Re-copy every default skill into <home>/skills and exit
+	                              (the way back after deleting one)
 	--tools <path>                Tools directory (default ./tools, falls back to built-in)
 	--home <path>                 Override the global home (default ~/.drip or $DRIP_HOME)
 	--project-dir <path>          Override the session data dir (default <project>/.drip);
@@ -269,7 +271,8 @@ OPTIONS
 	--praeparare                  Prepare the current branch for a pull request: an agentic
 	                              pre-PR pass — cleanup, checks, commit, base merge, push, and a
 	                              DRAFT PR; refuses on the base branch. Takes no goal; a
-	                              positional goal is appended as extra operator context.
+	                              positional goal is appended as extra operator context. The
+	                              shipped praeparare template is re-copied if you deleted it.
 	--version                     Print the drip CLI version (with --json: {"version":"<version>"})
 	--help, -h                    Show this text
 
@@ -291,7 +294,7 @@ STORAGE
 	<project>/.drip/sessions/ — --list, --resume, --inspect and --gc see both.
 	<project>/.drip/patches.jsonl, async-tools/          Repo-scoped run data
 	<project>/.drip/skills/, roles.json, plugins.json   Project-scoped configuration
-	(skill precedence: project > user > marketplace > built-in pack)
+	(skill precedence: project > user > marketplace)
 	~/.drip/config.json                  Model + prompt profiles (shared with the web app)
 	~/.drip/env.vars                     API keys (dotenv format, 0600)
 
@@ -366,6 +369,7 @@ mod tests {
             "--skill",
             "--roles",
             "--skills",
+            "--install-skills",
             "--no-skills",
             "--answer",
             "--ask",

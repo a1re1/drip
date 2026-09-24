@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Built-in skill pack — embedded at compile time
+// Default skill pack — templates embedded at compile time and copied into
+// ~/.drip/skills on the first start (or by `drip --install-skills`). Nothing
+// here is discovered automatically: an uninstalled or deleted skill is simply
+// not in the pool.
 // ---------------------------------------------------------------------------
 
 const BUILTIN_CS_REFERENCE: &str = include_str!("../../skills/cs-reference/SKILL.md");
@@ -21,7 +24,8 @@ const BUILTIN_REVIEW_INDEPENDENTLY: &str =
 const BUILTIN_TDD: &str = include_str!("../../skills/tdd/SKILL.md");
 const BUILTIN_VERIFY_BEFORE_DONE: &str = include_str!("../../skills/verify-before-done/SKILL.md");
 
-/// Returns the built-in (name, content) pairs in filesystem-sort order.
+/// Returns the shipped default-skill templates as (name, content) pairs in
+/// filesystem-sort order. These are templates, not a discovered pack.
 fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("commit-discipline", BUILTIN_COMMIT_DISCIPLINE),
@@ -36,6 +40,194 @@ fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
         ("tdd", BUILTIN_TDD),
         ("verify-before-done", BUILTIN_VERIFY_BEFORE_DONE),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Default skills: templates copied into the home on first start
+// ---------------------------------------------------------------------------
+
+/// Marker recording which default skills have already been seeded into a home.
+/// It sits beside `skills/`, never inside it, so deleting that directory does
+/// not resurrect the templates on the next start.
+pub const DEFAULT_SKILLS_MARKER_FILE: &str = "default-skills.json";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DefaultSkillsMarker {
+    #[serde(default)]
+    installed: Vec<String>,
+    #[serde(default)]
+    version: u32,
+}
+
+/// `<home_root>/default-skills.json` — the seeding marker's absolute path.
+pub fn default_skills_marker_path(home_root: &str) -> PathBuf {
+    Path::new(home_root).join(DEFAULT_SKILLS_MARKER_FILE)
+}
+
+fn read_default_skills_marker(path: &Path) -> DefaultSkillsMarker {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_default_skills_marker(path: &Path, installed: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let marker = DefaultSkillsMarker {
+        installed: installed.to_vec(),
+        version: 1,
+    };
+
+    if let Ok(raw) = serde_json::to_string_pretty(&marker) {
+        if let Err(err) = std::fs::write(path, raw) {
+            eprintln!(
+                "drip: could not record the default-skills marker at {}: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// The shipped template for `name`, when the binary carries one.
+pub fn default_skill_template(name: &str) -> Option<&'static str> {
+    builtin_skill_entries()
+        .into_iter()
+        .find(|(entry_name, _)| *entry_name == name)
+        .map(|(_, content)| content)
+}
+
+/// The names of every default skill this binary ships, in sorted order.
+pub fn default_skill_names() -> Vec<String> {
+    builtin_skill_entries()
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Writes the template pack into `skills_dir` as `<name>/SKILL.md`, returning
+/// the names written. With `overwrite` false an existing file wins, so a seeded
+/// skill the operator edited is never clobbered.
+pub fn install_default_skills(skills_dir: &Path, overwrite: bool) -> Vec<String> {
+    let mut written: Vec<String> = Vec::new();
+
+    for (name, content) in builtin_skill_entries() {
+        let skill_dir = skills_dir.join(name);
+        let path = skill_dir.join("SKILL.md");
+
+        if !overwrite && path.exists() {
+            continue;
+        }
+
+        if std::fs::create_dir_all(&skill_dir).is_err() {
+            continue;
+        }
+
+        if std::fs::write(&path, content).is_ok() {
+            written.push(name.to_string());
+        }
+    }
+
+    written
+}
+
+/// First-start seeding: copies every default skill this home has never been
+/// given. The marker is what makes a deletion stick — a name it already lists is
+/// never written again, so removing `~/.drip/skills/tdd` keeps it gone until the
+/// operator asks for a reinstall (`drip --install-skills`). A file the operator
+/// already has under a default skill's name is theirs, and is left alone.
+///
+/// A name is only recorded once the template is actually on disk: a failed write
+/// warns and stays unrecorded, so the next start retries it rather than burning
+/// the skill forever.
+pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<String> {
+    let marker_path = default_skills_marker_path(home_root);
+    let mut marker = read_default_skills_marker(&marker_path);
+    let mut written: Vec<String> = Vec::new();
+
+    for (name, content) in builtin_skill_entries() {
+        if marker.installed.iter().any(|seen| seen == name) {
+            continue;
+        }
+
+        let skill_dir = skills_dir.join(name);
+        let path = skill_dir.join("SKILL.md");
+
+        // A skill document the operator already has under a default name is
+        // theirs and is never overwritten, but it does satisfy the seeding.
+        if path.is_file() {
+            marker.installed.push(name.to_string());
+            continue;
+        }
+
+        // Record the name only after the template landed. Recording it first
+        // would burn the skill forever: a home that was read-only, or a default
+        // name occupied by a plain file, would list the name as installed with
+        // nothing written, and no later start could ever retry it.
+        match std::fs::create_dir_all(&skill_dir).and_then(|()| std::fs::write(&path, content)) {
+            Ok(()) => {
+                marker.installed.push(name.to_string());
+                written.push(name.to_string());
+            }
+            Err(err) => eprintln!(
+                "drip: could not install the default skill {name} at {}: {err}",
+                path.display()
+            ),
+        }
+    }
+
+    marker.installed.sort();
+    marker.installed.dedup();
+    write_default_skills_marker(&marker_path, &marker.installed);
+    written
+}
+
+/// `drip --install-skills`: restore the shipped default skills. Files under
+/// those names are overwritten with the template, and the marker records every
+/// name so a later deletion still sticks.
+pub fn reinstall_default_skills(home_root: &str, skills_dir: &Path) -> Vec<String> {
+    let written = install_default_skills(skills_dir, true);
+    write_default_skills_marker(
+        &default_skills_marker_path(home_root),
+        &default_skill_names(),
+    );
+    written
+}
+
+/// Makes one default skill available again, for the modes that need a specific
+/// skill (`--praeparare`) even after the operator deleted it. Returns true when
+/// a file was written; an existing file (or an unknown name) is left alone.
+pub fn ensure_default_skill(home_root: &str, skills_dir: &Path, name: &str) -> bool {
+    let Some(content) = default_skill_template(name) else {
+        return false;
+    };
+
+    let skill_dir = skills_dir.join(name);
+    let path = skill_dir.join("SKILL.md");
+    if path.exists() {
+        return false;
+    }
+
+    if std::fs::create_dir_all(&skill_dir).is_err() {
+        return false;
+    }
+
+    if std::fs::write(&path, content).is_err() {
+        return false;
+    }
+
+    // Record it, so the startup seed never treats it as never-installed.
+    let marker_path = default_skills_marker_path(home_root);
+    let mut marker = read_default_skills_marker(&marker_path);
+    if !marker.installed.iter().any(|seen| seen == name) {
+        marker.installed.push(name.to_string());
+        marker.installed.sort();
+        write_default_skills_marker(&marker_path, &marker.installed);
+    }
+
+    true
 }
 
 /// Canned goal for the praeparare mode — shared by the `--praeparare` CLI flag
@@ -557,40 +749,18 @@ pub fn collect_builtin_skills(builtin_dir: Option<&Path>) -> Vec<CliSkill> {
         .collect()
 }
 
-fn collect_builtin_skills_from_dir_with_issues(skills_dir: Option<&Path>) -> CollectSkillsResult {
-    if let Some(dir) = skills_dir {
-        if dir.exists() {
-            return collect_skills_from_dir_with_issues(dir, SkillSource::Builtin);
-        }
-    }
-    // Fall back to embedded constants
-    CollectSkillsResult {
-        issues: vec![],
-        skills: collect_builtin_skills(skills_dir),
-    }
-}
-
-fn collect_builtin_skills_from_dir(skills_dir: Option<&Path>) -> Vec<CliSkill> {
-    if let Some(dir) = skills_dir {
-        if dir.exists() {
-            return collect_skills_from_dir(dir, SkillSource::Builtin);
-        }
-    }
-    collect_builtin_skills(skills_dir)
-}
-
 // ---------------------------------------------------------------------------
 // discoverSkills / discoverSkillsWithIssues
 // ---------------------------------------------------------------------------
 
-/// Project skills (<cwd>/.drip/skills) shadow user skills (~/.drip/skills), which
-/// shadow enabled marketplace skills, which shadow the built-in pack — all by
-/// skill name.
+/// Project skills (<cwd>/.drip/skills) shadow user skills (~/.drip/skills),
+/// which shadow enabled marketplace skills — all by skill name. The default
+/// skills are ordinary user skills: they are copied into the home once (see
+/// `seed_default_skills_once`) and deleting them removes them for good.
 pub fn discover_skills(
     cwd: &Path,
     home_skills_dir: &Path,
     marketplace_skills: Option<Vec<CliSkill>>,
-    builtin_dir: Option<&Path>,
 ) -> Vec<CliSkill> {
     let project_skills =
         collect_skills_from_dir(&cwd.join(".drip").join("skills"), SkillSource::Project);
@@ -613,15 +783,9 @@ pub fn discover_skills(
         local_names.insert(s.name.clone());
     }
 
-    let builtin_skills = collect_builtin_skills_from_dir(builtin_dir)
-        .into_iter()
-        .filter(|s| !local_names.contains(&s.name))
-        .collect::<Vec<_>>();
-
     let mut result = project_skills;
     result.extend(user_skills);
     result.extend(marketplace_skills);
-    result.extend(builtin_skills);
     result
 }
 
@@ -629,7 +793,6 @@ pub fn discover_skills_with_issues(
     cwd: &Path,
     home_skills_dir: &Path,
     marketplace_skills: Option<Vec<CliSkill>>,
-    builtin_dir: Option<&Path>,
 ) -> DiscoverSkillsResult {
     let mut all_issues: Vec<String> = Vec::new();
 
@@ -665,18 +828,9 @@ pub fn discover_skills_with_issues(
         local_names.insert(s.name.clone());
     }
 
-    let builtin_result = collect_builtin_skills_from_dir_with_issues(builtin_dir);
-    all_issues.extend(builtin_result.issues);
-    let builtin_skills = builtin_result
-        .skills
-        .into_iter()
-        .filter(|s| !local_names.contains(&s.name))
-        .collect::<Vec<_>>();
-
     let mut skills = project_result.skills;
     skills.extend(user_skills);
     skills.extend(marketplace_skills);
-    skills.extend(builtin_skills);
 
     DiscoverSkillsResult {
         issues: all_issues,
@@ -1249,7 +1403,7 @@ mod tests {
             "---\nname: tdd\ndescription: Project TDD\n---\n\nProject version.",
         );
 
-        let skills = discover_skills(&cwd, &home_skills, None, None);
+        let skills = discover_skills(&cwd, &home_skills, None);
         let tdd: Vec<_> = skills.iter().filter(|s| s.name == "tdd").collect();
         assert_eq!(tdd.len(), 1);
         assert_eq!(tdd[0].source, SkillSource::Project);
@@ -1277,51 +1431,58 @@ mod tests {
             source: SkillSource::Marketplace,
         }];
 
-        let skills = discover_skills(&cwd, &home_skills, Some(marketplace), None);
+        let skills = discover_skills(&cwd, &home_skills, Some(marketplace));
         let tdd: Vec<_> = skills.iter().filter(|s| s.name == "tdd").collect();
         assert_eq!(tdd.len(), 1);
         assert_eq!(tdd[0].source, SkillSource::User);
     }
 
     #[test]
-    fn discover_skills_builtin_pack_present_when_no_override() {
-        // "built-in skills appear when not shadowed"
+    fn discover_skills_seeded_defaults_present_when_no_override() {
+        // The defaults are ordinary user skills: once seeded into the home they
+        // are discovered like any other file-backed skill, with source User.
         let tmp = make_temp_dir();
         let cwd = tmp.path().join("project");
-        let home_skills = tmp.path().join("home_skills");
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
         fs::create_dir_all(&home_skills).unwrap();
+        seed_default_skills_once(home_root.to_str().unwrap(), &home_skills);
 
-        let skills = discover_skills(&cwd, &home_skills, None, None);
-        // Should include built-ins
+        let skills = discover_skills(&cwd, &home_skills, None);
         assert!(skills.iter().any(|s| s.name == "tdd"));
         assert!(skills.iter().any(|s| s.name == "verify-before-done"));
-        assert!(skills.iter().all(|s| s.source != SkillSource::Project
-            && s.source != SkillSource::User
-            || s.source == SkillSource::Builtin));
+        assert!(
+            skills.iter().all(|s| s.source == SkillSource::User),
+            "seeded defaults are user skills, never a built-in pack"
+        );
     }
 
     #[test]
-    fn discover_skills_builtin_pack_includes_praeparare() {
-        // "the praeparare skill ships in the built-in pack"
+    fn discover_skills_seeded_defaults_include_praeparare() {
+        // "the praeparare skill ships in the default pack"
         let tmp = make_temp_dir();
         let cwd = tmp.path().join("project");
-        let home_skills = tmp.path().join("home_skills");
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
         fs::create_dir_all(&home_skills).unwrap();
+        seed_default_skills_once(home_root.to_str().unwrap(), &home_skills);
 
-        let skills = discover_skills(&cwd, &home_skills, None, None);
+        let skills = discover_skills(&cwd, &home_skills, None);
         let praeparare: Vec<_> = skills.iter().filter(|s| s.name == "praeparare").collect();
         assert_eq!(praeparare.len(), 1);
-        assert_eq!(praeparare[0].source, SkillSource::Builtin);
+        assert_eq!(praeparare[0].source, SkillSource::User);
     }
 
     #[test]
-    fn discover_skills_project_praeparare_shadows_the_builtin() {
-        // "a project skill named praeparare shadows the built-in pack entry"
+    fn discover_skills_project_praeparare_shadows_the_seeded_default() {
+        // "a project skill named praeparare shadows the seeded default"
         let tmp = make_temp_dir();
         let cwd = tmp.path().join("project");
-        let home_skills = tmp.path().join("home_skills");
-        let proj_skills = cwd.join(".drip").join("skills");
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
         fs::create_dir_all(&home_skills).unwrap();
+        seed_default_skills_once(home_root.to_str().unwrap(), &home_skills);
+        let proj_skills = cwd.join(".drip").join("skills");
         fs::create_dir_all(&proj_skills).unwrap();
         write_file(
             &proj_skills,
@@ -1329,10 +1490,103 @@ mod tests {
             "---\nname: praeparare\ndescription: Project praeparare\n---\n\nProject version.",
         );
 
-        let skills = discover_skills(&cwd, &home_skills, None, None);
+        let skills = discover_skills(&cwd, &home_skills, None);
         let praeparare: Vec<_> = skills.iter().filter(|s| s.name == "praeparare").collect();
         assert_eq!(praeparare.len(), 1);
         assert_eq!(praeparare[0].source, SkillSource::Project);
+    }
+
+    #[test]
+    fn seeded_defaults_are_not_rewritten_after_the_operator_deletes_one() {
+        // The point of the marker: deleting a default skill keeps it gone.
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        seed_default_skills_once(home_root, &home_skills);
+        let tdd = home_skills.join("tdd").join("SKILL.md");
+        assert!(tdd.exists());
+        fs::remove_dir_all(home_skills.join("tdd")).unwrap();
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(
+            !written.iter().any(|name| name == "tdd"),
+            "a later start must not resurrect a deleted default"
+        );
+        assert!(!tdd.exists());
+
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(!skills.iter().any(|s| s.name == "tdd"));
+    }
+
+    #[test]
+    fn reinstall_default_skills_restores_every_deleted_default() {
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        seed_default_skills_once(home_root, &home_skills);
+        fs::remove_dir_all(home_skills.join("tdd")).unwrap();
+        fs::remove_dir_all(home_skills.join("verify-before-done")).unwrap();
+
+        let written = reinstall_default_skills(home_root, &home_skills);
+        assert_eq!(written.len(), default_skill_names().len());
+        assert!(home_skills.join("tdd").join("SKILL.md").exists());
+        assert!(home_skills
+            .join("verify-before-done")
+            .join("SKILL.md")
+            .exists());
+
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(skills.iter().any(|s| s.name == "tdd"));
+    }
+
+    #[test]
+    fn ensure_default_skill_restores_a_deleted_praeparare_only_when_absent() {
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        seed_default_skills_once(home_root, &home_skills);
+        fs::remove_dir_all(home_skills.join("praeparare")).unwrap();
+
+        assert!(ensure_default_skill(home_root, &home_skills, "praeparare"));
+        let skill_md = home_skills.join("praeparare").join("SKILL.md");
+        assert!(skill_md.exists());
+        // Already present: leave the operator's file alone.
+        assert!(!ensure_default_skill(home_root, &home_skills, "praeparare"));
+        // Unknown name: nothing to restore.
+        assert!(!ensure_default_skill(
+            home_root,
+            &home_skills,
+            "not-a-default"
+        ));
+
+        // The restored skill is visible to discovery like any user skill.
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(skills.iter().any(|s| s.name == "praeparare"));
+    }
+
+    #[test]
+    fn discovery_never_reports_the_embedded_pack() {
+        // An empty home has no default skills: nothing is discovered from the
+        // compiled-in templates any more.
+        let tmp = make_temp_dir();
+        let home_skills = tmp.path().join("home").join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(
+            skills.is_empty(),
+            "got {:?}",
+            skills.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1385,7 +1639,7 @@ mod tests {
         fs::create_dir_all(&proj_skills).unwrap();
         fs::create_dir_all(proj_skills.join("bad-skill")).unwrap();
 
-        let result = discover_skills_with_issues(&cwd, &home_skills, None, None);
+        let result = discover_skills_with_issues(&cwd, &home_skills, None);
         assert!(result.issues.iter().any(|i| i.contains("missing SKILL.md")));
     }
 
@@ -2174,6 +2428,69 @@ mod tests {
         assert_eq!(config.skills.len(), 2);
         assert_eq!(config.skills[0].name, "tdd");
         assert!(config.skills[0].args.is_empty());
+    }
+
+    #[test]
+    fn failed_default_write_is_retried_instead_of_burned() {
+        // A default name whose template could not be written must NOT be
+        // recorded as installed: once the obstruction is gone the next start
+        // seeds it. (Regression: the name used to be marked before the write.)
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        // `tdd` is a plain file, so `tdd/SKILL.md` can never be created.
+        fs::write(home_skills.join("tdd"), "not a skill dir").unwrap();
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+        assert!(!home_skills.join("tdd").join("SKILL.md").exists());
+
+        // Clear the obstruction: the next start seeds the unrecorded name.
+        fs::remove_file(home_skills.join("tdd")).unwrap();
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(
+            written.iter().any(|name| name == "tdd"),
+            "a failed write must be retried, got {written:?}"
+        );
+        assert!(home_skills.join("tdd").join("SKILL.md").exists());
+
+        // Deletion still sticks for a name that was seeded successfully.
+        fs::remove_dir_all(home_skills.join("tdd")).unwrap();
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+    }
+
+    #[test]
+    fn operator_owned_file_under_a_default_name_survives_seeding_and_reinstall_replaces_it() {
+        // Pins both halves of the overwrite contract: seeding never clobbers an
+        // operator's skill, `--install-skills` (reinstall) does overwrite it.
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(home_skills.join("tdd")).unwrap();
+        let skill_md = home_skills.join("tdd").join("SKILL.md");
+        fs::write(&skill_md, "MY OWN TDD\n").unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+        assert_eq!(fs::read_to_string(&skill_md).unwrap(), "MY OWN TDD\n");
+
+        // It is still discovered as the operator's own user skill.
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(skills.iter().any(|s| s.name == "tdd"));
+
+        let written = reinstall_default_skills(home_root, &home_skills);
+        assert!(written.iter().any(|name| name == "tdd"));
+        assert!(
+            fs::read_to_string(&skill_md)
+                .unwrap()
+                .contains("Test-first discipline"),
+            "--install-skills overwrites the operator's file with the template"
+        );
     }
 
     #[test]

@@ -47,7 +47,8 @@ use crate::cli::session_run::{
     run_session_goal, SessionGoalArgs, SessionGoalError, SessionGoalOutcome,
 };
 use crate::cli::skills::{
-    load_skill_activation, resolve_effective_activation, save_skill_activation, LoadedCliSkill,
+    ensure_default_skill, load_skill_activation, reinstall_default_skills,
+    resolve_effective_activation, save_skill_activation, seed_default_skills_once, LoadedCliSkill,
     ResolveEffectiveActivationArgs, SessionRunConfig, SkillActivationEntry,
 };
 use crate::cli::state_summary::{build_state_summary_json, format_state_summary};
@@ -985,6 +986,14 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
     let mut active_skills: Vec<LoadedCliSkill> = Vec::new();
     let mut activated_entries: Vec<SkillActivationEntry> = Vec::new();
 
+    // `--praeparare` is a mode, so it must work even after the operator deleted
+    // the seeded praeparare skill: restore the shipped template for this run and
+    // let the ordinary activation path pick it up. A same-named project or
+    // edited user skill is left untouched.
+    if args.cli_args.praeparare {
+        ensure_default_skill(&args.home.root, Path::new(&args.home.skills_dir), "praeparare");
+    }
+
     if !effective.entries.is_empty() {
         let pool = match discover_all_skills(Path::new(args.cwd), args.home) {
             Ok(pool) => pool,
@@ -1649,6 +1658,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
             .unwrap_or_else(crate::core::home::resolve_drip_home_root),
     );
 
+    // First start copies the shipped default skills into <home>/skills. They are
+    // ordinary user skills from then on: deleting one is permanent, and
+    // `drip --install-skills` is the way back. The marker next to skills/ is
+    // what makes a deletion stick, so no embedded fallback resurfaces it.
+    seed_default_skills_once(&home.root, Path::new(&home.skills_dir));
+
     // Paths only — the .drip directory is not created until a command actually
     // needs session storage, so read-only invocations never mutate the cwd.
     let project_override = cli_args
@@ -2200,6 +2215,17 @@ pub async fn main(argv: Vec<String>) -> i32 {
     if cli_args.tui && !(stdin_is_tty() && stdout_is_tty()) {
         eprintln!("--tui needs an interactive terminal (stdin and stdout must be TTYs).");
         return 1;
+    }
+
+    if cli_args.install_skills {
+        let written = reinstall_default_skills(&home.root, Path::new(&home.skills_dir));
+        println!(
+            "Restored {} default skill(s) into {}: {}",
+            written.len(),
+            home.skills_dir,
+            written.join(", ")
+        );
+        return 0;
     }
 
     if cli_args.skills {

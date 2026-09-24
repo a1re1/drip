@@ -1067,8 +1067,9 @@ impl WatchApp {
     }
 
     /// The picked skill's SKILL.md text, from the pool the focused session's
-    /// loop loaded it out of: that session's project skills, this machine's
-    /// user skills, then the builtins (embedded, so they resolve anywhere).
+    /// loop loaded it out of: that session's project skills, then this
+    /// machine's user skills (the shipped defaults among them, seeded at
+    /// first start).
     fn load_skill_markdown(&self, name: &str) -> Option<String> {
         let cwd = self
             .selected_record()
@@ -1079,7 +1080,6 @@ impl WatchApp {
         let skill = crate::cli::skills::discover_skills(
             std::path::Path::new(&cwd),
             &home_skills,
-            None,
             None,
         )
         .into_iter()
@@ -1209,17 +1209,21 @@ mod tests {
     }
 
     fn project() -> DripProject {
+        project_with_home("/tmp/drip-h")
+    }
+
+    fn project_with_home(home_root: &str) -> DripProject {
         DripProject {
             legacy_index_db_path: None,
             legacy_sessions_dir: None,
-            home_root: "/tmp/drip-h".into(),
-            index_db_path: "/tmp/drip-h/p/index.sqlite".into(),
-            memory_dir: "/tmp/drip-h/p/memory".into(),
+            home_root: home_root.into(),
+            index_db_path: format!("{home_root}/p/index.sqlite"),
+            memory_dir: format!("{home_root}/p/memory"),
             project_root: Some("/r".into()),
             repo_root: Some("/r".into()),
             repo_slug: "p".into(),
             root: "/r/.drip".into(),
-            sessions_dir: "/tmp/drip-h/p/sessions".into(),
+            sessions_dir: format!("{home_root}/p/sessions"),
             slug: "p".into(),
             worktree_root: Some("/r".into()),
         }
@@ -1447,7 +1451,18 @@ mod tests {
 
     #[test]
     fn arrows_clicks_and_the_wheel_walk_the_skills_and_tools_and_read_them_up() {
-        let mut app = WatchApp::new(project(), "/r".into());
+        // The defaults live in the home as ordinary user skills, so this test
+        // carries its own home (a temp dir, not a shared fixed path) and seeds
+        // it before the read-up can find a SKILL.md.
+        let tmp = tempfile::tempdir().unwrap();
+        let home_root = tmp.path().join("h");
+        std::fs::create_dir_all(home_root.join("skills")).unwrap();
+        let home_root = home_root.to_string_lossy().into_owned();
+        crate::cli::skills::seed_default_skills_once(
+            &home_root,
+            std::path::Path::new(&home_root).join("skills").as_path(),
+        );
+        let mut app = WatchApp::new(project_with_home(&home_root), "/r".into());
         app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
             iteration: 1,
             skills: vec!["tdd".into()],

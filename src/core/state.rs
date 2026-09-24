@@ -610,6 +610,17 @@ pub fn operator_blocked_tasks(state: &HarnessState) -> Vec<&HarnessTask> {
 /// with no message at all) stay blocked — resuming with the same goal and no
 /// reply ends the run blocked-on-input again rather than replaying the block.
 pub fn reopen_operator_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTask> {
+    reopen_operator_blocked_tasks_in(state, None)
+}
+
+/// Scoped variant of [`reopen_operator_blocked_tasks`]: only the listed task ids
+/// may reopen. The terminal blocked-on-input survey asks the operator which
+/// tasks to unblock, so a task the operator did not pick stays blocked for the
+/// next resume instead of being reopened by an answer that never named it.
+pub fn reopen_operator_blocked_tasks_in(
+    state: &mut HarnessState,
+    only: Option<&[String]>,
+) -> Vec<HarnessTask> {
     let Some(reply) = state
         .operator_messages
         .as_ref()
@@ -626,6 +637,11 @@ pub fn reopen_operator_blocked_tasks(state: &mut HarnessState) -> Vec<HarnessTas
         }
         if task.finished_at_iteration.unwrap_or(0) > reply.received_at_iteration {
             continue;
+        }
+        if let Some(only) = only {
+            if !only.iter().any(|id| id == &task.id) {
+                continue;
+            }
         }
 
         task.blocked_on = None;

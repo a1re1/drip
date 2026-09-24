@@ -759,9 +759,14 @@ fn paint_bold_title(title: &str) -> String {
 pub struct StatusBarProps<'a> {
     pub active_skill_names: &'a [String],
     pub cwd: &'a str,
+    /// Live background work of each kind, from the app's running-job
+    /// snapshot. Zero/zero renders the row exactly as it was before the
+    /// counter existed.
+    pub monitors: usize,
     pub running: bool,
     pub running_detail: Option<&'a str>,
     pub session_id: &'a str,
+    pub shells: usize,
 }
 
 /// Port of the Ink `StatusBar` component.
@@ -790,6 +795,15 @@ pub fn render_status_bar(props: &StatusBarProps, width: usize) -> Vec<String> {
         "session {}",
         props.session_id.chars().take(8).collect::<String>()
     );
+    // The background-work counter rides directly after the session id, ahead
+    // of the skills and the cwd, so a narrow terminal's `fit` truncation eats
+    // the tail of the row before it reaches the chip. The chip itself can
+    // still be cut on a terminal too narrow to hold it, in which case it has
+    // no clickable cell either. Nothing running leaves the row byte-for-byte
+    // unchanged.
+    if let Some(counts) = crate::tui::jobs::background_counter(props.monitors, props.shells) {
+        line.push_str(&format!(" · {}", paint(ACCENT_COLOR)(&counts)));
+    }
     if !props.active_skill_names.is_empty() {
         line.push_str(&format!(" · skills: {}", props.active_skill_names.join(", ")));
     }
@@ -1409,13 +1423,61 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_shows_the_background_counter_only_when_something_runs() {
+        let running = StatusBarProps {
+            active_skill_names: &[],
+            cwd: "/tmp/project",
+            monitors: 1,
+            running: false,
+            running_detail: None,
+            session_id: "1234567890abcdef",
+            shells: 2,
+        };
+        let rows = plain(&render_status_bar(&running, 80));
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("1 monitor · 2 shells"), "{:?}", rows[0]);
+        // A monitor alone reads as Claude's singular chip, and an idle bar
+        // gains nothing at all.
+        let one = plain(&render_status_bar(
+            &StatusBarProps {
+                active_skill_names: &[],
+                cwd: "/tmp/project",
+                monitors: 1,
+                running: false,
+                running_detail: None,
+                session_id: "1234567890abcdef",
+                shells: 0,
+            },
+            80,
+        ));
+        assert!(one[0].contains("1 monitor"), "{:?}", one[0]);
+        assert!(!one[0].contains("shell"), "{:?}", one[0]);
+        let idle = plain(&render_status_bar(
+            &StatusBarProps {
+                active_skill_names: &[],
+                cwd: "/tmp/project",
+                monitors: 0,
+                running: false,
+                running_detail: None,
+                session_id: "1234567890abcdef",
+                shells: 0,
+            },
+            80,
+        ));
+        assert!(!idle[0].contains("monitor"), "{:?}", idle[0]);
+        assert!(!idle[0].contains("shell"), "{:?}", idle[0]);
+    }
+
+    #[test]
     fn status_bar_truncates_to_width() {
         let props = StatusBarProps {
             active_skill_names: &["a".to_string(), "b".to_string()],
             cwd: "/tmp",
+            monitors: 0,
             running: false,
             running_detail: None,
             session_id: "1234567890abcdef",
+            shells: 0,
         };
         let rows = plain(&render_status_bar(&props, 30));
         assert_eq!(rows.len(), 1);
@@ -1429,9 +1491,11 @@ mod tests {
         let props = StatusBarProps {
             active_skill_names: &[],
             cwd: "/tmp/project",
+            monitors: 0,
             running: false,
             running_detail: None,
             session_id: "1234567890abcdef",
+            shells: 0,
         };
         let rows = plain(&render_status_bar(&props, 80));
         assert_eq!(rows.len(), 1);

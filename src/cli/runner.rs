@@ -89,6 +89,11 @@ pub struct CliGoalRunArgs {
     pub tools: Vec<ChatToolDefinition>,
     /// Runtime services for async tools (the web server owns one; CLI defaults inside the harness).
     pub tool_services: Option<ChatToolRuntimeServices>,
+    /// A caller that keeps the async-job registry past this run and hands a
+    /// settled MONITOR back to the session itself (the TUI) sets this so the
+    /// loop does not hold the chat open waiting for one
+    /// (see `SolidStateHarnessOptions::monitor_background_handoff`).
+    pub monitor_background_handoff: bool,
 }
 
 /// Whether a previous run was resumed, with its harness state.
@@ -453,6 +458,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
             .map(|route| route.to_model_route()),
         tools: args.tools,
         tool_services: args.tool_services.clone(),
+        monitor_background_handoff: args.monitor_background_handoff,
         mcp_servers: args.mcp_servers.clone(),
         url: Some(args.inference.url.clone()),
         hooks: args.hooks.clone(),

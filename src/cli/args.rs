@@ -115,6 +115,8 @@ pub struct ParsedCliArgs {
     pub undo_last_count: Option<i64>,
     /// List the discovered skill pool and exit.
     pub skills: bool,
+    /// Restore the shipped default skills into the home and exit.
+    pub install_skills: bool,
     /// Stop the session's running goal (SIGTERM to the leased pid).
     pub stop: bool,
     /// Optional session id or prefix for --stop (defaults to the latest session).
@@ -268,6 +270,7 @@ impl Default for ParsedCliArgs {
             undo_last: false,
             undo_last_count: None,
             skills: false,
+            install_skills: false,
             stop: false,
             stop_id: None,
             state: false,
@@ -657,6 +660,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--skills" => {
                 parsed.skills = true;
+            }
+            "--install-skills" => {
+                parsed.install_skills = true;
             }
             "--dry-run" => {
                 parsed.dry_run = true;
@@ -1615,6 +1621,7 @@ mod tests {
         assert_eq!(parsed.skill_names, vec!["tdd", "verify"]);
         assert_eq!(parsed.goal.as_deref(), Some("goal text"));
         assert!(parse(&["--skills"]).skills);
+        assert!(parse(&["--install-skills"]).install_skills);
         assert!(!parse(&["--skill"]).errors.is_empty());
         assert!(parse(&["--no-skills"]).no_skills);
     }

@@ -1067,8 +1067,9 @@ impl WatchApp {
     }
 
     /// The picked skill's SKILL.md text, from the pool the focused session's
-    /// loop loaded it out of: that session's project skills, this machine's
-    /// user skills, then the builtins (embedded, so they resolve anywhere).
+    /// loop loaded it out of: that session's project skills, then this
+    /// machine's user skills (the shipped defaults among them, seeded at
+    /// first start).
     fn load_skill_markdown(&self, name: &str) -> Option<String> {
         let cwd = self
             .selected_record()
@@ -1079,7 +1080,6 @@ impl WatchApp {
         let skill = crate::cli::skills::discover_skills(
             std::path::Path::new(&cwd),
             &home_skills,
-            None,
             None,
         )
         .into_iter()
@@ -1447,6 +1447,12 @@ mod tests {
 
     #[test]
     fn arrows_clicks_and_the_wheel_walk_the_skills_and_tools_and_read_them_up() {
+        // The defaults live in the home as ordinary user skills, so the fixture
+        // home has to carry them before the read-up can find a SKILL.md.
+        crate::cli::skills::seed_default_skills_once(
+            "/tmp/drip-h",
+            std::path::Path::new("/tmp/drip-h/skills"),
+        );
         let mut app = WatchApp::new(project(), "/r".into());
         app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
             iteration: 1,

@@ -1150,7 +1150,6 @@ pub fn discover_all_skills(
         cwd,
         std::path::Path::new(&home.skills_dir),
         Some(marketplace_skills),
-        None,
     ))
 }
 
@@ -1164,7 +1163,6 @@ pub fn discover_all_skills_with_issues(
         cwd,
         std::path::Path::new(&home.skills_dir),
         Some(marketplace_skills),
-        None,
     ))
 }
 

@@ -19,6 +19,22 @@ cargo install --path .        # puts `drip`, `dripw`, and `drip-mcp` on your PAT
 cargo build --release && ./target/release/drip "goal"
 ```
 
+## Skills
+
+The default skills ship as **templates**, not as magic built-ins. On the first
+start drip copies each one into `<home>/skills/<name>/SKILL.md` — ordinary user
+skills from then on, editable and shadowable by a project skill of the same
+name. Once copied, a default skill stays gone if you delete it: a marker beside
+`skills/` records the names this home has already been given, so drip will not
+put a deleted one back. Ask for them again with:
+
+```sh
+drip --install-skills   # re-copy every shipped default template and exit
+```
+
+`drip --praeparare` (and `/praeparare` in the TUI) re-restores its own
+`praeparare` template if that one was deleted, since the mode needs it.
+
 ## MCP server (drip-mcp)
 
 Claude Code normally drives drip through the Bash tool. With Bash disabled,

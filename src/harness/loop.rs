@@ -5893,6 +5893,13 @@ pub struct SolidStateHarnessOptions {
     /// before persisting the pending survey and ending with awaiting-input
     /// (default DEFAULT_ASK_USER_TIMEOUT_SECONDS = 900).
     pub ask_user_timeout_seconds: Option<i64>,
+    /// The caller keeps the background-job registry alive past this run and
+    /// hands a settled MONITOR back to the session itself (the TUI's idle
+    /// handoff). The loop then does NOT hold for a pending MONITOR: the chat
+    /// ends with the task, and the settled result arrives as the next message.
+    /// False (every other caller) keeps the hold, because nothing would read
+    /// the result afterwards.
+    pub monitor_background_handoff: bool,
     /// Optional per-loop skill classifier route. `None` (the default) disables
     /// the feature entirely: no pool, no requests, only the explicit --skill
     /// activations.
@@ -8363,7 +8370,13 @@ impl HarnessRun {
                 // pending MONITOR and spend one delivery cycle handing the
                 // settled result to the model, which can then decide what to do
                 // next with it in hand.
-                if scope.task_finished && !scope.delivering_settled_monitor {
+                // A session that hands a settled monitor back to itself as
+                // its next message never holds the run: the chat ends the
+                // moment the task does, and the result wakes it later.
+                if !self.options.monitor_background_handoff
+                    && scope.task_finished
+                    && !scope.delivering_settled_monitor
+                {
                     if scope.delivery_cycles >= MONITOR_DELIVERY_MAX_CYCLES {
                         break;
                     }
@@ -8405,7 +8418,10 @@ impl HarnessRun {
                             // even when the task already finished: the settled
                             // result (completed OR failed) is the model's to
                             // act on.
-                            if !delivery_round && self.hold_for_pending_monitor(&mut scope).await {
+                            if !delivery_round
+                                && !self.options.monitor_background_handoff
+                                && self.hold_for_pending_monitor(&mut scope).await
+                            {
                                 continue;
                             }
                             break;
@@ -11799,7 +11815,15 @@ impl HarnessRun {
 
         // A job that settled after the last round was reported nowhere: say so
         // before the run result is built, so its output is not silently lost.
-        for job in self.tool_services.async_jobs.take_settled_unreported() {
+        // A session that hands settled monitor jobs back to itself as its next
+        // message (monitor_background_handoff) owns them: draining them here
+        // would leave the session nothing to wake with.
+        let settled_after_last_round = if self.options.monitor_background_handoff {
+            Vec::new()
+        } else {
+            self.tool_services.async_jobs.take_settled_unreported()
+        };
+        for job in settled_after_last_round {
             let status = job_status_label(job.status);
             let error = job
                 .error
@@ -11826,7 +11850,13 @@ impl HarnessRun {
         // still checking) count, so nothing outlives a run invisibly.
         let leaked_jobs: Vec<crate::core::types::HarnessLeakedJob> = leaked_background_jobs(
             self.tool_services.tmux_sessions.list_sessions(),
-            self.tool_services.async_jobs.running_jobs(),
+            // A handoff session keeps its monitor jobs on purpose — they are
+            // the message it wakes with — so they are not leaked work.
+            if self.options.monitor_background_handoff {
+                Vec::new()
+            } else {
+                self.tool_services.async_jobs.running_jobs()
+            },
         );
 
         if !leaked_jobs.is_empty() {

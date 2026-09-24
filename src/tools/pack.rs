@@ -614,7 +614,7 @@ fn monitor_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolResult
         )
     } else {
         (
-            format!("Monitor started; still waiting after {MONITOR_GRACE_MS}ms. The harness reports the settled result at the next round; in chat/TUI collect it with ASYNC_WAIT/ASYNC_TAIL. Do not sleep-and-poll in BASH."),
+            format!("Monitor started; still waiting after {MONITOR_GRACE_MS}ms. The settled result is reported to you at the next round; a TUI session ends when its task does and receives it as the session's next message, and in chat collect it with ASYNC_WAIT/ASYNC_TAIL. Do not sleep-and-poll in BASH."),
             ToolCallStatus::Running,
         )
     };

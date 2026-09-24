@@ -249,6 +249,9 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     no_review: false,
                     tools: child_tools,
                     tool_services: wiring.tool_services.clone(),
+                    // The parent run is live and drains this child's settled
+                    // jobs itself, so the child keeps the ordinary hold.
+                    monitor_background_handoff: false,
                     // A delegate child gets no MCP surface of its own.
                     mcp_servers: None,
                 }))

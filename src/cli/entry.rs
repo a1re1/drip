@@ -1413,6 +1413,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
         no_review: args.cli_args.no_review || args.cli_args.lite,
         tools: build_tools(),
         tool_services: None,
+        monitor_background_handoff: false,
     })
     .await
     {
@@ -1577,6 +1578,7 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
                 no_review: args.cli_args.no_review || args.cli_args.lite,
                 tools: build_tools(),
                 tool_services: None,
+                monitor_background_handoff: false,
             }))
         });
 

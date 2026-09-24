@@ -9,13 +9,14 @@
 // with the last check output. Every check is bounded by the remaining budget,
 // so a hung check cannot outlive timeoutMs. In the harness the settled result
 // reaches the model at the next round (harness/loop.rs
-// `report_settled_background_jobs`) with no polling; in interactive chat/TUI
-// the settled job is collected with ASYNC_WAIT or ASYNC_TAIL. A monitor still
-// checking when its task loop would end — even a loop whose task already
-// finished — is waited for instead, and its result is handed to the model in
-// one more round whether the check fired, timed out, or errored
-// (harness/loop.rs `hold_for_pending_monitor`); only a monitor still checking
-// after MONITOR_HOLD_MAX_MS is reported as leaked background work.
+// `report_settled_background_jobs`) with no polling; in interactive chat the
+// settled job is collected with ASYNC_WAIT or ASYNC_TAIL. A TUI session ends
+// the moment its task does and hands the settled job back to itself as its
+// next message (src/tui/app.rs `take_idle_background_reports` — the harness
+// leaves the job for the session instead of draining it); a CLI run has no
+// session to wake, so it instead waits for the settled result and resumes with
+// it (harness/loop.rs `hold_for_pending_monitor`), and only a monitor still
+// checking after MONITOR_HOLD_MAX_MS is reported as leaked background work.
 
 use std::time::{Duration, Instant};
 
@@ -290,7 +291,7 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "MONITOR",
-            "description": "Wait for a signal without spending model rounds. Runs `check` (a bash command, `bash -lc`) every intervalMs in a background job and finishes the moment it exits 0; on timeout it finishes as failed with the last check output. Returns inline when the signal is already met. Otherwise it keeps checking on its own: in the harness loop the settled result is reported to you at the next round — a task loop that would end while the monitor is still checking, even one whose task already finished, waits for the settled result and resumes with it, so a monitor that timed out or failed still reaches you — and in interactive chat/TUI collect it with ASYNC_WAIT or ASYNC_TAIL — never spend rounds on sleep-and-check loops in BASH.",
+            "description": "Wait for a signal without spending model rounds. Runs `check` (a bash command, `bash -lc`) every intervalMs in a background job and finishes the moment it exits 0; on timeout it finishes as failed with the last check output. Returns inline when the signal is already met. Otherwise it keeps checking on its own: as a TUI session the run ends when its task does and the settled result arrives as that session's next message; a CLI run has no session to wake, so it instead waits for the settled result, reports it to you, and resumes — a task loop that would end while the monitor is still checking, even one whose task already finished, waits for the settled result and resumes with it, so a monitor that timed out or failed still reaches you. In interactive chat collect it with ASYNC_WAIT or ASYNC_TAIL — never spend rounds on sleep-and-check loops in BASH.",
             "parameters": {
                 "additionalProperties": false,
                 "properties": {

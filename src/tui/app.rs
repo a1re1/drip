@@ -1244,6 +1244,73 @@ impl TuiApp {
         changed
     }
 
+    /// One message for a settled background job: what finished, how it
+    /// finished, and where its full output lives, so whoever reads it next can
+    /// act on it without hunting for the job. A MONITOR reports whether its
+    /// signal fired; an async shell reports its exit status.
+    fn background_report_message(job: &ChatAsyncToolJob) -> String {
+        let exit = job.exit_code.flatten();
+        let is_monitor = job.tool_name == "MONITOR";
+        let outcome = match (exit, job.error.as_deref()) {
+            (_, Some(error)) => format!("failed - {}", error.trim()),
+            (Some(0), None) if is_monitor => "the signal fired (exit 0)".to_string(),
+            (Some(code), None) if is_monitor => {
+                format!("ended with exit {code} without the signal")
+            }
+            (Some(code), None) => format!("finished with exit {code}"),
+            (None, None) if is_monitor => "settled without an exit status".to_string(),
+            (None, None) => "finished without an exit status".to_string(),
+        };
+        let kind = if is_monitor {
+            "background monitor"
+        } else {
+            "background shell"
+        };
+        format!(
+            "[{kind}] {} {}: {outcome} - full output: {}",
+            job.id, job.title, job.log_path
+        )
+    }
+
+    /// Claims the settled background jobs nobody has read yet, as one steering
+    /// report. `None` while a run is live -- the harness drains its own reports
+    /// at the next round and a second reader would steal them -- and `None`
+    /// when nothing has settled.
+    fn take_idle_background_reports(&mut self) -> Option<String> {
+        if self.running {
+            return None;
+        }
+        let settled = self.tool_services.async_jobs.take_settled_unreported();
+        if settled.is_empty() {
+            return None;
+        }
+        Some(
+            settled
+                .iter()
+                .map(Self::background_report_message)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// A background job settles on its own schedule, which is usually after the
+    /// run that started it has ended. Once no run is live there is nobody to
+    /// hand the result to, so wake the session back up with it: the settled
+    /// report becomes the next message, exactly as if the operator had waited
+    /// for the job to finish and then sent the result themselves. The queued
+    /// prompts go with it -- the report answers what the queue was waiting on,
+    /// so replaying both as separate goals would run the same thought twice.
+    fn handoff_settled_background_jobs(&mut self) {
+        let Some(report) = self.take_idle_background_reports() else {
+            return;
+        };
+        self.queued_prompts.clear();
+        self.push_info(
+            "a background job finished while the session was idle - waking it up with the result",
+        );
+        self.run_goal(report);
+    }
+
     /// `/jobs`: the browser. Nothing running still opens it -- the empty frame
     /// says so, which is a better answer than a silent no-op.
     fn jobs_command(&mut self, args: &str) {
@@ -4300,6 +4367,10 @@ impl TuiApp {
                     pack.extend(crate::tools::mcp::mcp_tool_definitions(&mcp_clients));
                     pack
                 },
+                // The TUI keeps this registry past the run and hands a
+                // settled monitor back to the session, so the run must not
+                // hold for one: see `handoff_settled_background_jobs`.
+                monitor_background_handoff: true,
                 tool_services: Some(tool_services),
                 // `/mcp` sets the run gate — the CLI's `--mcp`: `None` leaves
                 // the decision to the roles (a loop sees an MCP server exactly
@@ -4346,6 +4417,10 @@ impl TuiApp {
                 self.run_goal(next);
             }
         }
+        // A background job (a MONITOR above all) may have settled while this
+        // run was finishing. Hand a settled one to the session as its next
+        // message instead of leaving the result with no reader.
+        self.handoff_settled_background_jobs();
     }
 
     // ----- terminal pane title --------------------------------------------
@@ -4639,6 +4714,11 @@ impl TuiApp {
             // interval refresh here, never in the paint path (drawing stays
             // side-effect-free). Non-blocking; failures never retry or log.
             self.poll_status_line();
+
+            // A background job that settles while the session sits idle has no
+            // run to report to; hand its result back to the session as the
+            // next message from here rather than only counting it.
+            self.handoff_settled_background_jobs();
 
             // Background jobs: re-read the shared runtime's running set on its
             // own deadline (drawing stays side-effect-free), and repaint when
@@ -7873,12 +7953,14 @@ mod background_jobs_tests {
     /// test reads it exactly like it reads the real manager.
     struct FakeJobs {
         running: Mutex<Vec<ChatAsyncToolJob>>,
+        reported: Mutex<Vec<String>>,
     }
 
     impl FakeJobs {
         fn new(jobs: Vec<ChatAsyncToolJob>) -> Arc<Self> {
             Arc::new(Self {
                 running: Mutex::new(jobs),
+                reported: Mutex::new(Vec::new()),
             })
         }
 
@@ -7932,6 +8014,21 @@ mod background_jobs_tests {
             _timeout_ms: Option<i64>,
         ) -> anyhow::Result<ChatAsyncToolWaitResult> {
             anyhow::bail!("the fake runtime never waits")
+        }
+
+        /// Mirrors `AsyncToolJobManager::take_settled_unreported`: a settled
+        /// job nobody has read yet comes back once, then counts as reported.
+        fn take_settled_unreported(&self) -> Vec<ChatAsyncToolJob> {
+            let reported = self.reported.lock().unwrap().clone();
+            let mut jobs = self.running.lock().unwrap();
+            let mut settled = Vec::new();
+            for job in jobs.iter_mut() {
+                if job.status != ChatAsyncToolJobStatus::Running && !reported.contains(&job.id) {
+                    self.reported.lock().unwrap().push(job.id.clone());
+                    settled.push(job.clone());
+                }
+            }
+            settled
         }
 
         /// Mirrors `AsyncToolJobManager::running_jobs`: settled jobs are
@@ -8049,6 +8146,44 @@ mod background_jobs_tests {
             _rx: rx,
             _mention_rx: mention_rx,
         }
+    }
+
+    #[test]
+    fn a_settled_monitor_is_handed_to_an_idle_session_as_its_next_message() {
+        let mut fixture = make_app(vec![]);
+        let mut settled = job("monitor-1", "MONITOR", "monitor: watch the build");
+        settled.status = ChatAsyncToolJobStatus::Completed;
+        settled.exit_code = Some(Some(0));
+        settled.finished_at = Some("2026-01-01T00:00:05Z".to_string());
+        fixture.jobs.set(vec![settled]);
+
+        let report = fixture
+            .app
+            .take_idle_background_reports()
+            .expect("an idle session takes the settled report");
+        assert!(
+            report.contains("[background monitor] monitor-1"),
+            "{report}"
+        );
+        assert!(report.contains("the signal fired"), "{report}");
+        assert!(report.contains("/tmp/job.log"), "{report}");
+
+        // Claimed exactly once: the next poll has nothing left to hand over.
+        assert!(fixture.app.take_idle_background_reports().is_none());
+    }
+
+    #[test]
+    fn a_live_run_keeps_its_own_background_reports() {
+        let mut fixture = make_app(vec![]);
+        let mut settled = job("monitor-1", "MONITOR", "monitor: watch the build");
+        settled.status = ChatAsyncToolJobStatus::Failed;
+        settled.error = Some("monitor timed out after 1000ms".to_string());
+        fixture.jobs.set(vec![settled]);
+        fixture.app.running = true;
+
+        assert!(fixture.app.take_idle_background_reports().is_none());
+        // Still unclaimed: the running harness drains it at its next round.
+        assert_eq!(fixture.jobs.take_settled_unreported().len(), 1);
     }
 
     fn strip(rows: &[String]) -> Vec<String> {

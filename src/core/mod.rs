@@ -8,5 +8,6 @@ pub mod inference;
 pub mod lease;
 pub mod sessions;
 pub mod skill_requirements;
+pub mod startup;
 pub mod state;
 pub mod types;

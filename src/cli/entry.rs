@@ -2758,6 +2758,33 @@ pub async fn main(argv: Vec<String>) -> i32 {
     let allow_net = tool_options.allow_net;
     let reference_roots = tool_options.reference_roots.clone();
     let status_line_setting = config.status_line.clone();
+    // The startup banner is rendered by the operator's script before the TUI
+    // owns the terminal; a missing, empty or failing script never blocks the
+    // session (see core::startup).
+    let startup_message = {
+        let path = crate::core::startup::resolve_startup_message_path(&home.home_root);
+        let profiles: Vec<crate::core::startup::StartupProfile> =
+            crate::core::config::list_cli_model_profiles(&config.settings)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|profile| crate::core::startup::StartupProfile {
+                    id: profile.id,
+                    model: profile.model,
+                    label: profile.label,
+                })
+                .collect();
+        let active_profile_id = crate::core::config::get_active_cli_profile_id(&config.settings);
+        tokio::task::block_in_place(|| {
+            crate::core::startup::run_startup_message(&crate::core::startup::StartupMessageInput {
+                path: &path,
+                version: env!("CARGO_PKG_VERSION"),
+                cwd: &cwd,
+                session_id: &session.id,
+                profiles: &profiles,
+                active_profile_id: &active_profile_id,
+            })
+        })
+    };
     tokio::task::block_in_place(|| {
         crate::tui::app::run_tui_app(crate::tui::app::TuiBootstrap {
             allow_net,
@@ -2787,6 +2814,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
             roles_flag,
             session,
             status_line: status_line_setting,
+            startup_message,
         })
     })
 }

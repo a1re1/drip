@@ -299,6 +299,11 @@ pub fn open_drip_home(root: &str) -> DripHome {
     // Seeded once so there is always something to edit; an existing file is
     // never overwritten, and emptying it restores the built-in prompt.
     let _ = ensure_summary_preferences_file(Path::new(&home.summary_preferences_path));
+    // The startup banner script is seeded once with the shipped mascot; it is
+    // the operator's file to rewrite or delete.
+    let _ = crate::core::startup::ensure_startup_message_file(Path::new(
+        &crate::core::startup::resolve_startup_message_path(root),
+    ));
 
     home
 }

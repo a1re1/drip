@@ -2,8 +2,8 @@
 //! whose output is shown once when an interactive session opens.
 //!
 //! `~/.drip/startup-message.sh` is drip's own file (nothing here ever reads or
-//! executes `~/.claude` settings). It is seeded once with a rainbow
-//! water-droplet mascot and a single info line — drip's version, the model
+//! executes `~/.claude` settings). It is seeded once with a rainbow rain-cloud
+//! mascot and a single info line — drip's version, the model
 //! profile chosen for startup, and the working directory — and the operator may
 //! rewrite it however they like, or delete it to get no banner at all.
 //!
@@ -73,7 +73,11 @@ pub fn resolve_startup_message_path(home_root: &str) -> String {
 /// `startup-message.sh` still identical to one of these has never been edited
 /// by the operator, so it is upgraded in place; any other content belongs to
 /// the operator and is never touched.
-const LEGACY_STARTUP_MESSAGE_SCRIPTS: &[&str] = &[include_str!("startup_legacy_default.sh")];
+const LEGACY_STARTUP_MESSAGE_SCRIPTS: &[&str] = &[
+    include_str!("startup_legacy_default.sh"),
+    // The rainbow water droplet this build replaced with the rain cloud.
+    include_str!("startup_legacy_rainbow_droplet.sh"),
+];
 
 /// Seed `startup-message.sh` with the shipped banner so there is always
 /// something to edit. An existing file is left byte-identical — unless it is
@@ -327,7 +331,7 @@ pub fn run_startup_message(input: &StartupMessageInput<'_>) -> Option<String> {
     None
 }
 
-/// The shipped startup script: a rainbow droplet and one info line. It uses
+/// The shipped startup script: a rainbow rain cloud and one info line. It uses
 /// only the `DRIP_STARTUP_*` environment variables, so it is a working example
 /// of how a rewrite gets its facts.
 pub const DEFAULT_STARTUP_MESSAGE_SCRIPT: &str = r#"#!/bin/sh
@@ -367,13 +371,14 @@ rainbow() {
   }'
 }
 
-rainbow '       __'
-rainbow '      /  \'
-rainbow '     /    \'
-rainbow '     |    |'
-rainbow '     \    /'
-rainbow '      \  /'
-rainbow '       \/'
+# The mascot: a rain cloud in five rows - puffed crown, rounded shoulder, a
+# flat base, then two rows of rain. The rain uses ' and . so the ramp still
+# reads cool below the cloud.
+rainbow '      .--.'
+rainbow '   .-(    ).'
+rainbow '  (___.__)__)'
+rainbow "   ' . ' . '"
+rainbow "   . ' . '"
 
 active_model=$(printf '%s\n' "$DRIP_STARTUP_PROFILES" | grep '^\* ' | head -n 1)
 active_model=${active_model#*: }
@@ -444,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_script_draws_a_colorful_droplet_and_one_info_line() {
+    fn the_default_script_draws_a_colorful_rain_cloud_and_one_info_line() {
         let dir = tempfile::tempdir().unwrap();
         let cwd_dir = tempfile::tempdir().unwrap();
         let cwd = cwd_dir.path().to_string_lossy().into_owned();
@@ -457,21 +462,25 @@ mod tests {
         let out = run(&path, &cwd, &profiles).expect("the default script prints a banner");
         let text = plain(&out);
 
-        // The mascot is a droplet: flat crown, sloping shoulders, a straight
-        // body and a tapered tip.
+        // The mascot is a rain cloud: puffed crown, rounded shoulder, a flat
+        // base, and two rows of rain under it.
+        assert!(text.contains("      .--."), "cloud crown missing: {text:?}");
         assert!(
-            text.contains("       __"),
-            "droplet crown missing: {text:?}"
+            text.contains("   .-(    )."),
+            "cloud shoulder missing: {text:?}"
         );
         assert!(
-            text.contains("      /  \\"),
-            "droplet shoulder missing: {text:?}"
+            text.contains("  (___.__)__)"),
+            "cloud base missing: {text:?}"
         );
         assert!(
-            text.contains("     |    |"),
-            "droplet body missing: {text:?}"
+            text.contains("   ' . ' . '") && text.contains("   . ' . '"),
+            "rain rows missing: {text:?}"
         );
-        assert!(text.contains("       \\/"), "droplet tip missing: {text:?}");
+        assert!(
+            !text.contains("\\/"),
+            "the droplet mascot is still in the banner: {text:?}"
+        );
         // It is painted through a 256-color ramp, and the info line is styled.
         assert!(out.contains("\x1b[38;5;45m"), "no rainbow ramp: {out:?}");
         assert!(out.contains("\x1b[38;5;219m"), "ramp is too short: {out:?}");
@@ -490,8 +499,8 @@ mod tests {
         );
         assert_eq!(
             text.trim_end().lines().count(),
-            8,
-            "expected 7 mascot rows + 1 info row: {text:?}"
+            6,
+            "expected 5 mascot rows + 1 info row: {text:?}"
         );
         // Only color runs survive: every escape printed ends a style, so
         // nothing in the banner can move the cursor or clear the screen.
@@ -575,15 +584,31 @@ mod tests {
     fn an_unedited_previous_default_is_upgraded_and_an_edited_file_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(STARTUP_MESSAGE_FILE_NAME);
-        let legacy = LEGACY_STARTUP_MESSAGE_SCRIPTS[0];
+        // Every default an earlier version shipped - the plain droplet and the
+        // rainbow droplet this change replaced - is upgraded when unedited.
+        for legacy in LEGACY_STARTUP_MESSAGE_SCRIPTS {
+            std::fs::write(&path, legacy).unwrap();
+            ensure_startup_message_file(&path).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                DEFAULT_STARTUP_MESSAGE_SCRIPT,
+                "an unedited earlier default was not upgraded"
+            );
+        }
 
-        // Never edited, so it is replaced by the default this build ships.
-        std::fs::write(&path, legacy).unwrap();
+        // The rainbow droplet the rain cloud replaced is in that list, and a
+        // file that was edited is the operator's, never an upgrade target.
+        let rainbow = include_str!("startup_legacy_rainbow_droplet.sh");
+        assert!(
+            LEGACY_STARTUP_MESSAGE_SCRIPTS.contains(&rainbow),
+            "the rainbow droplet default is not upgradable"
+        );
+        std::fs::write(&path, format!("{rainbow}\necho mine\n")).unwrap();
         ensure_startup_message_file(&path).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            DEFAULT_STARTUP_MESSAGE_SCRIPT,
-            "an unedited earlier default was not upgraded"
+            format!("{rainbow}\necho mine\n"),
+            "an edited rainbow droplet default was overwritten"
         );
 
         // Any other content belongs to the operator and is left byte-identical.

@@ -967,16 +967,18 @@ impl TuiApp {
             tx,
             env_overlay: None,
         };
-        // The banner is the first scrollback row, painted before the first
-        // frame; it is never persisted, so reopening a session does not replay
-        // an old greeting.
+        // The banner leads the first scrollback replay: it enters the in-memory
+        // timeline (never the transcript, so reopening a session does not
+        // replay an old greeting) and is painted by `run` in the same pass as
+        // the persisted rows. Painting it here instead would print it twice --
+        // once before `run` hides the cursor and installs the live region.
         if let Some(text) = startup_message {
-            app.push_cell(
+            app.cells.insert(
+                0,
                 TranscriptEntry::Info(TranscriptNoteEntry {
                     at: now_iso(),
                     text,
                 }),
-                false,
             );
         }
         app
@@ -6431,6 +6433,13 @@ mod prompt_history_wiring_tests {
     }
 
     pub(super) fn make_history_app(skills: &[&str]) -> HistoryFixture {
+        make_history_app_with_banner(skills, None)
+    }
+
+    pub(super) fn make_history_app_with_banner(
+        skills: &[&str],
+        startup_banner: Option<&str>,
+    ) -> HistoryFixture {
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let home = tempfile::tempdir().expect("home tempdir");
         let project = tempfile::tempdir().expect("project tempdir");
@@ -6483,7 +6492,7 @@ mod prompt_history_wiring_tests {
             roles_flag: None,
             session,
             status_line: None,
-            startup_message: None,
+            startup_message: startup_banner.map(str::to_string),
             classifier: None,
             no_classifier: false,
         };
@@ -6502,6 +6511,41 @@ mod prompt_history_wiring_tests {
             _rx: rx,
             _mention_rx: mention_rx,
         }
+    }
+
+    #[test]
+    fn the_startup_banner_leads_the_first_replay_and_is_never_persisted() {
+        let fixture = make_history_app_with_banner(&[], Some("DRIP BANNER"));
+        let app = &fixture.app;
+
+        assert!(
+            matches!(
+                app.cells.first(),
+                Some(TranscriptEntry::Info(note)) if note.text == "DRIP BANNER"
+            ),
+            "banner is not the leading row: {:?}",
+            app.cells
+        );
+        // The banner must still be queued for `run`'s single replay; painting
+        // it during construction would print it twice -- once before `run`
+        // hides the cursor and installs the live region.
+        assert!(
+            app.pending_cells.is_empty(),
+            "banner was painted during construction"
+        );
+        assert!(app.compact.projection.cells.is_empty());
+        assert!(
+            read_transcript(Path::new(&app.paths.transcript_path)).is_empty(),
+            "banner leaked into the transcript"
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_banner_starts_with_an_empty_timeline() {
+        let fixture = make_history_app(&[]);
+
+        assert!(fixture.app.cells.is_empty());
+        assert!(fixture.app.pending_cells.is_empty());
     }
 
     fn type_into(app: &mut TuiApp, text: &str) {

@@ -664,7 +664,7 @@ longer enforced.
 
 The `reviewer` role is also `blind`: its loops never inherit the author's tool
 exchanges or footprint, so it judges the artifact against the goal and against
-anchors the author did not write. Any role definition (`~/.drip/config.json`
+anchors the author did not write. Any role definition (`~/.drip/profiles/`
 or `.drip/profiles/`) can set `blind: true`.
 
 Any role can also set `reasoningEffort` (`"low"`, `"medium"`, `"high"`) to

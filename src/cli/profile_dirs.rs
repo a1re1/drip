@@ -215,11 +215,17 @@ pub fn ensure_profiles_dir(home_root: &Path) {
 /// `<config dir>/profiles/<name>/{config.json,prompt.md}` and clears the
 /// setting once every profile is on disk.
 ///
-/// Returns true when the setting may be dropped: either the profiles were
-/// written now, or a directory for them already existed (a migration that
-/// already ran, or a hand-authored profile of the same name). A write failure
-/// leaves the setting alone, so the next load retries — no profile is ever
-/// lost to a half-finished migration.
+/// Returns true only when every entry in the setting is accounted for on
+/// disk: the profiles were written now, or a directory for them already
+/// existed (a migration that already ran, or a hand-authored profile of the
+/// same name). Anything that leaves an entry unaccounted for — a write
+/// failure, or an entry the role normalizer could not lift — reports its issue
+/// and leaves the setting alone, so the next load retries. Clearing the
+/// setting while an entry was dropped would destroy that entry with a warning
+/// as the only trace.
+///
+/// Liftable entries are still written on a partial failure, so fixing the
+/// offending entry and reloading finishes the migration.
 pub fn migrate_legacy_role_profiles(
     config_path: &Path,
     settings: &mut IndexMap<String, String>,
@@ -251,6 +257,9 @@ pub fn migrate_legacy_role_profiles(
         .unwrap_or_else(|| Path::new("."))
         .join(PROFILES_DIR_NAME);
 
+    // The normalizer's issues were previously discarded here, which let a
+    // partially liftable setting drop its unusable entries and still clear the
+    // setting below. Surface them instead, and let them keep the setting alive.
     let mut ignored_issues: Vec<String> = Vec::new();
     let mut roles: Vec<RoleDefinition> = Vec::new();
     for entry in entries {
@@ -260,6 +269,12 @@ pub fn migrate_legacy_role_profiles(
             roles.push(role);
         }
     }
+    for issue in &ignored_issues {
+        eprintln!(
+            "warning: {}: {issue}; {ROLE_PROFILES_SETTING_ID} is kept until every entry migrates",
+            config_path.display()
+        );
+    }
     if roles.is_empty() {
         // Nothing liftable (every entry was unusable): leave the setting for
         // the loader to report.
@@ -267,14 +282,50 @@ pub fn migrate_legacy_role_profiles(
     }
 
     let mut written: Vec<PathBuf> = Vec::new();
+    let mut seen_names: Vec<String> = Vec::new();
     let mut settled = 0usize;
     for role in &roles {
-        let base = profile_dir_name(&role.name);
-        // Already on disk under its own name — hand-authored, or an earlier
-        // migration run. Never overwrite it.
-        if profile_dir_holds(&root.join(&base), &role.name) {
-            settled += 1;
+        let name = role.name.trim();
+        // Two entries with one name are one role to the loader (they merge by
+        // name), so writing only the first directory would drop the second
+        // entry's fields. Keep the setting instead and say so.
+        if seen_names.iter().any(|seen| seen == name) {
+            eprintln!(
+                "warning: {}: {ROLE_PROFILES_SETTING_ID} defines \"{}\" more than once; \
+                 merge the duplicate entries so migration can place this profile",
+                config_path.display(),
+                role.name
+            );
             continue;
+        }
+        seen_names.push(name.to_string());
+
+        let base = profile_dir_name(&role.name);
+        match profile_dir_holds(&root.join(&base), &role.name) {
+            // Already on disk under its own name — hand-authored, or an earlier
+            // migration run. Never overwrite it.
+            Some(true) => {
+                settled += 1;
+                continue;
+            }
+            // An existing directory whose config.json omits `name`: the loader
+            // names it after the directory, so this may or may not be the same
+            // profile. Never overwrite it, but never call the legacy entry
+            // migrated either — clearing the setting here would discard it
+            // with no trace.
+            None if root.join(&base).join(PROFILE_CONFIG_FILE).exists() => {
+                eprintln!(
+                    "warning: {}: {} has no \"name\" and {} takes its name from the \
+                     directory; add a \"name\" (or remove the directory) so migration can place \
+                     \"{}\". {ROLE_PROFILES_SETTING_ID} is kept until every entry migrates",
+                    config_path.display(),
+                    root.join(&base).join(PROFILE_CONFIG_FILE).display(),
+                    PROFILE_PROMPT_FILE,
+                    role.name
+                );
+                continue;
+            }
+            _ => {}
         }
 
         match free_profile_dir(&root, &base, &written) {
@@ -303,28 +354,35 @@ pub fn migrate_legacy_role_profiles(
         }
     }
 
-    let migrated = settled == roles.len();
+    // `roles.len() < entries.len()` means the normalizer skipped an entry: the
+    // setting must survive so that entry is neither lost nor silently ignored.
+    let migrated = settled == roles.len() && roles.len() == entries.len();
     if migrated {
         settings.insert(ROLE_PROFILES_SETTING_ID.to_string(), "[]".to_string());
     }
     migrated
 }
 
-/// Whether `dir` is already the profile directory of `name` — a config.json
-/// whose `name` matches, or one that omits `name` (the loader defaults it to
-/// the directory name).
-fn profile_dir_holds(dir: &Path, name: &str) -> bool {
+/// Whether `dir` is already the profile directory of `name`.
+///
+/// `Some(true)` — its config.json names this profile. `Some(false)` — it names
+/// a different profile, or its config.json is unreadable/malformed (the loader
+/// reports that one; migration must not treat it as migrated). `None` — no
+/// config.json at all, or one that omits `name`, so the loader would call it
+/// whatever the directory is called: callers must not assume it is this
+/// profile.
+fn profile_dir_holds(dir: &Path, name: &str) -> Option<bool> {
     let Ok(raw) = fs::read_to_string(dir.join(PROFILE_CONFIG_FILE)) else {
-        return false;
+        return None;
     };
-    match serde_json::from_str::<Value>(&raw) {
-        Ok(value) => value
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(|existing| existing.trim() == name.trim())
-            .unwrap_or(true),
-        Err(_) => false,
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Some(false);
+    };
+    let existing = value.get("name").and_then(|value| value.as_str())?;
+    if existing.trim().is_empty() {
+        return None;
     }
+    Some(existing.trim() == name.trim())
 }
 
 /// The first free `<root>/<base>[-N]` directory name, ignoring names already
@@ -432,6 +490,104 @@ Seek  "
         assert_eq!(
             blob["model"], "fast",
             "an existing profile directory is never overwritten"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partially_liftable_setting_keeps_the_entries_it_could_not_lift() {
+        let dir = temp_dir("partial");
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        // `{"id": ...}` is the pre-change README's own example shape: no
+        // `name`, so the normalizer skips it. The other entry lifts fine.
+        let raw = r#"[{"id":"planner","prompt":"PLAN PROMPT"},{"name":"Reviewer One","prompt":"Review hard."}]"#;
+        let mut settings: IndexMap<String, String> = IndexMap::new();
+        settings.insert(ROLE_PROFILES_SETTING_ID.to_string(), raw.to_string());
+
+        assert!(
+            !migrate_legacy_role_profiles(&config_path, &mut settings),
+            "an entry that could not be lifted keeps the setting alive"
+        );
+        assert_eq!(
+            settings.get(ROLE_PROFILES_SETTING_ID).map(String::as_str),
+            Some(raw),
+            "the un-liftable entry survives for the loader to report and the user to fix"
+        );
+
+        // The liftable entry still landed, so a fixed setting migrates cleanly
+        // and the retry does not rewrite it.
+        let reviewer = dir.join("profiles").join("reviewer-one");
+        assert!(reviewer.join("config.json").is_file());
+        assert_eq!(
+            fs::read_to_string(reviewer.join("prompt.md")).unwrap(),
+            "Review hard.\n"
+        );
+        let mut fixed: IndexMap<String, String> = IndexMap::new();
+        fixed.insert(
+            ROLE_PROFILES_SETTING_ID.to_string(),
+            r#"[{"name":"planner","prompt":"PLAN PROMPT"},{"name":"Reviewer One","prompt":"Review hard."}]"#.to_string(),
+        );
+        assert!(migrate_legacy_role_profiles(&config_path, &mut fixed));
+        assert_eq!(
+            fs::read_to_string(reviewer.join("prompt.md")).unwrap(),
+            "Review hard.\n",
+            "the already-written profile is not rewritten by the retry"
+        );
+        assert!(dir.join("profiles/planner/prompt.md").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_nameless_profile_directory_keeps_the_legacy_entry_unsettled() {
+        let dir = temp_dir("nameless-collision");
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        // A hand-authored profile whose slug matches the legacy entry's, with
+        // no `name` — the loader calls it "reviewer-one" after the directory.
+        let hand = dir.join("profiles").join("reviewer-one");
+        fs::create_dir_all(&hand).unwrap();
+        fs::write(hand.join("config.json"), r#"{"model":"hand-written"}"#).unwrap();
+
+        let raw = r#"[{"name":"Reviewer One","prompt":"Review hard."}]"#;
+        let mut settings: IndexMap<String, String> = IndexMap::new();
+        settings.insert(ROLE_PROFILES_SETTING_ID.to_string(), raw.to_string());
+
+        assert!(
+            !migrate_legacy_role_profiles(&config_path, &mut settings),
+            "a directory that only *might* be this profile must not settle the entry"
+        );
+        assert_eq!(
+            settings.get(ROLE_PROFILES_SETTING_ID).map(String::as_str),
+            Some(raw),
+            "the legacy entry is never discarded into an ambiguous directory"
+        );
+        // The hand-authored profile is untouched — no -2 duplicate either.
+        assert_eq!(
+            fs::read_to_string(hand.join("config.json")).unwrap(),
+            r#"{"model":"hand-written"}"#
+        );
+        assert!(!dir.join("profiles").join("reviewer-one-2").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repeated_role_name_keeps_the_setting_until_it_is_deduplicated() {
+        let dir = temp_dir("duplicate-name");
+        let config_path = dir.join("config.json");
+        fs::write(&config_path, "{}").unwrap();
+
+        let raw = r#"[{"name":"author","model":"fast"},{"name":"author","tools":["READ"]}]"#;
+        let mut settings: IndexMap<String, String> = IndexMap::new();
+        settings.insert(ROLE_PROFILES_SETTING_ID.to_string(), raw.to_string());
+
+        assert!(!migrate_legacy_role_profiles(&config_path, &mut settings));
+        assert_eq!(
+            settings.get(ROLE_PROFILES_SETTING_ID).map(String::as_str),
+            Some(raw),
+            "writing only the first of two same-named entries would drop the second's fields"
         );
         let _ = fs::remove_dir_all(&dir);
     }

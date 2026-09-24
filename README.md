@@ -142,10 +142,14 @@ drip "repair the corrupted shards" --max-loops 30
 # --plan-mode always|auto|direct: how a run gets its first task list; auto skips the planner
 # for small goals that declare their own check
 
-# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
-# skills appear above the input line; up/down selects, tab completes, and
-# enter enables the skill for that session. Typing a full skill name as a
-# command (e.g. `/navis`) also enables it without starting a run.
+# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — the first
+# three matching skills appear above the input line (further matches page in
+# as you move); up/down selects, tab completes, and enter enables the skill
+# for that session. A skill name typed in full (e.g. `/navis`) is painted
+# green, showing it will be invoked on enter; `/navis <goal>` enables the
+# skill and runs the rest of the line as the goal. An explicitly enabled
+# skill outranks anything the classifier would have found on its own: it is
+# composed into the base prompt and excluded from the classifier's pool.
 
 # Machine-readable output (NDJSON; final line is the result)
 drip "goal" --json

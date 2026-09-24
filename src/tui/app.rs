@@ -172,6 +172,7 @@ fn help_text() -> String {
             "  /<skill-name> — enable a discovered skill for this session (idempotent; /skill <name> toggles)",
             "  /praeparare — pre-PR pass: clean up, commit, merge the base branch, push, open a DRAFT PR",
             "  typing /<prefix> lists matching skills above the input; up/down select, tab completes, esc clears the line",
+            "  a skill name typed in full turns green — enter enables it; /navis <goal> enables it and runs the rest as the goal",
             "  @path or @path#12:40 — inline a file (or directory tree) into the goal",
             "  ctrl+v — attach the clipboard image; pasting an image path or data URL also attaches",
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
@@ -881,6 +882,28 @@ fn filter_skill_catalog(
     exact
 }
 
+/// The leading `/token` of a composer line when it names a discovered skill
+/// exactly (and is not a built-in command): the length in chars, including the
+/// leading '/', of the span the composer paints as "this will be invoked" on
+/// enter. A prefix is only a suggestion, so it stays unpainted.
+fn invoked_skill_token_len(text: &str, catalog: &[(String, String)]) -> Option<usize> {
+    let rest = text.strip_prefix('/')?;
+    let token = rest.split_whitespace().next()?;
+    if token.is_empty() || token.contains('/') {
+        return None;
+    }
+    if SLASH_COMMANDS
+        .iter()
+        .any(|command| command.name.eq_ignore_ascii_case(token))
+    {
+        return None;
+    }
+    catalog
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(token))
+        .then(|| token.chars().count() + 1)
+}
+
 impl TuiApp {
     fn new(bootstrap: TuiBootstrap, tx: Sender<Msg>, mention_tx: Sender<(u64, String)>) -> Self {
         let paths = session_paths_for(&bootstrap.project, &bootstrap.session);
@@ -1279,6 +1302,7 @@ impl TuiApp {
                     selected_skill_index: self.selected_skill_index,
                     selected_suggestion_index: self.selected_suggestion_index,
                     skill_suggestions: &self.skill_suggestions,
+                    invoked_skill_len: invoked_skill_token_len(&self.text, &self.skill_catalog),
                     slash_suggestions: &slash,
                     text: &self.text,
                     queued: &queued,
@@ -1659,10 +1683,14 @@ impl TuiApp {
         }
 
         // Skill names allow characters the slash-command grammar rejects
-        // (qualified names like "spellcraft:navis", digits, dots), so a lone
-        // "/<token>" that parse_slash_command rejected still activates a
-        // discovered skill; anything else falls through to the goal run.
-        if submitted.starts_with('/') && self.enable_skill_if_discovered(&submitted[1..]) {
+        // (qualified names like "spellcraft:navis", digits, dots), and a skill
+        // line may carry the goal after it ("/navis ship this"), so a leading
+        // "/<token>" naming a discovered skill activates it and runs the rest
+        // as the goal; anything else falls through to the ordinary goal run.
+        if let Some(rest) = self.submitted_skill_goal(&submitted) {
+            if !rest.is_empty() {
+                self.submit_goal_text(rest);
+            }
             return;
         }
 
@@ -2947,6 +2975,23 @@ impl TuiApp {
         true
     }
 
+    /// A submitted line whose leading `/<token>` names a discovered skill:
+    /// enable it and return the rest of the line as the goal (empty for a bare
+    /// "/navis"). `None` leaves the line alone for the ordinary goal path.
+    ///
+    /// This is the submit-side twin of the `dispatch_command` default arm, for
+    /// skill names the slash-command grammar rejects (qualified names like
+    /// "spellcraft:navis", digits, dots): the typed name is explicit intent, so
+    /// the skill is active before the remainder runs.
+    fn submitted_skill_goal(&mut self, submitted: &str) -> Option<String> {
+        let rest = submitted.strip_prefix('/')?;
+        let token = rest.split_whitespace().next()?;
+        if token.is_empty() || !self.enable_skill_if_discovered(token) {
+            return None;
+        }
+        Some(submitted[1 + token.len()..].trim().to_string())
+    }
+
     // ----- commands -------------------------------------------------------
 
     fn dispatch_command(&mut self, name: &str, args: &str) {
@@ -3150,11 +3195,17 @@ impl TuiApp {
             // names always win because their arms match first, and "/skill"
             // keeps its toggle behavior unchanged.
             _ => {
-                // A discovered skill name enables for the session — but only
-                // as a lone token. With arguments this is not a skill command,
-                // so keep the unknown-command error instead of silently
-                // dropping the arguments.
-                if !args.trim().is_empty() || !self.enable_skill_if_discovered(name) {
+                // A discovered skill name enables for the session — alone
+                // ("/navis") or with the goal after it ("/navis ship this"):
+                // the typed name is explicit intent, so the skill is active
+                // before the remainder runs as the goal. Anything else keeps
+                // the unknown-command error.
+                if self.enable_skill_if_discovered(name) {
+                    let rest = args.trim();
+                    if !rest.is_empty() {
+                        self.submit_goal_text(rest.to_string());
+                    }
+                } else {
                     self.push_error(format!("Unknown command /{name}. Try /help."));
                 }
             }
@@ -6216,29 +6267,37 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn dispatching_a_skill_with_arguments_errors_instead_of_activating() {
+    fn dispatching_a_skill_with_a_goal_activates_instead_of_erroring() {
+        // The contract reversed deliberately: "/navis <goal>" is explicit
+        // intent, so the skill enables and the remainder becomes the goal
+        // instead of an unknown-command error.
         let mut fixture = make_app_with_skills(&["navis"]);
         fixture.app.dispatch_command("navis", "extra");
-        assert!(
-            fixture.app.active_skills.is_empty(),
-            "a skill dispatched with arguments must not activate"
-        );
-        assert!(!fixture.app.running);
-        assert!(
+        assert_eq!(
             fixture
                 .app
-                .cells
+                .active_skills
                 .iter()
-                .any(|entry| matches!(entry, TranscriptEntry::Error(_))),
-            "the dispatch must report an unknown-command error, not drop the args silently"
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["navis"],
+            "a skill dispatched with a goal after it activates"
         );
+        // Starting a run in this fixture fails later (no resolvable
+        // inference profile), so the check is on the message, not on the
+        // absence of an error cell.
+        let errors: Vec<String> = fixture
+            .app
+            .cells
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::Error(note) => Some(note.text.clone()),
+                _ => None,
+            })
+            .collect();
         assert!(
-            fixture
-                .app
-                .cells
-                .iter()
-                .all(|entry| !matches!(entry, TranscriptEntry::Skill(_))),
-            "no skill activation may be recorded"
+            !errors.iter().any(|text| text.contains("Unknown command")),
+            "a known skill name with a goal is not an unknown-command error: {errors:?}"
         );
     }
 
@@ -6390,7 +6449,68 @@ mod skill_activation_tests {
             "the queued prompt becomes the next goal"
         );
     }
-}
+
+    #[test]
+    fn skill_token_with_a_goal_text_enables_the_skill_and_runs_the_rest() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        // "/navis ship this": the typed name is explicit intent, so the skill
+        // must be enabled before the remainder runs as the goal.
+        fixture.app.dispatch_command("navis", "ship this");
+        assert!(
+            fixture
+                .app
+                .active_skills
+                .iter()
+                .any(|skill| skill.name == "navis"),
+            "a leading skill token with arguments still activates the skill"
+        );
+    }
+
+    #[test]
+    fn unknown_token_with_arguments_keeps_the_unknown_command_error() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture.app.dispatch_command("definitely-not-a-skill", "some args");
+        assert!(fixture.app.active_skills.is_empty());
+        assert!(!fixture.app.running);
+    }
+
+    #[test]
+    fn qualified_skill_token_with_a_goal_text_activates_from_the_composer() {
+        let mut fixture = make_app_with_skills(&["spellcraft:navis"]);
+        type_text(&mut fixture.app, "/spellcraft:navis ship this");
+        fixture.app.submit();
+        assert!(
+            fixture
+                .app
+                .active_skills
+                .iter()
+                .any(|skill| skill.name == "spellcraft:navis"),
+            "a qualified name carries the goal after it"
+        );
+    }
+
+    #[test]
+    fn only_an_exact_leading_skill_token_is_flagged_for_invocation() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "/navis ship this");
+        assert_eq!(
+            invoked_skill_token_len(&fixture.app.text, &fixture.app.skill_catalog),
+            Some(6),
+            "the full name plus its slash is the invoked span"
+        );
+        assert_eq!(
+            invoked_skill_token_len("/nav", &fixture.app.skill_catalog),
+            None,
+            "a prefix is a suggestion, not an invocation"
+        );
+        let builtin = SLASH_COMMANDS[0].name;
+        assert_eq!(
+            invoked_skill_token_len(&format!("/{builtin}"), &fixture.app.skill_catalog),
+            None,
+            "built-in commands keep their own meaning"
+        );
+    }
+    }
 
 /// Focused tests for prompt-recall wiring: Up/Down order, exact draft
 /// restoration, edited resend through the normal submit path, multiline

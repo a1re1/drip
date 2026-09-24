@@ -6038,6 +6038,11 @@ pub struct HarnessRun {
     /// The terminal blocked-on-input moment offered its one operator
     /// clarification survey already; never offered twice in one run.
     pub late_survey_offered: bool,
+    /// The resumed run's pending survey was the terminal blocked-on-input offer
+    /// and its picks were already applied on the resume path: `Some(resume)`
+    /// records whether the operator picked "Resume the run now" (`true`) or
+    /// "Stop after this reply" (`false`); `None` means the normal resume path.
+    pub late_survey_answer: Option<bool>,
     pub answers_path: Option<PathBuf>,
     pub continue_command: Option<String>,
     pub aborted: bool,
@@ -6692,6 +6697,7 @@ impl HarnessRun {
             ask_user_awaiting: false,
             ask_window_open: true,
             late_survey_offered: false,
+            late_survey_answer: None,
             answers_path: run_answers_path,
             continue_command: None,
             aborted: false,
@@ -6986,72 +6992,86 @@ impl HarnessRun {
         self.emit_question_event(&survey);
         match self.run_survey_block(survey.clone()).await {
             SurveyWait::Answered(answers) => {
-                let Some((picks, resume)) = late_survey_picks(&scope, &survey, &answers) else {
-                    // A whole-survey "chat about this" reply is one free-form
-                    // instruction for the whole run: reopen every task it could
-                    // be about, exactly as the generic answer path did.
-                    let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
-                    self.persist();
-                    return !reopened.is_empty();
-                };
-                // Replace the generic Q/A echo with the scoped rendering: the
-                // next loop must read which ids it may work on, not just the
-                // answers it already saw.
-                if let Some(last) = self
-                    .state
-                    .operator_messages
-                    .as_mut()
-                    .and_then(|messages| messages.last_mut())
-                {
-                    last.text = render_late_survey_scope(&survey, &answers, &picks, resume);
-                }
-                let mut dropped = 0usize;
-                for (id, pick) in &picks {
-                    if *pick == LateUnblockPick::Drop
-                        && core_state::drop_task(
-                            &mut self.state,
-                            id,
-                            "operator dropped it from the blocked-on-input survey",
-                        )
-                        .is_some()
-                    {
-                        dropped += 1;
-                    }
-                }
-                let unblocked: Vec<String> = if resume {
-                    picks
-                        .iter()
-                        .filter(|(_, pick)| *pick == LateUnblockPick::Reopen)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let reopened =
-                    core_state::reopen_operator_blocked_tasks_in(&mut self.state, Some(&unblocked));
-                self.emit(HarnessEvent {
-                    data: None,
-                    detail: format!(
-                        "operator answered the blocked-on-input survey — reopened {} task(s), dropped {} task(s), continue: {}",
-                        reopened.len(),
-                        dropped,
-                        if resume { "resume the run" } else { "stop after this reply" }
-                    ),
-                    iteration: self.state.iteration,
-                    r#type: HarnessEventType::StallRecovery,
-                });
-                self.persist();
-                if !resume {
-                    return false;
-                }
-                // Continue when a task reopened, or when the drops cleared the
-                // last blocker (the loop then re-evaluates the goal itself).
-                !reopened.is_empty() || core_state::operator_blocked_tasks(&self.state).is_empty()
+                self.apply_late_survey_answers(&scope, &survey, &answers)
             }
             // Aborted or timed out: the caller's own end-of-run handling
             // (aborted result / awaiting-input) takes over from here.
             _ => false,
         }
+    }
+
+    /// Apply a late blocked-on-input survey's answers: drop the tasks the
+    /// operator dropped, reopen exactly the ids it picked, and report whether
+    /// the run continues. Shared by the live offer and the `--resume` path, so
+    /// the Drop and "Stop after this reply" picks mean the same thing whether
+    /// the survey was answered in this run or after it had ended.
+    fn apply_late_survey_answers(
+        &mut self,
+        scope: &[String],
+        survey: &crate::core::types::QuestionSurvey,
+        answers: &crate::core::types::HarnessSurveyAnswers,
+    ) -> bool {
+        let Some((picks, resume)) = late_survey_picks(scope, survey, answers) else {
+            // A whole-survey "chat about this" reply is one free-form
+            // instruction for the whole run: reopen every task it could
+            // be about, exactly as the generic answer path did.
+            let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
+            self.persist();
+            return !reopened.is_empty();
+        };
+        // Replace the generic Q/A echo with the scoped rendering: the
+        // next loop must read which ids it may work on, not just the
+        // answers it already saw.
+        if let Some(last) = self
+            .state
+            .operator_messages
+            .as_mut()
+            .and_then(|messages| messages.last_mut())
+        {
+            last.text = render_late_survey_scope(survey, answers, &picks, resume);
+        }
+        let mut dropped = 0usize;
+        for (id, pick) in &picks {
+            if *pick == LateUnblockPick::Drop
+                && core_state::drop_task(
+                    &mut self.state,
+                    id,
+                    "operator dropped it from the blocked-on-input survey",
+                )
+                .is_some()
+            {
+                dropped += 1;
+            }
+        }
+        let unblocked: Vec<String> = if resume {
+            picks
+                .iter()
+                .filter(|(_, pick)| *pick == LateUnblockPick::Reopen)
+                .map(|(id, _)| id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let reopened =
+            core_state::reopen_operator_blocked_tasks_in(&mut self.state, Some(&unblocked));
+        self.emit(HarnessEvent {
+            data: None,
+            detail: format!(
+                "operator answered the blocked-on-input survey — reopened {} task(s), dropped {} task(s), continue: {}",
+                reopened.len(),
+                dropped,
+                if resume { "resume the run" } else { "stop after this reply" }
+            ),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::StallRecovery,
+        });
+        self.persist();
+        if !resume {
+            return false;
+        }
+        // Continue when a task reopened, or when the drops cleared the
+        // last blocker (the loop then re-evaluates the goal itself).
+        !reopened.is_empty() || core_state::operator_blocked_tasks(&self.state).is_empty()
     }
 
     /// ask_user timeout expires. On timeout the pending survey is preserved
@@ -7148,7 +7168,27 @@ impl HarnessRun {
                 if let Some(pending) = self.state.pending_questions.as_mut() {
                     pending.answers_cursor = Some(cursor);
                 }
-                self.accept_survey_answers(survey, entry.record);
+                // A late blocked-on-input survey preserved across the run's end
+                // still carries the Drop / "Stop after this reply" picks: route
+                // it through the same scoped apply the live offer uses, or
+                // run_loops' unscoped reopen would revive a task the operator
+                // dropped and ignore the stop.
+                let late = is_late_blocker_survey(&survey);
+                let scope: Vec<String> = if late {
+                    core_state::operator_blocked_tasks(&self.state)
+                        .iter()
+                        .take(4)
+                        .map(|task| task.id.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                self.accept_survey_answers(survey.clone(), entry.record.clone());
+                if late {
+                    self.late_survey_answer =
+                        Some(self.apply_late_survey_answers(&scope, &survey, &entry.record));
+                    self.late_survey_offered = true;
+                }
                 return;
             }
             // Rejected batches advance the persisted cursor too, so the next
@@ -8253,7 +8293,23 @@ impl HarnessRun {
         }
         // A resume prompt is the answer an operator-blocked task was waiting
         // for: those tasks go back to pending before the first loop.
-        let reopened = core_state::reopen_operator_blocked_tasks(&mut self.state);
+        //
+        // The resumed survey was the terminal blocked-on-input offer: its picks
+        // already dropped and reopened exactly the ids the operator named, so
+        // the unscoped reopen below must not run — it would bring back a task
+        // the operator dropped.
+        if self.late_survey_answer.is_some() {
+            // The offer already happened; never offer it a second time on this
+            // resumed run. A "Stop after this reply" pick then falls through to
+            // the loop's own blocked-on-input end (and a stop whose drops
+            // cleared the last blocker completes instead).
+            self.late_survey_offered = true;
+        }
+        let reopened = if self.late_survey_answer.is_some() {
+            Vec::new()
+        } else {
+            core_state::reopen_operator_blocked_tasks(&mut self.state)
+        };
         if !reopened.is_empty() {
             self.emit(HarnessEvent {
                 data: None,
@@ -12099,6 +12155,18 @@ const LATE_UNBLOCK_DROP: &str = "Drop this task";
 const LATE_CONTINUE_RESUME: &str = "Resume the run now";
 const LATE_CONTINUE_STOP: &str = "Stop after this reply";
 
+/// Does this survey carry the terminal blocked-on-input decision form? Its
+/// closing question is the resume/stop one, which no ordinary mid-run
+/// clarification survey carries.
+fn is_late_blocker_survey(survey: &crate::core::types::QuestionSurvey) -> bool {
+    survey.questions.last().is_some_and(|question| {
+        question
+            .options
+            .iter()
+            .any(|option| option.label == LATE_CONTINUE_RESUME)
+    })
+}
+
 /// One task the terminal blocked-on-input survey asks about.
 struct LateBlocker {
     id: String,
@@ -13220,6 +13288,110 @@ mod ask_user_survey_tests {
         assert!(
             message.contains("Do not start new work"),
             "the stop choice is recorded in the reply: {message}"
+        );
+    }
+
+    /// A terminal blocked-on-input survey preserved across the run's end is
+    /// answered through the same scoped apply the live offer uses: "Drop this
+    /// task" really drops, so run_loops' unscoped resume reopen must not revive
+    /// it, and a retry pick reopens only its own id.
+    #[tokio::test]
+    async fn resume_applies_a_preserved_late_surveys_picks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        let dropped = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        let retried = seed_operator_blocked_task(&mut run, "choose a provider", "which provider?");
+        run.state.pending_questions = Some(late_blocker_survey(&[
+            LateBlocker {
+                id: dropped.clone(),
+                title: "add authentication".into(),
+                detail: "which app?".into(),
+            },
+            LateBlocker {
+                id: retried.clone(),
+                title: "choose a provider".into(),
+                detail: "which provider?".into(),
+            },
+        ]));
+        let path = run.answers_path().unwrap();
+        crate::core::state::answers::append_answers(
+            &path,
+            &late_answers(&[LATE_UNBLOCK_DROP, LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
+        )
+        .unwrap();
+        run.resume_pending_survey().await;
+        assert!(
+            run.state.pending_questions.is_none(),
+            "the answer batch consumes the preserved survey"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &dropped)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Dropped,
+            "a 'Drop this task' pick drops its task on the resume path too"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &retried)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Pending,
+            "only the picked retry task reopens"
+        );
+        assert_eq!(
+            run.late_survey_answer,
+            Some(true),
+            "the resume pick is recorded for run_loops"
+        );
+        assert!(
+            run.late_survey_offered,
+            "a resumed run must not offer the terminal survey a second time"
+        );
+        let message = run
+            .state
+            .operator_messages
+            .as_ref()
+            .expect("the answer injects an operator message")
+            .last()
+            .unwrap()
+            .text
+            .clone();
+        assert!(
+            message.contains("Drop these tasks") && message.contains(&dropped),
+            "the reply names the dropped task: {message}"
+        );
+    }
+
+    /// "Stop after this reply" on the resumed survey records the stop and
+    /// reopens nothing: the task stays blocked for a later --resume.
+    #[tokio::test]
+    async fn resume_honors_a_stop_after_this_reply_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = test_run_in(&dir, |_| {}).await;
+        let id = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
+        run.state.pending_questions = Some(late_blocker_survey(&[LateBlocker {
+            id: id.clone(),
+            title: "add authentication".into(),
+            detail: "which app?".into(),
+        }]));
+        let path = run.answers_path().unwrap();
+        crate::core::state::answers::append_answers(
+            &path,
+            &late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_STOP]),
+        )
+        .unwrap();
+        run.resume_pending_survey().await;
+        assert_eq!(
+            run.late_survey_answer,
+            Some(false),
+            "the stop pick is recorded for run_loops"
+        );
+        assert_eq!(
+            crate::core::state::get_task_by_id(&run.state, &id)
+                .unwrap()
+                .status,
+            HarnessTaskStatus::Blocked,
+            "a stop reply reopens nothing"
         );
     }
 }

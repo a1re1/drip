@@ -961,6 +961,26 @@ the built-in prompt, and set `DRIP_SUMMARY_PREFERENCES` to a path to keep anothe
 prompt around. The file is read once when a run starts, so edits
 apply from the next run; `--home` / `DRIP_HOME` decide which home's file is read.
 
+### The run report
+
+A summary is a digest, so the detail behind it is kept in a **run report**: a
+markdown file at `<session dir>/report.md` in which the agent adds a short
+write-up as it works, through the `report` tool (one headline plus a few
+sentences saying what the task or cycle did and how it went). The end-of-run
+summary step is then asked to synthesize those write-ups into an executive
+summary — what happened and how it went — instead of only restating task
+summaries, and the full document stays on disk for the details a digest drops.
+
+When a report was written, the run ends with a line naming it, clickable in
+terminals that support `OSC 8` hyperlinks (VS Code's integrated terminal,
+iTerm2, WezTerm, Ghostty, kitty, VTE):
+
+```
+Full run report: report.md
+```
+
+Set `DRIP_NO_HYPERLINKS=1` to always print the plain absolute path instead.
+
 ---
 
 ## Session storage

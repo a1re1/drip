@@ -436,6 +436,10 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         roles: args.roles.clone().filter(|roles| !roles.is_empty()),
         signal: args.signal.clone(),
         state_path: Some(args.state_path.clone()),
+        report_path: args
+            .state_path
+            .parent()
+            .map(|dir| dir.join(crate::harness::report::RUN_REPORT_FILE_NAME)),
         summarize_run: args.summarize_run,
         run_summary_preferences: args.summary_preferences.clone(),
         lite: args.lite,

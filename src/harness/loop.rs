@@ -5825,6 +5825,9 @@ mod dynamic_skills_tests {
 #[derive(Default)]
 pub struct SolidStateHarnessOptions {
     pub cwd: Option<String>,
+    /// Path of the session's running markdown report, handed to the `report`
+    /// tool through the op context.
+    pub report_path: Option<std::path::PathBuf>,
     pub dynamic_tool_names: Option<Vec<String>>,
     pub goal: String,
     pub goal_context: Option<String>,
@@ -10713,6 +10716,7 @@ impl HarnessRun {
                     // phrase, operator message, --no-review, --lite); also
                     // rejects delayed Review*/reviewer task work mid-run.
                     review_opt_out: self.state.review_opt_out == Some(true),
+                    report_path: self.options.report_path.clone(),
                     review_waived: if tool_name == "finish_task" {
                         self.review_waiver_reason(None)
                     } else {

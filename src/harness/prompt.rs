@@ -917,6 +917,30 @@ pub fn build_run_summary_messages(
     // summary can only restate task summaries — the shallowness this fixes.
     sections.push(build_verification_breakdown_section(state));
 
+    // The agent's own per-task write-ups, kept in the session's running report
+    // file. They are source material for the executive summary: the summary
+    // step SYNTHESIZES them instead of restating them, so the section says so.
+    if !state.task_reports.is_empty() {
+        let entries = state
+            .task_reports
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- [{}] {} (iteration {}, loop {})\n    {}",
+                    entry.task_id.as_deref().unwrap_or("run"),
+                    entry.headline,
+                    entry.at_iteration,
+                    entry.at_loop,
+                    entry.body.replace('\n', " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!(
+            "report_writeups — the agent's own write-ups of what each task and cycle did (source material):\nopen with 3-6 sentences of executive summary covering what happened and how it went, then keep the per-task detail below it.\n{entries}"
+        ));
+    }
+
     if !state.memory.is_empty() {
         sections.push(
             ["memory:".to_string()]

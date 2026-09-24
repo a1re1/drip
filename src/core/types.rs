@@ -429,6 +429,21 @@ pub struct HarnessRunSummaryNote {
 	pub text: String,
 }
 
+/// One agent-authored write-up of what a task or cycle did and how it went.
+/// Appended to the session's running markdown report (see `harness::report`)
+/// and kept on the state so the end-of-run summary step can synthesize the
+/// executive summary from them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessTaskReport {
+	pub at_iteration: i64,
+	pub at_loop: i64,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub task_id: Option<String>,
+	pub headline: String,
+	pub body: String,
+}
+
 /// The most recent verification-shaped command this goal ran (tests, typecheck, build).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -638,6 +653,10 @@ pub struct HarnessState {
 	pub memory: Vec<HarnessMemoryNote>,
 	pub observations: Vec<HarnessObservation>,
 	pub promoted_context: Vec<PromotedContextEntry>,
+	/// Per-task write-ups the agent added during the run — the entries of the
+	/// session's running markdown report, newest last.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub task_reports: Vec<HarnessTaskReport>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub run_summary: Option<HarnessRunSummaryNote>,
 	pub tasks: Vec<HarnessTask>,
@@ -672,6 +691,7 @@ impl Default for HarnessState {
 			memory: Vec::new(),
 			observations: Vec::new(),
 			promoted_context: Vec::new(),
+			task_reports: Vec::new(),
 			run_summary: None,
 			tasks: Vec::new(),
 			telemetry: IndexMap::new(),

@@ -2036,3 +2036,89 @@ async fn a_failed_monitor_result_is_delivered_even_after_the_task_finished() {
         "the failure was not settled when the task finished — this test needs it delivered late"
     );
 }
+
+/// End-to-end proof of the run-report path: the agent's `report` tool call
+/// writes an entry into the session's report file, keeps it on the state, and
+/// the entry reaches the end-of-run summary request as source material. The
+/// summary request is the anchor: it is what the summary model actually saw.
+#[tokio::test]
+async fn the_report_tool_writes_the_session_report_and_feeds_the_summary_request() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let temp = temp_dir.path().to_path_buf();
+    let report_path = temp.join("report.md");
+
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "call-1",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["wire the report link"]}),
+        ),
+        tool_call_response(
+            "call-2",
+            "report",
+            serde_json::json!({
+                "headline": "task-1: wired the report link",
+                "body": "The link line now prints after the summary."
+            }),
+        ),
+        tool_call_response(
+            "call-3",
+            "finish_task",
+            serde_json::json!({"status": "completed", "summary": "wired it"}),
+        ),
+        text_response("Done: the report link is wired."),
+    ]);
+
+    let options = SolidStateHarnessOptions {
+        cwd: Some(temp.to_string_lossy().to_string()),
+        goal: "wire the run report".to_string(),
+        max_iterations: Some(6),
+        model: Some("mock".to_string()),
+        report_path: Some(report_path.clone()),
+        summarize_run: Some(true),
+        state_path: Some(temp.join("state.json")),
+        latency_store: Some(temp.join("latency.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(temp.clone()),
+                jobs_root: Some(temp.join("jobs")),
+            },
+        )),
+        url: Some(url),
+        ..Default::default()
+    };
+
+    let result = run_solid_state_harness(options).await.expect("run starts");
+    let bodies = server.join().unwrap();
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(result.state.task_reports.len(), 1, "one write-up recorded");
+
+    let text = std::fs::read_to_string(&report_path).expect("the session report was written");
+    assert!(text.contains("# Run report"), "{text}");
+    assert!(text.contains("Goal: wire the run report"), "{text}");
+    assert!(text.contains("## task-1: wired the report link"), "{text}");
+    assert!(
+        text.contains("The link line now prints after the summary."),
+        "{text}"
+    );
+
+    // The last request is the run summary; its input carries the write-up.
+    let summary_call = bodies.last().expect("a summary request was made");
+    let messages = summary_call["messages"].to_string();
+    assert!(
+        messages.contains("report_writeups"),
+        "the summary request carries the write-ups: {messages}"
+    );
+    assert!(
+        messages.contains("task-1: wired the report link"),
+        "{messages}"
+    );
+    assert!(!summary_call["tools"]
+        .as_array()
+        .is_some_and(|t| !t.is_empty()));
+}

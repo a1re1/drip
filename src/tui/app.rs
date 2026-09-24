@@ -195,6 +195,40 @@ fn help_text() -> String {
     lines.join("\n")
 }
 
+/// Spawns the MCP clients a TUI run needs: one per name in `names` (the union
+/// of every server any role in play names and the `/mcp` run gate — see
+/// `TuiApp::mcp_spawn_names`), looked up in the config-defined server map.
+/// Returns the clients plus one warning line per server that could not be
+/// started: MCP is opt-in and never fatal, so a dead or unconfigured server
+/// only costs its tools for this run.
+fn spawn_mcp_clients_for_run(
+    names: &[String],
+    configured: &crate::tools::mcp::config::McpServerMap,
+    cwd: &Path,
+) -> (
+    Vec<Arc<std::sync::Mutex<crate::tools::mcp::client::McpClient>>>,
+    Vec<String>,
+) {
+    let mut clients = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for name in names {
+        let name = name.as_str();
+        let Some(server_config) = configured.get(name) else {
+            warnings.push(format!(
+                "mcp: server \"{name}\": not in mcpServers config — its tools are unavailable"
+            ));
+            continue;
+        };
+        match crate::tools::mcp::client::McpClient::spawn(name, server_config, cwd) {
+            Ok(client) => clients.push(Arc::new(std::sync::Mutex::new(client))),
+            Err(error) => warnings.push(format!(
+                "mcp: server \"{name}\": {error} — its tools are unavailable"
+            )),
+        }
+    }
+    (clients, warnings)
+}
+
 /// Cuts a painted row to `width` columns without dropping its SGR codes.
 fn clip_ansi(row: &str, width: usize) -> String {
     if string_width(row) <= width {
@@ -716,6 +750,11 @@ struct TuiApp {
     status_line_request_width: Option<usize>,
     status_line_runner: Option<crate::tui::status_line::StatusLineRunner>,
     text: String,
+    /// Run-level MCP gate set by `/mcp` — the TUI's stand-in for `--mcp`:
+    /// `None` leaves the decision to each loop's role (`mcpServers`), a
+    /// non-empty list is the set for loops whose role names none, and an empty
+    /// list is a hard off, exactly like `--no-mcp`.
+    mcp_run_gate: Option<Vec<String>>,
     /// OSC 2 title state while an interactive TTY owns stdout; None keeps
     /// headless/redirected runs silent. Pure state lives in pane_title.rs.
     pane_title: Option<PaneTitle>,
@@ -962,6 +1001,7 @@ impl TuiApp {
             skill_rows,
             skill_suggestions: Vec::new(),
             session,
+            mcp_run_gate: None,
             status_line_next_refresh: None,
             pane_title: None,
             session_name,
@@ -3307,6 +3347,7 @@ impl TuiApp {
                     self.toggle_skill(&name);
                 }
             }
+            "mcp" => self.mcp_command(args),
             "marketplace" => {
                 self.marketplace_command(args);
                 self.refresh_skill_catalog();
@@ -3432,6 +3473,165 @@ impl TuiApp {
         )
         .into_iter()
         .collect()
+    }
+
+    // ----- mcp ------------------------------------------------------------
+
+    /// The MCP servers a TUI run spawns: every server any role in play names
+    /// (`referenced_mcp_servers`, the CLI's rule) plus the run gate `/mcp` set
+    /// — the same union the CLI spawns for `--mcp`. `/mcp off` (an explicit
+    /// empty gate) spawns nothing at all, and an absent gate leaves the
+    /// decision to the roles alone.
+    fn mcp_spawn_names(&self, role_args: &ResolveRoleSetupArgs<'_>) -> Vec<String> {
+        if self.mcp_gate_off() {
+            return Vec::new();
+        }
+        let mut names = crate::cli::roles::referenced_mcp_servers(role_args);
+        for name in self.mcp_run_gate.iter().flatten() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+
+    /// True when `/mcp off` closed the run gate: no server is spawned and no
+    /// MCP tool is in scope for any loop, however the roles are configured.
+    fn mcp_gate_off(&self) -> bool {
+        self.mcp_run_gate
+            .as_ref()
+            .map(|names| names.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// The MCP servers configured right now: the global `mcpServers` section
+    /// merged with `<cwd>/.drip/mcp.json` (project wins). Read fresh so an edit
+    /// to either file shows up in `/mcp` and in the next run without a restart.
+    fn configured_mcp_servers(&self) -> crate::tools::mcp::config::McpServerMap {
+        crate::tools::mcp::config::load_mcp_servers(
+            &self.config.mcp_servers,
+            Path::new(&self.bootstrap.cwd),
+        )
+    }
+
+    /// `/mcp` — the TUI's MCP affordance. With no argument it lists every
+    /// configured server with its status; with names it toggles those servers
+    /// for the whole run, exactly like `--mcp`; `off` spawns nothing (like
+    /// `--no-mcp`) and `roles` hands the decision back to each loop's role.
+    fn mcp_command(&mut self, args: &str) {
+        let configured = self.configured_mcp_servers();
+        let argument = args.trim().to_lowercase();
+        if argument.is_empty() {
+            self.report_mcp_status(&configured);
+            return;
+        }
+        match argument.as_str() {
+            "off" | "none" => {
+                self.mcp_run_gate = Some(Vec::new());
+                self.push_info(
+                    "mcp: every server is off for this run (like --no-mcp). /mcp roles hands the decision back to the roles."
+                        .to_string(),
+                );
+            }
+            "roles" | "auto" => {
+                self.mcp_run_gate = None;
+                self.push_info(
+                    "mcp: run gate cleared — each loop sees a server exactly when its role names it in mcpServers."
+                        .to_string(),
+                );
+            }
+            _ => {
+                let mut unknown: Vec<String> = Vec::new();
+                let mut enabled: Vec<String> = self.mcp_run_gate.clone().unwrap_or_default();
+                for raw_name in
+                    args.split(|character: char| character == ',' || character.is_whitespace())
+                {
+                    let name = raw_name.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    if !configured.contains_key(name) {
+                        if !unknown.iter().any(|seen| seen == name) {
+                            unknown.push(name.to_string());
+                        }
+                        continue;
+                    }
+                    match enabled.iter().position(|seen| seen == name) {
+                        Some(index) => {
+                            enabled.remove(index);
+                        }
+                        None => enabled.push(name.to_string()),
+                    }
+                }
+                if !unknown.is_empty() {
+                    self.push_error(format!(
+                        "mcp: no configured server named {} — /mcp lists the configured servers",
+                        unknown.join(", ")
+                    ));
+                    return;
+                }
+                // An explicit gate is the set for loops whose role names no
+                // server (`--mcp` semantics); a role that names its own keeps
+                // them. Toggling everything off leaves an empty gate, i.e. off.
+                self.mcp_run_gate = Some(enabled.clone());
+                if enabled.is_empty() {
+                    self.push_info(
+                        "mcp: every server is off for this run (like --no-mcp). /mcp roles hands the decision back to the roles."
+                            .to_string(),
+                    );
+                } else {
+                    self.push_info(format!(
+                        "mcp: {} on for this run (like --mcp) — the next goal spawns them.",
+                        enabled.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Renders the `/mcp` listing: every configured server with the command it
+    /// would run and whether this run may use it, then the gate in one line.
+    fn report_mcp_status(&mut self, configured: &crate::tools::mcp::config::McpServerMap) {
+        if configured.is_empty() {
+            self.push_info(
+                "no MCP servers configured. Declare them under a top-level \"mcpServers\" section of ~/.drip/config.json or in ./.drip/mcp.json (see README), then /mcp lists them."
+                    .to_string(),
+            );
+            return;
+        }
+        let gate = self.mcp_run_gate.clone();
+        let mut lines = vec![format!("mcp servers ({} configured):", configured.len())];
+        for (name, server) in configured {
+            let status = match &gate {
+                Some(names) if names.is_empty() => "off for this run".to_string(),
+                Some(names) if names.iter().any(|gate| gate == name) => {
+                    "on for this run (gate)".to_string()
+                }
+                Some(_) | None => "role opt-in only".to_string(),
+            };
+            let mut command = server.command.clone();
+            if !server.args.is_empty() {
+                command.push(' ');
+                command.push_str(&server.args.join(" "));
+            }
+            lines.push(format!("  {name} — {command} — {status}"));
+        }
+        lines.push(match &gate {
+            Some(names) if names.is_empty() => {
+                "run gate: off (like --no-mcp) — no loop gets MCP tools".to_string()
+            }
+            Some(names) => format!(
+                "run gate: {} — the set for loops whose role sets no mcpServers",
+                names.join(", ")
+            ),
+            None => "run gate: none — each loop sees a server when its role names it in mcpServers"
+                .to_string(),
+        });
+        lines.push(
+            "/mcp <server>[,<server>] toggles servers for this run (like --mcp); /mcp off turns all off; /mcp roles gives the decision back to the roles."
+                .to_string(),
+        );
+        self.push_info(lines.join("\n"));
     }
 
     fn marketplace_command(&mut self, args: &str) {
@@ -3853,8 +4053,17 @@ impl TuiApp {
 
         // Roles resolve fresh per run so marketplace, config, and .drip/roles.json
         // edits apply to the next goal without restarting the session.
-        let cwd = Path::new(&self.bootstrap.cwd);
-        let role_setup = resolve_role_setup(&ResolveRoleSetupArgs {
+        let cwd_path = self.bootstrap.cwd.clone();
+        let cwd = Path::new(&cwd_path);
+        // The configured MCP server set (global `mcpServers` merged with
+        // <cwd>/.drip/mcp.json, project wins) is read once per run: roles
+        // validate their `mcpServers` against its names, and the spawn helper
+        // below looks commands up in it.
+        let mcp_configured = crate::tools::mcp::config::load_mcp_servers(
+            &self.config.mcp_servers,
+            Path::new(&cwd_path),
+        );
+        let mut role_args = ResolveRoleSetupArgs {
             config: &self.config,
             cwd: self.bootstrap.cwd.clone(),
             env: Some(&env),
@@ -3875,14 +4084,40 @@ impl TuiApp {
             tool_names: self.tool_names(),
             // Same merged set the CLI validates against (global mcpServers plus
             // <cwd>/.drip/mcp.json), so both callers report the same unknowns.
-            mcp_server_names: crate::tools::mcp::config::load_mcp_servers(
-                &self.config.mcp_servers,
-                std::path::Path::new(&self.bootstrap.cwd),
-            )
-            .keys()
-            .cloned()
-            .collect(),
-        });
+            mcp_server_names: mcp_configured.keys().cloned().collect(),
+        };
+        // MCP clients, by the CLI's rule: every server any role in play names,
+        // plus the ones `/mcp` turned on for this run (the TUI's --mcp), is
+        // spawned once here, so the pack the roles are validated against already
+        // carries its tools. Never fatal: a dead or unconfigured server becomes
+        // a transcript line and only costs its tools for this run.
+        let mcp_gate = self.mcp_run_gate.clone();
+        let mcp_names = self.mcp_spawn_names(&role_args);
+        let (mcp_clients, mcp_warnings) =
+            spawn_mcp_clients_for_run(&mcp_names, &mcp_configured, cwd);
+        // Role `tools` allowlists may name MCP__<server>__<tool> entries.
+        role_args.tool_names.extend(
+            crate::tools::mcp::mcp_tool_definitions(&mcp_clients)
+                .into_iter()
+                .map(|tool| tool.name),
+        );
+        let role_setup = resolve_role_setup(&role_args);
+        // The resolver still holds `&self.config`; release it before the
+        // transcript pushes below need `&mut self`.
+        drop(role_args);
+        for warning in &mcp_warnings {
+            self.push_info(warning.clone());
+        }
+        if !mcp_names.is_empty() {
+            self.push_info(format!(
+                "mcp: spawning {} for this run",
+                mcp_names.join(", ")
+            ));
+        } else if self.mcp_gate_off() {
+            self.push_info(
+                "mcp: off for this run (/mcp roles re-enables role opt-ins)".to_string(),
+            );
+        }
         for issue in &role_setup.issues {
             self.push_info(format!("roles: {issue}"));
         }
@@ -3943,12 +4178,12 @@ impl TuiApp {
                     disabled: false,
                     env: &env,
                     home: &self.bootstrap.home,
-                    // The TUI tool pack carries no MCP tools at all, so the
-                    // requirements pass sees no MCP capabilities here. The
-                    // headless path adds one entry per server it spawned; a
-                    // skill whose requirements need MCP is classified as
-                    // unsatisfiable in the TUI, which matches what the run can
-                    // actually invoke.
+                    // This pass is handed the built-in pack and no MCP
+                    // entries, so a skill whose requirements need MCP is
+                    // classified as unsatisfiable here. The headless path
+                    // passes one entry per server it spawned (see entry.rs,
+                    // which loops its `mcp_clients`); threading this run's
+                    // `mcp_clients` through is left as a separate change.
                     mcp_servers: Vec::new(),
                     profile_override: self.bootstrap.classifier.as_deref(),
                     settings: &settings,
@@ -4057,11 +4292,20 @@ impl TuiApp {
                 summarize_run: None,
                 lite: false,
                 no_review: false,
-                tools: builtin_tool_pack(tool_options.clone()),
+                tools: {
+                    // MCP server tools ride on every goal run, exactly as they do
+                    // headless: the definitions come from the clients spawned
+                    // above (zero when none survived).
+                    let mut pack = builtin_tool_pack(tool_options.clone());
+                    pack.extend(crate::tools::mcp::mcp_tool_definitions(&mcp_clients));
+                    pack
+                },
                 tool_services: Some(tool_services),
-                // The watch view spawns no MCP clients, so its pack carries no
-                // MCP tools; None just leaves the (empty) gate to the roles.
-                mcp_servers: None,
+                // `/mcp` sets the run gate — the CLI's `--mcp`: `None` leaves
+                // the decision to the roles (a loop sees an MCP server exactly
+                // when its role names it in `mcpServers`), a list is the set for
+                // loops whose role names none, and an empty list is `/mcp off`.
+                mcp_servers: mcp_gate.clone(),
             }));
             index.close();
             // Restored before the main thread learns the run is over, so no
@@ -5268,7 +5512,7 @@ mod rename_tests {
     }
 
     /// A TuiApp whose project + session live in an isolated temp home.
-    fn rename_app(dir: &Path) -> TuiApp {
+    pub(super) fn rename_app(dir: &Path) -> TuiApp {
         let root = dir.to_string_lossy().to_string();
         let home = crate::core::home::open_drip_home(&root);
         let project =
@@ -8031,5 +8275,269 @@ mod background_jobs_tests {
             .on_key(Key::Mouse(MouseEvent::Click { col: 20, row: rows }));
         assert!(fixture.app.overlay.is_none());
         assert!(fixture.app.text.is_empty());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mcp_run_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // A minimal stdio MCP server: it answers `initialize` and `tools/list`
+    // with one `echo` tool, so a client spawned from it advertises a
+    // `MCP__fake__echo` definition. Same shape as tests/mcp_client.rs, trimmed
+    // to the two requests a spawn makes.
+    const FAKE_SERVER: &str = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  method=$(printf '%s' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  case "$method" in
+    initialize)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"0"}}}\n' "$id" ;;
+    tools/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo text back","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}\n' "$id" ;;
+    *) ;;
+  esac
+done
+"#;
+
+    #[test]
+    fn tui_run_spawns_a_role_referenced_config_server() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-mcp-server");
+        std::fs::write(&script, format!("#!/bin/sh\n{FAKE_SERVER}\n")).expect("write fake server");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake server");
+
+        let mut configured = crate::tools::mcp::config::McpServerMap::new();
+        configured.insert(
+            "fake".to_string(),
+            crate::tools::mcp::config::McpServerConfig {
+                command: script.to_string_lossy().into_owned(),
+                timeout_secs: 10,
+                ..crate::tools::mcp::config::McpServerConfig::default()
+            },
+        );
+
+        let env: HashMap<String, String> = HashMap::new();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let config = crate::core::config::create_default_cli_config();
+        let args = ResolveRoleSetupArgs {
+            config: &config,
+            cwd: cwd.clone(),
+            env: Some(&env),
+            extra_bindings: None,
+            extra_roles: Some(vec![crate::cli::roles::RoleDefinition {
+                name: "author".to_string(),
+                mcp_servers: Some(vec!["fake".to_string()]),
+                ..crate::cli::roles::RoleDefinition::default()
+            }]),
+            marketplace_roles: None,
+            skills: Vec::new(),
+            tool_names: vec!["READ".to_string()],
+            mcp_server_names: vec!["fake".to_string()],
+        };
+
+        let names = crate::cli::roles::referenced_mcp_servers(&args);
+        assert_eq!(
+            names,
+            vec!["fake".to_string()],
+            "the role opted the server in"
+        );
+        let (clients, warnings) = spawn_mcp_clients_for_run(&names, &configured, Path::new(&cwd));
+        assert!(warnings.is_empty(), "spawn warnings: {warnings:?}");
+        assert_eq!(clients.len(), 1, "one server was named by the role");
+
+        let names: Vec<String> = crate::tools::mcp::mcp_tool_definitions(&clients)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let mcp_name = names
+            .iter()
+            .find(|name| name.starts_with("MCP__fake__"))
+            .cloned()
+            .expect("the spawned server must contribute at least one MCP tool");
+
+        // The role's `mcpServers` opt-in is what makes those tools callable in
+        // a loop: with the role attached, the same names the pack carries pass
+        // the loop gate.
+        let role_setup = crate::cli::roles::resolve_role_setup(&args);
+        let opened = role_setup.roles.iter().find(|role| {
+            role.mcp_servers
+                .as_ref()
+                .map(|servers| servers.iter().any(|server| server == "fake"))
+                .unwrap_or(false)
+        });
+        assert!(opened.is_some(), "role setup kept no mcpServers opt-in");
+        let scope = crate::harness::r#loop::loop_tool_scope(&names, opened, None);
+        assert!(
+            scope.allowed.contains(&mcp_name),
+            "the opted-in loop must see {mcp_name}: {:?}",
+            scope.allowed
+        );
+    }
+
+    // The newest Info line in the timeline, for asserting on what `/mcp` said.
+    fn last_info(app: &TuiApp) -> String {
+        app.cells
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                TranscriptEntry::Info(note) => Some(note.text.clone()),
+                _ => None,
+            })
+            .expect("an info line landed in the timeline")
+    }
+
+    // `/mcp <server>` sets the run gate, which is what the TUI was missing: the
+    // CLI's `--mcp` semantics, reachable without restarting the session.
+    #[test]
+    fn the_run_gate_spawns_servers_no_role_names_and_off_spawns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-mcp-server");
+        std::fs::write(&script, format!("#!/bin/sh\n{FAKE_SERVER}\n")).expect("write fake server");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut configured = crate::tools::mcp::config::McpServerMap::new();
+        configured.insert(
+            "fake".to_string(),
+            crate::tools::mcp::config::McpServerConfig {
+                command: script.to_string_lossy().into_owned(),
+                timeout_secs: 10,
+                ..crate::tools::mcp::config::McpServerConfig::default()
+            },
+        );
+        let home = tempfile::tempdir().expect("home tempdir");
+        let mut app = super::rename_tests::rename_app(home.path());
+        let cwd = app.bootstrap.cwd.clone();
+
+        // `/mcp fake`: the gate names a server NO role in play mentions.
+        app.mcp_run_gate = Some(vec!["fake".to_string()]);
+        let (names, clients, warnings) = {
+            let env: HashMap<String, String> = HashMap::new();
+            let args = ResolveRoleSetupArgs {
+                config: &app.config,
+                cwd: cwd.clone(),
+                env: Some(&env),
+                extra_bindings: None,
+                extra_roles: None,
+                marketplace_roles: None,
+                skills: Vec::new(),
+                tool_names: vec!["READ".to_string()],
+                mcp_server_names: configured.keys().cloned().collect(),
+            };
+            let names = app.mcp_spawn_names(&args);
+            let (clients, warnings) =
+                spawn_mcp_clients_for_run(&names, &configured, Path::new(&cwd));
+            (names, clients, warnings)
+        };
+        assert_eq!(names, vec!["fake".to_string()], "the gate alone names it");
+        assert!(warnings.is_empty(), "spawn warnings: {warnings:?}");
+        assert_eq!(
+            clients.len(),
+            1,
+            "an ungated role still gets the gate server"
+        );
+        let tools: Vec<String> = crate::tools::mcp::mcp_tool_definitions(&clients)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(
+            tools.iter().any(|name| name.starts_with("MCP__fake__")),
+            "{tools:?}"
+        );
+        let scope = crate::harness::r#loop::loop_tool_scope(&tools, None, Some(names.clone()));
+        assert!(
+            scope
+                .allowed
+                .iter()
+                .any(|name| name.starts_with("MCP__fake__")),
+            "a loop covered by the gate must see its tools: {:?}",
+            scope.allowed
+        );
+
+        // `/mcp off`: a hard off that no role's own `mcpServers` can reopen.
+        app.mcp_run_gate = Some(Vec::new());
+        let off_names = {
+            let env: HashMap<String, String> = HashMap::new();
+            let args = ResolveRoleSetupArgs {
+                config: &app.config,
+                cwd: cwd.clone(),
+                env: Some(&env),
+                extra_bindings: None,
+                extra_roles: Some(vec![crate::cli::roles::RoleDefinition {
+                    name: "author".to_string(),
+                    mcp_servers: Some(vec!["fake".to_string()]),
+                    ..crate::cli::roles::RoleDefinition::default()
+                }]),
+                marketplace_roles: None,
+                skills: Vec::new(),
+                tool_names: vec!["READ".to_string()],
+                mcp_server_names: configured.keys().cloned().collect(),
+            };
+            app.mcp_spawn_names(&args)
+        };
+        assert!(
+            off_names.is_empty(),
+            "/mcp off spawns nothing: {off_names:?}"
+        );
+    }
+
+    // The affordance itself: `/mcp` lists the configured servers with their
+    // status and toggles the run gate, and an unknown name never opens it.
+    #[test]
+    fn the_mcp_command_lists_servers_and_toggles_the_run_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = super::rename_tests::rename_app(dir.path());
+        app.config.mcp_servers.insert(
+            "fake".to_string(),
+            crate::tools::mcp::config::McpServerConfig {
+                command: "fake-mcp-server".to_string(),
+                ..crate::tools::mcp::config::McpServerConfig::default()
+            },
+        );
+
+        app.dispatch_command("mcp", "");
+        let listed = last_info(&app);
+        assert!(listed.contains("fake"), "{listed}");
+        assert!(listed.contains("fake-mcp-server"), "{listed}");
+        assert!(listed.contains("role opt-in only"), "{listed}");
+        assert!(app.mcp_run_gate.is_none(), "listing never changes the gate");
+
+        app.dispatch_command("mcp", "fake");
+        assert_eq!(app.mcp_run_gate, Some(vec!["fake".to_string()]));
+        assert!(
+            last_info(&app).contains("on for this run"),
+            "{}",
+            last_info(&app)
+        );
+        app.dispatch_command("mcp", "");
+        assert!(
+            last_info(&app).contains("on for this run (gate)"),
+            "{}",
+            last_info(&app)
+        );
+
+        // The same name toggles back off, which is exactly `/mcp off`.
+        app.dispatch_command("mcp", "fake");
+        assert_eq!(app.mcp_run_gate, Some(Vec::new()));
+        assert!(
+            last_info(&app).contains("off for this run"),
+            "{}",
+            last_info(&app)
+        );
+
+        app.dispatch_command("mcp", "roles");
+        assert!(app.mcp_run_gate.is_none());
+        assert!(
+            last_info(&app).contains("each loop sees a server"),
+            "{}",
+            last_info(&app)
+        );
+
+        app.dispatch_command("mcp", "ghost");
+        assert!(
+            app.mcp_run_gate.is_none(),
+            "an unknown name must not open the gate"
+        );
     }
 }

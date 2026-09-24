@@ -105,6 +105,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Exit drip.",
         name: "quit",
     },
+    SlashCommandSpec {
+        args: Some("<server>[,<server>] | off | roles"),
+        description: "List the configured MCP servers and turn one on for this run (like --mcp).",
+        name: "mcp",
+    },
 ];
 
 /// A slash command parsed out of composer text.

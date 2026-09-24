@@ -5640,6 +5640,119 @@ mod dynamic_skills_tests {
         .unwrap()
     }
 
+    /// A plan pool entry that authors ONE relevance question, so exactly one
+    /// classifier request is made and the score is deterministic.
+    fn authored_plan(name: &str, body: &str) -> crate::harness::classifier::DynamicSkill {
+        let mut questions = serde_json::Map::new();
+        questions.insert(
+            "delivers_pr".to_string(),
+            serde_json::json!({"type": "noul", "instructions": "does the goal end in a pull request?"}),
+        );
+        crate::harness::classifier::DynamicSkill {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            content: body.to_string(),
+            classifiers: Some(crate::harness::classifier::SkillClassifiers {
+                relevance: Some(crate::harness::classifier::RelevanceSpec {
+                    threshold: Some(0.6),
+                    questions,
+                    formula: Some("delivers_pr".to_string()),
+                }),
+                requirements: None,
+            }),
+            requirements: crate::core::skill_requirements::SkillRequirements {
+                known: false,
+                required: std::collections::BTreeSet::new(),
+            },
+        }
+    }
+
+    /// A one-shot HTTP/1.1 mock over a std TcpListener: one canned JSON
+    /// response per connection (the shape the classifier's own tests use).
+    fn spawn_classifier_mock(responses: Vec<&'static str>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut data: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = std::io::Read::read(&mut stream, &mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    data.extend_from_slice(&chunk[..read]);
+                    if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&data[..pos]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if data.len() >= pos + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    // A plan is a template for the task list: a planning loop composes it, a
+    // task loop must never see it.
+    #[tokio::test]
+    async fn a_plan_reaches_a_planning_loop_prompt_and_never_a_task_loop() {
+        let mut run = test_run_for_dynamic_skills().await;
+        let base = spawn_classifier_mock(vec![
+            r#"{"model":"jev","answers":{"delivers_pr":{"type":"noul","noul":0.95}},"usage":{}}"#,
+        ]);
+        run.options.classifier = Some(crate::harness::classifier::ClassifierRoute {
+            url: format!("{base}/alpha/decisions"),
+            model: "~typesafe/jev-latest".to_string(),
+            headers: Vec::new(),
+            timeout_ms: 5_000,
+        });
+        run.options.plan_pool = vec![authored_plan(
+            "ship-pr",
+            "[1] establish a baseline\n[2] open a draft PR\n",
+        )];
+
+        // Planning duty: no current task, so this loop is the planner's.
+        run.select_plans().await;
+        let planning = run.begin_loop();
+        assert!(
+            planning.loop_system_prompt.contains("## Plan: ship-pr"),
+            "a planning loop must compose the relevant plan:\n{}",
+            planning.loop_system_prompt
+        );
+        assert!(planning
+            .loop_system_prompt
+            .contains("[1] establish a baseline"));
+
+        // The same pool on a TASK loop composes nothing: a plan is the shape
+        // of the task list, never context for doing the work.
+        crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from("do the work")],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        run.select_plans().await;
+        assert!(run.active_plans.is_empty());
+        let task = run.begin_loop();
+        assert!(!task.loop_system_prompt.contains("## Plan: ship-pr"));
+        assert!(!task.loop_system_prompt.contains("[1] establish a baseline"));
+    }
+
     // A no-classifier run must not compose anything, and a loop that previously
     // selected skills must clear them when nothing is selected this time.
     #[tokio::test]
@@ -5839,6 +5952,10 @@ pub struct SolidStateHarnessOptions {
     /// expensive event directly where --max-iterations bounds cycles.
     pub max_loops: Option<i64>,
     pub plan_only: bool,
+    /// Prebuilt plan templates (`<home>/plans` + `<cwd>/.drip/plans`), offered
+    /// to the classifier on PLANNING/replanning loops only — a plan shapes the
+    /// task list, so a task/review/monitor loop never composes one.
+    pub plan_pool: Vec<crate::harness::classifier::DynamicSkill>,
     pub max_review_rounds: Option<i64>,
     pub max_task_reopens: Option<i64>,
     pub max_tool_rounds_per_iteration: Option<i64>,
@@ -6014,6 +6131,10 @@ pub struct HarnessRun {
     /// planning loops): a task re-activated in a later loop reuses its
     /// selection instead of calling the classifier again.
     pub dynamic_skill_cache: HashMap<Option<String>, Vec<crate::cli::skills::LoadedCliSkill>>,
+    /// The prebuilt plans THIS loop is shaped by. Rebuilt by `select_plans` on
+    /// every loop, and non-empty only on a planning/replanning loop (no
+    /// current task), where `begin_loop` composes them into the prompt.
+    pub active_plans: Vec<crate::cli::plans::LoadedCliPlan>,
     /// `tools` in insertion order; `tool_registry` maps name → index (Map<name, tool>).
     pub tools: Vec<ChatToolDefinition>,
     pub tool_registry: HashMap<String, usize>,
@@ -6684,6 +6805,7 @@ impl HarnessRun {
             dynamic_tool_names,
             dynamic_skills: Vec::new(),
             dynamic_skill_cache: HashMap::new(),
+            active_plans: Vec::new(),
             tools,
             tool_registry,
             role_map,
@@ -8434,6 +8556,10 @@ impl HarnessRun {
             // Decide which discovered skills THIS loop composes, immediately
             // before it opens (and before begin_loop mutates task status).
             self.select_dynamic_skills().await;
+            // Same point in the loop's life for the prebuilt plans: a plan is a
+            // template for the TASK LIST, so only a planning/replanning loop
+            // (one with no current task) composes one.
+            self.select_plans().await;
             let mut scope = self.begin_loop();
             self.fire_hook(crate::harness::hooks::HookEvent::LoopStart, None);
             self.fire_hook(crate::harness::hooks::HookEvent::TaskStart, None);
@@ -8795,6 +8921,56 @@ impl HarnessRun {
         self.dynamic_skills = selected;
     }
 
+    /// Decides which prebuilt plans THIS loop is shaped by. A plan is a
+    /// template for the TASK LIST, so it belongs to planning/replanning loops
+    /// only: a task, review or monitor loop composes none.
+    ///
+    /// Never fatal, exactly like `select_dynamic_skills`: no classifier or an
+    /// empty pool is a no-op, and every classifier failure warns.
+    pub async fn select_plans(&mut self) {
+        // Cleared every loop: only a loop that selects a plan composes one.
+        self.active_plans.clear();
+
+        let Some(route) = self.options.classifier.clone() else {
+            return;
+        };
+        if self.options.plan_pool.is_empty() {
+            return;
+        }
+
+        // Planning duty is "no current task": `get_current_task` prefers an
+        // InProgress task and then the first ready Pending one, so a
+        // direct-seeded author/review/monitor loop always has one.
+        let (task_id, role) = self.loop_role_for_state();
+        if task_id.is_some() {
+            return;
+        }
+
+        // The classifier's view: the goal and the phase. No repository
+        // contents and no tool list — a plan declares no capability
+        // requirements, so the tool surface cannot change its relevance.
+        let state = serde_json::json!({
+            "goal": self.state.goal.clone(),
+            "task": Option::<serde_json::Value>::None,
+            "phase": "planning",
+            "role": role.as_ref().map(|role| role.name.clone()),
+        });
+
+        let selection =
+            crate::cli::plans::select_plans(&route, state, &self.options.plan_pool).await;
+
+        for warning in &selection.warnings {
+            self.emit(HarnessEvent {
+                data: None,
+                detail: warning.clone(),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::RunWarning,
+            });
+        }
+
+        self.active_plans = crate::cli::plans::selected_plans(&self.options.plan_pool, &selection);
+    }
+
     pub fn begin_loop(&mut self) -> LoopScope {
         // pending → in_progress; activations counts pickups.
         let current_task_id = core_state::get_current_task(&self.state).map(|task| task.id.clone());
@@ -8890,10 +9066,18 @@ impl HarnessRun {
                 self.default_transport_tools.clone()
             };
         // Role first, then this loop's classifier-selected skills, so the
-        // skill guidance reads inside the role's context.
-        let loop_system_prompt = crate::cli::skills::compose_skill_system_prompt(
-            &crate::harness::roles::compose_role_system_prompt(&self.system_prompt, role.as_ref()),
-            &self.dynamic_skills,
+        // skill guidance reads inside the role's context; the plan templates
+        // (planning loops only) come last, as the shape of the task list the
+        // planner is about to write.
+        let loop_system_prompt = crate::cli::plans::compose_plan_system_prompt(
+            &crate::cli::skills::compose_skill_system_prompt(
+                &crate::harness::roles::compose_role_system_prompt(
+                    &self.system_prompt,
+                    role.as_ref(),
+                ),
+                &self.dynamic_skills,
+            ),
+            &self.active_plans,
         );
         // Per-role inference accounting keys off this for every model call in
         // the loop; roleless loops fall back to "default" at accumulation.

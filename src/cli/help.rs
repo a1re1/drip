@@ -25,6 +25,7 @@ USAGE
 	drip --follow [id]             Stream a session's transcript live (ctrl+c to stop)
 	drip --stop [id]               Stop a session's running goal (state persists; resumable)
 	drip --skills                  List the discovered skill pool (project/user/marketplace)
+	drip --plans                   List the discovered plan pool (project/user)
 	drip --help                    Show this text
 	drip --version                 Print the drip CLI version
 	drip --marketplace-list        List marketplaces/plugins (also: --marketplace-add <src> [name],
@@ -246,6 +247,11 @@ OPTIONS
 	                              review-independently, migration-discipline,
 	                              praeparare) and is copied into <home>/skills on the
 	                              first start, where it is ordinary and deletable
+	--plans                       List discovered plans with source and description; the
+	                              default pack ships with drip (ship-pr) and is copied into
+	                              <home>/plans on the first start, where it is ordinary and
+	                              deletable. The planner composes the plans relevant to a
+	                              goal into the planning loop's prompt only
 	--install-skills              Re-copy every default skill into <home>/skills and exit
 	                              (the way back after deleting one)
 	--tools <path>                Tools directory (default ./tools, falls back to built-in)
@@ -294,6 +300,8 @@ STORAGE
 	<project>/.drip/sessions/ — --list, --resume, --inspect and --gc see both.
 	<project>/.drip/patches.jsonl, async-tools/          Repo-scoped run data
 	<project>/.drip/skills/, roles.json, plugins.json   Project-scoped configuration
+	~/.drip/plans/<name>/ + <project>/.drip/plans/       Plan templates: PLAN.md +
+	                              classification.json
 	(skill precedence: project > user > marketplace)
 	~/.drip/config.json                  Model profiles + settings (shared with the web app)
 	~/.drip/profiles/<name>/             Role profiles: config.json + prompt.md
@@ -370,6 +378,7 @@ mod tests {
             "--profile",
             "--skill",
             "--roles",
+            "--plans",
             "--skills",
             "--install-skills",
             "--no-skills",

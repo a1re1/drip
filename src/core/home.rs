@@ -78,6 +78,9 @@ pub struct DripHome {
     pub marketplaces_path: String,
     /// The ~/.drip root every project's homes live under.
     pub home_root: String,
+    /// <home>/plans/ — the user's plan library (planner templates), shared by
+    /// every project.
+    pub plans_dir: String,
     /// <home>/projects/ — per-project session homes, keyed by checkout slug.
     pub projects_dir: String,
     /// <home>/skills/ — the user's skill library, shared by every project.
@@ -282,6 +285,7 @@ pub fn open_drip_home(root: &str) -> DripHome {
             .to_string_lossy()
             .into_owned(),
         home_root: root.to_string(),
+        plans_dir: join(root, "plans").to_string_lossy().into_owned(),
         projects_dir: join(root, "projects").to_string_lossy().into_owned(),
         skills_dir: join(root, "skills").to_string_lossy().into_owned(),
         skill_requirements_db_path: join(root, "skill-requirements.sqlite")
@@ -291,7 +295,12 @@ pub fn open_drip_home(root: &str) -> DripHome {
         root: root.to_string(),
     };
 
-    for dir in [&home.root, &home.skills_dir, &home.marketplaces_dir] {
+    for dir in [
+        &home.root,
+        &home.skills_dir,
+        &home.marketplaces_dir,
+        &home.plans_dir,
+    ] {
         let _ = fs::create_dir_all(dir);
     }
 
@@ -308,6 +317,11 @@ pub fn open_drip_home(root: &str) -> DripHome {
     // holding config.json and prompt.md. Seeding it (plus a README) means the
     // layout is discoverable without reading these sources.
     crate::cli::profile_dirs::ensure_profiles_dir(Path::new(&home.root));
+    // <home>/plans/ is seeded once with the shipped starter plans (see
+    // src/cli/plans.rs). A plan written by the operator wins, and a deleted
+    // starter plan is not resurrected: the marker beside plans/ records what
+    // was already written.
+    crate::cli::plans::ensure_default_plans(&home.root, Path::new(&home.plans_dir));
 
     home
 }

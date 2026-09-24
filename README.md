@@ -35,6 +35,41 @@ drip --install-skills   # re-copy every shipped default template and exit
 `drip --praeparare` (and `/praeparare` in the TUI) re-restores its own
 `praeparare` template if that one was deleted, since the mode needs it.
 
+## Plans
+
+Plans are **planner templates**. A skill tells an agent *how* to work; a plan
+tells the planner *what the shape of the work usually is*. When drip starts a
+run, the plans relevant to the goal are composed into the planning loop's
+system prompt as candidate starting points for the task list — the planner
+adapts them to the goal instead of starting from a blank list every time. Plans
+reach the planning (and replanning) loop only; task loops never see them.
+
+A plan is a directory with two files:
+
+```
+<home>/plans/<name>/PLAN.md               # the template: frontmatter + steps
+<home>/plans/<name>/classification.json   # optional relevance questions
+<project>/.drip/plans/<name>/PLAN.md      # project-scoped, wins by name
+```
+
+`PLAN.md` may open with frontmatter carrying `name:` (defaults to the directory
+name) and `description:`; the rest of the file is the template the planner
+receives, typically a numbered step list. `classification.json` uses the same
+schema as a skill's `classifiers.json` — questions about when the plan is
+relevant — and drip asks the classifier per goal, exactly as it does for skills.
+A plan without a sidecar is still offered, with a question generated for it.
+Project plans shadow user plans of the same name.
+
+Drip ships one starter plan, `ship-pr` (baseline verification → draft PR →
+implement → push → watch checks → review → land green). Like the default
+skills it is copied into `<home>/plans` on the first start, and a marker beside
+`plans/` records the names this home was given — delete one and it stays gone:
+
+```sh
+drip --plans            # list discovered plans with scope and description
+drip --plans --json     # machine-readable
+```
+
 ## MCP server (drip-mcp)
 
 Claude Code normally drives drip through the Bash tool. With Bash disabled,

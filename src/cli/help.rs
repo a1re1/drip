@@ -295,7 +295,9 @@ STORAGE
 	<project>/.drip/patches.jsonl, async-tools/          Repo-scoped run data
 	<project>/.drip/skills/, roles.json, plugins.json   Project-scoped configuration
 	(skill precedence: project > user > marketplace)
-	~/.drip/config.json                  Model + prompt profiles (shared with the web app)
+	~/.drip/config.json                  Model profiles + settings (shared with the web app)
+	~/.drip/profiles/<name>/             Role profiles: config.json + prompt.md
+	<project>/.drip/profiles/<name>/     Same shape, repo-scoped (wins over user)
 	~/.drip/env.vars                     API keys (dotenv format, 0600)
 
 AUTOMATION RECIPES

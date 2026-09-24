@@ -118,6 +118,11 @@ pub struct SessionGoalArgs<'a> {
     pub no_review: bool,
     pub tools: Vec<ChatToolDefinition>,
     pub tool_services: Option<ChatToolRuntimeServices>,
+    /// The caller keeps the job registry past this run and hands a settled
+    /// MONITOR back to the session as its next message (the TUI). Threaded
+    /// into the harness so the run ends with its task instead of holding for
+    /// a pending monitor (`SolidStateHarnessOptions::monitor_background_handoff`).
+    pub monitor_background_handoff: bool,
 }
 
 /// How a session run ended: with a record, or with an error.
@@ -334,6 +339,7 @@ pub async fn run_session_goal(
         summarize_run: args.summarize_run,
         lite: args.lite,
         no_review: args.no_review || args.lite,
+        monitor_background_handoff: args.monitor_background_handoff,
         tools: args.tools,
         tool_services: args.tool_services.clone(),
     })

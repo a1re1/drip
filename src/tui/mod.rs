@@ -4,6 +4,7 @@ pub mod app;
 pub mod btw;
 pub mod compact;
 pub mod images;
+pub mod jobs;
 pub mod markdown_ansi;
 pub mod pane_title;
 pub mod session_name;

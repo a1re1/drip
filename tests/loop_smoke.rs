@@ -1918,6 +1918,138 @@ async fn a_loop_waits_for_a_pending_monitor_and_wakes_up_with_its_result() {
     );
 }
 
+/// Operator directive (TUI sessions): the run must NOT hold for a pending
+/// MONITOR when the run is owned by a session that hands settled jobs back to
+/// itself as its next message. Here the same script as the CLI test above runs
+/// with `monitor_background_handoff: true`: the task loop ends the moment the
+/// task does (no hold, no delivery round — the session delivers instead), the
+/// monitor job stays on the manager (it is the message the session wakes with,
+/// so it is deliberately NOT drained and NOT reported as leaked work), and once
+/// it settles the result is still there for the session's next message.
+#[tokio::test]
+async fn a_session_path_run_ends_immediately_and_leaves_the_monitor_for_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let signal_path = dir.path().join("signal.txt");
+    let signal_for_thread = signal_path.clone();
+    // Land the signal well past MONITOR's inline grace window (2500ms) AND
+    // past the run's own end, so the job is genuinely in flight when the run
+    // finishes and settles only afterwards — the session's wake-up case.
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(5_000));
+        std::fs::write(&signal_for_thread, "ready\n").unwrap();
+    });
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["wait for signal.txt"]}),
+        ),
+        tool_call_response(
+            "m",
+            "MONITOR",
+            serde_json::json!({
+                "check": format!("test -f {}", signal_path.display()),
+                "description": "signal.txt exists",
+                "intervalMs": 50,
+                "timeoutMs": 20_000
+            }),
+        ),
+        text_response("The monitor is watching for signal.txt; nothing to do until it lands."),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({
+                "status": "completed",
+                "summary": "the signal appeared",
+                "confidence": "high",
+                "anchor": "none",
+                "anchorNote": "the goal's own check is the signal file"
+            }),
+        ),
+        text_response("Signal observed."),
+    ]);
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let services = create_chat_tool_runtime_services(CreateChatToolRuntimeServicesOptions {
+        cwd: Some(dir.path().into()),
+        jobs_root: Some(dir.path().join("jobs")),
+    });
+    let session_services = services.clone();
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "Wait for signal.txt to appear. Acceptance: `test -f signal.txt` must pass.".into(),
+        max_iterations: Some(8),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        // The session owns the settled monitor jobs: no hold, no drain.
+        monitor_background_handoff: true,
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(services),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let bodies = server.join().unwrap();
+    writer.join().unwrap();
+
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(
+        bodies.len(),
+        5,
+        "no extra delivery round may run: {bodies:#?}"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.detail.contains("still-checking MONITOR job")),
+        "the session path must not hold the run: {:?}",
+        events
+            .iter()
+            .map(|event| event.detail.clone())
+            .collect::<Vec<_>>()
+    );
+    drop(events);
+
+    // The job outlived the run and is deliberately still owned by the session:
+    // not drained as an unreported settled job, not reported as leaked work.
+    assert!(
+        result.leaked_jobs.is_none(),
+        "a handoff session's monitor is its next message, not leaked work: {:?}",
+        result.leaked_jobs
+    );
+    let running = session_services.async_jobs.running_jobs();
+    assert_eq!(
+        running.len(),
+        1,
+        "the monitor job must survive the run on the manager: {running:#?}"
+    );
+    let job_id = running[0].id.clone();
+
+    // Wait for it to settle out of band, exactly as the session would: the
+    // result is still unreported, so the session's next message can carry it.
+    for _ in 0..120 {
+        if session_services.async_jobs.running_jobs().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let settled = session_services.async_jobs.take_settled_unreported();
+    assert!(
+        settled.iter().any(|job| job.id == job_id),
+        "the settled monitor must still be available to the session: {settled:#?}"
+    );
+}
+
 /// Operator directive: the run always delivers a MONITOR result — a failed one
 /// as much as a successful one — so the model can decide what to do next from
 /// the goal and the result. Here the task finishes while the monitor is still

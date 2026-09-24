@@ -158,10 +158,17 @@ drip "repair the corrupted shards" --max-loops 30
 # --plan-mode always|auto|direct: how a run gets its first task list; auto skips the planner
 # for small goals that declare their own check
 
-# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — matching
-# skills appear above the input line; up/down selects, tab completes, and
-# enter enables the skill for that session. Typing a full skill name as a
-# command (e.g. `/navis`) also enables it without starting a run.
+# In the TUI: `/` is the skill trigger anywhere in the message, not just at
+# the start — typing "i still /na" opens the skill menu above the input line
+# (three matches at a time, further matches page in as you move); up/down
+# selects, tab completes just that token (the surrounding text is kept), and
+# enter submits. Any `/name` naming a discovered skill is painted green and is
+# invoked on enter, and the message around it runs as the goal: "/navis ship
+# this" runs "ship this" with navis active, and "i still /navis ship" runs
+# "i still ship". A `/token` that names no skill (e.g. /etc/hosts) is left in
+# the message and sent unchanged. An explicitly enabled skill outranks
+# anything the classifier would have found on its own: it is composed into the
+# base prompt and excluded from the classifier's pool.
 
 # Machine-readable output (NDJSON; final line is the result)
 drip "goal" --json
@@ -342,7 +349,7 @@ report "not found".
 | DIR | Show project structure as a tree view |
 | BASH | Run a bash command and wait for it to finish |
 | BASH_ASYNC | Run a bash command in a detached tmux session (background) |
-| MONITOR | Wait for a signal (a file, a port, a build) by retrying `check` in a background job — sleeps between attempts and hands the settled result to the harness, so no sleep-and-poll rounds. A task loop that would end while its monitor is still checking — even one whose task already finished — waits for the settled result and resumes with it, so a monitor that fired, timed out, or failed always reaches the model (up to one hour per hold); in chat/TUI collect it with ASYNC_WAIT/ASYNC_TAIL |
+| MONITOR | Wait for a signal (a file, a port, a build) by retrying `check` in a background job — sleeps between attempts and hands the settled result to the harness, so no sleep-and-poll rounds. A TUI session ends when its task does and the settled result arrives as that session's next message (the harness leaves the job for the session rather than draining it); a CLI run has no session to wake, so it waits for the settled result and resumes with it — a task loop that would end while its monitor is still checking, even one whose task already finished, waits and resumes, so a monitor that fired, timed out, or failed always reaches the model (up to one hour per hold). In chat collect it with ASYNC_WAIT/ASYNC_TAIL |
 | GREP | Search files with a regex |
 | VERIFY | Run a shell command and parse structured test verdicts (bun, vitest, pytest, unittest, cargo, go, tsc) |
 | FETCH | HTTP GET a URL and return text content (requires `DRIP_ALLOW_NET=1`) |
@@ -497,9 +504,13 @@ model may only ask while planning — right after the goal or a fresh operator m
 (`--send`, or a queued/steered TUI message) and before the first task loop starts;
 once the plan is executing the tool is withheld. One exception: when nothing workable
 remains and a task is blocked on operator input, the harness itself offers a final
-survey drawn from the blocked tasks before ending the run — the answers reopen those
-tasks (and unblock their dependents) so the run continues, while no answer (or a
-timeout) ends it `awaiting-input` with the survey preserved for `--resume`.
+unblock survey before ending the run. It is a decision form, not a notification: every
+blocked task gets its own question whose options are the ways the run can move — supply
+the missing material, retry with what we have now, re-scope it smaller, or drop it — and
+a closing question says whether the run resumes or ends after the reply. The picks are
+applied: the chosen tasks reopen (unblocking their dependents), the dropped ones do not
+come back, and the injected reply names exactly which ids the next loop may work on. No
+answer (or a timeout) ends it `awaiting-input` with the survey preserved for `--resume`.
 The defaults live in `~/.drip/config.json`: `runtime.ask_user_interactive` (the TUI)
 and `runtime.ask_user_headless` (headless runs), each `"true"` unless set to `"false"`.
 `--no-ask` turns surveys off for a run and `--ask` forces them on; either explicit
@@ -1120,6 +1131,62 @@ running: the harness gives up at its next safe point, and every in-flight
 mid-run is killed within about a second instead of running to its own timeout,
 and the transcript notes how many in-flight commands were stopped.
 
+## Background jobs (TUI)
+
+A `MONITOR` or a `BASH_ASYNC` shell keeps running in the background after the
+run that started it ends — the TUI hands every run one shared job runtime, so a
+monitor still checking or a build still going stays alive and inspectable. The
+built-in status bar counts that live work directly after the session id:
+`1 monitor`, `2 shells`, or `1 monitor · 2 shells` when both kinds are live.
+Completed and failed jobs leave the running set and drop off the count, and
+nothing running leaves the row exactly as it was.
+
+A session stays visible to `dripw` while its background work is live. `dripw`
+reads "running" from the session's liveness lease, and the TUI holds that lease
+open for as long as a monitor or async shell is still going — even after the
+run that started it ended. So a TUI session with live background jobs still
+shows under `dripw`'s **Running** sessions and its shells still fill the
+Shells pane, instead of the session vanishing the moment the run ends; the
+lease (and the row) go away once the last job settles. The TUI owns the lease
+then, so a headless `drip <id> "goal"` aimed at that session waits its turn
+rather than writing the same session state from two processes.
+
+Three ways in:
+
+- `ctrl+b` or `/jobs` opens the background-jobs browser: one row per running
+  job (kind, title, counting runtime, short job id). `↑`/`↓` move the
+  highlight, `enter` (or `space`) opens the job's detail frame, `esc` closes
+  the browser.
+- `/jobs <n>` jumps straight into the detail frame of the n-th row.
+- The counter is reachable from the keyboard too: with an empty composer, `↓`
+  parks the focus on it (the chip is painted highlighted), `enter` (or space)
+  opens the browser, and `↑` / `esc` hands the focus back to the composer.
+- A left click on the chip opens the same browser. The terminal has to be
+  forwarding mouse reports to drip for that to reach it: inside `tmux` that
+  means `set -g mouse on`, because with mouse reporting off tmux consumes the
+  click before drip ever sees it.
+- **Click the counter.** The TUI turns on terminal mouse reporting while it
+  owns the screen, and a left click on the background counter opens the same
+  browser the keys open. The counter is the only clickable target: wheel
+  notches, releases and clicks anywhere else are ignored, so a stray click
+  never types into the composer. Mouse reporting does mean the terminal stops
+  doing its own drag-select while the TUI runs — hold `shift` to select text,
+  as in most mouse-aware TUIs.
+
+The detail frame shows the status, the runtime counted up from the job's start,
+the script (a monitor's `check` rides its title), the job log tail, and the
+keys back out: `←` returns to the list, `esc`/`enter`/`space` close. A job that
+settles while its frame is open is dropped rather than shown as still running.
+
+**When a job finishes, the session wakes up with its result.** A monitor usually
+settles long after the run that started it, so a TUI run never holds the chat
+open waiting for one: the run ends the moment its task does, and whenever the
+job settles the result - what finished, how it finished (a monitor says whether
+its signal fired), and where the full log lives - becomes the session's *next
+message*, exactly as if you had waited for the job and then sent it yourself.
+A `drip` CLI run has no session to wake, so it instead waits for the settled
+result and resumes with it.
+
 ## Watch TUI (`dripw`)
 
 `dripw` is a read-only, lazygit-style watcher for drip sessions — run it in a
@@ -1330,6 +1397,63 @@ Behavior:
 
 ---
 
+
+## Startup message
+
+In the interactive TUI (`drip --tui`), drip greets you with a small startup
+message — the same idea as Claude Code's welcome banner. It is generated by a
+shell script in drip's home directory, `~/.drip/startup-message.sh`
+(`DRIP_HOME` relocates the home; `DRIP_STARTUP_MESSAGE` points at a different
+script), seeded on first run with a rainbow water-droplet mascot and a single
+info line — version, the profile chosen for startup, and the working
+directory:
+
+```
+       __
+      /  \
+     /    \
+     |    |
+     \    /
+      \  /
+       \/
+
+  ❯ drip 0.1.0 · deepseek-v4-1-flash: deepseek/deepseek-v4.1-flash · ~/src/drip
+```
+
+In a terminal the droplet is painted through a blue → cyan → violet ramp and
+the info line is color-coded (accent `drip`, cyan version, violet profile, dim
+separators, light path).
+
+The facts arrive both as a JSON object on stdin and as environment variables
+the script can read:
+
+| Variable | Meaning |
+| --- | --- |
+| `DRIP_STARTUP_VERSION` | drip's version, e.g. `0.1.0` |
+| `DRIP_STARTUP_CWD` | the directory this session runs in |
+| `DRIP_STARTUP_SESSION_ID` | this session's id |
+| `DRIP_STARTUP_ACTIVE_PROFILE` | the model profile chosen for startup |
+| `DRIP_STARTUP_PROFILES` | one `id: model` line per configured profile, the active one marked `*` |
+
+Behavior:
+
+- Output may be colorful: SGR color escapes (`ESC [ … m`) pass through to the
+  timeline, so the banner is painted in whatever colors the script asks for.
+  Every other escape and control character is stripped — cursor moves, screens
+  clears, title sets, bell — so a banner can never drive the terminal. The
+  script runs as local code, exactly like `statusLine`; nothing reads or
+  executes `~/.claude` settings.
+- The run is bounded (5s) and its output capped (4096 characters). A script
+  that is missing, times out, or prints nothing shows no banner; a script that
+  exists but fails shows one dim line naming its status and first stderr line
+  instead of failing the session.
+- The banner is painted once per interactive session and is never persisted to
+  the transcript. Delete `~/.drip/startup-message.sh` to get no banner at all.
+- A `startup-message.sh` still byte-identical to the default an earlier version
+  shipped has never been edited, so it is upgraded to the current default on the
+  next start. Once you edit it, drip never touches it again.
+
+---
 
 ## Hooks
 

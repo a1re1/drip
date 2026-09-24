@@ -8857,6 +8857,7 @@ mod background_jobs_tests {
             roles_flag: None,
             session,
             status_line: None,
+            startup_message: None,
             classifier: None,
             no_classifier: false,
         };

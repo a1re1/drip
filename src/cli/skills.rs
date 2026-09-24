@@ -82,7 +82,12 @@ fn write_default_skills_marker(path: &Path, installed: &[String]) {
     };
 
     if let Ok(raw) = serde_json::to_string_pretty(&marker) {
-        let _ = std::fs::write(path, raw);
+        if let Err(err) = std::fs::write(path, raw) {
+            eprintln!(
+                "drip: could not record the default-skills marker at {}: {err}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -133,6 +138,10 @@ pub fn install_default_skills(skills_dir: &Path, overwrite: bool) -> Vec<String>
 /// never written again, so removing `~/.drip/skills/tdd` keeps it gone until the
 /// operator asks for a reinstall (`drip --install-skills`). A file the operator
 /// already has under a default skill's name is theirs, and is left alone.
+///
+/// A name is only recorded once the template is actually on disk: a failed write
+/// warns and stays unrecorded, so the next start retries it rather than burning
+/// the skill forever.
 pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<String> {
     let marker_path = default_skills_marker_path(home_root);
     let mut marker = read_default_skills_marker(&marker_path);
@@ -143,20 +152,29 @@ pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<Strin
             continue;
         }
 
-        marker.installed.push(name.to_string());
-
         let skill_dir = skills_dir.join(name);
         let path = skill_dir.join("SKILL.md");
-        if path.exists() {
+
+        // A skill document the operator already has under a default name is
+        // theirs and is never overwritten, but it does satisfy the seeding.
+        if path.is_file() {
+            marker.installed.push(name.to_string());
             continue;
         }
 
-        if std::fs::create_dir_all(&skill_dir).is_err() {
-            continue;
-        }
-
-        if std::fs::write(&path, content).is_ok() {
-            written.push(name.to_string());
+        // Record the name only after the template landed. Recording it first
+        // would burn the skill forever: a home that was read-only, or a default
+        // name occupied by a plain file, would list the name as installed with
+        // nothing written, and no later start could ever retry it.
+        match std::fs::create_dir_all(&skill_dir).and_then(|()| std::fs::write(&path, content)) {
+            Ok(()) => {
+                marker.installed.push(name.to_string());
+                written.push(name.to_string());
+            }
+            Err(err) => eprintln!(
+                "drip: could not install the default skill {name} at {}: {err}",
+                path.display()
+            ),
         }
     }
 
@@ -2410,6 +2428,69 @@ mod tests {
         assert_eq!(config.skills.len(), 2);
         assert_eq!(config.skills[0].name, "tdd");
         assert!(config.skills[0].args.is_empty());
+    }
+
+    #[test]
+    fn failed_default_write_is_retried_instead_of_burned() {
+        // A default name whose template could not be written must NOT be
+        // recorded as installed: once the obstruction is gone the next start
+        // seeds it. (Regression: the name used to be marked before the write.)
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(&home_skills).unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        // `tdd` is a plain file, so `tdd/SKILL.md` can never be created.
+        fs::write(home_skills.join("tdd"), "not a skill dir").unwrap();
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+        assert!(!home_skills.join("tdd").join("SKILL.md").exists());
+
+        // Clear the obstruction: the next start seeds the unrecorded name.
+        fs::remove_file(home_skills.join("tdd")).unwrap();
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(
+            written.iter().any(|name| name == "tdd"),
+            "a failed write must be retried, got {written:?}"
+        );
+        assert!(home_skills.join("tdd").join("SKILL.md").exists());
+
+        // Deletion still sticks for a name that was seeded successfully.
+        fs::remove_dir_all(home_skills.join("tdd")).unwrap();
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+    }
+
+    #[test]
+    fn operator_owned_file_under_a_default_name_survives_seeding_and_reinstall_replaces_it() {
+        // Pins both halves of the overwrite contract: seeding never clobbers an
+        // operator's skill, `--install-skills` (reinstall) does overwrite it.
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        fs::create_dir_all(home_skills.join("tdd")).unwrap();
+        let skill_md = home_skills.join("tdd").join("SKILL.md");
+        fs::write(&skill_md, "MY OWN TDD\n").unwrap();
+        let home_root = home_root.to_str().unwrap();
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(!written.iter().any(|name| name == "tdd"));
+        assert_eq!(fs::read_to_string(&skill_md).unwrap(), "MY OWN TDD\n");
+
+        // It is still discovered as the operator's own user skill.
+        let skills = discover_skills(&tmp.path().join("project"), &home_skills, None);
+        assert!(skills.iter().any(|s| s.name == "tdd"));
+
+        let written = reinstall_default_skills(home_root, &home_skills);
+        assert!(written.iter().any(|name| name == "tdd"));
+        assert!(
+            fs::read_to_string(&skill_md)
+                .unwrap()
+                .contains("Test-first discipline"),
+            "--install-skills overwrites the operator's file with the template"
+        );
     }
 
     #[test]

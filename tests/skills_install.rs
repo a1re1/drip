@@ -120,3 +120,30 @@ fn a_deleted_default_skill_stays_gone_and_install_skills_brings_it_back() {
 
     fs::remove_dir_all(&home).ok();
 }
+
+#[test]
+fn a_default_name_that_could_not_be_seeded_is_retried_on_a_later_start() {
+    let home = temp_root("drip-skills-retry-");
+    fs::create_dir_all(home.join("skills")).unwrap();
+    // First start: `skills/tdd` is a plain file, so the template cannot land.
+    fs::write(home.join("skills/tdd"), "not a skill dir").unwrap();
+
+    let (ok, _) = run_drip(&home, &["--skills"]);
+    assert!(ok, "first start must succeed");
+    assert!(!home.join("skills/tdd/SKILL.md").exists());
+
+    // The name must not be burned: clearing the obstruction seeds it next start.
+    fs::remove_file(home.join("skills/tdd")).unwrap();
+    let (ok, stdout) = run_drip(&home, &["--skills"]);
+    assert!(ok, "second start must succeed");
+    assert!(
+        home.join("skills/tdd/SKILL.md").is_file(),
+        "an unwritable default name must be retried, not recorded as installed"
+    );
+    assert!(
+        stdout.contains("tdd"),
+        "retried tdd must be discovered:\n{stdout}"
+    );
+
+    fs::remove_dir_all(&home).ok();
+}

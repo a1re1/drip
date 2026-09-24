@@ -1074,6 +1074,15 @@ the script (a monitor's `check` rides its title), the job log tail, and the
 keys back out: `←` returns to the list, `esc`/`enter`/`space` close. A job that
 settles while its frame is open is dropped rather than shown as still running.
 
+**When a job finishes, the session wakes up with its result.** A monitor usually
+settles long after the run that started it, so a TUI run never holds the chat
+open waiting for one: the run ends the moment its task does, and whenever the
+job settles the result - what finished, how it finished (a monitor says whether
+its signal fired), and where the full log lives - becomes the session's *next
+message*, exactly as if you had waited for the job and then sent it yourself.
+A `drip` CLI run has no session to wake, so it instead waits for the settled
+result and resumes with it.
+
 ## Watch TUI (`dripw`)
 
 `dripw` is a read-only, lazygit-style watcher for drip sessions — run it in a

@@ -1054,6 +1054,16 @@ built-in status bar counts that live work directly after the session id:
 Completed and failed jobs leave the running set and drop off the count, and
 nothing running leaves the row exactly as it was.
 
+A session stays visible to `dripw` while its background work is live. `dripw`
+reads "running" from the session's liveness lease, and the TUI holds that lease
+open for as long as a monitor or async shell is still going — even after the
+run that started it ended. So a TUI session with live background jobs still
+shows under `dripw`'s **Running** sessions and its shells still fill the
+Shells pane, instead of the session vanishing the moment the run ends; the
+lease (and the row) go away once the last job settles. The TUI owns the lease
+then, so a headless `drip <id> "goal"` aimed at that session waits its turn
+rather than writing the same session state from two processes.
+
 Three ways in:
 
 - `ctrl+b` or `/jobs` opens the background-jobs browser: one row per running
@@ -1061,6 +1071,13 @@ Three ways in:
   highlight, `enter` (or `space`) opens the job's detail frame, `esc` closes
   the browser.
 - `/jobs <n>` jumps straight into the detail frame of the n-th row.
+- The counter is reachable from the keyboard too: with an empty composer, `↓`
+  parks the focus on it (the chip is painted highlighted), `enter` (or space)
+  opens the browser, and `↑` / `esc` hands the focus back to the composer.
+- A left click on the chip opens the same browser. The terminal has to be
+  forwarding mouse reports to drip for that to reach it: inside `tmux` that
+  means `set -g mouse on`, because with mouse reporting off tmux consumes the
+  click before drip ever sees it.
 - **Click the counter.** The TUI turns on terminal mouse reporting while it
   owns the screen, and a left click on the background counter opens the same
   browser the keys open. The counter is the only clickable target: wheel

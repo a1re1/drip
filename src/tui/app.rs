@@ -59,6 +59,7 @@ use crate::core::env_vars::{
     load_env_vars, load_merged_env, lookup_env_var_source, upsert_env_var,
 };
 use crate::core::home::{DripHome, DripProject};
+use crate::core::lease::{clear_lease, write_lease};
 use crate::core::sessions::{
     create_session, list_all_sessions, open_session_index, resolve_any_session_ref,
     session_paths_for, CreateSessionArgs, ProjectPaths, SessionEnvScope, SessionPaths,
@@ -683,6 +684,12 @@ struct TuiApp {
     /// compact `-- N Tools called: ... --` rows. Never persisted.
     compact: CompactEmitter,
     cols: usize,
+    /// Keyboard focus parked on the status-line background counter: `↓` on an
+    /// empty composer moves it there, the chip is painted highlighted, and
+    /// `enter` opens the same jobs browser `ctrl+b` and `/jobs` open. The
+    /// counter is a readout by default; this is what makes it reachable with
+    /// the arrow keys instead of only with the shortcut.
+    chip_focus: bool,
     config: CliConfig,
     cursor: usize,
     exit_code: i32,
@@ -785,6 +792,9 @@ struct TuiApp {
     job_detail: Option<usize>,
     /// Next refresh deadline of the running-job snapshot.
     jobs_next_refresh: Option<Instant>,
+    /// The lease path the TUI is holding open for live background work while
+    /// no run is active; `None` when the job runtime is idle.
+    held_lease_path: Option<String>,
     tx: Sender<Msg>,
     /// Test injection: when Some, replaces the process environment in
     /// merged_env so credential resolution is deterministic regardless of
@@ -968,6 +978,7 @@ impl TuiApp {
             cells,
             compact: CompactEmitter::new(),
             cols,
+            chip_focus: false,
             config,
             cursor: 0,
             exit_code: 0,
@@ -1014,6 +1025,7 @@ impl TuiApp {
             job_rows,
             job_detail: None,
             jobs_next_refresh: Some(Instant::now() + Duration::from_millis(JOBS_REFRESH_MS)),
+            held_lease_path: None,
             status_line_output: None,
             status_line_request_width: None,
             status_line_runner,
@@ -1244,6 +1256,40 @@ impl TuiApp {
         changed
     }
 
+    /// The session's liveness lease is what `dripw` reads to decide a session
+    /// is still running and which pid's child processes fill its Shells pane.
+    /// The runner owns that lease for the length of a run, but a TUI session
+    /// whose run has ended can still own live background work -- a monitor
+    /// still checking, an async shell still building. Without a lease `dripw`
+    /// drops the session from Running the moment the run ends, so its shells
+    /// vanish from the pane while they are still alive. Hold the lease open
+    /// while any background job is live (re-stamping it on the jobs deadline
+    /// keeps the heartbeat fresh) and release it once the last job settles.
+    fn sync_background_lease(&mut self) {
+        if self.running {
+            // The runner writes and clears the lease around its own run.
+            return;
+        }
+        let desired = if self.job_counts == (0, 0) {
+            None
+        } else {
+            Some(self.paths.lease_path.clone())
+        };
+        if self.held_lease_path == desired {
+            if let Some(path) = desired {
+                let _ = write_lease(Path::new(&path), &chrono::Utc::now);
+            }
+            return;
+        }
+        if let Some(path) = self.held_lease_path.take() {
+            clear_lease(Path::new(&path));
+        }
+        if let Some(path) = desired {
+            let _ = write_lease(Path::new(&path), &chrono::Utc::now);
+            self.held_lease_path = Some(path);
+        }
+    }
+
     /// One message for a settled background job: what finished, how it
     /// finished, and where its full output lives, so whoever reads it next can
     /// act on it without hunting for the job. A MONITOR reports whether its
@@ -1472,6 +1518,22 @@ impl TuiApp {
     /// exact counter text, which keeps the hit box aligned with whatever the
     /// bar actually drew at the current width -- a custom `statusLine` paints
     /// no chip, so it has no clickable cell at all.
+    /// `↓` on an empty composer with nothing else open parks the focus on the
+    /// status-line background counter, so live background work is one arrow key
+    /// away. False when there is nothing to focus: no composer text (the key
+    /// keeps its history-recall meaning) and no running job to count.
+    fn focus_background_chip(&mut self) -> bool {
+        if !self.text.is_empty() {
+            return false;
+        }
+        if background_counter(self.job_counts.0, self.job_counts.1).is_none() {
+            return false;
+        }
+        self.chip_focus = true;
+        self.repaint();
+        true
+    }
+
     fn background_chip_at(&self, col: usize, row: usize) -> bool {
         let Some(counts) = background_counter(self.job_counts.0, self.job_counts.1) else {
             return false;
@@ -1641,7 +1703,7 @@ impl TuiApp {
         }
         let before_status = rows.len();
         if custom_status_rows.is_none() {
-            rows.extend(render_status_bar(
+            let mut painted = render_status_bar(
                 &StatusBarProps {
                     active_skill_names: &skill_names,
                     cwd: &self.bootstrap.cwd,
@@ -1652,7 +1714,30 @@ impl TuiApp {
                     shells: self.job_counts.1,
                 },
                 self.cols,
-            ));
+            );
+            // Keyboard focus on the counter: reverse-video the chip so the
+            // arrow-key navigation shows what enter is about to open. The
+            // counter text appears verbatim inside the styled row; the splice
+            // turns reverse video on and off (SGR 7/27) rather than resetting
+            // (SGR 0), so the dim styling the rest of the row carries —
+            // including the text after the chip — survives the splice.
+            if self.chip_focus {
+                if let Some(counts) = background_counter(self.job_counts.0, self.job_counts.1) {
+                    if let Some(row) = painted.first_mut() {
+                        if let Some(offset) = row.find(counts.as_str()) {
+                            let end = offset + counts.len();
+                            let highlighted = format!(
+                                "{}\u{1b}[7m{}\u{1b}[27m{}",
+                                &row[..offset],
+                                &counts,
+                                &row[end..]
+                            );
+                            *row = highlighted;
+                        }
+                    }
+                }
+            }
+            rows.extend(painted);
         }
         let status_rows = match custom_status_rows {
             Some(count) => count,
@@ -2152,6 +2237,36 @@ impl TuiApp {
             return;
         }
 
+        // The status-line counter can hold keyboard focus: ↓ on an empty
+        // composer parks it there, enter (or space) opens the jobs browser,
+        // and esc/↑ hands the focus back. Any other key releases the focus and
+        // falls through, so the browser keys, the overlays and the composer
+        // keep working exactly as before.
+        if self.chip_focus {
+            match &key {
+                Key::Up | Key::Escape => {
+                    self.chip_focus = false;
+                    self.repaint();
+                    return;
+                }
+                Key::Return => {
+                    self.chip_focus = false;
+                    self.open_jobs();
+                    return;
+                }
+                Key::Text(text) if text == " " => {
+                    self.chip_focus = false;
+                    self.open_jobs();
+                    return;
+                }
+                Key::Ctrl('c') => {
+                    self.quit = true;
+                    return;
+                }
+                _ => self.chip_focus = false,
+            }
+        }
+
         // Free-text "Other…" survey answer: collected before the overlay arm
         // and the running guard so typing works mid-run.
         if self
@@ -2359,7 +2474,11 @@ impl TuiApp {
                 // A draft typed mid-run gets the same visual-line cursor
                 // movement and history recall as an idle composer.
                 Key::Up => self.recall_older_prompt(),
-                Key::Down => self.recall_newer_prompt(),
+                Key::Down => {
+                    if !self.focus_background_chip() {
+                        self.recall_newer_prompt();
+                    }
+                }
                 Key::Tab | Key::Ctrl(_) | Key::Ignored | Key::Mouse(_) => {}
             }
             return;
@@ -2423,7 +2542,7 @@ impl TuiApp {
                         self.selected_suggestion_index =
                             (self.selected_suggestion_index + 1).min(menu_length - 1);
                     }
-                } else {
+                } else if !self.focus_background_chip() {
                     self.recall_newer_prompt();
                 }
             }
@@ -4726,6 +4845,9 @@ impl TuiApp {
             // list that just moved under it.
             if self.jobs_next_refresh.is_none_or(|at| now >= at) {
                 let changed = self.refresh_jobs(now);
+                // A run that just ended cleared the runner's lease; if the job
+                // runtime is still busy the session re-takes it here.
+                self.sync_background_lease();
                 let browsing = self
                     .overlay
                     .as_ref()
@@ -4853,6 +4975,12 @@ impl TuiApp {
                     break;
                 }
             }
+        }
+        // The process is going away, so the lease held for background work
+        // must go with it: `dripw` reads a dead pid as not running, but a
+        // clean release keeps the window exact.
+        if let Some(path) = self.held_lease_path.take() {
+            clear_lease(Path::new(&path));
         }
         // Leave an idle title on exit (quit, ctrl-c, or halt): bare label,
         // no spinner left behind.
@@ -8074,6 +8202,74 @@ mod background_jobs_tests {
         }
     }
 
+    #[test]
+    fn a_live_background_job_keeps_the_session_lease_held_for_dripw() {
+        let mut fixture = make_app(vec![job(
+            "monitor-1",
+            "MONITOR",
+            "monitor: watch the build",
+        )]);
+        std::fs::create_dir_all(&fixture.app.paths.dir).expect("session dir");
+        fixture.app.refresh_jobs(Instant::now());
+        assert_eq!(fixture.app.job_counts, (1, 0));
+
+        fixture.app.sync_background_lease();
+
+        let lease =
+            crate::core::lease::read_lease(std::path::Path::new(&fixture.app.paths.lease_path))
+                .expect("a live job holds the session lease");
+        assert_eq!(lease.pid, std::process::id() as i32);
+        assert_eq!(
+            fixture.app.held_lease_path.as_deref(),
+            Some(fixture.app.paths.lease_path.as_str())
+        );
+
+        // The exact liveness call `dripw` makes on this session's lease: an
+        // Alive status is what puts the session in its Running list and fills
+        // the Shells pane with this pid's descendants (the live async jobs).
+        let status = crate::core::lease::check_lease(
+            std::path::Path::new(&fixture.app.paths.lease_path),
+            &chrono::Utc::now,
+        );
+        assert!(
+            status.alive(),
+            "dripw reads the held lease as a running session"
+        );
+    }
+
+    #[test]
+    fn the_lease_is_released_once_the_last_job_settles() {
+        let mut fixture = make_app(vec![job("shell-1", "BASH_ASYNC", "build")]);
+        std::fs::create_dir_all(&fixture.app.paths.dir).expect("session dir");
+        fixture.app.refresh_jobs(Instant::now());
+        fixture.app.sync_background_lease();
+        assert!(std::path::Path::new(&fixture.app.paths.lease_path).exists());
+
+        fixture.jobs.set(Vec::new());
+        fixture.app.refresh_jobs(Instant::now());
+        fixture.app.sync_background_lease();
+
+        assert!(fixture.app.held_lease_path.is_none());
+        assert!(!std::path::Path::new(&fixture.app.paths.lease_path).exists());
+    }
+
+    #[test]
+    fn a_live_run_owns_the_lease_so_the_tui_does_not_stamp_it() {
+        let mut fixture = make_app(vec![job(
+            "monitor-1",
+            "MONITOR",
+            "monitor: watch the build",
+        )]);
+        std::fs::create_dir_all(&fixture.app.paths.dir).expect("session dir");
+        fixture.app.refresh_jobs(Instant::now());
+        fixture.app.running = true;
+
+        fixture.app.sync_background_lease();
+
+        assert!(fixture.app.held_lease_path.is_none());
+        assert!(!std::path::Path::new(&fixture.app.paths.lease_path).exists());
+    }
+
     struct JobsFixture {
         app: TuiApp,
         jobs: Arc<FakeJobs>,
@@ -8410,6 +8606,66 @@ mod background_jobs_tests {
             .on_key(Key::Mouse(MouseEvent::Click { col: 20, row: rows }));
         assert!(fixture.app.overlay.is_none());
         assert!(fixture.app.text.is_empty());
+    }
+
+    #[test]
+    fn down_on_an_empty_composer_parks_the_focus_on_the_counter_and_enter_opens_it() {
+        let mut fixture = make_app(vec![job(
+            "monitor-1",
+            "MONITOR",
+            "monitor: watch the build",
+        )]);
+        fixture.app.refresh_jobs(Instant::now());
+
+        fixture.app.on_key(Key::Down);
+        assert!(
+            fixture.app.chip_focus,
+            "down parks the focus on the counter"
+        );
+        // The focused chip is painted highlighted, so the arrow-key navigation
+        // shows which element enter will act on.
+        let raw = fixture.app.live_region();
+        assert!(
+            raw.iter().any(|row| row.contains("\u{1b}[7m1 monitor")),
+            "{raw:?}"
+        );
+
+        fixture.app.on_key(Key::Return);
+        assert!(!fixture.app.chip_focus, "enter releases the focus");
+        let overlay = fixture.app.overlay.as_ref().expect("the browser opened");
+        assert_eq!(overlay.kind, OverlayKind::Jobs);
+        assert_eq!(overlay.items.len(), 1);
+        assert!(
+            fixture.app.text.is_empty(),
+            "the focus key never types itself into the composer"
+        );
+    }
+
+    #[test]
+    fn the_counter_only_takes_focus_with_live_work_and_esc_hands_it_back() {
+        // Nothing running: down keeps its composer meaning (history recall).
+        let mut idle = make_app(Vec::new());
+        idle.app.refresh_jobs(Instant::now());
+        idle.app.on_key(Key::Down);
+        assert!(!idle.app.chip_focus, "nothing running, nothing to focus");
+        assert!(idle.app.overlay.is_none());
+
+        // With a live job, esc gives the focus back and opens nothing.
+        let mut fixture = make_app(vec![job("shell-1", "BASH_ASYNC", "cargo test --lib")]);
+        fixture.app.refresh_jobs(Instant::now());
+        fixture.app.on_key(Key::Down);
+        assert!(fixture.app.chip_focus);
+        fixture.app.on_key(Key::Escape);
+        assert!(!fixture.app.chip_focus);
+        assert!(fixture.app.overlay.is_none());
+
+        // Any other key releases the focus and is handled normally: it is
+        // typed into the composer rather than swallowed by the chip.
+        fixture.app.on_key(Key::Down);
+        assert!(fixture.app.chip_focus);
+        fixture.app.on_key(Key::Text("x".to_string()));
+        assert!(!fixture.app.chip_focus);
+        assert_eq!(fixture.app.text, "x");
     }
 }
 

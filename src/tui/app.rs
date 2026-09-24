@@ -52,7 +52,7 @@ use crate::cli::transcript::{
 };
 use crate::core::config::{
     get_active_cli_profile_id, get_active_cli_tool_profile_id, list_cli_model_profiles,
-    list_cli_system_prompt_profiles, resolve_cli_inference, save_cli_config,
+    list_cli_system_prompt_profiles_for, resolve_cli_inference, save_cli_config,
     set_active_cli_profile, set_active_cli_system_prompt, set_active_cli_tool_profile, CliConfig,
 };
 use crate::core::env_vars::{
@@ -2831,7 +2831,7 @@ impl TuiApp {
             ),
             OverlayKind::Prompt => (
                 "system prompt profiles",
-                list_cli_system_prompt_profiles(settings)
+                list_cli_system_prompt_profiles_for(&self.config)
                     .map(|profiles| {
                         profiles
                             .into_iter()

@@ -308,6 +308,10 @@ pub fn open_drip_home(root: &str) -> DripHome {
     // holding config.json and prompt.md. Seeding it (plus a README) means the
     // layout is discoverable without reading these sources.
     crate::cli::profile_dirs::ensure_profiles_dir(Path::new(&home.root));
+    // <home>/prompts/ is where system prompt profiles live — one directory per
+    // profile, holding config.json and prompt.md — seeded with a README for the
+    // same discoverability reason.
+    crate::cli::prompt_dirs::ensure_prompts_dir(Path::new(&home.root));
 
     home
 }

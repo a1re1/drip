@@ -58,7 +58,10 @@ receives, typically a numbered step list. `classification.json` uses the same
 schema as a skill's `classifiers.json` — questions about when the plan is
 relevant — and drip asks the classifier per goal, exactly as it does for skills.
 A plan without a sidecar is still offered, with a question generated for it.
-Project plans shadow user plans of the same name.
+Project plans shadow user plans of the same name — and because `name:` may
+differ from the directory name, shadowing is decided by the frontmatter
+`name:`, so a project plan that declares `name: ship-pr` wins over a user plan
+of that name whatever the two directories are called.
 
 Drip ships one starter plan, `ship-pr` (baseline verification → draft PR →
 implement → push → watch checks → review → land green). Like the default

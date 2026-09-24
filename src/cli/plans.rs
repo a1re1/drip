@@ -623,14 +623,38 @@ pub fn build_plan_pool(cwd: &Path, home_plans_dir: &Path) -> Vec<PlanPoolEntry> 
         .iter()
         .filter_map(|plan| {
             let loaded = load_plan_content(plan).ok()?;
+            let (classifiers, warning) = pool_classifiers(plan);
+
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+
             Some(PlanPoolEntry {
                 name: plan.name.clone(),
                 description: plan.description.clone(),
                 content: loaded.content,
-                classifiers: load_plan_classification(plan).and_then(|result| result.ok()),
+                classifiers,
             })
         })
         .collect()
+}
+
+/// A plan's sidecar as the pool stores it, plus the warning to surface when it
+/// is malformed. A malformed `classification.json` never drops the plan and is
+/// never silently ignored: the plan is pooled unauthored — exactly like a skill
+/// with a broken `classifiers.json` — and the operator is told once.
+fn pool_classifiers(plan: &CliPlan) -> (Option<SkillClassifiers>, Option<String>) {
+    match load_plan_classification(plan) {
+        None => (None, None),
+        Some(Ok(classifiers)) => (Some(classifiers), None),
+        Some(Err(error)) => (
+            None,
+            Some(format!(
+                "plans: \"{}\": {error} — treating it as unauthored",
+                plan.name
+            )),
+        ),
+    }
 }
 
 /// The pool as classifier candidates. A plan declares no capability
@@ -864,5 +888,134 @@ mod plan_pool_tests {
         let selection = select_plans(&route, serde_json::json!({"goal": "x"}), &[]).await;
         assert!(selection.selected.is_empty());
         assert!(selection.warnings.is_empty());
+    }
+
+    // --- the shipped ship-pr sidecar ---
+
+    /// Scores the SHIPPED `plans/ship-pr/classification.json` for a set of
+    /// classifier answers, resolving formula variables exactly as the docs
+    /// define (README "In a formula, a bare question id resolves to that answer
+    /// normalized to 0..1, and `id.member` resolves to one option/level
+    /// probability").
+    fn shipped_ship_pr_score(answers: &str) -> (f64, f64) {
+        let sidecar: serde_json::Value =
+            serde_json::from_str(BUILTIN_SHIP_PR_CLASSIFICATION).unwrap();
+        let relevance = &sidecar["relevance"];
+        let formula = relevance["formula"].as_str().unwrap();
+        let threshold = relevance["threshold"].as_f64().unwrap();
+        let response: crate::harness::classifier::DecisionsResponse =
+            serde_json::from_str(answers).unwrap();
+
+        let resolve = |var: &str| match var.split_once('.') {
+            Some((id, member)) => response
+                .answers
+                .get(id)
+                .and_then(|answer| crate::harness::classifier::answer_member(answer, member)),
+            None => response
+                .answers
+                .get(var)
+                .map(crate::harness::classifier::answer_value),
+        };
+
+        (
+            crate::harness::classifier::eval_formula(formula, &resolve).unwrap(),
+            threshold,
+        )
+    }
+
+    /// The shipped sidecar must actually REJECT a goal whose classifier answers
+    /// say it does not end in a pull request. Reading the `request_shape`
+    /// `choice` question bare would resolve to the chosen option's probability
+    /// (the documented meaning of a bare id for a `choice`), so a unanimous
+    /// "unrelated" answer would still contribute a near-constant 0.15 — 0.60 for
+    /// an all-NO goal, which meets the sidecar's own 0.6 threshold and composes
+    /// the ship-pr template into a run that ships nothing.
+    #[test]
+    fn the_shipped_ship_pr_formula_rejects_a_goal_that_does_not_deliver_a_pr() {
+        let (score, threshold) = shipped_ship_pr_score(
+            r#"{"model":"jev","answers":{
+                "delivers_pr":{"type":"noul","noul":0.0},
+                "needs_verification":{"type":"noul","noul":0.0},
+                "asks_for_review":{"type":"noul","noul":0.0},
+                "request_shape":{"type":"choice","choice":"unrelated",
+                    "probabilities":{"direct":0.0,"indirect":0.0,"unrelated":1.0},
+                    "confidence":1.0}},"usage":{}}"#,
+        );
+
+        assert!(
+            score < threshold,
+            "an all-NO goal scored {score} >= the sidecar threshold {threshold}"
+        );
+    }
+
+    /// The positive control for the test above: a goal every question agrees is
+    /// a PR does compose the template, so the fix narrowed the formula rather
+    /// than killing it.
+    #[test]
+    fn the_shipped_ship_pr_formula_selects_a_goal_that_delivers_a_pr() {
+        let (score, threshold) = shipped_ship_pr_score(
+            r#"{"model":"jev","answers":{
+                "delivers_pr":{"type":"noul","noul":0.95},
+                "needs_verification":{"type":"noul","noul":0.9},
+                "asks_for_review":{"type":"noul","noul":0.85},
+                "request_shape":{"type":"choice","choice":"direct",
+                    "probabilities":{"direct":0.9,"indirect":0.1,"unrelated":0.0},
+                    "confidence":0.9}},"usage":{}}"#,
+        );
+
+        assert!(
+            score >= threshold,
+            "a ship-the-PR goal scored {score} < the sidecar threshold {threshold}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_sidecar_is_warned_about_and_pooled_unauthored() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = home.path().join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PLAN_FILE_NAME), "body\n").unwrap();
+        std::fs::write(dir.join(PLAN_CLASSIFICATION_FILE_NAME), "{ not json").unwrap();
+
+        let plan = discover_plans(project.path(), home.path())
+            .into_iter()
+            .find(|plan| plan.name == "broken")
+            .unwrap();
+        let (classifiers, warning) = pool_classifiers(&plan);
+
+        assert!(classifiers.is_none());
+        let warning = warning.expect("a malformed sidecar must warn, not be swallowed");
+        assert!(
+            warning.contains("broken"),
+            "warning names the plan: {warning}"
+        );
+        assert!(warning.contains("treating it as unauthored"));
+
+        // None when absent, and no warning for a well-formed sidecar.
+        let plain = home.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join(PLAN_FILE_NAME), "body\n").unwrap();
+        let plain_plan = discover_plans(project.path(), home.path())
+            .into_iter()
+            .find(|plan| plan.name == "plain")
+            .unwrap();
+        assert_eq!(pool_classifiers(&plain_plan), (None, None));
+
+        let ok = home.path().join("authored");
+        std::fs::create_dir_all(&ok).unwrap();
+        std::fs::write(ok.join(PLAN_FILE_NAME), "body\n").unwrap();
+        std::fs::write(
+            ok.join(PLAN_CLASSIFICATION_FILE_NAME),
+            r#"{"relevance":{"threshold":0.7,"questions":{},"formula":"1.0"}}"#,
+        )
+        .unwrap();
+        let authored = discover_plans(project.path(), home.path())
+            .into_iter()
+            .find(|plan| plan.name == "authored")
+            .unwrap();
+        let (classifiers, warning) = pool_classifiers(&authored);
+        assert!(classifiers.is_some());
+        assert!(warning.is_none());
     }
 }

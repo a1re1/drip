@@ -7,7 +7,7 @@ use crate::cli::transcript::{format_model_route_lines, TranscriptEntry};
 use crate::core::types::{HarnessEventType, HarnessRunReason};
 use crate::tui::markdown_ansi::render_markdown_ansi;
 use crate::tui::theme::{event_label, event_paint};
-use crate::watch::ansi::{c, string_width, wrap_ansi};
+use crate::watch::ansi::{c, string_width, strip_ansi, wrap_ansi};
 
 /// Collapse all whitespace runs to a single space, trim, and hard-cut to
 /// `max_chars` characters (appending "...") when longer.
@@ -168,10 +168,24 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
             skill.name,
             if skill.enabled { "enabled" } else { "disabled" }
         ))],
-        TranscriptEntry::Info(note) => wrap_ansi(&note.text, width)
-            .iter()
-            .map(|line| c::dim(line))
-            .collect(),
+        // An info row may carry its own color (the startup banner paints
+        // itself); an uncolored note still renders dim. With color switched
+        // off the escapes are removed instead of printed literally.
+        TranscriptEntry::Info(note) => {
+            let rows = wrap_ansi(&note.text, width);
+            if !crate::watch::ansi::color_enabled() {
+                return rows.iter().map(|line| strip_ansi(line)).collect();
+            }
+            rows.iter()
+                .map(|line| {
+                    if line.contains('\x1b') {
+                        line.clone()
+                    } else {
+                        c::dim(line)
+                    }
+                })
+                .collect()
+        }
         TranscriptEntry::Error(note) => {
             let mut rows = vec![String::new()];
 
@@ -248,6 +262,28 @@ mod tests {
             at: String::new(),
             text: text.to_string(),
         })
+    }
+
+    #[test]
+    fn an_info_row_keeps_its_own_color_and_a_plain_one_stays_dim() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        crate::watch::ansi::set_color_enabled(true);
+
+        let colored = render_timeline_cell_rows(&note("\x1b[38;5;45mdrip\x1b[0m"), 80);
+        assert!(
+            colored[0].contains("\x1b[38;5;45m"),
+            "the banner's own color was overwritten: {colored:?}"
+        );
+        assert_eq!(strip_ansi(&colored[0]), "drip");
+
+        let dim = render_timeline_cell_rows(&note("plain note"), 80);
+        assert_eq!(dim[0], "\x1b[2mplain note\x1b[0m");
+
+        // No color: the escape is removed, never printed literally.
+        crate::watch::ansi::set_color_enabled(false);
+        let uncolored = render_timeline_cell_rows(&note("\x1b[38;5;45mdrip\x1b[0m"), 80);
+        assert_eq!(uncolored[0], "drip");
+        crate::watch::ansi::set_color_enabled(true);
     }
 
     #[test]

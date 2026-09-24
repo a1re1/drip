@@ -2,16 +2,18 @@
 //! whose output is shown once when an interactive session opens.
 //!
 //! `~/.drip/startup-message.sh` is drip's own file (nothing here ever reads or
-//! executes `~/.claude` settings). It is seeded once with a water-droplet
-//! mascot plus a short info block — drip's version, the working directory, and
-//! the model profiles available for startup — and the operator may rewrite it
-//! however they like, or delete it to get no banner at all.
+//! executes `~/.claude` settings). It is seeded once with a rainbow
+//! water-droplet mascot and a single info line — drip's version, the model
+//! profile chosen for startup, and the working directory — and the operator may
+//! rewrite it however they like, or delete it to get no banner at all.
 //!
 //! The script runs like a status-line command: a bounded child process, with
 //! the run's facts on stdin as one JSON object and the same facts exported as
 //! `DRIP_STARTUP_*` environment variables (the shipped default script uses the
-//! environment). Output is stripped of escape sequences before it reaches the
-//! transcript, so a script can never drive the terminal through the banner.
+//! environment). Output is stripped of terminal commands and control characters
+//! before it reaches the transcript, so a script can never move the cursor,
+//! clear the screen or set a title — while SGR color escapes survive, so the
+//! banner can be colorful.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -67,10 +69,24 @@ pub fn resolve_startup_message_path(home_root: &str) -> String {
         })
 }
 
+/// Defaults shipped by earlier versions, byte for byte. A
+/// `startup-message.sh` still identical to one of these has never been edited
+/// by the operator, so it is upgraded in place; any other content belongs to
+/// the operator and is never touched.
+const LEGACY_STARTUP_MESSAGE_SCRIPTS: &[&str] = &[include_str!("startup_legacy_default.sh")];
+
 /// Seed `startup-message.sh` with the shipped banner so there is always
-/// something to edit. An existing file is left byte-identical.
+/// something to edit. An existing file is left byte-identical — unless it is
+/// still byte-identical to a default an earlier version shipped, in which case
+/// it was never edited and is upgraded to the current default.
 pub fn ensure_startup_message_file(path: &Path) -> Result<()> {
     if path.exists() {
+        // A file that cannot be read as UTF-8 is the operator's too.
+        if let Ok(existing) = fs::read_to_string(path) {
+            if LEGACY_STARTUP_MESSAGE_SCRIPTS.contains(&existing.as_str()) {
+                fs::write(path, DEFAULT_STARTUP_MESSAGE_SCRIPT)?;
+            }
+        }
         return Ok(());
     }
 
@@ -163,8 +179,10 @@ pub fn startup_message_env(input: &StartupMessageInput<'_>) -> BTreeMap<String, 
     env
 }
 
-/// Drop escape sequences and control characters (newline and tab survive), so
-/// banner text can never move the cursor, clear the screen or set a title.
+/// Drop terminal *commands* and control characters (newline and tab survive),
+/// so banner text can never move the cursor, clear the screen or set a title.
+/// SGR color runs — `ESC [ … m` whose parameters are only digits, `;`, `:` and
+/// spaces — pass through unchanged, so a banner may be colorful.
 pub fn strip_control_sequences(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -174,12 +192,27 @@ pub fn strip_control_sequences(raw: &str) -> String {
             match chars.peek() {
                 Some('[') => {
                     chars.next();
-                    let mut len = 0;
+                    let mut body = String::new();
+                    let mut final_byte = None;
                     for next in chars.by_ref() {
-                        len += 1;
-                        if next.is_ascii_alphabetic() || len > 64 {
+                        if next.is_ascii_alphabetic() || body.chars().count() >= 64 {
+                            final_byte = Some(next);
                             break;
                         }
+                        body.push(next);
+                    }
+                    // `ESC [ params m` is a color/style run: keep it. Everything
+                    // else (cursor moves, clears, titles, mouse reports) is
+                    // dropped. The parameter check matters: it is what stops a
+                    // command byte from riding along in the kept sequence.
+                    let params_ok = body
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || matches!(ch, ';' | ':' | ' '));
+                    if final_byte == Some('m') && params_ok {
+                        out.push('\x1b');
+                        out.push('[');
+                        out.push_str(&body);
+                        out.push('m');
                     }
                 }
                 Some(']') => {
@@ -294,7 +327,7 @@ pub fn run_startup_message(input: &StartupMessageInput<'_>) -> Option<String> {
     None
 }
 
-/// The shipped startup script: a water droplet and a short info block. It uses
+/// The shipped startup script: a rainbow droplet and one info line. It uses
 /// only the `DRIP_STARTUP_*` environment variables, so it is a working example
 /// of how a rewrite gets its facts.
 pub const DEFAULT_STARTUP_MESSAGE_SCRIPT: &str = r#"#!/bin/sh
@@ -311,26 +344,47 @@ pub const DEFAULT_STARTUP_MESSAGE_SCRIPT: &str = r#"#!/bin/sh
 #   DRIP_STARTUP_PROFILES        one "id: model" line per configured profile,
 #                                the active one marked with *
 #
-# Output is plain text: escape sequences are stripped before it is displayed.
+# Color is fine: escapes that move the cursor, clear the screen or set a title
+# are stripped before the banner is shown; colors pass through.
 
-cat <<'DRIP_MASCOT'
-        .
-       / \
-      / . \
-     |     |
-      \   /
-       \_/
-DRIP_MASCOT
+# One styled fragment: sgr 1;36 'text'.
+sgr() {
+  printf '\033[%sm%s\033[0m' "$1" "$2"
+}
 
-printf '  drip %s\n' "$DRIP_STARTUP_VERSION"
-printf '  %s\n' "$DRIP_STARTUP_CWD"
-printf '  session %s\n' "$DRIP_STARTUP_SESSION_ID"
-printf '  model profiles (active: %s)\n' "$DRIP_STARTUP_ACTIVE_PROFILE"
-printf '%s\n' "$DRIP_STARTUP_PROFILES" | while IFS= read -r profile; do
-  if [ -n "$profile" ]; then
-    printf '    %s\n' "$profile"
-  fi
-done
+# Paint one line through a blue -> cyan -> violet ramp.
+rainbow() {
+  printf '%s' "$1" | awk 'BEGIN { n = split("45 51 81 111 147 183 219", ramp); cur = "" }
+  {
+    len = split($0, ch, "")
+    for (i = 1; i <= len; i++) {
+      if (ch[i] == " ") { printf " "; continue }
+      code = ramp[int((i - 1) * n / len) + 1]
+      if (code != cur) { printf "%c[38;5;%sm", 27, code; cur = code }
+      printf "%s", ch[i]
+    }
+    printf "%c[0m\n", 27
+  }'
+}
+
+rainbow '       __'
+rainbow '      /  \'
+rainbow '     /    \'
+rainbow '     |    |'
+rainbow '     \    /'
+rainbow '      \  /'
+rainbow '       \/'
+
+active_model=$(printf '%s\n' "$DRIP_STARTUP_PROFILES" | grep '^\* ' | head -n 1)
+active_model=${active_model#*: }
+[ -n "$active_model" ] || active_model=$DRIP_STARTUP_ACTIVE_PROFILE
+printf '  %s %s %s %s %s %s\n' \
+  "$(sgr '1;36' '❯')" \
+  "$(sgr '1;36' 'drip') $(sgr '38;5;45' "$DRIP_STARTUP_VERSION")" \
+  "$(sgr '38;5;240' '·')" \
+  "$(sgr '1;38;5;183' "$active_model")" \
+  "$(sgr '38;5;240' '·')" \
+  "$(sgr '38;5;250' "$DRIP_STARTUP_CWD")"
 "#;
 
 #[cfg(test)]
@@ -362,8 +416,35 @@ mod tests {
         })
     }
 
+    /// The banner as a terminal would show it: every escape removed.
+    fn plain(text: &str) -> String {
+        crate::watch::ansi::strip_ansi(text)
+    }
+
+    /// Every escape run in `text`.
+    fn escape_runs(text: &str) -> Vec<String> {
+        let mut runs = Vec::new();
+        let mut chars = text.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch != '\x1b' {
+                continue;
+            }
+            let mut run = String::from(ch);
+            while let Some(next) = chars.next() {
+                run.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            runs.push(run);
+        }
+
+        runs
+    }
+
     #[test]
-    fn the_default_script_shows_the_mascot_and_the_run_facts() {
+    fn the_default_script_draws_a_colorful_droplet_and_one_info_line() {
         let dir = tempfile::tempdir().unwrap();
         let cwd_dir = tempfile::tempdir().unwrap();
         let cwd = cwd_dir.path().to_string_lossy().into_owned();
@@ -374,33 +455,64 @@ mod tests {
         ];
 
         let out = run(&path, &cwd, &profiles).expect("the default script prints a banner");
+        let text = plain(&out);
 
-        assert!(out.contains("\\_/"), "droplet mascot missing: {out:?}");
-        assert!(out.contains("drip 9.9.9"), "{out:?}");
+        // The mascot is a droplet: flat crown, sloping shoulders, a straight
+        // body and a tapered tip.
+        assert!(
+            text.contains("       __"),
+            "droplet crown missing: {text:?}"
+        );
+        assert!(
+            text.contains("      /  \\"),
+            "droplet shoulder missing: {text:?}"
+        );
+        assert!(
+            text.contains("     |    |"),
+            "droplet body missing: {text:?}"
+        );
+        assert!(text.contains("       \\/"), "droplet tip missing: {text:?}");
+        // It is painted through a 256-color ramp, and the info line is styled.
+        assert!(out.contains("\x1b[38;5;45m"), "no rainbow ramp: {out:?}");
+        assert!(out.contains("\x1b[38;5;219m"), "ramp is too short: {out:?}");
+        assert!(out.contains("\x1b[1;36m"), "no accent: {out:?}");
+        // One info line carrying version, the startup profile and the cwd.
+        assert!(out.contains("drip"), "{out:?}");
+        assert!(out.contains("9.9.9"), "version missing: {out:?}");
+        assert!(
+            out.contains("anthropic/claude-sonnet-4-5"),
+            "startup profile missing: {out:?}"
+        );
         assert!(out.contains(&cwd), "cwd missing: {out:?}");
-        assert!(out.contains("session sess-abc"), "{out:?}");
         assert!(
-            out.contains("* default: anthropic/claude-sonnet-4-5"),
-            "{out:?}"
+            !text.contains("session ") && !text.contains("model profiles"),
+            "the info block is still verbose: {text:?}"
         );
-        assert!(
-            out.contains("fast: anthropic/claude-haiku-4-5 (quick)"),
-            "{out:?}"
+        assert_eq!(
+            text.trim_end().lines().count(),
+            8,
+            "expected 7 mascot rows + 1 info row: {text:?}"
         );
-        assert!(
-            !out.contains('\x1b'),
-            "escape leaked into the banner: {out:?}"
-        );
+        // Only color runs survive: every escape printed ends a style, so
+        // nothing in the banner can move the cursor or clear the screen.
+        let runs = escape_runs(&out);
+        assert!(!runs.is_empty(), "the banner lost its color: {out:?}");
+        for rune in runs {
+            assert!(rune.ends_with('m'), "non-color escape leaked: {rune:?}");
+        }
     }
 
     #[test]
-    fn escape_sequences_and_control_characters_are_stripped() {
+    fn colors_survive_but_terminal_commands_are_stripped() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_script(dir.path(), "printf '\\033[31mred\\033[0m \\007done\\n'");
+        let path = write_script(
+            dir.path(),
+            "printf '\\033[1;36mred\\033[0m \\033[2J\\033[3;4H\\033]0;t\\007\\007done\\n'",
+        );
 
         let out = run(&path, "/tmp", &[]).expect("prints text");
 
-        assert_eq!(out, "red done");
+        assert_eq!(out, "\x1b[1;36mred\x1b[0m done");
     }
 
     #[test]
@@ -454,6 +566,27 @@ mod tests {
         let seeded = std::fs::read_to_string(&path).unwrap();
         assert_eq!(seeded, DEFAULT_STARTUP_MESSAGE_SCRIPT);
 
+        std::fs::write(&path, "echo mine\n").unwrap();
+        ensure_startup_message_file(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo mine\n");
+    }
+
+    #[test]
+    fn an_unedited_previous_default_is_upgraded_and_an_edited_file_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STARTUP_MESSAGE_FILE_NAME);
+        let legacy = LEGACY_STARTUP_MESSAGE_SCRIPTS[0];
+
+        // Never edited, so it is replaced by the default this build ships.
+        std::fs::write(&path, legacy).unwrap();
+        ensure_startup_message_file(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            DEFAULT_STARTUP_MESSAGE_SCRIPT,
+            "an unedited earlier default was not upgraded"
+        );
+
+        // Any other content belongs to the operator and is left byte-identical.
         std::fs::write(&path, "echo mine\n").unwrap();
         ensure_startup_message_file(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo mine\n");

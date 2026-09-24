@@ -331,8 +331,8 @@ fn path_tokens(path: &str) -> usize {
         .unwrap_or(1)
 }
 
-/// Build the picker's row cache: every enabled project/user/builtin and
-/// marketplace skill plus the marketplace skills the registry currently gates
+/// Build the picker's row cache: every enabled project/user and marketplace
+/// skill plus the marketplace skills the registry currently gates
 /// (shown locked). Files are read here only, on dispatch; the paint path
 /// always renders from this cache.
 fn collect_skill_rows(cwd: &Path, home: &crate::core::home::DripHome) -> Vec<SkillRow> {
@@ -3154,10 +3154,19 @@ impl TuiApp {
             }
             "praeparare" => {
                 // The TUI face of `drip --praeparare`: activate the praeparare
-                // skill for the session (built-in pack, or a same-named
+                // skill for the session (the seeded default, or a same-named
                 // discovered skill — the same mechanism as --skill) AND submit
                 // the shared canned goal through the ordinary run path.
                 // Activation alone would leave the run unstarted.
+                //
+                // The skill is an ordinary user skill, so restore the shipped
+                // template when the operator deleted it before activating.
+                crate::cli::skills::ensure_default_skill(
+                    &self.bootstrap.home.root,
+                    std::path::Path::new(&self.bootstrap.home.skills_dir),
+                    "praeparare",
+                );
+                self.refresh_skill_catalog();
                 self.enable_skill_if_discovered("praeparare");
                 // Non-empty args are extra operator context, appended through
                 // the SAME helper the CLI face uses — never silently dropped
@@ -5795,6 +5804,13 @@ mod skill_activation_tests {
         let project_str = project.path().to_string_lossy().into_owned();
 
         let drip_home = crate::core::home::open_drip_home(&home_root);
+        // The shipped default skills are copied into the home on first start
+        // (entry does this too), so the fixture sees them like any other user
+        // skill rather than from an embedded pack.
+        crate::cli::skills::seed_default_skills_once(
+            &home_root,
+            std::path::Path::new(&drip_home.skills_dir),
+        );
         let drip_project =
             crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
                 .expect("resolve drip project");
@@ -6099,8 +6115,8 @@ mod skill_activation_tests {
                 .app
                 .skill_rows
                 .iter()
-                .any(|row| row.source == SkillSource::Builtin),
-            "built-in skills are listed too"
+                .any(|row| row.name == "tdd" && row.source == SkillSource::User),
+            "the seeded default skills are listed as user skills"
         );
     }
 
@@ -6583,6 +6599,13 @@ mod prompt_history_wiring_tests {
         let cwd_str = cwd.path().to_string_lossy().into_owned();
         let project_str = project.path().to_string_lossy().into_owned();
         let drip_home = crate::core::home::open_drip_home(&home_root);
+        // The shipped default skills are copied into the home on first start
+        // (entry does this too), so the fixture sees them like any other user
+        // skill rather than from an embedded pack.
+        crate::cli::skills::seed_default_skills_once(
+            &home_root,
+            std::path::Path::new(&drip_home.skills_dir),
+        );
         let drip_project =
             crate::core::home::resolve_drip_project(&cwd_str, &home_root, Some(&project_str))
                 .expect("resolve drip project");

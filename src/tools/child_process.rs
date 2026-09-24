@@ -71,6 +71,25 @@ impl ActiveProcessTerminators {
     }
 }
 
+/// Whether [`run_captured_process`] registers its child in the process-wide
+/// stop registry.
+///
+/// The sweep must stay process-wide in production: a stop signal or esc has to
+/// kill every in-flight child of the run. Under `cargo test` the whole crate's
+/// tests share ONE process and run in parallel, so a test that fires the sweep
+/// for its own purposes (the registry test, the esc-key test) also reached the
+/// children that unrelated tests had merely spawned: the status-line runner
+/// tests saw their `sleep 0.3; printf ok` job come back group-killed and failed
+/// on `assert!(out.ok)` (src/tui/status_line.rs:743 / :1034 / :1046), and a
+/// captured-process child reported SIGTERM instead of its exit code.
+/// Registration is therefore skipped in the test build. The sweep itself and
+/// the registration path stay covered by the tests that register explicitly
+/// (registry + esc) and assert their terminator ran.
+#[cfg(test)]
+const REGISTER_SPAWNED_CHILDREN: bool = false;
+#[cfg(not(test))]
+const REGISTER_SPAWNED_CHILDREN: bool = true;
+
 static ACTIVE_PROCESS_TERMINATORS: Mutex<Option<ActiveProcessTerminators>> = Mutex::new(None);
 static STOP_SIGNAL_HANDLERS_INSTALLED: Once = Once::new();
 static STOP_SIGNAL_FIRED: AtomicBool = AtomicBool::new(false);
@@ -156,16 +175,25 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
     // loop SIGTERMs the group, SIGKILLs after 1s, and settles after 1.5s
     // with whatever was captured. The flag keeps the closure safe to call
     // from a real signal handler; the deadlines live in the poll loop.
+    //
+    // Nothing is registered in the test build: the sweep is process-wide and
+    // every test of this crate shares one process (see
+    // REGISTER_SPAWNED_CHILDREN).
     let terminate_now = Arc::new(AtomicBool::new(false));
-    let terminator_flag = Arc::clone(&terminate_now);
-    let terminator = Box::new(move || {
-        terminator_flag.store(true, Ordering::SeqCst);
-    });
+    let terminate_now_id: Option<u64> = if REGISTER_SPAWNED_CHILDREN {
+        let terminator_flag = Arc::clone(&terminate_now);
+        let terminator = Box::new(move || {
+            terminator_flag.store(true, Ordering::SeqCst);
+        });
 
-    let mut guard = ACTIVE_PROCESS_TERMINATORS.lock().unwrap();
-    let slots = guard.get_or_insert_with(ActiveProcessTerminators::new);
-    let terminate_now_id = slots.add(terminator);
-    drop(guard);
+        let mut guard = ACTIVE_PROCESS_TERMINATORS.lock().unwrap();
+        let slots = guard.get_or_insert_with(ActiveProcessTerminators::new);
+        let id = slots.add(terminator);
+        drop(guard);
+        Some(id)
+    } else {
+        None
+    };
 
     let result = wait_with_pipes(
         &mut child,
@@ -178,7 +206,9 @@ pub fn run_captured_process(args: &CapturedProcessArgs) -> Result<CapturedProces
 
     // Both the `close` and `error` paths delete the terminator before
     // settling; do the same here.
-    with_terminators(|slots| slots.remove(terminate_now_id));
+    if let Some(id) = terminate_now_id {
+        with_terminators(|slots| slots.remove(id));
+    }
 
     Ok(result)
 }
@@ -299,11 +329,14 @@ enum Outcome {
 fn wait_with_pipes(
     child: &mut Child,
     timeout_ms: Option<u64>,
-    terminate_now_id: u64,
+    terminate_now_id: Option<u64>,
     terminate_now: &AtomicBool,
     _pid: u32,
     stdin_payload: Option<&str>,
 ) -> CapturedProcessResult {
+    // `None` means the child is not in the process-wide registry (see
+    // REGISTER_SPAWNED_CHILDREN); only the poll loop that owns a registered id
+    // may re-read it, so nothing here dereferences the id itself.
     let _ = terminate_now_id;
 
     // Take the pipe ends and drain them from reader threads into shared
@@ -597,10 +630,13 @@ pub fn build_combined_output(stdout: &str, stderr: &str) -> String {
     sections.join("\n\n")
 }
 
-/// Test-only: `terminate_active_processes` sweeps EVERY in-flight child in
-/// the process, so a test that fires it must not overlap a test whose child
-/// is still running (it would report a spurious "KILLED by SIGTERM").
-/// Registry tests and timeout tests across modules hold this lock.
+/// Test-only lock for the tests that FIRE the sweep or inspect the registry.
+///
+/// `terminate_active_processes` sweeps every registered terminator at once, so
+/// a test that fires it must not overlap another test's manually registered
+/// terminator (a `panic!`-on-run guard would land in the wrong test). Children
+/// spawned by `run_captured_process` no longer register in the test build (see
+/// REGISTER_SPAWNED_CHILDREN), so this lock no longer guards process tests.
 #[cfg(test)]
 pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -741,8 +777,9 @@ mod tests {
     #[test]
     fn register_process_terminator_registers_then_unregisters() {
         let _guard = REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Other tests spawn processes concurrently (each registers a
-        // terminator), so assert on the delta this test causes, not on zero.
+        // Spawned children no longer register in the test build (see
+        // REGISTER_SPAWNED_CHILDREN) and every manually registering test holds
+        // this lock, so assert on the delta this test causes, not on zero.
         let before = with_terminators(|slots| slots.active.len());
         let unregister = register_process_terminator(Box::new(|| {
             panic!("terminator should not run on unregister");
@@ -766,9 +803,55 @@ mod tests {
 
         let count = terminate_active_processes();
 
-        // At least ours ran; concurrent process tests may add their own.
+        // At least ours ran; no manually registering test can overlap this one
+        // (they all hold REGISTRY_TEST_LOCK), so the sweep is exactly ours.
         assert!(count >= 1, "count = {count}");
         assert!(fired.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cross_test_sweep_cannot_kill_a_spawned_child() {
+        // `cargo test` runs this crate's tests in parallel inside ONE process,
+        // and `terminate_active_processes` is process-wide by design: on a real
+        // stop signal or esc, every in-flight child of the run must die. In a
+        // test binary that same sweep reached the children of unrelated tests:
+        // the status-line runner tests saw their `sleep 0.3; printf ok` jobs
+        // group-killed, the job reported a spurious `ok == false`, and the run
+        // flaked (src/tui/status_line.rs:743 / :1034 / :1046 panics). A child
+        // spawned by `run_captured_process` must therefore survive a sweep
+        // fired by another test.
+        let child = std::thread::spawn(|| {
+            let process_args = owned(&["-c", "sleep 0.4; printf ok"]);
+            let args = CapturedProcessArgs {
+                stdin_payload: None,
+                command: "/bin/sh",
+                cwd: None,
+                env: None,
+                process_args: &process_args,
+                timeout_ms: Some(5_000),
+            };
+            run_captured_process(&args).expect("spawn failed")
+        });
+
+        // Let the child spawn (and, pre-fix, register its terminator) before
+        // the sweep fires. This test deliberately does NOT take
+        // REGISTRY_TEST_LOCK: the point is that an un-serialized sweep cannot
+        // touch it.
+        std::thread::sleep(Duration::from_millis(150));
+        terminate_active_processes();
+
+        let result = child.join().expect("child thread must not panic");
+        assert!(
+            !result.timed_out,
+            "a cross-test sweep must not time this job out"
+        );
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "a cross-test sweep must not kill this child (signal {:?})",
+            result.signal
+        );
+        assert_eq!(result.stdout.trim(), "ok");
     }
 
     #[test]
@@ -942,5 +1025,20 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.stdout, "");
         assert_eq!(result.stdin_error, None);
+    }
+
+    #[test]
+    fn production_build_registers_spawned_children() {
+        // The exemption above is a test-build detail and must never leak into
+        // production: a released drip has to register every in-flight child so
+        // a stop signal or esc kills it. `cfg!(test)` is true while this test
+        // binary runs, so the assertion is on the constant pair itself.
+        #[cfg(not(test))]
+        assert!(REGISTER_SPAWNED_CHILDREN);
+        #[cfg(test)]
+        assert!(
+            !REGISTER_SPAWNED_CHILDREN,
+            "test builds must not register spawned children"
+        );
     }
 }

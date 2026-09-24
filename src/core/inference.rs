@@ -321,7 +321,7 @@ pub fn resolve_active_system_prompt_profile(
 
     if profiles.is_empty() {
         return Err(anyhow!(
-            "No system prompt profiles configured. Add one to ~/.drip/config.json under settings.runtime.system_prompt_profiles."
+            "No system prompt profiles configured. Add one to ~/.drip/prompts/<id>/ (or to ~/.drip/config.json under settings.runtime.system_prompt_profiles)."
         ));
     }
 
@@ -329,7 +329,7 @@ pub fn resolve_active_system_prompt_profile(
         .into_iter()
         .find(|candidate| candidate.id == active_prompt_id)
         .ok_or_else(|| anyhow!(
-            "Unknown active system prompt id \"{active_prompt_id}\". Add a profile with that id to ~/.drip/config.json under settings.runtime.system_prompt_profiles, or change {ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID}."
+            "Unknown active system prompt id \"{active_prompt_id}\". Add a profile with that id to ~/.drip/prompts/<id>/ (or to ~/.drip/config.json under settings.runtime.system_prompt_profiles), or change {ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID}."
         ))
 }
 

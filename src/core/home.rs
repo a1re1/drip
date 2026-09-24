@@ -322,6 +322,10 @@ pub fn open_drip_home(root: &str) -> DripHome {
     // starter plan is not resurrected: the marker beside plans/ records what
     // was already written.
     crate::cli::plans::ensure_default_plans(&home.root, Path::new(&home.plans_dir));
+    // <home>/prompts/ is where system prompt profiles live — one directory per
+    // profile, holding config.json and prompt.md — seeded with a README for the
+    // same discoverability reason.
+    crate::cli::prompt_dirs::ensure_prompts_dir(Path::new(&home.root));
 
     home
 }

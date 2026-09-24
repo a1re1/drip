@@ -1223,6 +1223,7 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         normalize_web_setting_values(settings_value.unwrap_or(&serde_json::Value::Null));
 
     let mut role_profiles_migrated = false;
+    let mut prompt_profiles_migrated = false;
 
     // config.json is the only source of profiles once the file exists: the
     // compiled-in catalogs are never merged, backfilled, or looked up here.
@@ -1242,6 +1243,26 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         {
             object.insert(
                 ROLE_PROFILES_SETTING_ID.to_string(),
+                serde_json::Value::String("[]".to_string()),
+            );
+        }
+    }
+
+    // Same shape for system prompt profiles: lift legacy
+    // `runtime.system_prompt_profiles` entries into
+    // ~/.drip/prompts/<name>/{config.json,prompt.md} and clear the setting. A
+    // profile that already has a directory is never overwritten, so a
+    // hand-authored profile survives; a write failure leaves the setting in
+    // place for the next load to retry, and the cleared value rides the same
+    // on-disk rewrite below.
+    if crate::cli::prompt_dirs::migrate_legacy_system_prompt_profiles(path, &mut settings) {
+        prompt_profiles_migrated = true;
+        if let Some(object) = parsed_value
+            .get_mut("settings")
+            .and_then(|settings| settings.as_object_mut())
+        {
+            object.insert(
+                SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(),
                 serde_json::Value::String("[]".to_string()),
             );
         }
@@ -1301,7 +1322,8 @@ pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     let migrated_settings = migrated_settings_object(&original_settings);
-    if migrated_settings != original_settings || role_profiles_migrated {
+    if migrated_settings != original_settings || role_profiles_migrated || prompt_profiles_migrated
+    {
         let mut document = parsed_value.clone();
         document["settings"] = migrated_settings;
         match serde_json::to_string_pretty(&document) {
@@ -1370,7 +1392,30 @@ pub fn resolve_cli_inference(
     config: &CliConfig,
     env: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<crate::core::inference::ResolvedInferenceConfig> {
-    crate::core::inference::resolve_inference_config(&config.settings, env)
+    crate::core::inference::resolve_inference_config(&system_prompt_settings(config), env)
+}
+
+/// The config's settings with the `~/.drip/prompts/` directories folded in.
+///
+/// System prompt profiles live on disk, one directory per profile (see
+/// `cli::prompt_dirs`); this view is what the resolve paths consume, so no
+/// caller has to thread a config path through. It is an in-memory view only:
+/// `save_cli_config` persists `config.settings` untouched, which keeps the
+/// directories the single on-disk source for those profiles. An id still
+/// listed in `runtime.system_prompt_profiles` overrides the directory profile
+/// with the same id.
+pub fn system_prompt_settings(config: &CliConfig) -> IndexMap<String, String> {
+    crate::cli::prompt_dirs::merge_dir_profiles_into_settings(
+        &config.settings,
+        config.path.as_deref(),
+    )
+}
+
+/// The system prompt profiles a config resolves to: the prompt directories
+/// beside its config file plus any entry left in
+/// `runtime.system_prompt_profiles`.
+pub fn list_cli_system_prompt_profiles_for(config: &CliConfig) -> Result<Vec<SystemPromptProfile>> {
+    parse_system_prompt_profiles(&system_prompt_settings(config))
 }
 
 pub fn list_cli_model_profiles(
@@ -1444,12 +1489,12 @@ pub fn set_active_cli_system_prompt(
     mut config: CliConfig,
     prompt_profile_id: &str,
 ) -> Result<CliConfig> {
-    let known = list_cli_system_prompt_profiles(&config.settings)?
+    let known = list_cli_system_prompt_profiles_for(&config)?
         .iter()
         .any(|profile| profile.id == prompt_profile_id);
     if !known {
         return Err(anyhow!(
-            "Unknown system prompt profile \"{prompt_profile_id}\". Add it to ~/.drip/config.json under settings.runtime.system_prompt_profiles."
+            "Unknown system prompt profile \"{prompt_profile_id}\". Add it to ~/.drip/prompts/{prompt_profile_id}/ (or to ~/.drip/config.json under settings.runtime.system_prompt_profiles)."
         ));
     }
     config.settings.insert(
@@ -1502,7 +1547,7 @@ mod tests {
         std::fs::write(&path, body).unwrap();
 
         let config = load_cli_config(&path).unwrap();
-        let prompts = list_cli_system_prompt_profiles(&config.settings).unwrap();
+        let prompts = list_cli_system_prompt_profiles_for(&config).unwrap();
         assert_eq!(prompts.len(), 1, "{prompts:?}");
         assert_eq!(prompts[0].id, "custom-prompt");
         // The seed catalog is not consulted: none of its ids appear.
@@ -1513,6 +1558,84 @@ mod tests {
             .collect();
         assert!(!catalog_ids.is_empty(), "seed catalog should be non-empty");
         assert!(!prompts.iter().any(|p| catalog_ids.contains(&p.id)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_cli_config_lifts_prompt_profiles_into_directories_and_still_resolves_them() {
+        let dir = unique_config_dir("prompt-dirs-migrate");
+        let path = dir.join("config.json");
+        let body = r#"{
+  "settings": {
+    "runtime.system_prompt_profiles": [{"id":"code-reviewer","label":"Code reviewer","prompt":"Review hard.","toolAccess":"all"}]
+  },
+  "version": 1
+}"#;
+        std::fs::write(&path, body).unwrap();
+
+        let config = load_cli_config(&path).unwrap();
+
+        // The profile now lives in a directory, with its prompt as prose and the
+        // setting cleared on disk.
+        let profile_dir = dir.join("prompts").join("code-reviewer");
+        assert_eq!(
+            std::fs::read_to_string(profile_dir.join("prompt.md")).unwrap(),
+            "Review hard.\n"
+        );
+        let blob: Value = serde_json::from_str(
+            &std::fs::read_to_string(profile_dir.join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(blob.get("prompt").is_none(), "{blob}");
+        assert_eq!(blob["toolAccess"], "all");
+
+        // ...and the config still resolves it, so nothing downstream has to know
+        // the profiles moved.
+        let prompts = list_cli_system_prompt_profiles_for(&config).unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].id, "code-reviewer");
+        assert_eq!(prompts[0].prompt, "Review hard.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prompt_directory_profile_is_visible_and_an_inline_entry_with_its_id_wins() {
+        let dir = unique_config_dir("prompt-dirs-inline");
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{ "settings": {}, "version": 1 }"#).unwrap();
+
+        // Hand-authored profile: `id` omitted, so the directory names it.
+        let target = dir.join("prompts").join("scout");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("config.json"), r#"{"label":"Scout"}"#).unwrap();
+        std::fs::write(target.join("prompt.md"), "Scout it.\n").unwrap();
+
+        let mut config = load_cli_config(&path).unwrap();
+        let prompts = list_cli_system_prompt_profiles_for(&config).unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].id, "scout");
+        assert_eq!(prompts[0].prompt, "Scout it.");
+        // The merged view never leaks back into the settings map a save writes,
+        // so saving the config cannot duplicate a directory profile inline.
+        assert!(!config
+            .settings
+            .get(SYSTEM_PROMPT_PROFILES_SETTING_ID)
+            .map(|value| value.contains("scout"))
+            .unwrap_or(false));
+
+        // An entry in the setting with the same id overrides the directory one.
+        config.settings.insert(
+            SYSTEM_PROMPT_PROFILES_SETTING_ID.to_string(),
+            r#"[{"id":"scout","prompt":"Inline wins."},{"id":"inline-only","prompt":"Inline."}]"#
+                .to_string(),
+        );
+        let prompts = list_cli_system_prompt_profiles_for(&config).unwrap();
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert_eq!(prompts[0].id, "scout");
+        assert_eq!(prompts[0].prompt, "Inline wins.");
+        assert_eq!(prompts[1].id, "inline-only");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2376,7 +2499,8 @@ mod tests {
         // Consumers see the profiles through the normal parse path.
         let profiles = parse_inference_model_profiles(&config.settings).expect("parse models");
         assert!(profiles.iter().any(|p| p.id == "glm-5-3-flash"));
-        let prompts = parse_system_prompt_profiles(&config.settings).expect("parse prompts");
+        let prompts =
+            parse_system_prompt_profiles(&system_prompt_settings(&config)).expect("parse prompts");
         assert!(prompts.iter().any(|p| p.id == "default-coding-agent"));
 
         // Idempotent: a second load does not rewrite the file.

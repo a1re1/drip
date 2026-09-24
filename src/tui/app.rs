@@ -842,13 +842,38 @@ fn custom_status_row_from(
     ))
 }
 
-/// A lone "/token" with no whitespace may be a not-yet-enabled skill name;
-/// the built-in slash command menu takes priority and suppresses this one.
-fn skill_suggestion_query(text: &str) -> Option<String> {
-    if !text.starts_with('/') || text.trim().chars().any(char::is_whitespace) {
+/// The `/token` the composer is currently completing: the last `/<run>` that
+/// starts at a word boundary and reaches the end of the text, as char offsets
+/// (slash included). A token typed mid-message ("i still /navi") completes
+/// exactly like a leading one, so `/` triggers the menu wherever it is typed.
+fn active_skill_token_span(text: &str) -> Option<(usize, usize)> {
+    let (index, _) = text.rmatch_indices('/').find(|(index, _)| {
+        *index == 0
+            || text[..*index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+    })?;
+    let tail = &text[index + 1..];
+    if tail.is_empty() || tail.chars().any(char::is_whitespace) {
         return None;
     }
-    Some(text[1..].to_ascii_lowercase())
+    let start = text[..index].chars().count();
+    Some((start, start + 1 + tail.chars().count()))
+}
+
+/// A lone "/token" with no whitespace may be a not-yet-enabled skill name;
+/// the built-in slash command menu takes priority and suppresses this one. The
+/// token may sit anywhere in the line, not only at the start.
+fn skill_suggestion_query(text: &str) -> Option<String> {
+    let (start, end) = active_skill_token_span(text)?;
+    let chars: Vec<char> = text.chars().collect();
+    Some(
+        chars[start + 1..end]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase(),
+    )
 }
 
 /// Prefix filter over the cached skill catalog: full-name prefixes first,
@@ -882,26 +907,50 @@ fn filter_skill_catalog(
     exact
 }
 
-/// The leading `/token` of a composer line when it names a discovered skill
-/// exactly (and is not a built-in command): the length in chars, including the
-/// leading '/', of the span the composer paints as "this will be invoked" on
-/// enter. A prefix is only a suggestion, so it stays unpainted.
-fn invoked_skill_token_len(text: &str, catalog: &[(String, String)]) -> Option<usize> {
-    let rest = text.strip_prefix('/')?;
-    let token = rest.split_whitespace().next()?;
-    if token.is_empty() || token.contains('/') {
-        return None;
+/// Every `/<token>` in `text` that names a discovered skill exactly (and is
+/// not a built-in command), as char spans including the slash: the spans the
+/// composer paints as "this will be invoked on enter". A prefix is only a
+/// suggestion, so it stays unpainted; a token typed mid-message is painted
+/// exactly like a leading one.
+fn invoked_skill_spans(text: &str, catalog: &[(String, String)]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    for (index, _) in text.match_indices('/') {
+        if index < cursor {
+            continue;
+        }
+        let at_word_start = index == 0
+            || text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        if !at_word_start {
+            continue;
+        }
+        let token: String = text[index + 1..]
+            .chars()
+            .take_while(|ch| !ch.is_whitespace())
+            .collect();
+        if token.is_empty() || token.contains('/') {
+            continue;
+        }
+        if SLASH_COMMANDS
+            .iter()
+            .any(|command| command.name.eq_ignore_ascii_case(&token))
+        {
+            continue;
+        }
+        if catalog
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&token))
+        {
+            let start = text[..index].chars().count();
+            let end = start + 1 + token.chars().count();
+            spans.push((start, end));
+            cursor = index + 1 + token.len();
+        }
     }
-    if SLASH_COMMANDS
-        .iter()
-        .any(|command| command.name.eq_ignore_ascii_case(token))
-    {
-        return None;
-    }
-    catalog
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case(token))
-        .then(|| token.chars().count() + 1)
+    spans
 }
 
 impl TuiApp {
@@ -1302,7 +1351,7 @@ impl TuiApp {
                     selected_skill_index: self.selected_skill_index,
                     selected_suggestion_index: self.selected_suggestion_index,
                     skill_suggestions: &self.skill_suggestions,
-                    invoked_skill_len: invoked_skill_token_len(&self.text, &self.skill_catalog),
+                    invoked_skill_spans: &invoked_skill_spans(&self.text, &self.skill_catalog),
                     slash_suggestions: &slash,
                     text: &self.text,
                     queued: &queued,
@@ -1597,8 +1646,9 @@ impl TuiApp {
         self.selected_skill_index = 0;
     }
 
-    /// Tab/Enter completion: inserts "/<name> " WITHOUT submitting or
-    /// activating the skill.
+    /// Tab/Enter completion: replaces the `/token` being completed — wherever
+    /// it sits in the line — with "/<name> ", WITHOUT submitting or activating
+    /// the skill. Text around an inline token is preserved.
     fn accept_skill_suggestion(&mut self) -> bool {
         if self.skill_suggestions.is_empty() {
             return false;
@@ -1607,9 +1657,17 @@ impl TuiApp {
             .selected_skill_index
             .min(self.skill_suggestions.len() - 1)]
         .clone();
-        let next_text = format!("/{name} ");
-        let len = next_text.chars().count();
-        self.apply_edit(next_text, len);
+        let Some((start, end)) = active_skill_token_span(&self.text) else {
+            return false;
+        };
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut next: String = chars[..start].iter().collect();
+        next.push('/');
+        next.push_str(&name);
+        next.push(' ');
+        next.extend(chars[end..].iter());
+        let cursor = start + 1 + name.chars().count() + 1;
+        self.apply_edit(next, cursor);
         true
     }
 
@@ -1682,18 +1740,12 @@ impl TuiApp {
             return;
         }
 
-        // Skill names allow characters the slash-command grammar rejects
-        // (qualified names like "spellcraft:navis", digits, dots), and a skill
-        // line may carry the goal after it ("/navis ship this"), so a leading
-        // "/<token>" naming a discovered skill activates it and runs the rest
-        // as the goal; anything else falls through to the ordinary goal run.
-        if let Some(rest) = self.submitted_skill_goal(&submitted) {
-            if !rest.is_empty() {
-                self.submit_goal_text(rest);
-            }
-            return;
-        }
-
+        // A `/<name>` anywhere in the line that names a discovered skill is
+        // explicit intent, so the skill is enabled and the remainder runs as
+        // the goal. `run_goal` performs the activation — it is the one funnel
+        // every started run passes through — so the queued and drained paths
+        // activate exactly like this one. A line that names no skill reaches
+        // the ordinary goal run unchanged.
         self.submit_goal_text(submitted);
     }
 
@@ -2062,9 +2114,7 @@ impl TuiApp {
                     let slash = get_slash_command_suggestions(&self.text);
                     let exact_slash =
                         slash.len() == 1 && format!("/{}", slash[0].name) == self.text.trim();
-                    let exact_skill = slash_len == 0
-                        && self.skill_suggestions.len() == 1
-                        && format!("/{}", self.skill_suggestions[0].0) == self.text.trim();
+                    let exact_skill = slash_len == 0 && self.skill_token_is_complete();
                     if !exact_slash && !exact_skill && self.accept_suggestion() {
                         return;
                     }
@@ -2975,21 +3025,52 @@ impl TuiApp {
         true
     }
 
-    /// A submitted line whose leading `/<token>` names a discovered skill:
-    /// enable it and return the rest of the line as the goal (empty for a bare
-    /// "/navis"). `None` leaves the line alone for the ordinary goal path.
-    ///
-    /// This is the submit-side twin of the `dispatch_command` default arm, for
-    /// skill names the slash-command grammar rejects (qualified names like
-    /// "spellcraft:navis", digits, dots): the typed name is explicit intent, so
-    /// the skill is active before the remainder runs.
-    fn submitted_skill_goal(&mut self, submitted: &str) -> Option<String> {
-        let rest = submitted.strip_prefix('/')?;
-        let token = rest.split_whitespace().next()?;
-        if token.is_empty() || !self.enable_skill_if_discovered(token) {
-            return None;
+    /// Enable every discovered skill named by a `/<token>` in `submitted` and
+    /// return the line with those tokens removed (trimmed). A `/token` that
+    /// names no discovered skill — or a built-in command — is left exactly as
+    /// typed, so text that only looks like a slash token still runs as an
+    /// ordinary message. This also covers skill names the slash-command
+    /// grammar rejects (qualified names like "spellcraft:navis", digits, dots).
+    fn invoke_skill_tokens(&mut self, submitted: &str) -> String {
+        let spans = invoked_skill_spans(submitted, &self.skill_catalog);
+        let chars: Vec<char> = submitted.chars().collect();
+        for &(start, end) in &spans {
+            let token: String = chars[start + 1..end].iter().collect();
+            self.enable_skill_if_discovered(&token);
         }
-        Some(submitted[1 + token.len()..].trim().to_string())
+        if spans.is_empty() {
+            return submitted.to_string();
+        }
+        // Rebuild the line without the tokens, dropping the single space that
+        // separated each one from the rest so "i still /navis please" becomes
+        // "i still please".
+        let mut out: Vec<char> = Vec::with_capacity(chars.len());
+        let mut next = 0usize;
+        for &(start, end) in &spans {
+            let remove_end = if chars.get(end).is_some_and(|ch| ch.is_whitespace()) {
+                end + 1
+            } else {
+                end
+            };
+            out.extend(chars[next..start].iter());
+            next = remove_end;
+        }
+        out.extend(chars[next..].iter());
+        out.iter().collect::<String>().trim().to_string()
+    }
+
+    /// True when the `/token` under the cursor already names a listed match
+    /// exactly: Enter then submits instead of completing, for a leading token
+    /// and for an inline one alike.
+    fn skill_token_is_complete(&self) -> bool {
+        let Some((start, end)) = active_skill_token_span(&self.text) else {
+            return false;
+        };
+        let chars: Vec<char> = self.text.chars().collect();
+        let token: String = chars[start + 1..end].iter().collect();
+        self.skill_suggestions
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&token))
     }
 
     // ----- commands -------------------------------------------------------
@@ -3757,6 +3838,15 @@ impl TuiApp {
     // ----- goals ----------------------------------------------------------
 
     fn run_goal(&mut self, goal_text: String) {
+        // A `/<name>` naming a discovered skill is explicit intent wherever it
+        // sits in the line: enable it and run the remainder as the goal. Doing
+        // it here covers every path that starts a run, including a prompt
+        // queued mid-run and drained after it. A line that is only the token
+        // enabled a skill and has nothing left to run, so it stops here.
+        let goal_text = self.invoke_skill_tokens(&goal_text);
+        if goal_text.trim().is_empty() {
+            return;
+        }
         let goal_images = std::mem::take(&mut self.attachments);
         self.run_session_id = Some(self.session.id.clone());
         self.running = true;
@@ -6490,27 +6580,110 @@ mod skill_activation_tests {
     }
 
     #[test]
-    fn only_an_exact_leading_skill_token_is_flagged_for_invocation() {
+    fn exact_skill_tokens_are_flagged_for_invocation_anywhere_in_the_line() {
         let mut fixture = make_app_with_skills(&["navis"]);
         type_text(&mut fixture.app, "/navis ship this");
         assert_eq!(
-            invoked_skill_token_len(&fixture.app.text, &fixture.app.skill_catalog),
-            Some(6),
+            invoked_skill_spans(&fixture.app.text, &fixture.app.skill_catalog),
+            vec![(0, 6)],
             "the full name plus its slash is the invoked span"
         );
         assert_eq!(
-            invoked_skill_token_len("/nav", &fixture.app.skill_catalog),
-            None,
+            invoked_skill_spans("still /navis go", &fixture.app.skill_catalog),
+            vec![(6, 12)],
+            "a token typed mid-message is flagged too"
+        );
+        assert!(
+            invoked_skill_spans("/nav", &fixture.app.skill_catalog).is_empty(),
             "a prefix is a suggestion, not an invocation"
         );
         let builtin = SLASH_COMMANDS[0].name;
-        assert_eq!(
-            invoked_skill_token_len(&format!("/{builtin}"), &fixture.app.skill_catalog),
-            None,
+        assert!(
+            invoked_skill_spans(&format!("/{builtin}"), &fixture.app.skill_catalog).is_empty(),
             "built-in commands keep their own meaning"
         );
     }
+
+    #[test]
+    fn skill_menu_opens_for_a_token_typed_mid_message() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "i still /na");
+        assert_eq!(fixture.app.skill_suggestions.len(), 1);
+        assert_eq!(fixture.app.skill_suggestions[0].0, "navis");
+        fixture.app.on_key(Key::Tab);
+        assert_eq!(
+            fixture.app.text, "i still /navis ",
+            "completion rewrites only the token and keeps the surrounding text"
+        );
+        assert!(!fixture.app.running, "completion must not submit");
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "completion must not activate a skill"
+        );
     }
+
+    #[test]
+    fn inline_skill_token_enables_the_skill_and_runs_the_remaining_message() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "i still /navis please ship");
+        fixture.app.submit();
+        assert!(
+            fixture
+                .app
+                .active_skills
+                .iter()
+                .any(|skill| skill.name == "navis"),
+            "an inline skill token is explicit intent and enables the skill"
+        );
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == "i still please ship")
+            ),
+            "the token is removed and the rest runs as the goal"
+        );
+    }
+
+    #[test]
+    fn a_slash_token_that_names_no_skill_runs_as_an_ordinary_message() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        type_text(&mut fixture.app, "look at /etc/hosts");
+        fixture.app.submit();
+        assert!(
+            fixture.app.active_skills.is_empty(),
+            "a token that names no skill activates nothing"
+        );
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == "look at /etc/hosts")
+            ),
+            "the message still runs as a normal goal, slash and all"
+        );
+    }
+
+    #[test]
+    fn a_queued_skill_prompt_activates_the_skill_when_it_drains() {
+        let mut fixture = make_app_with_skills(&["navis"]);
+        fixture
+            .app
+            .queued_prompts
+            .push_back("/navis queued ship".to_string());
+        fixture.app.on_key(Key::Ctrl('s'));
+        assert!(
+            fixture
+                .app
+                .active_skills
+                .iter()
+                .any(|skill| skill.name == "navis"),
+            "the drain path runs through run_goal, so the token still activates"
+        );
+        assert!(
+            fixture.app.cells.iter().any(
+                |entry| matches!(entry, TranscriptEntry::Goal(goal) if goal.text == "queued ship")
+            ),
+            "the queued token is stripped before the remainder runs"
+        );
+    }
+}
 
 /// Focused tests for prompt-recall wiring: Up/Down order, exact draft
 /// restoration, edited resend through the normal submit path, multiline

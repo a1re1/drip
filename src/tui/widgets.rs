@@ -253,9 +253,10 @@ pub struct ComposerProps<'a> {
     pub mention_suggestions: &'a [String],
     pub selected_skill_index: usize,
     pub selected_suggestion_index: usize,
-    /// Chars of a leading `/skill` token the composer paints as "this will be
-    /// invoked on enter"; `None` paints the line plainly.
-    pub invoked_skill_len: Option<usize>,
+    /// Char spans (slash included) of the `/skill` tokens the composer paints
+    /// as "this will be invoked on enter", wherever they sit in the line; an
+    /// empty slice paints the line plainly.
+    pub invoked_skill_spans: &'a [(usize, usize)],
     pub skill_suggestions: &'a [(String, String)],
     /// Prompts waiting for the next run, oldest first. They are listed above
     /// the composer (never in the timeline) so the whole queue stays visible.
@@ -390,10 +391,10 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
         composer_cursor_position(display, text_width, props.cursor).0
     };
     let text_chars: Vec<char> = display.chars().collect();
-    // An exactly-typed leading `/skill` token is painted in the "will be
-    // invoked on enter" colour, so the composer shows what Enter does before
-    // it happens instead of leaving the writer to guess.
-    let invoked_len = props.invoked_skill_len.unwrap_or(0);
+    // An exactly-typed `/skill` token is painted in the "will be invoked on
+    // enter" colour, so the composer shows what Enter does before it happens
+    // instead of leaving the writer to guess. A token typed mid-message is
+    // painted the same way.
     let invoked_paint = paint("green");
 
     let rule = dim(&"─".repeat(width));
@@ -417,7 +418,11 @@ pub fn render_composer(props: &ComposerProps, width: usize) -> Vec<String> {
             let position = line.start + offset;
             if index == cursor_line && position == props.cursor {
                 cells.push(format!("{INVERSE_ON}{ch}{INVERSE_OFF}"));
-            } else if index == 0 && offset < invoked_len {
+            } else if props
+                .invoked_skill_spans
+                .iter()
+                .any(|&(start, end)| position >= start && position < end)
+            {
                 cells.push(invoked_paint(&ch.to_string()));
             } else {
                 cells.push(ch.to_string());
@@ -872,7 +877,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: Some("test"),
@@ -897,7 +902,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -917,7 +922,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -945,7 +950,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -1053,7 +1058,7 @@ mod tests {
             mention_suggestions: &mentions,
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -1078,7 +1083,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1117,7 +1122,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1138,7 +1143,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -1161,7 +1166,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -1182,7 +1187,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &[],
             session_name: None,
@@ -1214,7 +1219,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &queued,
             session_name: None,
@@ -1248,7 +1253,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &queued,
             session_name: None,
@@ -1272,7 +1277,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &[],
             queued: &queued,
             session_name: None,
@@ -1450,7 +1455,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1477,7 +1482,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 2,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1504,7 +1509,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1534,7 +1539,7 @@ mod tests {
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             skill_suggestions: &skills,
             queued: &[],
             session_name: None,
@@ -1559,7 +1564,7 @@ mod tests {
             attachments: &[],
             cursor: 4,
             disabled: false,
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             mention_suggestions: &[],
             selected_skill_index: 4,
             selected_suggestion_index: 0,
@@ -1596,7 +1601,7 @@ mod tests {
             attachments: &[],
             cursor: 16,
             disabled: false,
-            invoked_skill_len: Some(6),
+            invoked_skill_spans: &[(0, 6)],
             mention_suggestions: &[],
             selected_skill_index: 0,
             selected_suggestion_index: 0,
@@ -1620,13 +1625,44 @@ mod tests {
             rows[1]
         );
         let plain_props = ComposerProps {
-            invoked_skill_len: None,
+            invoked_skill_spans: &[],
             ..props
         };
         let rows = render_composer(&plain_props, 40);
         assert!(
             !rows[1].contains(&green("/")),
             "no token, no colour: {:?}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn composer_paints_a_skill_token_typed_mid_message() {
+        let green = paint("green");
+        let props = ComposerProps {
+            attachments: &[],
+            cursor: 19,
+            disabled: false,
+            invoked_skill_spans: &[(6, 12)],
+            mention_suggestions: &[],
+            selected_skill_index: 0,
+            selected_suggestion_index: 0,
+            skill_suggestions: &[],
+            queued: &[],
+            session_name: None,
+            slash_suggestions: &[],
+            text: "still /navis please",
+        };
+        let rows = render_composer(&props, 40);
+        assert!(
+            rows[1].contains(&format!("{}{}", green("/"), green("n"))),
+            "an inline token is painted in the invoked colour: {:?}",
+            rows[1]
+        );
+        assert_eq!(plain(&rows)[1].trim_end(), "❯ still /navis please");
+        assert!(
+            !rows[1].contains(&green("still ")),
+            "text around the token stays plain: {:?}",
             rows[1]
         );
     }

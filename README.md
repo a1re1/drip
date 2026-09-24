@@ -142,14 +142,17 @@ drip "repair the corrupted shards" --max-loops 30
 # --plan-mode always|auto|direct: how a run gets its first task list; auto skips the planner
 # for small goals that declare their own check
 
-# In the TUI: type `/` followed by a skill prefix (e.g. `/na`) — the first
-# three matching skills appear above the input line (further matches page in
-# as you move); up/down selects, tab completes, and enter enables the skill
-# for that session. A skill name typed in full (e.g. `/navis`) is painted
-# green, showing it will be invoked on enter; `/navis <goal>` enables the
-# skill and runs the rest of the line as the goal. An explicitly enabled
-# skill outranks anything the classifier would have found on its own: it is
-# composed into the base prompt and excluded from the classifier's pool.
+# In the TUI: `/` is the skill trigger anywhere in the message, not just at
+# the start — typing "i still /na" opens the skill menu above the input line
+# (three matches at a time, further matches page in as you move); up/down
+# selects, tab completes just that token (the surrounding text is kept), and
+# enter submits. Any `/name` naming a discovered skill is painted green and is
+# invoked on enter, and the message around it runs as the goal: "/navis ship
+# this" runs "ship this" with navis active, and "i still /navis ship" runs
+# "i still ship". A `/token` that names no skill (e.g. /etc/hosts) is left in
+# the message and sent unchanged. An explicitly enabled skill outranks
+# anything the classifier would have found on its own: it is composed into the
+# base prompt and excluded from the classifier's pool.
 
 # Machine-readable output (NDJSON; final line is the result)
 drip "goal" --json

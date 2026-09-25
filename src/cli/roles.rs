@@ -331,7 +331,7 @@ fn lite_planner_role() -> RoleDefinition {
             .join("\n"),
         ),
         r#loop: Some(PartialHarnessLoopConfig {
-            max_tool_rounds_per_cycle: Some(16),
+            max_tool_rounds_per_cycle: Some(12),
             max_tool_result_chars: Some(16_000),
             ..PartialHarnessLoopConfig::default()
         }),
@@ -358,7 +358,7 @@ fn lite_author_role() -> RoleDefinition {
             .join("\n"),
         ),
         r#loop: Some(PartialHarnessLoopConfig {
-            max_tool_rounds_per_cycle: Some(16),
+            max_tool_rounds_per_cycle: Some(12),
             max_tool_result_chars: Some(16_000),
             ..PartialHarnessLoopConfig::default()
         }),
@@ -1569,5 +1569,21 @@ mod tests {
         assert!(prompt.contains("temp directory via BASH"));
         assert!(prompt.contains("correct for this app/case/shape"));
         assert!(prompt.contains("not a safety feature"));
+    }
+
+    // The lite preset's own loop block used to pin sixteen, so lowering only
+    // the default would have left a lite run at the old bound.
+    #[test]
+    fn lite_roles_cap_a_cycle_at_twelve_tool_rounds() {
+        for role in [lite_planner_role(), lite_author_role()] {
+            assert_eq!(
+                role.r#loop
+                    .as_ref()
+                    .and_then(|block| block.max_tool_rounds_per_cycle),
+                Some(12),
+                "{} pins a per-cycle round bound",
+                role.name
+            );
+        }
     }
 }

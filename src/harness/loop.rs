@@ -7156,21 +7156,43 @@ impl HarnessRun {
             .find(|spec| spec.function.name == "ask_user")?
             .clone();
         let messages = Self::unblock_survey_messages(&self.state, blockers);
-        let response = match self
-            .call_model
-            .call_model(
+        // Authoring the survey is a best-effort enhancement layered on the
+        // static menu, so it must never stall a blocked-on-input handoff: the
+        // call is bounded by UNBLOCK_SURVEY_BUDGET_MS (or the run's own smaller
+        // request timeout) and a slow or failing provider falls back to the
+        // static menu instead of holding the run open.
+        let budget_ms = self
+            .options
+            .request_timeout_ms
+            .unwrap_or(UNBLOCK_SURVEY_BUDGET_MS)
+            .min(UNBLOCK_SURVEY_BUDGET_MS);
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_millis(budget_ms),
+            self.call_model.call_model(
                 messages,
                 Some(crate::harness::model_call::ModelCallOptions {
                     include_tools: Some(false),
                     transport_tools: Some(vec![spec]),
                     ..Default::default()
                 }),
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(response) => response,
-            Err(_) => return None,
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) | Err(_) => {
+                // The call still produced usage/retry hooks; drain them before
+                // bailing out so they cannot leak into the next round.
+                self.drain_usage_inbox();
+                return None;
+            }
         };
+        // Side calls own their bookkeeping: `generate_run_summary` drains the
+        // usage inbox right after its own `call_model`, and this survey call is
+        // the same shape. Without the drain the survey call's usage lands in
+        // the inbox and is attributed to whatever runs next — or is lost when
+        // the operator picks stop and the run ends here.
+        self.drain_usage_inbox();
         let response_message = response
             .choices
             .as_ref()
@@ -7183,8 +7205,13 @@ impl HarnessRun {
         let Some(function) = function else {
             // No question: the model explained the blocker in text instead.
             // Surface that explanation so the operator can act on it.
+            // The explanation must reach the operator as the model's own
+            // prose: serializing the message would emit a JSON object with
+            // literal `\n` escapes instead of the text (the same extraction
+            // `generate_run_summary` uses).
             let explanation = response_message
-                .map(|message| serde_json::to_string(message).unwrap_or_default())
+                .and_then(|message| message.content.as_ref())
+                .map(extract_response_text)
                 .unwrap_or_default();
             if !explanation.trim().is_empty() {
                 self.emit(HarnessEvent {
@@ -7210,82 +7237,88 @@ impl HarnessRun {
         }
     }
 
-/// The prompt pair that asks the model to author the blocked-on-input survey.
-fn unblock_survey_messages(
-    state: &crate::core::types::HarnessState,
-    blockers: &[LateBlocker],
-) -> Vec<crate::harness::transport::TransportRequestMessage> {
-    let mut brief =
-        String::from("The run is out of work it can do on its own. Blocked tasks:\n");
-    for blocker in blockers {
+    /// The prompt pair that asks the model to author the blocked-on-input survey.
+    fn unblock_survey_messages(
+        state: &crate::core::types::HarnessState,
+        blockers: &[LateBlocker],
+    ) -> Vec<crate::harness::transport::TransportRequestMessage> {
+        let mut brief =
+            String::from("The run is out of work it can do on its own. Blocked tasks:\n");
+        for blocker in blockers {
+            brief.push_str(&format!(
+                "- {} — {}: {}\n",
+                blocker.id, blocker.title, blocker.detail
+            ));
+        }
+        brief.push_str(&format!("\nGoal: {}\n", state.goal));
         brief.push_str(&format!(
-            "- {} — {}: {}\n",
-            blocker.id, blocker.title, blocker.detail
+            "\n{}\n",
+            crate::harness::prompt::build_last_activation_section(state)
         ));
+        brief.push_str(UNBLOCK_SURVEY_DIRECTIVE);
+        vec![
+            crate::harness::transport::TransportRequestMessage {
+                role: crate::harness::chat_types::ChatRoleTag::System,
+                content: Some(crate::harness::transport::TransportContent::Text(
+                    UNBLOCK_SURVEY_SYSTEM.to_string(),
+                )),
+                ..Default::default()
+            },
+            crate::harness::transport::TransportRequestMessage {
+                role: crate::harness::chat_types::ChatRoleTag::User,
+                content: Some(crate::harness::transport::TransportContent::Text(brief)),
+                ..Default::default()
+            },
+        ]
     }
-    brief.push_str(&format!("\nGoal: {}\n", state.goal));
-    brief.push_str(&format!(
-        "\n{}\n",
-        crate::harness::prompt::build_last_activation_section(state)
-    ));
-    brief.push_str(UNBLOCK_SURVEY_DIRECTIVE);
-    vec![
-        crate::harness::transport::TransportRequestMessage {
-            role: crate::harness::chat_types::ChatRoleTag::System,
-            content: Some(crate::harness::transport::TransportContent::Text(
-                UNBLOCK_SURVEY_SYSTEM.to_string(),
-            )),
-            ..Default::default()
-        },
-        crate::harness::transport::TransportRequestMessage {
-            role: crate::harness::chat_types::ChatRoleTag::User,
-            content: Some(crate::harness::transport::TransportContent::Text(brief)),
-            ..Default::default()
-        },
-    ]
-}
 
-/// A model-authored unblock survey is only usable when it keeps the shape the
-/// resume path relies on: one question per blocked task plus the closing
-/// resume/stop question, every task question offering 2-4 real, non-empty
-/// choices that are not the retired static menu.
-fn usable_unblock_survey(
-    survey: &crate::core::types::QuestionSurvey,
-    blockers: &[LateBlocker],
-) -> bool {
-    let Some((closing, questions)) = survey.questions.split_last() else {
-        return false;
-    };
-    if questions.len() != blockers.len() {
-        return false;
+    /// A model-authored unblock survey is only usable when it keeps the shape the
+    /// resume path relies on: one question per blocked task plus the closing
+    /// resume/stop question, every task question offering 2-4 real, non-empty
+    /// choices that are not the retired static menu.
+    fn usable_unblock_survey(
+        survey: &crate::core::types::QuestionSurvey,
+        blockers: &[LateBlocker],
+    ) -> bool {
+        let Some((closing, questions)) = survey.questions.split_last() else {
+            return false;
+        };
+        if questions.len() != blockers.len() {
+            return false;
+        }
+        if !closing
+            .options
+            .iter()
+            .any(|option| option.label == LATE_CONTINUE_RESUME)
+            || !closing
+                .options
+                .iter()
+                .any(|option| option.label == LATE_CONTINUE_STOP)
+        {
+            return false;
+        }
+        questions.iter().enumerate().all(|(index, question)| {
+            // The resume path binds question `i` to blocker `i` by parsing this
+            // exact prefix; a survey that cannot be bound must not be offered.
+            question
+                .question
+                .strip_prefix("Task ")
+                .and_then(|rest| rest.split_once(" is blocked on operator input"))
+                .is_some_and(|(id, _)| id == blockers[index].id)
+                && (2..=4).contains(&question.options.len())
+                && question.options.iter().all(|option| {
+                    let label = option.label.trim();
+                    !label.is_empty()
+                        && !option.description.trim().is_empty()
+                        && label != LATE_UNBLOCK_SUPPLY
+                        && label != LATE_UNBLOCK_RETRY
+                        && label != LATE_UNBLOCK_RESCOPE
+                        && label != LATE_UNBLOCK_DROP
+                        && label != LATE_CONTINUE_RESUME
+                        && label != LATE_CONTINUE_STOP
+                })
+        })
     }
-    if !closing.options.iter().any(|option| option.label == LATE_CONTINUE_RESUME)
-        || !closing.options.iter().any(|option| option.label == LATE_CONTINUE_STOP)
-    {
-        return false;
-    }
-    questions.iter().enumerate().all(|(index, question)| {
-        // The resume path binds question `i` to blocker `i` by parsing this
-        // exact prefix; a survey that cannot be bound must not be offered.
-        question
-            .question
-            .strip_prefix("Task ")
-            .and_then(|rest| rest.split_once(" is blocked on operator input"))
-            .map_or(false, |(id, _)| id == blockers[index].id)
-            && (2..=4).contains(&question.options.len())
-            && question.options.iter().all(|option| {
-                let label = option.label.trim();
-                !label.is_empty()
-                    && !option.description.trim().is_empty()
-                    && label != LATE_UNBLOCK_SUPPLY
-                    && label != LATE_UNBLOCK_RETRY
-                    && label != LATE_UNBLOCK_RESCOPE
-                    && label != LATE_UNBLOCK_DROP
-                    && label != LATE_CONTINUE_RESUME
-                    && label != LATE_CONTINUE_STOP
-            })
-    })
-}
 
     /// Apply a late blocked-on-input survey's answers: drop the tasks the
     /// operator dropped, reopen exactly the ids it picked, and report whether
@@ -12510,16 +12543,18 @@ fn poll_survey_answers(
     None
 }
 
-/// Rendered Q->A summary injected into the conversation as an operator
-/// message; the leading directive tells the model to revise its plan with
-/// plan_tasks/revise_task before continuing.
-/// Option labels of the terminal blocked-on-input survey. The binding below
-/// matches on these strings, so they live in one place.
 /// How the model must author the blocked-on-input survey: real, pre-reasoned
 /// directions the operator can pick between — never the retired yes/no menu.
 const UNBLOCK_SURVEY_SYSTEM: &str = "You are drip's harness. A run has exhausted the work it can do on its own because some tasks are blocked on the operator. Ask the fewest, sharpest questions whose answers unblock the run, and give every question options that already carry the reasoning, so the operator picks between directions instead of answering yes/no.";
 const UNBLOCK_SURVEY_DIRECTIVE: &str = "\nAuthor the survey with the ask_user tool, following this contract:\n- One question per blocked task listed above, then one closing question whose options are exactly 'Resume the run now' and 'Stop after this reply'.\n- Begin every task question's text with exactly 'Task <task id> is blocked on operator input: ', using the id from the list above, then say what you need to know — the harness binds your question to that task by this prefix.
 - Give each task question 2-4 mutually exclusive options. Every option label names a concrete direction or tradeoff, and its description states the pre-work behind it: what that direction changes, what it costs, and when it is the right call.\n- Never offer Retry, Supply what is missing, Re-scope it smaller, or Drop this task as a task question — that is the menu the operator is trying to get away from. Make the choice substantive instead.\n- Keep labels under 60 characters. If you genuinely cannot propose directions, answer in plain text explaining the blocker and exactly what you need; the harness will not invent a question for you.";
+/// Wall-clock budget for the one-shot survey-authoring model call. The static
+/// menu is the fallback, so a provider that stalls must not hold the
+/// blocked-on-input handoff open for minutes.
+pub const UNBLOCK_SURVEY_BUDGET_MS: u64 = 20_000;
+
+/// Option labels of the terminal blocked-on-input survey. The binding below
+/// matches on these strings, so they live in one place.
 const LATE_UNBLOCK_SUPPLY: &str = "Supply what is missing";
 const LATE_UNBLOCK_RETRY: &str = "Retry with what we have now";
 const LATE_UNBLOCK_RESCOPE: &str = "Re-scope it smaller";
@@ -12711,7 +12746,9 @@ fn choice_picks(choice: &str, label: &str) -> bool {
 
 /// The operator message a late blocked-on-input survey injects: the picks bound
 /// to the exact task ids they unblock (and drop) plus whether the run resumes,
-/// followed by the plain Q/A echo. The next loop reads this as its directive.
+/// followed by the plain Q/A echo. The next loop reads this as its directive —
+/// the leading directive tells the model to revise its plan with
+/// plan_tasks/revise_task before continuing.
 fn render_late_survey_scope(
     survey: &crate::core::types::QuestionSurvey,
     answers: &crate::core::types::HarnessSurveyAnswers,
@@ -13127,6 +13164,41 @@ mod ask_user_survey_tests {
         }
     }
 
+    /// A writer that lands the operator's answers AFTER the survey's
+    /// consumed-boundary marker. `run_survey_block` appends that boundary when
+    /// the wait starts and reads only records past it, so an answer written
+    /// before the boundary is fenced off and never seen. A survey-authoring
+    /// model call can delay the boundary by seconds, which is exactly the race
+    /// a fixed `sleep` loses: waiting for the marker keeps the answer
+    /// deterministic instead of timing-dependent.
+    fn append_answers_after_boundary(path: std::path::PathBuf, answers: HarnessSurveyAnswers) {
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
+                let boundary_seen = std::fs::read_to_string(&path)
+                    .map(|text| text.contains(crate::core::state::answers::ANSWERS_BOUNDARY))
+                    .unwrap_or(false);
+                if boundary_seen {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            crate::core::state::answers::append_answers(&path, &answers).unwrap();
+        });
+    }
+
+    /// `try_late_clarification` behind a hard cap: the wait must always resolve
+    /// from an answer it is given, so a regression shows up as a failure rather
+    /// than as a hung suite.
+    async fn late_clarification_with_timeout(run: &mut HarnessRun) -> bool {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run.try_late_clarification(),
+        )
+        .await
+        .expect("the late survey wait must not hang")
+    }
+
     /// One answer per question, choice-only: `late_answers(&[LATE_UNBLOCK_RETRY,
     /// LATE_CONTINUE_RESUME])` answers a one-blocker late survey.
     fn late_answers(choices: &[&str]) -> HarnessSurveyAnswers {
@@ -13224,6 +13296,8 @@ mod ask_user_survey_tests {
             state_path: Some(dir.path().join("session/state.json")),
             ask_user_enabled: true,
             ask_user_timeout_seconds: Some(1),
+            // Tests never reach a provider; anything that does is bounded.
+            request_timeout_ms: Some(2_000),
             ..SolidStateHarnessOptions::default()
         };
         configure(&mut options);
@@ -13584,7 +13658,11 @@ mod ask_user_survey_tests {
             .with_timezone(&chrono::Utc);
         let now: NowFn = Arc::new(move || {
             let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
-            base + chrono::Duration::seconds(if step < 1_000_000 { 0 } else { 60 * (step - 999_999) })
+            base + chrono::Duration::seconds(if step < 1_000_000 {
+                0
+            } else {
+                60 * (step - 999_999)
+            })
         });
         let mut run = test_run_in(&dir, move |o| {
             o.ask_user_enabled = true;
@@ -13597,17 +13675,12 @@ mod ask_user_survey_tests {
             "which app should receive authentication?",
         );
         let path = run.answers_path().unwrap();
-        let writer = path.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            crate::core::state::answers::append_answers(
-                &writer,
-                &late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
-            )
-            .unwrap();
-        });
+        append_answers_after_boundary(
+            path.clone(),
+            late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
+        );
         assert!(
-            run.try_late_clarification().await,
+            late_clarification_with_timeout(&mut run).await,
             "an answered late survey must reopen the blocked task"
         );
         let task = crate::core::state::get_task_by_id(&run.state, &id).unwrap();
@@ -13697,18 +13770,22 @@ mod ask_user_survey_tests {
             .with_timezone(&chrono::Utc);
         let now: NowFn = Arc::new(move || {
             let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
-            base + chrono::Duration::seconds(if step < 1_000_000 { 0 } else { 60 * (step - 999_999) })
+            base + chrono::Duration::seconds(if step < 1_000_000 {
+                0
+            } else {
+                60 * (step - 999_999)
+            })
         });
         let mut run = test_run_in(&dir, move |o| o.now = Some(now)).await;
         run.state.pending_questions = Some(survey());
         let path = run.answers_path().unwrap();
-        let writer_path = path.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            crate::core::state::answers::append_answers(&writer_path, &batch(0, "Channel"))
-                .unwrap();
-        });
-        let outcome = run.run_survey_block(survey()).await;
+        append_answers_after_boundary(path.clone(), batch(0, "Channel"));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run.run_survey_block(survey()),
+        )
+        .await
+        .expect("the survey wait must not hang");
         assert!(
             matches!(outcome, SurveyWait::Answered(_)),
             "an answer appended during the wait must be accepted live"
@@ -13802,22 +13879,22 @@ mod ask_user_survey_tests {
             .with_timezone(&chrono::Utc);
         let now: NowFn = Arc::new(move || {
             let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
-            base + chrono::Duration::seconds(if step < 1_000_000 { 0 } else { 60 * (step - 999_999) })
+            base + chrono::Duration::seconds(if step < 1_000_000 {
+                0
+            } else {
+                60 * (step - 999_999)
+            })
         });
         let mut run = test_run_in(&dir, move |o| o.now = Some(now)).await;
         let give_up = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
         let retry = seed_operator_blocked_task(&mut run, "choose a provider", "which provider?");
         let path = run.answers_path().unwrap();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            crate::core::state::answers::append_answers(
-                &path,
-                &late_answers(&[LATE_UNBLOCK_DROP, LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
-            )
-            .unwrap();
-        });
+        append_answers_after_boundary(
+            path.clone(),
+            late_answers(&[LATE_UNBLOCK_DROP, LATE_UNBLOCK_RETRY, LATE_CONTINUE_RESUME]),
+        );
         assert!(
-            run.try_late_clarification().await,
+            late_clarification_with_timeout(&mut run).await,
             "a picked unblock path continues the run"
         );
         assert_eq!(
@@ -13865,21 +13942,21 @@ mod ask_user_survey_tests {
             .with_timezone(&chrono::Utc);
         let now: NowFn = Arc::new(move || {
             let step = clock_ticks.fetch_add(1, Ordering::SeqCst) as i64;
-            base + chrono::Duration::seconds(if step < 1_000_000 { 0 } else { 60 * (step - 999_999) })
+            base + chrono::Duration::seconds(if step < 1_000_000 {
+                0
+            } else {
+                60 * (step - 999_999)
+            })
         });
         let mut run = test_run_in(&dir, move |o| o.now = Some(now)).await;
         let id = seed_operator_blocked_task(&mut run, "add authentication", "which app?");
         let path = run.answers_path().unwrap();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            crate::core::state::answers::append_answers(
-                &path,
-                &late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_STOP]),
-            )
-            .unwrap();
-        });
+        append_answers_after_boundary(
+            path.clone(),
+            late_answers(&[LATE_UNBLOCK_RETRY, LATE_CONTINUE_STOP]),
+        );
         assert!(
-            !run.try_late_clarification().await,
+            !late_clarification_with_timeout(&mut run).await,
             "the stop pick ends the blocked-on-input run"
         );
         assert_eq!(

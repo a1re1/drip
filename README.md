@@ -872,10 +872,15 @@ enforce that:
 
 1. The composed system prompt gains a `# Skill step contract` block naming
 every activated skill. It tells the planner to create one task per step of
-each skill, in the skill's own order, including the steps that come *after*
-the code is written (opening or updating the draft PR, watching it for review
-comments and build/CI failures, looping back to fix them, closing the skill
-out) — and that a step with no task is a step that gets dropped.
+each skill, in the skill's own order, and including any late step the skill
+spells out — for a ship workflow, that is the sequence after the code is
+written (opening or updating the draft PR, watching it for review comments and
+build/CI failures, looping back to fix them, closing the skill out) — and that
+a step with no task is a step that gets dropped. The contract defers to the
+skill's own steps: the concrete ship/watch wording is rendered only for a skill
+whose text actually names a PR, and every other skill (most of the shipped
+ones — `tdd`, `debug-root-cause`, `refactor-safely`, ...) is told to plan the
+late steps it spells out and never to invent one.
 2. A planning loop always runs. The empty-ledger planner prompt drops its usual
 "fewest concrete tasks, usually one or two" economy line for a step-contract
 instruction naming the activated skills, and plan mode stops seeding its

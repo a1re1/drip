@@ -200,8 +200,13 @@ mod anchoring_render_tests {
             "{message}"
         );
         assert!(message.contains("one task per step"));
-        assert!(message.contains("draft PR"));
-        assert!(message.contains("build/CI failures"));
+        // The late-step guidance is generic, with a ship workflow only as an
+        // example: the same instruction is used for skills that have no PR or
+        // watch step at all (tdd, debug-root-cause, refactor-safely, ...), so it
+        // must not assert ship-pr's shape as if every skill had it.
+        assert!(message.contains("INCLUDING any late steps the skill spells out"));
+        assert!(message.contains("a ship workflow's"));
+        assert!(message.contains("do not invent a step the activated skill never spells out"));
         assert!(!message.contains("usually one or two"));
     }
 
@@ -776,9 +781,10 @@ fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
 /// The generic economy line ("fewest concrete tasks … usually one or two")
 /// stops being right when the operator explicitly activated a skill
 /// (`--skill <name>` or `/name` in a session): the skill's own steps are the
-/// plan, and its late steps — open/update the draft PR, watch it for review
-/// comments and build failures, loop back to fix them — are exactly the ones a
-/// planner drops when nothing names them. The activated skills therefore get a
+/// plan, and the late steps it spells out (for a ship workflow: open/update the
+/// draft PR, watch it for review comments and build failures, loop back to fix
+/// them) are exactly the ones a planner drops when nothing names them. The
+/// activated skills therefore get a
 /// contract instead of the economy line; the system prompt carries the full
 /// step-contract block (cli::skills::render_skill_step_contract).
 fn planning_instruction(active_skills: Option<&[String]>) -> String {
@@ -789,7 +795,7 @@ fn planning_instruction(active_skills: Option<&[String]>) -> String {
     };
 
     format!(
-        "instruction: No tasks exist yet. This run explicitly activated skill(s) {} — every step they spell out is a contract (see the \"Skill step contract\" block in the system prompt). Call plan_tasks with one task per step, in the skill's own order, INCLUDING the steps that come after the code is written: opening or updating the draft PR, then watching it for review comments and build/CI failures and looping back to fix them until it is clean, and the step that closes the skill out. Do not plan only the opening steps and leave the rest for later — a step with no task is a step that gets dropped when the run completes. Use the role a step declares when the skill names one.",
+        "instruction: No tasks exist yet. This run explicitly activated skill(s) {} — every step they spell out is a contract (see the \"Skill step contract\" block in the system prompt). Call plan_tasks with one task per step, in the skill's own order, INCLUDING any late steps the skill spells out (a ship workflow's: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them, and the step that closes the skill out). Do not plan only the opening steps and leave the rest for later — a step with no task is a step that gets dropped when the run completes — and do not invent a step the activated skill never spells out. Use the role a step declares when the skill names one.",
         skills.join(", ")
     )
 }

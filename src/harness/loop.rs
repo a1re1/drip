@@ -9797,8 +9797,9 @@ impl HarnessRun {
             let loop_system_prompt = scope.loop_system_prompt.clone();
             // The run's explicit --skill / slash activations name the planner's
             // step contract (see cli::skills::render_skill_step_contract).
-            // Cloned once per activation: the args borrow it while `self.state`
-            // is borrowed too.
+            // Cloned once per cycle (this block runs in `begin_cycle`), not once
+            // per activation: the args borrow it while `self.state` is borrowed
+            // too.
             let active_skill_names: Vec<String> = self.options.base_skills.clone();
 
             scope.transport_messages = build_iteration_messages(

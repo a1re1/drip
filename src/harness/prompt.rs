@@ -299,9 +299,10 @@ pub struct IterationUserMessageArgs<'a> {
     pub stall_limit: Option<i64>,
     pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
-    /// Skills activated for this run by explicit request (`--skill`, `/name`, or
-    /// a role that embeds one): the planner owes every one of their steps a task
-    /// (see cli::skills::render_skill_step_contract).
+    /// Skills activated for this run by explicit request (`--skill <name>`,
+    /// `/name` in a session): the planner owes every one of their steps a task
+    /// (see cli::skills::render_skill_step_contract). A classifier-selected or
+    /// role-embedded skill is not in this set.
     pub active_skills: Option<&'a [String]>,
 }
 
@@ -320,9 +321,10 @@ pub struct IterationMessagesArgs<'a> {
     pub system_prompt: &'a str,
     pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
-    /// Skills activated for this run by explicit request (`--skill`, `/name`, or
-    /// a role that embeds one): the planner owes every one of their steps a task
-    /// (see cli::skills::render_skill_step_contract).
+    /// Skills activated for this run by explicit request (`--skill <name>`,
+    /// `/name` in a session): the planner owes every one of their steps a task
+    /// (see cli::skills::render_skill_step_contract). A classifier-selected or
+    /// role-embedded skill is not in this set.
     pub active_skills: Option<&'a [String]>,
 }
 

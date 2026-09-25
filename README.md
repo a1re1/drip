@@ -866,9 +866,9 @@ default for that stage until you add a `reviewer` role to your `roles.json`.
 
 ### The step contract (activated skills are plans, not reading)
 
-Activating a skill by direct reference — `--skill navis`, a `--roles` profile
-that loads it, or `/navis` in a session — makes its steps a **contract**, not
-background reading. Two things enforce that:
+Activating a skill by direct reference — `--skill navis` or `/navis` in a
+session — makes its steps a **contract**, not background reading. Two things
+enforce that:
 
 1. The composed system prompt gains a `# Skill step contract` block naming
 every activated skill. It tells the planner to create one task per step of
@@ -884,11 +884,19 @@ explicitly activated). Without this, a short `/navis` goal was seeded as one
 direct task, that task finished, and the run completed with the ship and
 monitor steps never planned — the failure mode the contract exists to prevent.
 
-A skill activated only by the classifier (no explicit reference) is *not* a
-contract: those are opportunistic, composed per loop, and never force a
-planning loop or a full step ledger. Nothing changes for goals with no
-activated skill: the prompt and the direct-task path are byte-for-byte what
-they were.
+Two kinds of skill are deliberately *not* a contract, and both compose without
+the `# Skill step contract` block:
+
+- A skill activated only by the classifier (no explicit reference): those are
+  opportunistic, composed per loop, and never force a planning loop or a full
+  step ledger.
+- A skill a role embeds (`"skills"` in a role of a `--roles` profile): its
+  content and its `roles:` hints compose into **that role's** prompt, so it
+  guides that role's loops. It is not a run-wide activation: it never reaches
+  the planner's step contract and never forces a planning loop.
+
+Nothing changes for goals with no activated skill: the prompt and the
+direct-task path are byte-for-byte what they were.
 
 ## Skill classifier (jev)
 

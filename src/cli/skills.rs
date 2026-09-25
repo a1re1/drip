@@ -1002,7 +1002,7 @@ fn render_skill_role_hints_guidance(skills: &[LoadedCliSkill]) -> Option<String>
 }
 
 /// The step contract for a run whose skills were activated by explicit request
-/// (`drip --skill <name>`, `/name` in a session, or a role that embeds one).
+/// (`drip --skill <name>`, `/name` in a session).
 ///
 /// Without it a planner reads an activated skill as background reading and
 /// plans only its opening steps: the shipping and follow-up steps (opening or
@@ -1032,6 +1032,11 @@ pub fn render_skill_step_contract(skills: &[LoadedCliSkill]) -> Option<String> {
     Some(out)
 }
 
+/// Compose a prompt from skills the run did **not** activate by explicit
+/// request: classifier-selected skills, and skills a `--roles` profile embeds in
+/// one role's prompt. Those are opportunistic or role-scoped material, not a
+/// run-wide contract, so the step contract is deliberately absent here — only
+/// [`compose_explicit_skill_system_prompt`] adds it.
 pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill]) -> String {
     if skills.is_empty() {
         return base_prompt.to_string();
@@ -1046,14 +1051,30 @@ pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill])
         sections.push(guidance);
     }
 
-    if let Some(contract) = render_skill_step_contract(skills) {
-        sections.push(contract);
-    }
-
     std::iter::once(base_prompt)
         .chain(sections.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Compose the prompt for skills activated by explicit reference
+/// (`drip --skill <name>`, `/name` in a session): their steps ARE the plan, so
+/// the composed prompt also carries the step contract (see
+/// [`render_skill_step_contract`]).
+///
+/// A skill the classifier picked on its own, or one a role embeds, never reaches
+/// this function: those compose through [`compose_skill_system_prompt`] and are
+/// not a contract.
+pub fn compose_explicit_skill_system_prompt(
+    base_prompt: &str,
+    skills: &[LoadedCliSkill],
+) -> String {
+    let composed = compose_skill_system_prompt(base_prompt, skills);
+    match render_skill_step_contract(skills) {
+        Some(contract) if composed.is_empty() => contract,
+        Some(contract) => format!("{composed}\n\n{contract}"),
+        None => composed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2215,7 +2236,32 @@ mod tests {
         assert!(contract.contains("build/CI failures"));
         assert!(contract.contains("plan_tasks"));
         assert!(render_skill_step_contract(&[]).is_none());
-        assert!(compose_skill_system_prompt("base", &skills).contains("# Skill step contract"));
+        assert!(
+            compose_explicit_skill_system_prompt("base", &skills).contains("# Skill step contract")
+        );
+    }
+
+    // The contract is for explicit activations only. A classifier-selected skill
+    // (and a skill a role embeds) composes its content and hints, never the
+    // contract — a contract block there would claim a run-wide plan that
+    // README.md explicitly denies for opportunistic selections.
+    #[test]
+    fn a_classifier_selected_skill_composes_no_step_contract() {
+        let skills = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Ship it.".to_string(),
+            name: "navis".to_string(),
+        }];
+        let composed = compose_skill_system_prompt("base", &skills);
+        assert!(composed.contains("# Skill: navis"));
+        assert!(composed.contains("Ship it."));
+        assert!(
+            !composed.contains("# Skill step contract"),
+            "classifier-selected skills are opportunistic, not a contract: {composed}"
+        );
+        assert!(
+            compose_explicit_skill_system_prompt("base", &skills).contains("# Skill step contract")
+        );
     }
 
     #[test]

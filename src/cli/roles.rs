@@ -943,6 +943,9 @@ pub fn resolve_role_setup(args: &ResolveRoleSetupArgs) -> ResolvedRoleSetup {
                         // Compose through the shared composer so role-embedded
                         // skills get the same "# Skill role hints (advisory)"
                         // section as CLI/slash-activated skills (README contract).
+                        // Deliberately *not* the explicit composer: a role's skill
+                        // is scoped to that role's own loops, not a run-wide step
+                        // contract (it never reaches the planner's ledger either).
                         prompt_sections.push(crate::cli::skills::compose_skill_system_prompt(
                             "",
                             std::slice::from_ref(&loaded),

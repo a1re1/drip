@@ -495,3 +495,16 @@ fn an_edited_preferences_file_changes_the_summary_system_prompt() {
     assert_eq!(base.len(), edited.len());
     assert_eq!(base[1].content, edited[1].content);
 }
+
+#[test]
+fn harness_prompt_documents_inline_image_presentation() {
+    let prompt = DEFAULT_HARNESS_SYSTEM_PROMPT;
+    assert!(
+        prompt.contains("![what it shows](/absolute/path/shot.png)"),
+        "the harness prompt must tell the agent how to present a local image"
+    );
+    assert!(
+        prompt.contains("screencapture"),
+        "the harness prompt must name a way to take the screenshot it presents"
+    );
+}

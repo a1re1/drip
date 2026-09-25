@@ -8,6 +8,7 @@
   "runtime.role_profiles": "[]",
   "runtime.role_bindings": "{}",
   "runtime.terminal_title_enabled": "true",
+  "runtime.tui_mouse_enabled": "false",
   "runtime.terminal_title_profile_id": "glm-5-3-flash",
   "runtime.terminal_title_timeout_ms": "8000",
   "runtime.classifier_profile_id": "",

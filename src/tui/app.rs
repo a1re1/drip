@@ -5381,6 +5381,28 @@ fn stdout_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
+/// Whether the TUI turns terminal mouse reporting on (SGR 1000 + 1006).
+///
+/// OFF unless the user opts in, because while reporting is on the terminal
+/// stops handling the pointer itself: the wheel no longer scrolls the
+/// scrollback (it arrives as input drip has to act on) and drag-select no
+/// longer extends a selection, so a long session can neither be scrolled with
+/// the mouse nor have text highlighted to copy. The only pointer target the
+/// TUI routes is a left click on the status-line background counter, and that
+/// counter is reachable from the keyboard (`ctrl+b`, or `↓` then `enter`), so
+/// capturing the pointer costs the two most-used terminal affordances to save
+/// one keystroke. `runtime.tui_mouse_enabled: "true"` in ~/.drip/config.json
+/// buys the click back (then hold `shift` to select text, as in any
+/// mouse-aware TUI). A missing key means the shipped default: off.
+fn mouse_reporting_enabled(is_tty: bool, settings: &indexmap::IndexMap<String, String>) -> bool {
+    is_tty
+        && settings
+            .get(crate::core::config::TUI_MOUSE_ENABLED_SETTING_ID)
+            .map(|value| value.trim())
+            .unwrap_or("false")
+            != "false"
+}
+
 /// Gate for the one-shot background title request: interactive TTY only,
 /// config-enabled, and not already requested this session. Pure so lifecycle
 /// tests can cover the decision without a terminal.
@@ -5503,9 +5525,11 @@ pub fn run_tui_app(bootstrap: TuiBootstrap) -> i32 {
     write_out(ENABLE_BRACKETED_PASTE);
     // Mouse reporting (normal tracking + SGR coordinates) so a left click on
     // the status-line background chip reaches the input path as
-    // `ESC [ < 0 ; col ; row M`. Only for an interactive stdout: redirected
-    // output must not collect the escapes, and there is nothing to click.
-    let mouse_reporting = stdout_is_tty();
+    // `ESC [ < 0 ; col ; row M`. Opt-in (`runtime.tui_mouse_enabled`) and only
+    // for an interactive stdout: redirected output must not collect the
+    // escapes, and the terminal's own wheel scrolling / drag-select is what an
+    // ordinary long session needs -- see `mouse_reporting_enabled`.
+    let mouse_reporting = mouse_reporting_enabled(stdout_is_tty(), &bootstrap.config.settings);
     if mouse_reporting {
         write_out(ENABLE_MOUSE);
     }
@@ -5759,6 +5783,43 @@ mod tests {
         assert!(clipped.starts_with("\x1b[7m"));
         assert_eq!(string_width(&clipped), 5);
         assert_eq!(clip_ansi("short", 10), "short");
+    }
+
+    #[test]
+    fn mouse_reporting_is_off_unless_the_setting_opts_in() {
+        let mut settings = indexmap::IndexMap::new();
+        // Missing key = the shipped default: the terminal keeps its own wheel
+        // scrolling and drag-select.
+        assert!(!mouse_reporting_enabled(true, &settings));
+        settings.insert(
+            crate::core::config::TUI_MOUSE_ENABLED_SETTING_ID.to_string(),
+            "false".to_string(),
+        );
+        assert!(!mouse_reporting_enabled(true, &settings));
+        settings.insert(
+            crate::core::config::TUI_MOUSE_ENABLED_SETTING_ID.to_string(),
+            "true".to_string(),
+        );
+        assert!(mouse_reporting_enabled(true, &settings));
+        // Redirected stdout never collects the escapes, opted in or not.
+        assert!(!mouse_reporting_enabled(false, &settings));
+    }
+
+    #[test]
+    fn the_shipped_default_keeps_mouse_reporting_off() {
+        let settings = crate::core::config::default_setting_values();
+        assert_eq!(
+            settings
+                .get(crate::core::config::TUI_MOUSE_ENABLED_SETTING_ID)
+                .map(String::as_str),
+            Some("false")
+        );
+        assert!(!mouse_reporting_enabled(true, &settings));
+        // The baseline an existing config.json loads into agrees.
+        assert!(!mouse_reporting_enabled(
+            true,
+            &crate::core::config::baseline_setting_values()
+        ));
     }
 
     #[test]

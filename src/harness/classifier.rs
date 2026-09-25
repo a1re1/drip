@@ -103,8 +103,9 @@ impl std::fmt::Debug for ClassifierRoute {
 /// The resolved route's URL ends in `/chat/completions` (built from the
 /// profile's base URL); the decisions endpoint is derived from it per provider:
 /// openrouter `https://openrouter.ai/api/v1` → `.../api/alpha/decisions`
-/// (the `/v1` is dropped), typesafe `https://api.typesafe.ai/v1` →
-/// `.../v1/systemone` (the `/v1` is kept).
+/// (the `/v1` is dropped). `typesafe` derives nothing: the profile's `baseUrl`
+/// *is* the endpoint, so a Decisions profile spells its own path out
+/// (`https://api.typesafe.ai/v1/systemone`).
 pub fn resolve_classifier_route(
     settings: &IndexMap<String, String>,
     env: EnvSource<'_>,
@@ -139,7 +140,10 @@ pub fn resolve_classifier_route(
             "{}/alpha/decisions",
             base.strip_suffix("/v1").unwrap_or(&base).trim_end_matches('/')
         ),
-        "typesafe" => format!("{base}/systemone"),
+        // Nothing is appended: the profile's `baseUrl` is the endpoint
+        // (`https://api.typesafe.ai/v1/systemone` for the host's Decisions
+        // API). A bare `https://api.typesafe.ai/v1` posts to `/v1` itself.
+        "typesafe" => base,
         other => {
             return Err(format!(
                 "classifier: provider \"{other}\" is not supported for the skill classifier (use \"openrouter\" or \"typesafe\")"
@@ -1087,8 +1091,25 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "Authorization" && value == "Bearer test-key"));
 
+        // typesafe derives no suffix: the profile's own baseUrl is the
+        // endpoint, so nothing is appended to it.
         let typesafe = settings_with_profile("typesafe", None);
         let route = resolve_classifier_route(&typesafe, Some(&env), override_profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(route.url, "https://api.typesafe.ai/v1");
+
+        let decisions =
+            settings_with_profile("typesafe", Some("https://api.typesafe.ai/v1/systemone"));
+        let route = resolve_classifier_route(&decisions, Some(&env), override_profile)
+            .unwrap()
+            .unwrap();
+        assert_eq!(route.url, "https://api.typesafe.ai/v1/systemone");
+
+        // A trailing slash on the profile's endpoint is harmless.
+        let trailing =
+            settings_with_profile("typesafe", Some("https://api.typesafe.ai/v1/systemone/"));
+        let route = resolve_classifier_route(&trailing, Some(&env), override_profile)
             .unwrap()
             .unwrap();
         assert_eq!(route.url, "https://api.typesafe.ai/v1/systemone");

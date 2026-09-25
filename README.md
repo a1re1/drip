@@ -904,15 +904,17 @@ The classifier profile is an ordinary model profile; point it at jev:
 ```
 
 ```json
-{"id":"jev-direct","model":"jev-latest","provider":"typesafe","apiKeyRef":"env:TYPESAFE_API_KEY"}
+{"id":"jev-direct","model":"jev-latest","provider":"typesafe","baseUrl":"https://api.typesafe.ai/v1/systemone","apiKeyRef":"env:TYPESAFE_API_KEY"}
 ```
 
 The `typesafe` provider (`baseUrl` defaults to `https://api.typesafe.ai/v1`) is
-only valid on the classifier profile. The decisions endpoint is derived from the
-profile's base URL: `/v1` is stripped and `/alpha/decisions` appended for
-`openrouter`, `/systemone` for `typesafe`. Credentials resolve exactly like any
-other profile (`apiKey` / `apiKeyRef`, `env:` refs reading `~/.drip/env.vars`)
-and are never logged.
+only valid on the classifier profile. No endpoint path is derived for it: the
+profile's `baseUrl` *is* the classifier endpoint, so a Decisions profile spells
+it out (`"baseUrl": "https://api.typesafe.ai/v1/systemone"`). The `openrouter`
+provider derives its endpoint from the chat base URL instead (`/v1` stripped,
+`/alpha/decisions` appended). Credentials resolve exactly like any other profile
+(`apiKey` / `apiKeyRef`, `env:` refs reading `~/.drip/env.vars`) and are never
+logged.
 
 ### Requirements cache
 

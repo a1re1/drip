@@ -2326,7 +2326,9 @@ starts at once — the planner cost 13-20s on every speed-bench run, half the
 wall time of a small task, while the goal already said what to do and how to
 check it, and with `auto` the bench's small and medium tasks ran 25-60% faster at
 the same hidden-test pass rate. `always` runs the planner role first for every
-goal; `direct` always seeds the direct task. The reviewer still verifies.
+goal; `direct` always seeds the direct task. Both are lifted when a skill was
+explicitly activated: that always plans, one task per step of the skill (see
+"The step contract" above). The reviewer still verifies.
 
 A task loop's cycle budget stretches with progress: a cycle that edited or
 verified the workspace earns the loop one more cycle (at most two per loop,

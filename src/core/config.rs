@@ -38,6 +38,13 @@ pub const OTHER_SETTINGS_DEFAULT_JSON: &str = include_str!("defaults/other_setti
 /// Terminal pane title generation (best-effort, one-shot per chat).
 pub const TERMINAL_TITLE_ENABLED_SETTING_ID: &str = "runtime.terminal_title_enabled";
 
+/// Terminal mouse reporting (SGR 1000 + 1006) inside the interactive TUI.
+/// Default false: while reporting is on the terminal hands the pointer to drip
+/// instead of acting on it itself, which costs scrollback wheel scrolling and
+/// drag-select text selection -- the one click target it buys (the
+/// background-jobs counter) is one keystroke away (`ctrl+b`).
+pub const TUI_MOUSE_ENABLED_SETTING_ID: &str = "runtime.tui_mouse_enabled";
+
 /// Opt-in clarification surveys in the interactive TUI (`--ask`/`--no-ask`).
 pub const ASK_USER_INTERACTIVE_SETTING_ID: &str = "runtime.ask_user_interactive";
 /// Opt-in clarification surveys in headless runs.

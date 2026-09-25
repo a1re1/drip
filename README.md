@@ -1285,17 +1285,23 @@ Three ways in:
 - The counter is reachable from the keyboard too: with an empty composer, `↓`
   parks the focus on it (the chip is painted highlighted), `enter` (or space)
   opens the browser, and `↑` / `esc` hands the focus back to the composer.
-- A left click on the chip opens the same browser. The terminal has to be
-  forwarding mouse reports to drip for that to reach it: inside `tmux` that
-  means `set -g mouse on`, because with mouse reporting off tmux consumes the
-  click before drip ever sees it.
-- **Click the counter.** The TUI turns on terminal mouse reporting while it
-  owns the screen, and a left click on the background counter opens the same
-  browser the keys open. The counter is the only clickable target: wheel
-  notches, releases and clicks anywhere else are ignored, so a stray click
-  never types into the composer. Mouse reporting does mean the terminal stops
-  doing its own drag-select while the TUI runs — hold `shift` to select text,
-  as in most mouse-aware TUIs.
+- A left click on the chip opens the same browser, when mouse reporting is
+  opted in (see below). The terminal also has to be forwarding mouse reports
+  to drip for that to reach it: inside `tmux` that means `set -g mouse on`,
+  because with mouse reporting off tmux consumes the click before drip ever
+  sees it.
+- **Mouse reporting is off by default.** While it is on the terminal hands the
+  pointer to drip instead of acting on it itself: the wheel no longer scrolls
+  the scrollback and drag-select no longer extends a selection, so in a long
+  session you cannot scroll up with the mouse and cannot highlight text to
+  copy. The counter is already one keystroke away (`ctrl+b`, or `↓` then
+  `enter`), so drip leaves the terminal's own pointer handling alone unless
+  you set `"runtime.tui_mouse_enabled": "true"` under `settings` in
+  `~/.drip/config.json`. With it on the counter is clickable and the counter is
+  still the only target: wheel notches, releases and clicks anywhere else are
+  ignored, so a stray click never types into the composer — but scroll up and
+  text selection are the terminal's again only with `shift` held, as in any
+  mouse-aware TUI.
 
 The detail frame shows the status, the runtime counted up from the job's start,
 the script (a monitor's `check` rides its title), the job log tail, and the

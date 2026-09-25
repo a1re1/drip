@@ -1982,6 +1982,12 @@ reduced to a marker row:
   the plain `[N images attached]` marker. Local markdown image links in model
   text (`![shot](path.png)`, as long as the file exists and the target is not
   a URL) are drawn the same way; remote URLs are never fetched.
+- The harness system prompt tells the agent it can send you an image the same
+  way: to show a screenshot it took, or any local image it inspected, it writes a
+  markdown image link to that file on its own line in its message
+  (`![shot](/abs/path/shot.png)`, e.g. after `screencapture -x /tmp/shot.png`).
+  drip draws it inline exactly like an attachment, and the path stays readable
+  where inline images are off.
 - kitty only decodes PNG, so a non-PNG attachment stays a marker under kitty
   and renders normally under iTerm2/WezTerm. Unreadable paths degrade to the
   marker rather than an error.

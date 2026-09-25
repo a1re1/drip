@@ -9,6 +9,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+
 use drip::cli::headless_output::headless_event_line;
 use drip::cli::transcript::{
     append_transcript_entry, read_transcript, TranscriptEntry, TranscriptEventEntry,
@@ -19,6 +22,8 @@ use drip::tui::compact::{
     render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
     CompactCell, CompactProjection, ToolGroupCell,
 };
+use drip::tui::images::{set_inline_images, ImageProtocol};
+use drip::tui::timeline::estimate_cell_rows;
 use drip::watch::ansi::{string_width, strip_ansi};
 use drip::watch::transcript_view::flatten_transcript;
 
@@ -609,4 +614,206 @@ fn headless_stream_still_shows_every_tool_and_inference_event() {
     };
     let infer_line = headless_event_line(&infer_event, false).expect("inference line");
     assert!(infer_line.contains("21018 prompt"), "{infer_line}");
+}
+
+// ---------- inline image delivery ----------
+
+/// The image protocol is process-global; the tests that flip it serialize on
+/// this lock and always restore `None`.
+fn image_protocol_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct NoProtocol;
+
+impl Drop for NoProtocol {
+    fn drop(&mut self) {
+        set_inline_images(None);
+    }
+}
+
+/// A real local file the loader recognizes as a PNG. Only the 8-byte
+/// signature matters to `images::load`; the bytes after it are what the decode
+/// assertion proves travelled through the escape codes.
+fn write_local_png(dir: &std::path::Path) -> PathBuf {
+    let path = dir.join("screenshot.png");
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    bytes.extend_from_slice(b"pixels-and-then-some");
+    fs::write(&path, &bytes).expect("write screenshot.png");
+    path
+}
+
+fn model_text_with_image(path: &std::path::Path) -> TranscriptEntry {
+    event(
+        HarnessEventType::ModelText,
+        1,
+        &format!("Verification screenshot:\n\n![shot]({})", path.display()),
+        None,
+    )
+}
+
+fn rendered_rows(cells: &[CompactCell], width: usize) -> Vec<String> {
+    cells
+        .iter()
+        .flat_map(|cell| render_compact_cell(cell, width))
+        .collect()
+}
+
+/// Concatenate and decode the base64 bodies of a kitty `f=100` escape.
+fn kitty_payload(row: &str) -> Vec<u8> {
+    let mut payload = String::new();
+
+    for chunk in row.split("\x1b_G").skip(1) {
+        let body = chunk.split_once(';').expect("chunk carries a body").1;
+        let (data, _) = body.split_once("\x1b\\").expect("chunk is terminated");
+        payload.push_str(data);
+    }
+
+    STANDARD.decode(&payload).expect("kitty payload is base64")
+}
+
+#[test]
+fn model_text_image_is_readable_when_inline_images_are_disabled() {
+    let _lock = image_protocol_lock();
+    let _reset = NoProtocol;
+    set_inline_images(None);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_local_png(dir.path());
+    let cells = feed(&[model_text_with_image(&png)]).cells;
+    let rows = rendered_rows(&cells, 80);
+    let plain: Vec<String> = rows.iter().map(|row| strip_ansi(row)).collect();
+
+    // Without a protocol the agent's pointer to the image is still readable
+    // (a long path may wrap across rows, so join before matching).
+    assert!(
+        plain.concat().contains("screenshot.png"),
+        "the path stays readable: {plain:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("\x1b_G") || row.contains("\x1b]1337")),
+        "nothing is painted inline without a protocol: {rows:?}"
+    );
+}
+
+#[test]
+fn model_text_image_is_painted_inline_and_budgeted_by_the_repaint() {
+    let _lock = image_protocol_lock();
+    let _reset = NoProtocol;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_local_png(dir.path());
+    let bytes = fs::read(&png).expect("read screenshot.png");
+    let entry = model_text_with_image(&png);
+    let cells = feed(&[entry.clone()]).cells;
+
+    // A width wide enough that the markdown row itself never wraps: then the
+    // painted row count is what the budget must reserve.
+    const WIDE: usize = 300;
+    let text_rows = rendered_rows(&cells, WIDE);
+
+    set_inline_images(Some(ImageProtocol::Kitty));
+    let rows = rendered_rows(&cells, WIDE);
+    let escapes: Vec<&String> = rows.iter().filter(|row| row.contains("\x1b_G")).collect();
+
+    assert_eq!(escapes.len(), 1, "one inline row per image: {rows:?}");
+    assert!(escapes[0].contains("a=T,f=100"), "{}", escapes[0]);
+    assert_eq!(kitty_payload(escapes[0]), bytes);
+    assert_eq!(
+        rows.len(),
+        text_rows.len() + 1,
+        "the image adds exactly one row: {rows:?}"
+    );
+    assert!(
+        estimate_cell_rows(&entry) >= rows.len(),
+        "estimate {} under-counts {} painted rows",
+        estimate_cell_rows(&entry),
+        rows.len()
+    );
+
+    // The repaint budget spends rows on the image: the same number of cells
+    // keeps fewer of the image-bearing ones above the live region.
+    let with_images: Vec<TranscriptEntry> = vec![entry.clone(); 12];
+    let without_images: Vec<TranscriptEntry> = vec![
+        event(
+            HarnessEventType::ModelText,
+            1,
+            "Verification screenshot:\n\nno image here",
+            None,
+        );
+        12
+    ];
+    let plain_cells = feed(&without_images).cells;
+    let image_cells = feed(&with_images).cells;
+    let plain_start = select_compact_tail_start(&plain_cells, 40);
+    let image_start = select_compact_tail_start(&image_cells, 40);
+
+    assert!(
+        image_start > plain_start,
+        "image rows must consume budget: plain {plain_start}, image {image_start}"
+    );
+    let tail = rendered_rows(&image_cells[image_start..], WIDE);
+    assert!(
+        tail.iter().any(|row| row.contains("\x1b_G")),
+        "the tail still carries the newest image row: {tail:?}"
+    );
+
+    // iTerm2 carries the same image through its own escape.
+    set_inline_images(Some(ImageProtocol::Iterm2));
+    let iterm = rendered_rows(&cells, WIDE);
+    assert!(
+        iterm.iter().any(|row| row.contains("\x1b]1337")),
+        "iterm2 escape missing: {iterm:?}"
+    );
+}
+
+#[test]
+fn goal_attachment_rows_are_budgeted_by_the_repaint_too() {
+    let _lock = image_protocol_lock();
+    let _reset = NoProtocol;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png = write_local_png(dir.path());
+    let entry = TranscriptEntry::Goal(TranscriptGoalEntry {
+        at: String::new(),
+        goal_id: "g".to_string(),
+        images: vec![png.to_string_lossy().into_owned()],
+        mentions: Vec::new(),
+        text: "what is this?".to_string(),
+    });
+
+    const WIDE: usize = 300;
+    let marker_rows = rendered_rows(&[CompactCell::Passthrough(entry.clone())], WIDE);
+    set_inline_images(Some(ImageProtocol::Kitty));
+    let rows = rendered_rows(&[CompactCell::Passthrough(entry.clone())], WIDE);
+
+    assert_eq!(rows.len(), marker_rows.len() + 1, "{rows:?}");
+    assert!(
+        estimate_cell_rows(&entry) >= rows.len(),
+        "estimate {} under-counts {} painted rows",
+        estimate_cell_rows(&entry),
+        rows.len()
+    );
+}
+
+#[test]
+fn an_unreadable_image_link_paints_no_escape_and_keeps_its_text_row() {
+    let _lock = image_protocol_lock();
+    let _reset = NoProtocol;
+    set_inline_images(Some(ImageProtocol::Kitty));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("gone.png");
+    let cells = feed(&[model_text_with_image(&missing)]).cells;
+    let rows = rendered_rows(&cells, 80);
+    let plain: Vec<String> = rows.iter().map(|row| strip_ansi(row)).collect();
+
+    assert!(
+        plain.iter().any(|row| row.contains("gone.png")),
+        "{plain:?}"
+    );
+    assert!(!rows.iter().any(|row| row.contains("\x1b_G")), "{rows:?}");
 }

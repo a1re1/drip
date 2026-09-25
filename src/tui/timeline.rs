@@ -203,14 +203,22 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
 /// an overestimate just means a slightly shorter tail.
 pub fn estimate_cell_rows(entry: &TranscriptEntry) -> usize {
     match entry {
-        TranscriptEntry::Goal(goal) => 2 + usize::from(!goal.images.is_empty()),
+        // The `[N images attached]` marker is one row; when a protocol is
+        // active each image paints an inline row of its own on top of it.
+        TranscriptEntry::Goal(goal) => 2 + usize::from(!goal.images.is_empty()) + goal.images.len(),
         TranscriptEntry::Event(event) => match event.kind {
             HarnessEventType::ModelText | HarnessEventType::RunSummary => {
                 // Markdown rendering changes the line count (list spacing,
                 // tables), so budget from the rendered output rather than the
                 // raw detail.
                 let rows = render_markdown_ansi(&event.detail).split('\n').count();
-                1 + rows + usize::from(event.kind == HarnessEventType::RunSummary)
+                // Local markdown image links paint one inline row each (see
+                // `render_timeline_cell`); budgeting them keeps an image from
+                // pushing the pinned live region off screen. Counting every
+                // link is an overestimate when no protocol is active or a file
+                // will not load, which only shortens the tail.
+                let images = crate::tui::images::markdown_image_paths(&event.detail).len();
+                1 + rows + usize::from(event.kind == HarnessEventType::RunSummary) + images
             }
             _ => 1,
         },

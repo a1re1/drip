@@ -1001,6 +1001,98 @@ fn render_skill_role_hints_guidance(skills: &[LoadedCliSkill]) -> Option<String>
     Some(out)
 }
 
+/// Ship actions that make a skill's late steps concrete.
+const SHIP_ACTIONS: [&str; 4] = ["gh pr create", "gh pr edit", "gh pr ready", "gh pr merge"];
+
+/// Whether a skill's own text names a real ship action.
+///
+/// Detection is action-based on purpose. A mere *mention* of a pull request is
+/// not a ship step — a review skill's example descriptions ("Use when reviewing
+/// pull requests") and an event-name table ("| Draft pull request opened |") are
+/// both mention-only — and telling the planner to plan a draft-PR/CI-watch step
+/// for such a skill is exactly how a step the activated skill never contains
+/// ends up in the plan.
+fn skill_names_a_ship_action(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    if SHIP_ACTIONS.iter().any(|action| lower.contains(action)) {
+        return true;
+    }
+    // A skill that ships by hand rather than through the gh CLI.
+    lower
+        .lines()
+        .any(|line| line.contains("draft pr") && line.contains("git push"))
+}
+
+/// The late-step bullets of the step contract, derived from each activated
+/// skill's own text.
+///
+/// The generic bullet is always rendered: it is what tells the planner to derive
+/// the late steps from the skill's own text and never to invent one, so it must
+/// survive a mixed activation (`--skill navis --skill tdd`) — a run-wide "is
+/// anything here ship-like?" flag would trade that guard away for the non-ship
+/// skills in the set.
+///
+/// A skill that names a real ship action gets one extra bullet naming that
+/// skill, so the concrete ship/watch sequence is scoped to the skill whose text
+/// actually contains it. Every other skill (most of the shipped ones: tdd,
+/// debug-root-cause, refactor-safely, migration-discipline, ...) has no PR phase
+/// at all and keeps the generic bullet alone.
+fn render_late_step_guidance(skills: &[LoadedCliSkill]) -> String {
+    let mut out = String::from(
+        "- Plan every late step the skill itself spells out, not only its opening steps: derive them from the skill's own text, keep going until the step that closes the skill out, and never invent a step a skill does not name.\n",
+    );
+
+    for skill in skills
+        .iter()
+        .filter(|skill| skill_names_a_ship_action(&skill.content))
+    {
+        out.push_str(&format!(
+            "- {}'s own late steps are planned too: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them until it is clean, and the step that closes the skill out.\n",
+            skill.name
+        ));
+    }
+
+    out
+}
+
+/// The step contract for a run whose skills were activated by explicit request
+/// (`drip --skill <name>`, `/name` in a session).
+///
+/// Without it a planner reads an activated skill as background reading and
+/// plans only its opening steps: the late steps the skill itself spells out
+/// (for a ship workflow, opening or updating a draft PR, watching it for review
+/// comments and build/CI failures, and looping back to fix them) never become
+/// tasks, so the run reaches "completed" with steps of the skill unworked. The
+/// contract therefore defers to the skill's own step list and never names a step
+/// a skill does not contain — most shipped skills have no PR phase at all.
+pub fn render_skill_step_contract(skills: &[LoadedCliSkill]) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+
+    let names = skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str("# Skill step contract\n\n");
+    out.push_str(&format!(
+        "The skill(s) below are active for this run: {names}. An activated skill is a contract, not background reading — its steps ARE the plan.\n\n"
+    ));
+    out.push_str("- The planning step creates one task per step of every activated skill, in the skill's own order: never fold two listed steps into one task, and never plan only the opening steps \"and the rest later\".\n");
+    out.push_str(&render_late_step_guidance(skills));
+    out.push_str("- A later step whose task does not exist yet is still planned now (placement \"end\", dependsOn the step before it when the order matters): a step that is not on the task list is a step that gets dropped when the run completes.\n");
+    out.push_str("- A task loop that finishes a step and sees another step of an activated skill with no task on the list adds it with plan_tasks before finishing its own loop, and no loop finishes the run while a step of an activated skill is unplanned, unworked, or dropped.\n");
+    out.push_str("- drop_task is for steps the operator or the goal explicitly rules out — never for a step of a skill the operator asked for.\n");
+    Some(out)
+}
+
+/// Compose a prompt from skills the run did **not** activate by explicit
+/// request: classifier-selected skills, and skills a `--roles` profile embeds in
+/// one role's prompt. Those are opportunistic or role-scoped material, not a
+/// run-wide contract, so the step contract is deliberately absent here — only
+/// [`compose_explicit_skill_system_prompt`] adds it.
 pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill]) -> String {
     if skills.is_empty() {
         return base_prompt.to_string();
@@ -1019,6 +1111,26 @@ pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill])
         .chain(sections.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Compose the prompt for skills activated by explicit reference
+/// (`drip --skill <name>`, `/name` in a session): their steps ARE the plan, so
+/// the composed prompt also carries the step contract (see
+/// [`render_skill_step_contract`]).
+///
+/// A skill the classifier picked on its own, or one a role embeds, never reaches
+/// this function: those compose through [`compose_skill_system_prompt`] and are
+/// not a contract.
+pub fn compose_explicit_skill_system_prompt(
+    base_prompt: &str,
+    skills: &[LoadedCliSkill],
+) -> String {
+    let composed = compose_skill_system_prompt(base_prompt, skills);
+    match render_skill_step_contract(skills) {
+        Some(contract) if composed.is_empty() => contract,
+        Some(contract) => format!("{composed}\n\n{contract}"),
+        None => composed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,6 +2273,138 @@ mod tests {
     }
 
     // --- composeSkillSystemPrompt ---
+
+    // --- skill step contract (explicit --skill / slash activation) ---
+
+    #[test]
+    fn step_contract_names_every_activated_skill_and_composes() {
+        let skills = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Ship it.".to_string(),
+            name: "navis".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&skills).expect("activated skills produce a contract");
+        assert!(contract.contains("# Skill step contract"));
+        assert!(contract.contains("navis"));
+        assert!(contract.contains("one task per step"));
+        assert!(contract.contains("plan_tasks"));
+        assert!(render_skill_step_contract(&[]).is_none());
+        assert!(
+            compose_explicit_skill_system_prompt("base", &skills).contains("# Skill step contract")
+        );
+    }
+
+    // The contract is one instruction for every explicitly activated skill, so
+    // the generic late-step bullet — the "never invent a step" guard — is always
+    // present, and only a skill that names a real ship action gets the concrete
+    // ship/watch bullet, scoped to its own name. A skill like tdd (or
+    // debug-root-cause, refactor-safely, migration-discipline) has no PR step at
+    // all, and naming one would invite a fabricated task.
+    #[test]
+    fn step_contract_late_steps_follow_the_skills_own_text() {
+        let plain = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Write a failing test, then make it pass.".to_string(),
+            name: "tdd".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&plain).expect("activated skills produce a contract");
+        assert!(contract.contains("Plan every late step the skill itself spells out"));
+        assert!(contract.contains("never invent a step a skill does not name"));
+        assert!(
+            !contract.contains("opening or updating the draft PR")
+                && !contract.contains("build/CI failures"),
+            "a skill with no ship phase must not be told to plan a PR step: {contract}"
+        );
+
+        let shipping = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Then run `gh pr create --draft` and watch it for review comments."
+                .to_string(),
+            name: "navis".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&shipping).expect("activated skills produce a contract");
+        assert!(contract.contains("navis's own late steps"));
+        assert!(contract.contains("opening or updating the draft PR"));
+        assert!(contract.contains("build/CI failures"));
+        assert!(contract.contains("never invent a step a skill does not name"));
+    }
+
+    // A mixed activation must not trade the guard away: the generic bullet stays
+    // (for tdd here), and the concrete ship bullet names the ship skill only.
+    #[test]
+    fn a_mixed_activation_keeps_the_guard_and_scopes_the_ship_bullet() {
+        let skills = vec![
+            LoadedCliSkill {
+                role_hints: None,
+                content: "Write a failing test, then make it pass.".to_string(),
+                name: "tdd".to_string(),
+            },
+            LoadedCliSkill {
+                role_hints: None,
+                content: "Then run `gh pr ready` and merge the change.".to_string(),
+                name: "navis".to_string(),
+            },
+        ];
+        let contract =
+            render_skill_step_contract(&skills).expect("activated skills produce a contract");
+        assert!(
+            contract.contains("never invent a step a skill does not name"),
+            "a mixed activation must keep the guard for the non-ship skill: {contract}"
+        );
+        assert!(contract.contains("navis's own late steps"));
+        assert!(
+            !contract.contains("tdd's own late steps"),
+            "the concrete bullet must be scoped to the ship skill: {contract}"
+        );
+    }
+
+    // Mentioning a PR is not a ship step: automate's git-event table
+    // ("Draft pull request opened") and create-skill's example description
+    // ("Use when reviewing pull requests") are both mention-only, and naming a
+    // draft-PR/CI-watch step for them is the fabricated-step defect.
+    #[test]
+    fn a_mention_only_skill_gets_no_ship_bullet() {
+        let mention = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "| Draft pull request opened | `git_draft_opened` | `DRAFT_OPENED` |"
+                .to_string(),
+            name: "automate".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&mention).expect("activated skills produce a contract");
+        assert!(
+            !contract.contains("opening or updating the draft PR")
+                && !contract.contains("build/CI failures"),
+            "a PR mention is not a ship step: {contract}"
+        );
+        assert!(contract.contains("never invent a step a skill does not name"));
+    }
+
+    // The contract is for explicit activations only. A classifier-selected skill
+    // (and a skill a role embeds) composes its content and hints, never the
+    // contract — a contract block there would claim a run-wide plan that
+    // README.md explicitly denies for opportunistic selections.
+    #[test]
+    fn a_classifier_selected_skill_composes_no_step_contract() {
+        let skills = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Ship it.".to_string(),
+            name: "navis".to_string(),
+        }];
+        let composed = compose_skill_system_prompt("base", &skills);
+        assert!(composed.contains("# Skill: navis"));
+        assert!(composed.contains("Ship it."));
+        assert!(
+            !composed.contains("# Skill step contract"),
+            "classifier-selected skills are opportunistic, not a contract: {composed}"
+        );
+        assert!(
+            compose_explicit_skill_system_prompt("base", &skills).contains("# Skill step contract")
+        );
+    }
 
     #[test]
     fn compose_skill_system_prompt_no_skills_returns_base() {

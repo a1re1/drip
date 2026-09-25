@@ -864,6 +864,48 @@ provides `architect`/`author` (no reviewer). A skill suggesting
 `review: reviewer` under `planned` simply falls back to the configured
 default for that stage until you add a `reviewer` role to your `roles.json`.
 
+### The step contract (activated skills are plans, not reading)
+
+Activating a skill by direct reference — `--skill navis` or `/navis` in a
+session — makes its steps a **contract**, not background reading. Two things
+enforce that:
+
+1. The composed system prompt gains a `# Skill step contract` block naming
+every activated skill. It tells the planner to create one task per step of
+each skill, in the skill's own order, and including any late step the skill
+spells out — for a ship workflow, that is the sequence after the code is
+written (opening or updating the draft PR, watching it for review comments and
+build/CI failures, looping back to fix them, closing the skill out) — and that
+a step with no task is a step that gets dropped. The contract defers to the
+skill's own steps: every activated skill is told to plan the late steps it
+spells out and never to invent one, and the concrete ship/watch wording is added
+**per skill** — only for a skill whose own text names a real ship action (like
+`gh pr create --draft`). A mere mention of a pull request is not a ship step
+(most shipped skills have no PR phase at all: `tdd`, `debug-root-cause`,
+`refactor-safely`, ...), and a mixed activation (`--skill navis --skill tdd`)
+still carries the "never invent a step" guard for the skills that have none.
+2. A planning loop always runs. The empty-ledger planner prompt drops its usual
+"fewest concrete tasks, usually one or two" economy line for a step-contract
+instruction naming the activated skills, and plan mode stops seeding its
+single direct task entirely (`auto` and `direct` both plan when a skill is
+explicitly activated). Without this, a short `/navis` goal was seeded as one
+direct task, that task finished, and the run completed with the ship and
+monitor steps never planned — the failure mode the contract exists to prevent.
+
+Two kinds of skill are deliberately *not* a contract, and both compose without
+the `# Skill step contract` block:
+
+- A skill activated only by the classifier (no explicit reference): those are
+  opportunistic, composed per loop, and never force a planning loop or a full
+  step ledger.
+- A skill a role embeds (`"skills"` in a role of a `--roles` profile): its
+  content and its `roles:` hints compose into **that role's** prompt, so it
+  guides that role's loops. It is not a run-wide activation: it never reaches
+  the planner's step contract and never forces a planning loop.
+
+Nothing changes for goals with no activated skill: the prompt and the
+direct-task path are byte-for-byte what they were.
+
 ## Skill classifier (jev)
 
 Discovered skills are not all useful at once. With a classifier configured, drip
@@ -2147,7 +2189,9 @@ sixteen rounds in a three-repeat A/B.
 
 Auto plan mode now skips the planner for goals up to 2,500 characters naming
 up to ten paths (was 700 and three) when the goal declares a backticked
-check. A three-repeat A/B on the two largest bench tasks: backend-refactor
+check — except when a skill was explicitly activated, which always plans (see
+"The step contract" above). A three-repeat A/B on the two largest bench
+tasks: backend-refactor
 53s → 21s and http-serve 96s → 33s at the same pass rate, with inferences
 15 → 9 and 26 → 12; the planner's 15-18s call plus its task decomposition
 (each task its own loops and review) cost two to three times the wall.
@@ -2298,7 +2342,9 @@ starts at once — the planner cost 13-20s on every speed-bench run, half the
 wall time of a small task, while the goal already said what to do and how to
 check it, and with `auto` the bench's small and medium tasks ran 25-60% faster at
 the same hidden-test pass rate. `always` runs the planner role first for every
-goal; `direct` always seeds the direct task. The reviewer still verifies.
+goal; `direct` always seeds the direct task. Both are lifted when a skill was
+explicitly activated: that always plans, one task per step of the skill (see
+"The step contract" above). The reviewer still verifies.
 
 A task loop's cycle budget stretches with progress: a cycle that edited or
 verified the workspace earns the loop one more cycle (at most two per loop,

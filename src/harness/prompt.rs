@@ -174,8 +174,45 @@ mod anchoring_render_tests {
         assert!(!without.contains(FILE_OUTLINE_PREFIX));
     }
 
+    #[test]
+    fn planning_instruction_keeps_the_generic_text_without_activated_skills() {
+        let state = HarnessState::default();
+        let message = build_iteration_user_message(&state, &iteration_args());
+        assert!(message.contains(
+            "instruction: No tasks exist yet. Call plan_tasks with the fewest concrete tasks that cover the goal (usually one or two)."
+        ));
+        assert!(!message.contains("Skill step contract"));
+    }
+
+    #[test]
+    fn planning_instruction_demands_a_task_per_step_of_an_activated_skill() {
+        let state = HarnessState::default();
+        let skills = vec!["navis".to_string()];
+        let message = build_iteration_user_message(
+            &state,
+            &IterationUserMessageArgs {
+                active_skills: Some(&skills),
+                ..iteration_args()
+            },
+        );
+        assert!(
+            message.contains("explicitly activated skill(s) navis"),
+            "{message}"
+        );
+        assert!(message.contains("one task per step"));
+        // The late-step guidance is generic, with a ship workflow only as an
+        // example: the same instruction is used for skills that have no PR or
+        // watch step at all (tdd, debug-root-cause, refactor-safely, ...), so it
+        // must not assert ship-pr's shape as if every skill had it.
+        assert!(message.contains("INCLUDING any late steps the skill spells out"));
+        assert!(message.contains("a ship workflow's"));
+        assert!(message.contains("do not invent a step the activated skill never spells out"));
+        assert!(!message.contains("usually one or two"));
+    }
+
     fn iteration_args() -> IterationUserMessageArgs<'static> {
         IterationUserMessageArgs {
+            active_skills: None,
             current_date: "2026-01-01",
             current_task: None,
             file_outlines: None,
@@ -267,6 +304,11 @@ pub struct IterationUserMessageArgs<'a> {
     pub stall_limit: Option<i64>,
     pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
+    /// Skills activated for this run by explicit request (`--skill <name>`,
+    /// `/name` in a session): the planner owes every one of their steps a task
+    /// (see cli::skills::render_skill_step_contract). A classifier-selected or
+    /// role-embedded skill is not in this set.
+    pub active_skills: Option<&'a [String]>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -284,6 +326,11 @@ pub struct IterationMessagesArgs<'a> {
     pub system_prompt: &'a str,
     pub task_loop_limit: Option<i64>,
     pub workspace: Option<&'a str>,
+    /// Skills activated for this run by explicit request (`--skill <name>`,
+    /// `/name` in a session): the planner owes every one of their steps a task
+    /// (see cli::skills::render_skill_step_contract). A classifier-selected or
+    /// role-embedded skill is not in this set.
+    pub active_skills: Option<&'a [String]>,
 }
 
 #[derive(Clone, Debug)]
@@ -673,7 +720,7 @@ pub fn build_iteration_user_message(
 
         sections.push(task_sections.join("\n"));
     } else if state.tasks.is_empty() {
-        sections.push("instruction: No tasks exist yet. Call plan_tasks with the fewest concrete tasks that cover the goal (usually one or two).".to_string());
+        sections.push(planning_instruction(args.active_skills));
     } else if state
         .tasks
         .iter()
@@ -729,6 +776,30 @@ fn format_task_recovery_line(task: &HarnessTask) -> Option<String> {
     Some(line)
 }
 
+/// The instruction handed to the planner while the ledger is still empty.
+///
+/// The generic economy line ("fewest concrete tasks … usually one or two")
+/// stops being right when the operator explicitly activated a skill
+/// (`--skill <name>` or `/name` in a session): the skill's own steps are the
+/// plan, and the late steps it spells out (for a ship workflow: open/update the
+/// draft PR, watch it for review comments and build failures, loop back to fix
+/// them) are exactly the ones a planner drops when nothing names them. The
+/// activated skills therefore get a
+/// contract instead of the economy line; the system prompt carries the full
+/// step-contract block (cli::skills::render_skill_step_contract).
+fn planning_instruction(active_skills: Option<&[String]>) -> String {
+    const GENERIC: &str = "instruction: No tasks exist yet. Call plan_tasks with the fewest concrete tasks that cover the goal (usually one or two).";
+
+    let Some(skills) = active_skills.filter(|skills| !skills.is_empty()) else {
+        return GENERIC.to_string();
+    };
+
+    format!(
+        "instruction: No tasks exist yet. This run explicitly activated skill(s) {} — every step they spell out is a contract (see the \"Skill step contract\" block in the system prompt). Call plan_tasks with one task per step, in the skill's own order, INCLUDING any late steps the skill spells out (a ship workflow's: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them, and the step that closes the skill out). Do not plan only the opening steps and leave the rest for later — a step with no task is a step that gets dropped when the run completes — and do not invent a step the activated skill never spells out. Use the role a step declares when the skill names one.",
+        skills.join(", ")
+    )
+}
+
 pub fn build_iteration_messages(
     state: &HarnessState,
     args: &IterationMessagesArgs<'_>,
@@ -746,6 +817,7 @@ pub fn build_iteration_messages(
             stall_limit: args.stall_limit,
             task_loop_limit: args.task_loop_limit,
             workspace: args.workspace,
+            active_skills: args.active_skills,
         },
     );
     // Goal context (e.g. @mentioned files) rides along each activation instead of

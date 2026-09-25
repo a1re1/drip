@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::cli::follow::{read_inbox_entries, read_inbox_messages};
-use crate::cli::skills::{compose_skill_system_prompt, LoadedCliSkill};
+use crate::cli::skills::{compose_explicit_skill_system_prompt, LoadedCliSkill};
 use crate::core::inference::ResolvedInferenceConfig;
 use crate::core::lease::{clear_lease, write_lease};
 use crate::core::state::{
@@ -295,8 +295,10 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
     } = prepare_state_for_goal(&args.state_path, &args.goal, args.new_goal)?;
     let state =
         prepared_state.or_else(|| seed_initial_state(&args.goal, args.seed_tasks.as_deref()));
+    // Explicit activations (`--skill`, a session `/name`): the step contract
+    // rides in the base system prompt, which every loop (planner included) uses.
     let persona_with_skills =
-        compose_skill_system_prompt(&args.inference.system_prompt, &args.skills);
+        compose_explicit_skill_system_prompt(&args.inference.system_prompt, &args.skills);
     let repo_memory_index = load_repo_memory_index(args.repo_memory.as_ref());
     let published_from_workspace = Arc::new(AtomicBool::new(false));
 

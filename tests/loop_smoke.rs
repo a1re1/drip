@@ -964,6 +964,82 @@ async fn plan_mode_auto_seeds_a_direct_task_for_a_small_goal() {
     );
 }
 
+/// An explicitly activated skill (`--skill`, `/name`) overrides plan mode:
+/// the planner must run even for a goal plan mode would otherwise seed as a
+/// single direct task, because the skill's step contract only becomes tasks
+/// inside a planning loop. Without this, a `/navis` run planned one task and
+/// dropped the ship/monitor steps when that task finished.
+#[tokio::test]
+async fn an_activated_skill_forces_a_planning_loop_over_a_direct_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let (url, server) = spawn_scripted_server(vec![
+        // A planning loop is the only way the step contract can produce tasks.
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks": ["work on the file"]}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"wrote it","anchor":"none","anchorNote":"nothing to run"}),
+        ),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "write the file".into(),
+        // Direct would seed one task for this goal; the activated skill wins.
+        plan_mode: Some("direct".into()),
+        base_skills: vec!["navis".to_string()],
+        max_iterations: Some(6),
+        model: Some("mock".into()),
+        url: Some(url),
+        tools: drip::tools::pack::builtin_tool_pack(Default::default()),
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let bodies = server.join().unwrap();
+    assert_eq!(
+        result.reason,
+        HarnessRunReason::Completed,
+        "{:?}",
+        result.error_message
+    );
+    assert_eq!(
+        result.r#loops, 2,
+        "a planning loop ran before the task loop"
+    );
+    assert_eq!(result.state.tasks.len(), 1);
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.detail.starts_with("direct task seeded")),
+        "the activated skill must suppress the direct task"
+    );
+    assert!(
+        bodies[0]
+            .to_string()
+            .contains("explicitly activated skill(s) navis"),
+        "the planning prompt carries the step contract for the activated skill"
+    );
+    assert!(
+        bodies[0].to_string().contains("one task per step"),
+        "the planning prompt asks for one task per skill step"
+    );
+}
+
 /// A declared anomaly whose own observed text reports success (exit 0, 0
 /// failures) does not end the run unreconciled: it becomes a task note and
 /// the run completes. Two real sessions had ended unreconciled on green work.

@@ -829,6 +829,12 @@ fn role_embedded_skill_with_hints_gets_advisory_guidance_section() {
     assert!(suffix.contains("Skill role hints (advisory)"));
     assert!(suffix.contains("default role suggestion: author"));
     assert!(suffix.contains("role suggestion planner"));
+    // A role's embedded skill is scoped to that role; it is not a run-wide step
+    // contract (that is reserved for --skill / slash activations).
+    assert!(
+        !suffix.contains("# Skill step contract"),
+        "role-embedded skills must not compose the step contract: {suffix}"
+    );
 }
 
 #[test]

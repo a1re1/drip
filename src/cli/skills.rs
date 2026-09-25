@@ -1001,26 +1001,58 @@ fn render_skill_role_hints_guidance(skills: &[LoadedCliSkill]) -> Option<String>
     Some(out)
 }
 
-/// The late-step bullet of the step contract, derived from the activated
-/// skills' own text.
-///
-/// A skill whose body names a draft PR or a pull request gets the concrete
-/// ship/watch sequence spelled out; every other skill (most of the shipped
-/// ones: tdd, debug-root-cause, refactor-safely, migration-discipline, ...)
-/// gets the generic "plan the late steps the skill itself spells out" line
-/// instead. Naming a PR step for a skill that has none is exactly how the
-/// planner ends up planning a step the activated skill never contains.
-fn render_late_step_guidance(skills: &[LoadedCliSkill]) -> String {
-    let ship_like = skills.iter().any(|skill| {
-        let body = skill.content.to_ascii_lowercase();
-        body.contains("draft pr") || body.contains("pull request")
-    });
+/// Ship actions that make a skill's late steps concrete.
+const SHIP_ACTIONS: [&str; 4] = ["gh pr create", "gh pr edit", "gh pr ready", "gh pr merge"];
 
-    if ship_like {
-        "- The steps that come after the code is written are planned too: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them until it is clean, and the step that closes the skill out.\n".to_string()
-    } else {
-        "- Plan every late step the skill itself spells out, not only its opening steps: derive them from the skill's own text, keep going until the step that closes the skill out, and never invent a step the skill does not name.\n".to_string()
+/// Whether a skill's own text names a real ship action.
+///
+/// Detection is action-based on purpose. A mere *mention* of a pull request is
+/// not a ship step — a review skill's example descriptions ("Use when reviewing
+/// pull requests") and an event-name table ("| Draft pull request opened |") are
+/// both mention-only — and telling the planner to plan a draft-PR/CI-watch step
+/// for such a skill is exactly how a step the activated skill never contains
+/// ends up in the plan.
+fn skill_names_a_ship_action(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    if SHIP_ACTIONS.iter().any(|action| lower.contains(action)) {
+        return true;
     }
+    // A skill that ships by hand rather than through the gh CLI.
+    lower
+        .lines()
+        .any(|line| line.contains("draft pr") && line.contains("git push"))
+}
+
+/// The late-step bullets of the step contract, derived from each activated
+/// skill's own text.
+///
+/// The generic bullet is always rendered: it is what tells the planner to derive
+/// the late steps from the skill's own text and never to invent one, so it must
+/// survive a mixed activation (`--skill navis --skill tdd`) — a run-wide "is
+/// anything here ship-like?" flag would trade that guard away for the non-ship
+/// skills in the set.
+///
+/// A skill that names a real ship action gets one extra bullet naming that
+/// skill, so the concrete ship/watch sequence is scoped to the skill whose text
+/// actually contains it. Every other skill (most of the shipped ones: tdd,
+/// debug-root-cause, refactor-safely, migration-discipline, ...) has no PR phase
+/// at all and keeps the generic bullet alone.
+fn render_late_step_guidance(skills: &[LoadedCliSkill]) -> String {
+    let mut out = String::from(
+        "- Plan every late step the skill itself spells out, not only its opening steps: derive them from the skill's own text, keep going until the step that closes the skill out, and never invent a step a skill does not name.\n",
+    );
+
+    for skill in skills
+        .iter()
+        .filter(|skill| skill_names_a_ship_action(&skill.content))
+    {
+        out.push_str(&format!(
+            "- {}'s own late steps are planned too: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them until it is clean, and the step that closes the skill out.\n",
+            skill.name
+        ));
+    }
+
+    out
 }
 
 /// The step contract for a run whose skills were activated by explicit request
@@ -2264,9 +2296,11 @@ mod tests {
     }
 
     // The contract is one instruction for every explicitly activated skill, so
-    // its late-step bullet must not assert ship-pr's shape: this skill (like
-    // tdd, debug-root-cause, refactor-safely, migration-discipline) has no PR
-    // step at all, and naming one would invite a fabricated task.
+    // the generic late-step bullet — the "never invent a step" guard — is always
+    // present, and only a skill that names a real ship action gets the concrete
+    // ship/watch bullet, scoped to its own name. A skill like tdd (or
+    // debug-root-cause, refactor-safely, migration-discipline) has no PR step at
+    // all, and naming one would invite a fabricated task.
     #[test]
     fn step_contract_late_steps_follow_the_skills_own_text() {
         let plain = vec![LoadedCliSkill {
@@ -2277,7 +2311,7 @@ mod tests {
         let contract =
             render_skill_step_contract(&plain).expect("activated skills produce a contract");
         assert!(contract.contains("Plan every late step the skill itself spells out"));
-        assert!(contract.contains("never invent a step the skill does not name"));
+        assert!(contract.contains("never invent a step a skill does not name"));
         assert!(
             !contract.contains("opening or updating the draft PR")
                 && !contract.contains("build/CI failures"),
@@ -2286,13 +2320,67 @@ mod tests {
 
         let shipping = vec![LoadedCliSkill {
             role_hints: None,
-            content: "Open a draft PR, then watch it for review comments.".to_string(),
+            content: "Then run `gh pr create --draft` and watch it for review comments."
+                .to_string(),
             name: "navis".to_string(),
         }];
         let contract =
             render_skill_step_contract(&shipping).expect("activated skills produce a contract");
+        assert!(contract.contains("navis's own late steps"));
         assert!(contract.contains("opening or updating the draft PR"));
         assert!(contract.contains("build/CI failures"));
+        assert!(contract.contains("never invent a step a skill does not name"));
+    }
+
+    // A mixed activation must not trade the guard away: the generic bullet stays
+    // (for tdd here), and the concrete ship bullet names the ship skill only.
+    #[test]
+    fn a_mixed_activation_keeps_the_guard_and_scopes_the_ship_bullet() {
+        let skills = vec![
+            LoadedCliSkill {
+                role_hints: None,
+                content: "Write a failing test, then make it pass.".to_string(),
+                name: "tdd".to_string(),
+            },
+            LoadedCliSkill {
+                role_hints: None,
+                content: "Then run `gh pr ready` and merge the change.".to_string(),
+                name: "navis".to_string(),
+            },
+        ];
+        let contract =
+            render_skill_step_contract(&skills).expect("activated skills produce a contract");
+        assert!(
+            contract.contains("never invent a step a skill does not name"),
+            "a mixed activation must keep the guard for the non-ship skill: {contract}"
+        );
+        assert!(contract.contains("navis's own late steps"));
+        assert!(
+            !contract.contains("tdd's own late steps"),
+            "the concrete bullet must be scoped to the ship skill: {contract}"
+        );
+    }
+
+    // Mentioning a PR is not a ship step: automate's git-event table
+    // ("Draft pull request opened") and create-skill's example description
+    // ("Use when reviewing pull requests") are both mention-only, and naming a
+    // draft-PR/CI-watch step for them is the fabricated-step defect.
+    #[test]
+    fn a_mention_only_skill_gets_no_ship_bullet() {
+        let mention = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "| Draft pull request opened | `git_draft_opened` | `DRAFT_OPENED` |"
+                .to_string(),
+            name: "automate".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&mention).expect("activated skills produce a contract");
+        assert!(
+            !contract.contains("opening or updating the draft PR")
+                && !contract.contains("build/CI failures"),
+            "a PR mention is not a ship step: {contract}"
+        );
+        assert!(contract.contains("never invent a step a skill does not name"));
     }
 
     // The contract is for explicit activations only. A classifier-selected skill

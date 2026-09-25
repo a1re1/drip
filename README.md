@@ -877,10 +877,13 @@ spells out — for a ship workflow, that is the sequence after the code is
 written (opening or updating the draft PR, watching it for review comments and
 build/CI failures, looping back to fix them, closing the skill out) — and that
 a step with no task is a step that gets dropped. The contract defers to the
-skill's own steps: the concrete ship/watch wording is rendered only for a skill
-whose text actually names a PR, and every other skill (most of the shipped
-ones — `tdd`, `debug-root-cause`, `refactor-safely`, ...) is told to plan the
-late steps it spells out and never to invent one.
+skill's own steps: every activated skill is told to plan the late steps it
+spells out and never to invent one, and the concrete ship/watch wording is added
+**per skill** — only for a skill whose own text names a real ship action (like
+`gh pr create --draft`). A mere mention of a pull request is not a ship step
+(most shipped skills have no PR phase at all: `tdd`, `debug-root-cause`,
+`refactor-safely`, ...), and a mixed activation (`--skill navis --skill tdd`)
+still carries the "never invent a step" guard for the skills that have none.
 2. A planning loop always runs. The empty-ledger planner prompt drops its usual
 "fewest concrete tasks, usually one or two" economy line for a step-contract
 instruction naming the activated skills, and plan mode stops seeding its

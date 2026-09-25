@@ -1001,6 +1001,37 @@ fn render_skill_role_hints_guidance(skills: &[LoadedCliSkill]) -> Option<String>
     Some(out)
 }
 
+/// The step contract for a run whose skills were activated by explicit request
+/// (`drip --skill <name>`, `/name` in a session, or a role that embeds one).
+///
+/// Without it a planner reads an activated skill as background reading and
+/// plans only its opening steps: the shipping and follow-up steps (opening or
+/// updating a draft PR, watching it for review comments and build/CI failures,
+/// looping back to fix them) never become tasks, so the run reaches
+/// "completed" with steps of the skill unworked.
+pub fn render_skill_step_contract(skills: &[LoadedCliSkill]) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+
+    let names = skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str("# Skill step contract\n\n");
+    out.push_str(&format!(
+        "The skill(s) below are active for this run: {names}. An activated skill is a contract, not background reading — its steps ARE the plan.\n\n"
+    ));
+    out.push_str("- The planning step creates one task per step of every activated skill, in the skill's own order: never fold two listed steps into one task, and never plan only the opening steps \"and the rest later\".\n");
+    out.push_str("- The steps that come after the code is written are planned too: opening or updating the draft PR, watching it for review comments and build/CI failures, looping back to fix them until it is clean, and the step that closes the skill out.\n");
+    out.push_str("- A later step whose task does not exist yet is still planned now (placement \"end\", dependsOn the step before it when the order matters): a step that is not on the task list is a step that gets dropped when the run completes.\n");
+    out.push_str("- A task loop that finishes a step and sees another step of an activated skill with no task on the list adds it with plan_tasks before finishing its own loop, and no loop finishes the run while a step of an activated skill is unplanned, unworked, or dropped.\n");
+    out.push_str("- drop_task is for steps the operator or the goal explicitly rules out — never for a step of a skill the operator asked for.\n");
+    Some(out)
+}
+
 pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill]) -> String {
     if skills.is_empty() {
         return base_prompt.to_string();
@@ -1013,6 +1044,10 @@ pub fn compose_skill_system_prompt(base_prompt: &str, skills: &[LoadedCliSkill])
 
     if let Some(guidance) = render_skill_role_hints_guidance(skills) {
         sections.push(guidance);
+    }
+
+    if let Some(contract) = render_skill_step_contract(skills) {
+        sections.push(contract);
     }
 
     std::iter::once(base_prompt)
@@ -2161,6 +2196,27 @@ mod tests {
     }
 
     // --- composeSkillSystemPrompt ---
+
+    // --- skill step contract (explicit --skill / slash activation) ---
+
+    #[test]
+    fn step_contract_names_every_activated_skill_and_composes() {
+        let skills = vec![LoadedCliSkill {
+            role_hints: None,
+            content: "Ship it.".to_string(),
+            name: "navis".to_string(),
+        }];
+        let contract =
+            render_skill_step_contract(&skills).expect("activated skills produce a contract");
+        assert!(contract.contains("# Skill step contract"));
+        assert!(contract.contains("navis"));
+        assert!(contract.contains("one task per step"));
+        assert!(contract.contains("draft PR"));
+        assert!(contract.contains("build/CI failures"));
+        assert!(contract.contains("plan_tasks"));
+        assert!(render_skill_step_contract(&[]).is_none());
+        assert!(compose_skill_system_prompt("base", &skills).contains("# Skill step contract"));
+    }
 
     #[test]
     fn compose_skill_system_prompt_no_skills_returns_base() {

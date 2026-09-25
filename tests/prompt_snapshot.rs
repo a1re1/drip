@@ -247,6 +247,7 @@ fn iteration_user_message_matches() {
         stall_limit: Some(3),
         task_loop_limit: None,
         workspace: Some("/repo"),
+        active_skills: None,
     };
     check(
         "rich_full",
@@ -332,6 +333,7 @@ fn iteration_messages_match() {
             task_loop_limit: None,
             system_prompt: "SYS",
             workspace: Some("/repo"),
+            active_skills: None,
         },
     );
     assert_eq!(

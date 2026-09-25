@@ -864,6 +864,32 @@ provides `architect`/`author` (no reviewer). A skill suggesting
 `review: reviewer` under `planned` simply falls back to the configured
 default for that stage until you add a `reviewer` role to your `roles.json`.
 
+### The step contract (activated skills are plans, not reading)
+
+Activating a skill by direct reference — `--skill navis`, a `--roles` profile
+that loads it, or `/navis` in a session — makes its steps a **contract**, not
+background reading. Two things enforce that:
+
+1. The composed system prompt gains a `# Skill step contract` block naming
+every activated skill. It tells the planner to create one task per step of
+each skill, in the skill's own order, including the steps that come *after*
+the code is written (opening or updating the draft PR, watching it for review
+comments and build/CI failures, looping back to fix them, closing the skill
+out) — and that a step with no task is a step that gets dropped.
+2. A planning loop always runs. The empty-ledger planner prompt drops its usual
+"fewest concrete tasks, usually one or two" economy line for a step-contract
+instruction naming the activated skills, and plan mode stops seeding its
+single direct task entirely (`auto` and `direct` both plan when a skill is
+explicitly activated). Without this, a short `/navis` goal was seeded as one
+direct task, that task finished, and the run completed with the ship and
+monitor steps never planned — the failure mode the contract exists to prevent.
+
+A skill activated only by the classifier (no explicit reference) is *not* a
+contract: those are opportunistic, composed per loop, and never force a
+planning loop or a full step ledger. Nothing changes for goals with no
+activated skill: the prompt and the direct-task path are byte-for-byte what
+they were.
+
 ## Skill classifier (jev)
 
 Discovered skills are not all useful at once. With a classifier configured, drip
@@ -2145,7 +2171,9 @@ sixteen rounds in a three-repeat A/B.
 
 Auto plan mode now skips the planner for goals up to 2,500 characters naming
 up to ten paths (was 700 and three) when the goal declares a backticked
-check. A three-repeat A/B on the two largest bench tasks: backend-refactor
+check — except when a skill was explicitly activated, which always plans (see
+"The step contract" above). A three-repeat A/B on the two largest bench
+tasks: backend-refactor
 53s → 21s and http-serve 96s → 33s at the same pass rate, with inferences
 15 → 9 and 26 → 12; the planner's 15-18s call plus its task decomposition
 (each task its own loops and review) cost two to three times the wall.

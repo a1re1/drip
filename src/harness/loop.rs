@@ -927,17 +927,23 @@ mod goal_check_tests {
     fn direct_task_title_follows_the_plan_mode_and_goal_shape() {
         use super::{direct_task_title, PlanMode};
         let small = "Add a `count` subcommand to kvstore/cli.py. Run `python3 -m unittest discover -s tests -q`.";
-        assert_eq!(direct_task_title(small, PlanMode::Always, false), None);
         assert_eq!(
-            direct_task_title(small, PlanMode::Auto, false).as_deref(),
+            direct_task_title(small, PlanMode::Always, false, false),
+            None
+        );
+        assert_eq!(
+            direct_task_title(small, PlanMode::Auto, false, false).as_deref(),
             Some(small)
         );
-        assert!(direct_task_title(small, PlanMode::Direct, false).is_some());
+        assert!(direct_task_title(small, PlanMode::Direct, false, false).is_some());
         // No declared check: direct only when the workspace has a detectable project suite.
         let unchecked = "Rename the helper in kvstore/cli.py and update its callers.";
-        assert_eq!(direct_task_title(unchecked, PlanMode::Auto, false), None);
         assert_eq!(
-            direct_task_title(unchecked, PlanMode::Auto, true).as_deref(),
+            direct_task_title(unchecked, PlanMode::Auto, false, false),
+            None
+        );
+        assert_eq!(
+            direct_task_title(unchecked, PlanMode::Auto, true, false).as_deref(),
             Some(unchecked)
         );
         // No declared check: auto plans.
@@ -945,15 +951,27 @@ mod goal_check_tests {
             direct_task_title(
                 "Add a `count` subcommand to kvstore/cli.py.",
                 PlanMode::Auto,
+                false,
                 false
             ),
             None
         );
         // Too long: auto plans.
         let long = format!("{} {}", small, "and more ".repeat(300));
-        assert_eq!(direct_task_title(&long, PlanMode::Auto, true), None);
-        assert!(direct_task_title(&long, PlanMode::Direct, false).is_some());
-        assert_eq!(direct_task_title("   ", PlanMode::Direct, true), None);
+        assert_eq!(direct_task_title(&long, PlanMode::Auto, true, false), None);
+        assert!(direct_task_title(&long, PlanMode::Direct, false, false).is_some());
+        assert_eq!(
+            direct_task_title("   ", PlanMode::Direct, true, false),
+            None
+        );
+        // An explicitly activated skill forces the planner in every mode: the
+        // skill's steps only become tasks if a planning loop runs.
+        assert_eq!(direct_task_title(small, PlanMode::Auto, false, true), None);
+        assert_eq!(direct_task_title(small, PlanMode::Direct, true, true), None);
+        assert_eq!(
+            direct_task_title(unchecked, PlanMode::Direct, true, true),
+            None
+        );
     }
 
     #[test]
@@ -4143,9 +4161,21 @@ pub const DIRECT_PLAN_MAX_PATHS: usize = 10;
 /// suite (see detect_project_check_command). Most real goals declare no
 /// check, and every one of them paid a 13-16s planner call for a plan of
 /// one task.
-pub fn direct_task_title(goal: &str, mode: PlanMode, project_check: bool) -> Option<String> {
+///
+/// `skills_active` is the exception that overrides every mode: an explicitly
+/// activated skill (`--skill`, or a `/name` activation in a session) is a
+/// contract whose steps only become tasks if a planning loop actually runs.
+/// Seeding one direct task for a short goal silently dropped every step after
+/// the implementation — the ship step and the watch-and-fix loop never got a
+/// task list entry, so the run completed with the skill half worked.
+pub fn direct_task_title(
+    goal: &str,
+    mode: PlanMode,
+    project_check: bool,
+    skills_active: bool,
+) -> Option<String> {
     let goal = goal.trim();
-    if goal.is_empty() {
+    if goal.is_empty() || skills_active {
         return None;
     }
     let small = goal.chars().count() <= DIRECT_PLAN_MAX_GOAL_CHARS
@@ -8492,9 +8522,18 @@ impl HarnessRun {
                     } else {
                         None
                     };
-                    if let Some(title) =
-                        direct_task_title(&self.state.goal, self.plan_mode, project_check.is_some())
-                    {
+                    // An explicitly activated skill (--skill, or a slash
+                    // activation in the TUI) makes the planner mandatory: the
+                    // skill's step contract can only turn its steps into tasks
+                    // if a planning loop runs at all, and a seeded single
+                    // direct task drops everything after the implementation.
+                    let skills_active = !self.options.base_skills.is_empty();
+                    if let Some(title) = direct_task_title(
+                        &self.state.goal,
+                        self.plan_mode,
+                        project_check.is_some(),
+                        skills_active,
+                    ) {
                         let added = core_state::add_tasks(
                             &mut self.state,
                             vec![core_state::HarnessTaskInput {
@@ -9756,6 +9795,11 @@ impl HarnessRun {
                 description: role.description.clone(),
             });
             let loop_system_prompt = scope.loop_system_prompt.clone();
+            // The run's explicit --skill / slash activations name the planner's
+            // step contract (see cli::skills::render_skill_step_contract).
+            // Cloned once per activation: the args borrow it while `self.state`
+            // is borrowed too.
+            let active_skill_names: Vec<String> = self.options.base_skills.clone();
 
             scope.transport_messages = build_iteration_messages(
                 &self.state,
@@ -9778,6 +9822,11 @@ impl HarnessRun {
                     system_prompt: &loop_system_prompt,
                     task_loop_limit: Some(self.task_loop_limit),
                     workspace: Some(&self.cwd),
+                    active_skills: if active_skill_names.is_empty() {
+                        None
+                    } else {
+                        Some(active_skill_names.as_slice())
+                    },
                 },
             );
 

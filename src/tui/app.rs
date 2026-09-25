@@ -4478,6 +4478,17 @@ impl TuiApp {
         let mcp_names = self.mcp_spawn_names(&role_args);
         let (mcp_clients, mcp_warnings) =
             spawn_mcp_clients_for_run(&mcp_names, &mcp_configured, cwd);
+        // Record what those servers advertised, in this session's own
+        // directory, while the handshake is fresh: dripw's read-up shows a
+        // server's own description and full input schema from this snapshot
+        // instead of launching a server itself. Best-effort.
+        let advertisements = crate::tools::mcp::mcp_tool_advertisements(&mcp_clients);
+        if !advertisements.is_empty() {
+            let _ = crate::tools::mcp::advertise::save(
+                Path::new(&self.paths.dir),
+                &advertisements,
+            );
+        }
         // Role `tools` allowlists may name MCP__<server>__<tool> entries.
         role_args.tool_names.extend(
             crate::tools::mcp::mcp_tool_definitions(&mcp_clients)

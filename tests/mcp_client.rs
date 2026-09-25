@@ -21,7 +21,7 @@ use drip::tools::async_jobs::{
 use drip::tools::execute::{execute_tool_call, ToolExecutionContext};
 use drip::tools::mcp::client::McpClient;
 use drip::tools::mcp::config::McpServerConfig;
-use drip::tools::mcp::mcp_tool_definitions;
+use drip::tools::mcp::{advertise, mcp_tool_advertisements, mcp_tool_definitions};
 use drip::tools::types::ChatToolDefinition;
 use tempfile::tempdir;
 
@@ -40,7 +40,7 @@ while IFS= read -r line; do
     initialize)
       printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"0"}}}\n' "$id" ;;
     tools/list)
-      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo text back","inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}},{"name":"boom","description":"Always fails","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo text back — ünïcode ✓","inputSchema":{"title":"echo input","type":"object","additionalProperties":false,"properties":{"text":{"type":"string","description":"the text to echo…","maxLength":64,"enum":["hi","bye"]}},"required":["text"]}},{"name":"boom","description":"Always fails","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
     tools/call)
       name=$(printf '%s' "$line" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')
       if [ "$name" = "hang" ]; then
@@ -93,7 +93,7 @@ fn with_watchdog<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -
         .expect("watchdog: MCP client test did not finish within 30s")
 }
 
-fn spawn_fake() -> (FakeServer, Vec<ChatToolDefinition>) {
+fn spawn_fake_clients() -> (FakeServer, Vec<Arc<Mutex<McpClient>>>) {
     let fake = fake_server();
     let client = McpClient::spawn(
         "fake",
@@ -101,7 +101,11 @@ fn spawn_fake() -> (FakeServer, Vec<ChatToolDefinition>) {
         &PathBuf::from("."),
     )
     .expect("spawn fake MCP server");
-    let clients = vec![Arc::new(Mutex::new(client))];
+    (fake, vec![Arc::new(Mutex::new(client))])
+}
+
+fn spawn_fake() -> (FakeServer, Vec<ChatToolDefinition>) {
+    let (fake, clients) = spawn_fake_clients();
     let tools = mcp_tool_definitions(&clients);
     (fake, tools)
 }
@@ -187,6 +191,75 @@ fn spawn_lists_the_servers_tools_under_namespaced_names() {
         // A bare `{"type":"object"}` schema degrades to an empty object schema.
         let boom = &tools[1];
         assert!(boom.parameters.properties.is_empty());
+    });
+}
+
+#[test]
+fn advertisements_keep_the_servers_own_words_and_whole_schema() {
+    with_watchdog(|| {
+        let (_fake, clients) = spawn_fake_clients();
+        let advertisements = mcp_tool_advertisements(&clients);
+        assert_eq!(advertisements.len(), 2, "one per advertised tool");
+
+        let echo = advertisements
+            .iter()
+            .find(|advertisement| advertisement.tool == "echo")
+            .expect("echo is advertised");
+        // The namespaced name the loop-start telemetry lists it under, and
+        // the server's own name for itself beside it.
+        assert_eq!(echo.name, "MCP__fake__echo");
+        assert_eq!(echo.server, "fake");
+        // Verbatim server words: no `[mcp:fake] ` prefix, unicode intact.
+        assert_eq!(echo.description, "Echo text back — ünïcode ✓");
+        // The raw `inputSchema` is kept whole, including the keys the
+        // normalized parameters the model gets drop.
+        assert_eq!(echo.input_schema["title"], "echo input");
+        assert_eq!(echo.input_schema["additionalProperties"], false);
+        assert_eq!(
+            echo.input_schema["properties"]["text"]["description"],
+            "the text to echo…"
+        );
+        assert_eq!(echo.input_schema["properties"]["text"]["maxLength"], 64);
+        assert_eq!(echo.input_schema["properties"]["text"]["enum"][1], "bye");
+        // Normalization keeps the nested property objects as the server
+        // wrote them (description, maxLength, enum all survive), and drops
+        // only the top-level keys ChatToolParameters has no place for.
+        assert_eq!(
+            echo.parameters,
+            serde_json::json!({
+                "properties": {"text": {
+                    "type": "string",
+                    "description": "the text to echo…",
+                    "maxLength": 64,
+                    "enum": ["hi", "bye"]
+                }},
+                "required": ["text"],
+                "type": "object"
+            })
+        );
+        assert!(
+            echo.parameters.get("title").is_none(),
+            "normalized schema drops title"
+        );
+
+        // A tool whose schema the server omitted keeps the null schema.
+        let boom = advertisements
+            .iter()
+            .find(|advertisement| advertisement.tool == "boom")
+            .expect("boom is advertised");
+        assert_eq!(boom.input_schema, serde_json::json!({"type": "object"}));
+
+        // Persisted into the session directory and read back, the snapshot is
+        // what the server advertised, unchanged.
+        let dir = tempdir().expect("tempdir");
+        advertise::save(dir.path(), &advertisements).expect("save the snapshot");
+        let loaded = advertise::load(dir.path());
+        assert_eq!(loaded, advertisements);
+        assert_eq!(loaded[0].description, "Echo text back — ünïcode ✓");
+        assert_eq!(
+            loaded[0].input_schema["properties"]["text"]["maxLength"],
+            64
+        );
     });
 }
 

@@ -22,8 +22,10 @@ use crate::tools::types::{
     ChatToolMode, ChatToolParameters, ChatToolPreparedInput, ChatToolResult,
 };
 
+use self::advertise::McpToolAdvertisement;
 use self::client::{McpClient, McpToolInfo};
 
+pub mod advertise;
 pub mod client;
 pub mod config;
 
@@ -31,20 +33,56 @@ pub mod config;
 // the description carries an `[mcp:<server>]` prefix so the model can tell
 // which server a call will hit, and the parameters are the server's
 // inputSchema normalized into the tool layer's shape.
+// A server's name and the tools it advertised, copied out under one lock and
+// released before anything else runs: the std mutex is not reentrant, and the
+// per-tool builders that read the copy must not lock the client again. Every
+// reader of a live client takes its snapshot here so that invariant lives in
+// one place instead of once per caller.
+fn client_snapshot(client: &Arc<Mutex<McpClient>>) -> (String, Vec<McpToolInfo>) {
+    let guard = client.lock().unwrap_or_else(PoisonError::into_inner);
+    (guard.name().to_string(), guard.tools().to_vec())
+}
+
 pub fn mcp_tool_definitions(clients: &[Arc<Mutex<McpClient>>]) -> Vec<ChatToolDefinition> {
     let mut definitions = Vec::new();
     for client in clients {
-        // Snapshot under the lock, then release it: the std mutex is not
-        // reentrant, and the per-tool builder must not lock it again.
-        let (server, tools) = {
-            let guard = client.lock().unwrap_or_else(PoisonError::into_inner);
-            (guard.name().to_string(), guard.tools().to_vec())
-        };
+        let (server, tools) = client_snapshot(client);
         for tool in &tools {
             definitions.push(mcp_tool_definition(client, &server, tool));
         }
     }
     definitions
+}
+
+// What each spawned server advertised, captured while the handshake is
+// fresh: the tool's own name and words beside the definition the harness
+// normalized out of them. Callers persist this into the session directory so
+// a reader (dripw's read-up) can show a server's own listing without
+// launching a server of its own.
+pub fn mcp_tool_advertisements(clients: &[Arc<Mutex<McpClient>>]) -> Vec<McpToolAdvertisement> {
+    let mut advertisements = Vec::new();
+    for client in clients {
+        let (server, tools) = client_snapshot(client);
+        for tool in &tools {
+            let (name, _description, parameters) = mcp_tool_metadata(&server, tool);
+            advertisements.push(McpToolAdvertisement {
+                name,
+                server: server.clone(),
+                tool: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+                // The normalized schema as the request carries it, so a
+                // reader can show both when they differ. `ChatToolParameters`
+                // always serializes to a JSON object (its maps are string-
+                // keyed), so the fallback covers a shape that cannot occur —
+                // and a snapshot that somehow lost it records `null` rather
+                // than a wrong schema, leaving the read-up to show the
+                // advertised shape alone.
+                parameters: serde_json::to_value(&parameters).unwrap_or(Value::Null),
+            });
+        }
+    }
+    advertisements
 }
 
 // The `<server>` segment of an `MCP__<server>__<tool>` tool name, or None

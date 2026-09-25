@@ -1372,6 +1372,18 @@ scrolls, so a long `SKILL.md` or schema stays readable end to end: `PageUp`/
 says where in the listing you are. Leaving `[4]` or switching sessions puts the
 transcript back in the `[0]` column.
 
+A tool read-up resolves against the surfaces the focused session actually
+recorded, and an MCP tool's definition exists in no checkout at all: only the
+server process knows it. So a run records what its own spawned servers
+advertised in their `tools/list` handshake — each tool's server-side name, its
+verbatim description, and the whole advertised `inputSchema` — into that
+session's `mcp_tools.json`, and `[4]` resolves an `MCP__<server>__<tool>` name
+against that snapshot (dripw never launches a server itself, and reads no
+network). The read-up shows the server, the server's own words, the full
+advertised schema, and — when normalization changed it — the parameter schema
+the model is actually handed. A session that predates the snapshot, or spawned
+no server, still says `no definition available in this checkout`.
+
 dripw shows sessions started in the current directory or any directory beneath it.
 
 ## Browser UI (`drip --ui`)

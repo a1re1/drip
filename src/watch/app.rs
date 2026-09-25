@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::core::home::DripProject;
 use crate::core::lease::{check_lease, LeaseStatus};
 use crate::core::sessions::{list_all_home_sessions, session_paths_for, SessionRecord};
+use crate::tools::mcp::advertise::MCP_TOOLS_FILE;
 use crate::watch::ansi::term;
 use crate::watch::data::{classify_sessions, sessions_under_dir, tree_rows, trim_transcript, TranscriptTail};
 use crate::watch::ps::{descendants, list_processes, PsProc};
@@ -62,11 +63,17 @@ fn cell(
     }
 }
 
-/// The listing behind a builtin tool name — name, description, then the JSON
-/// parameter schema the model is handed in the context window. A name the pack
-/// does not carry here (an MCP tool, or a corpus-gated REFERENCE with no roots
-/// configured) says so instead of showing nothing.
-fn tool_listing_rows(name: &str, inner_w: usize) -> Vec<crate::watch::transcript_view::RowCell> {
+/// The listing behind a tool name — name, description, then the JSON parameter
+/// schema the model is handed in the context window. A name the pack does not
+/// carry here (a corpus-gated REFERENCE with no roots configured) says so
+/// instead of showing nothing, and an MCP tool resolves against the snapshot
+/// its own session recorded during the `tools/list` handshake, since its
+/// definition lives in the server process and nowhere in this checkout.
+fn tool_listing_rows(
+    name: &str,
+    inner_w: usize,
+    mcp_tools: &[crate::tools::mcp::advertise::McpToolAdvertisement],
+) -> Vec<crate::watch::transcript_view::RowCell> {
     use crate::watch::ansi::c;
     let mut defs =
         crate::tools::pack::builtin_tool_pack(crate::tools::pack::BuiltinToolOptions::default());
@@ -103,6 +110,34 @@ fn tool_listing_rows(name: &str, inner_w: usize) -> Vec<crate::watch::transcript
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         push_parameters(&mut rows, &parameters, inner_w);
+    } else if let Some(advertisement) = mcp_tools.iter().find(|a| a.name == name) {
+        // An MCP tool's read-up comes from the session's own snapshot: the
+        // server's words and the schema it advertised, then — when the
+        // adapter changed it — the schema the model is handed.
+        rows.push(cell(advertisement.name.clone(), c::accent_bold));
+        rows.push(cell(format!("server: {}", advertisement.server), c::dim));
+        rows.push(cell("", c::dim));
+        if advertisement.description.is_empty() {
+            // dripw's own words, dimmed like the other absent-field notes so
+            // they cannot be mistaken for something the server said.
+            rows.push(cell("  the server advertised no description", c::dim));
+        } else {
+            for line in crate::watch::render::wrap_plain(&advertisement.description, inner_w) {
+                rows.push(cell(line, c::white));
+            }
+        }
+        rows.push(cell("", c::dim));
+        if advertisement.input_schema.is_null() {
+            rows.push(cell("  the server advertised no input schema", c::dim));
+        } else {
+            rows.push(cell("advertised inputSchema", c::accent));
+            push_schema_rows(&mut rows, &advertisement.input_schema, inner_w);
+        }
+        if advertisement.parameters != advertisement.input_schema {
+            rows.push(cell("", c::dim));
+            rows.push(cell("parameters the model is handed", c::accent));
+            push_schema_rows(&mut rows, &advertisement.parameters, inner_w);
+        }
     } else {
         rows.push(cell("  no definition available in this checkout", c::dim));
     }
@@ -124,7 +159,19 @@ fn push_parameters(
 ) {
     use crate::watch::ansi::c;
     rows.push(cell("parameters", c::accent));
-    if let Ok(pretty) = serde_json::to_string_pretty(parameters) {
+    push_schema_rows(rows, parameters, inner_w);
+}
+
+/// One JSON schema as dim, wrapped rows — the shared body of every listing
+/// that ends in a schema (a packed tool, a harness tool, an MCP tool's
+/// advertised and normalized shapes).
+fn push_schema_rows(
+    rows: &mut Vec<crate::watch::transcript_view::RowCell>,
+    schema: &serde_json::Value,
+    inner_w: usize,
+) {
+    use crate::watch::ansi::c;
+    if let Ok(pretty) = serde_json::to_string_pretty(schema) {
         for line in pretty.lines() {
             for wrapped in crate::watch::render::wrap_plain(line, inner_w) {
                 rows.push(cell(wrapped, c::gray));
@@ -149,6 +196,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         sel_shell: 0,
         shell_log_lines: Vec::new(),
         shell_log_files: Vec::new(),
+        mcp_tools: Vec::new(),
         tasks: Vec::new(),
         sel_task: 0,
         skill_loads: Vec::new(),
@@ -215,6 +263,12 @@ pub struct WatchApp {
     /// state.json path and mtime behind `vm.tasks`, so an unchanged ledger is
     /// not reparsed on every tail tick.
     tasks_src: Option<(String, SystemTime)>,
+    /// mcp_tools.json path and mtime behind `vm.mcp_tools`, cached the same
+    /// way — a session's advertised tool snapshot is read once, not per tick.
+    /// The mtime is `None` while the session has no snapshot file yet, and
+    /// that miss is cached like any other: a session that never spawns an MCP
+    /// server must not restat and reread for the file on every tick.
+    mcp_tools_src: Option<(String, Option<SystemTime>)>,
     tail: Option<TranscriptTail>,
     focused_id: String,
     /// Ids of the task rows in the frame last painted, top to bottom — the
@@ -252,6 +306,7 @@ impl WatchApp {
             running_sessions: Vec::new(),
             recent_sessions: Vec::new(),
             tasks_src: None,
+            mcp_tools_src: None,
             tail: None,
             focused_id: String::new(),
             painted_task_ids: Vec::new(),
@@ -466,6 +521,14 @@ impl WatchApp {
         if self.vm.tasks != before {
             dirty = true;
         }
+        // The snapshot is written once, when the run spawns its servers, so
+        // this only ever reads; a session started after this dripw did picks
+        // its servers up on the next refresh.
+        let before = self.vm.mcp_tools.clone();
+        self.load_mcp_tools(selected.as_ref());
+        if self.vm.mcp_tools != before {
+            dirty = true;
+        }
 
         if !dirty {
             return;
@@ -604,6 +667,34 @@ impl WatchApp {
         self.vm.sel_task = clamp_sel(self.vm.sel_task as i64, self.vm.tasks.len());
     }
 
+    /// Loads the focused session's captured MCP tool snapshot, cached on the
+    /// file's mtime exactly like the ledger: same file, same mtime → skip. A
+    /// session that spawned no server (or predates the snapshot) simply has
+    /// none, and the read-up falls back to the other surfaces.
+    fn load_mcp_tools(&mut self, record: Option<&SessionRecord>) {
+        let src: Option<(String, Option<SystemTime>)> = record.map(|r| {
+            let dir = session_paths_for(&self.project, r).dir;
+            let mtime = std::fs::metadata(Path::new(&dir).join(MCP_TOOLS_FILE))
+                .and_then(|m| m.modified())
+                .ok();
+            (dir, mtime)
+        });
+        // The whole (dir, mtime) pair is the cache key, a missing file
+        // included: no snapshot yet means no snapshot, and the tick after one
+        // lands sees a different mtime and reads it.
+        if let Some(src) = &src {
+            if self.mcp_tools_src.as_ref() == Some(src) {
+                return;
+            }
+        }
+        let tools = src
+            .as_ref()
+            .map(|(dir, _)| crate::tools::mcp::advertise::load(Path::new(dir)))
+            .unwrap_or_default();
+        self.mcp_tools_src = src;
+        self.vm.mcp_tools = tools;
+    }
+
     fn sync_focused(&mut self) {
         let next = self.selected_record();
         let next_id = next.as_ref().map(|r| r.id.clone()).unwrap_or_default();
@@ -619,6 +710,7 @@ impl WatchApp {
         // Reload even when the transcript did not move: a task-only ledger
         // change must still reach the pane.
         self.load_tasks(next.as_ref());
+        self.load_mcp_tools(next.as_ref());
     }
 
     fn switch_transcript(&mut self, record: Option<&SessionRecord>) {
@@ -627,6 +719,8 @@ impl WatchApp {
         self.vm.transcript_scroll = 0;
         self.vm.skill_loads = Vec::new();
         self.vm.skill_page = 0;
+        // The next session owns its own advertised-tool snapshot.
+        self.vm.mcp_tools = Vec::new();
         // A new session owns a new surface, so nothing stays picked and the
         // [0] column goes back to the transcript.
         self.vm.sel_skill = None;
@@ -1058,7 +1152,9 @@ impl WatchApp {
                     crate::watch::ansi::c::dim,
                 )],
             },
-            crate::watch::render::SkillItem::Tool(name) => tool_listing_rows(name, inner_w),
+            crate::watch::render::SkillItem::Tool(name) => {
+                tool_listing_rows(name, inner_w, &self.vm.mcp_tools)
+            }
         };
         self.vm.skill_detail = Some(crate::watch::render::SkillDetail {
             title: format!("{} · {}", item.kind_label(), item.name()),
@@ -1156,7 +1252,7 @@ mod tests {
     fn the_harness_tools_read_up_the_schema_the_model_gets() {
         let body = |name: &str| {
             crate::watch::ansi::strip_ansi(
-                &tool_listing_rows(name, 60)
+                &tool_listing_rows(name, 60, &[])
                     .iter()
                     .map(|r| r.text.clone())
                     .collect::<Vec<_>>()
@@ -1187,6 +1283,75 @@ mod tests {
 
         // A name no surface carries still says so rather than painting nothing.
         assert!(body("NOPE__missing").contains("no definition available"));
+    }
+
+    #[test]
+    fn an_mcp_tool_reads_up_from_its_own_servers_advertisement() {
+        use crate::tools::mcp::advertise::McpToolAdvertisement;
+
+        let body = |name: &str, mcp_tools: &[McpToolAdvertisement]| {
+            crate::watch::ansi::strip_ansi(
+                &tool_listing_rows(name, 60, mcp_tools)
+                    .iter()
+                    .map(|r| r.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        };
+
+        // The pane lists `MCP__<server>__<tool>` names (the loop-start
+        // telemetry carries the harness's namespaced names), so the read-up
+        // resolves them against the snapshot the session recorded during its
+        // own `tools/list` handshake.
+        let advertisements = vec![McpToolAdvertisement {
+            name: "MCP__echo__echo".into(),
+            parameters: serde_json::json!({
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "type": "object"
+            }),
+            server: "echo".into(),
+            tool: "echo".into(),
+            description: "Echo text back — ünïcode ✓".into(),
+            input_schema: serde_json::json!({
+                "properties": {
+                    "text": {
+                        "description": "the text to echo…",
+                        "maxLength": 64,
+                        "type": "string"
+                    }
+                },
+                "required": ["text"],
+                "title": "echo input",
+                "type": "object"
+            }),
+        }];
+
+        let read_up = body("MCP__echo__echo", &advertisements);
+        assert!(!read_up.contains("no definition available"), "{read_up:?}");
+        assert!(read_up.starts_with("MCP__echo__echo"), "{read_up:?}");
+        assert!(read_up.contains("server: echo"), "{read_up:?}");
+        // The server's own words, not the harness's `[mcp:echo] ` prefix.
+        assert!(
+            read_up.contains("Echo text back — ünïcode ✓"),
+            "{read_up:?}"
+        );
+        assert!(!read_up.contains("[mcp:echo]"), "{read_up:?}");
+        // The whole advertised schema, including the keys the adapter drops.
+        assert!(read_up.contains("advertised inputSchema"), "{read_up:?}");
+        assert!(read_up.contains("\"maxLength\": 64"), "{read_up:?}");
+        assert!(read_up.contains("the text to echo…"), "{read_up:?}");
+        assert!(read_up.contains("\"title\": \"echo input\""), "{read_up:?}");
+        // ...and, since normalizing changed it, the schema the model gets.
+        assert!(
+            read_up.contains("parameters the model is handed"),
+            "{read_up:?}"
+        );
+
+        // A session that recorded no advertisement for the name (or predates
+        // the snapshot) still says so instead of painting nothing.
+        let legacy = body("MCP__echo__echo", &[]);
+        assert!(legacy.contains("no definition available"), "{legacy:?}");
     }
 
     fn record(id: &str) -> SessionRecord {

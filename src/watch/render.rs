@@ -82,6 +82,12 @@ pub struct WatchViewModel {
     /// Files discovered behind the selected shell's fd 1/2 — tells the empty
     /// states "no tailable fds" and "tailing, nothing yet" apart.
     pub shell_log_files: Vec<String>,
+    /// The focused session's captured MCP tool advertisements — what the
+    /// servers that session spawned said about their own tools during the
+    /// `tools/list` handshake, recorded into its directory by the run itself.
+    /// Empty when it spawned no server or predates the snapshot file; the
+    /// renderer never launches a server to fill it.
+    pub mcp_tools: Vec<crate::tools::mcp::advertise::McpToolAdvertisement>,
     /// The focused session's task ledger (empty when it has none / unreadable).
     pub tasks: Vec<HarnessTask>,
     /// Selection index into the ordered task list (used when focus == 2).
@@ -1583,6 +1589,7 @@ mod tests {
             sel_shell: 0,
             shell_log_lines: vec![],
             shell_log_files: vec![],
+            mcp_tools: vec![],
             tasks: vec![],
             sel_task: 0,
             skill_loads: vec![],

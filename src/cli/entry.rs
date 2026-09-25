@@ -74,7 +74,9 @@ use crate::core::sessions::{
 use crate::core::state::load_harness_state;
 use crate::core::types::HarnessEvent;
 use crate::harness::model_call::AbortSignal;
-use crate::tools::mcp::{client::McpClient, config::load_mcp_servers, mcp_tool_definitions};
+use crate::tools::mcp::{
+    client::McpClient, config::load_mcp_servers, mcp_tool_advertisements, mcp_tool_definitions,
+};
 use crate::tools::pack::{builtin_tool_pack, BuiltinToolOptions, PLAN_MODE_TOOLS};
 use crate::tools::patch_journal::{undo_last_patches, UndoOutcome};
 use crate::tools::types::ChatToolDefinition;
@@ -1159,6 +1161,16 @@ async fn run_headless(args: HeadlessArgs<'_>) -> i32 {
             }
         }
     }
+    // Record what those servers advertised, in this session's own directory,
+    // while the handshake is fresh: a reader (dripw's read-up) can then show
+    // a server's own description and full input schema without spawning one
+    // itself. Best-effort — a session that cannot record it still runs.
+    let advertisements = mcp_tool_advertisements(&mcp_clients);
+    if !advertisements.is_empty() {
+        let session_dir = session_paths_for(args.project, args.session).dir;
+        let _ = crate::tools::mcp::advertise::save(Path::new(&session_dir), &advertisements);
+    }
+
     // Role `tools` allowlists may name MCP__<server>__<tool> entries.
     role_args.tool_names.extend(
         mcp_tool_definitions(&mcp_clients)

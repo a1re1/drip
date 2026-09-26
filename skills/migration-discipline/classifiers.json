@@ -1,0 +1,20 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "migrate": {
+        "type": "noul",
+        "instructions": "Does the goal mention a version upgrade, a dependency, or replacing one API or pattern with another?"
+      },
+      "replace_everywhere": {
+        "type": "noul",
+        "instructions": "Does the goal replace one pattern with another everywhere in the codebase?"
+      },
+      "git_history": {
+        "type": "noul",
+        "instructions": "Does the goal ask to commit, push, rebase, squash, or force-push git history?"
+      }
+    },
+    "formula": "clamp(0.50 * migrate + 0.50 * replace_everywhere - 0.40 * git_history, 0, 1)"
+  }
+}

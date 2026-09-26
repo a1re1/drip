@@ -717,14 +717,25 @@ pub async fn select_plans(
 
     // Only a plan this pool actually offered is composed: the gate is
     // structural, not a property of what the classifier returned.
+    let offered = |name: &String| pool.iter().any(|plan| &plan.name == name);
     let selected = selection
         .selected
         .into_iter()
-        .filter(|(name, _score)| pool.iter().any(|plan| &plan.name == name))
+        .filter(|(name, _score)| offered(name))
         .collect();
+    let scored = selection
+        .scored
+        .into_iter()
+        .filter(|(name, _score)| offered(name))
+        .collect();
+
+    let mut answers = selection.answers;
+    answers.retain(|name, _| offered(name));
 
     crate::harness::classifier::SkillSelection {
         selected,
+        scored,
+        answers,
         warnings: selection.warnings,
     }
 }
@@ -843,6 +854,8 @@ mod plan_pool_tests {
                 // skill path drops it.
                 ("ghost".to_string(), 0.8),
             ],
+            scored: Vec::new(),
+            answers: Default::default(),
             warnings: Vec::new(),
         };
 
@@ -924,22 +937,19 @@ mod plan_pool_tests {
     }
 
     /// The shipped sidecar must actually REJECT a goal whose classifier answers
-    /// say it does not end in a pull request. Reading the `request_shape`
-    /// `choice` question bare would resolve to the chosen option's probability
-    /// (the documented meaning of a bare id for a `choice`), so a unanimous
-    /// "unrelated" answer would still contribute a near-constant 0.15 — 0.60 for
-    /// an all-NO goal, which meets the sidecar's own 0.6 threshold and composes
-    /// the ship-pr template into a run that ships nothing.
+    /// say it does not end in a pull request: an all-NO goal has to land under
+    /// the sidecar's own threshold, or the ship-pr template composes into a
+    /// run that ships nothing. (An earlier formula read a `choice` question
+    /// bare, which resolves to the chosen option's probability, so a unanimous
+    /// "unrelated" answer still contributed a near-constant term.)
     #[test]
     fn the_shipped_ship_pr_formula_rejects_a_goal_that_does_not_deliver_a_pr() {
         let (score, threshold) = shipped_ship_pr_score(
             r#"{"model":"jev","answers":{
                 "delivers_pr":{"type":"noul","noul":0.0},
-                "needs_verification":{"type":"noul","noul":0.0},
-                "asks_for_review":{"type":"noul","noul":0.0},
-                "request_shape":{"type":"choice","choice":"unrelated",
-                    "probabilities":{"direct":0.0,"indirect":0.0,"unrelated":1.0},
-                    "confidence":1.0}},"usage":{}}"#,
+                "build_then_pr":{"type":"noul","noul":0.0},
+                "pr_mention":{"type":"noul","noul":0.0},
+                "ship_language":{"type":"noul","noul":0.0}},"usage":{}}"#,
         );
 
         assert!(
@@ -948,19 +958,35 @@ mod plan_pool_tests {
         );
     }
 
-    /// The positive control for the test above: a goal every question agrees is
-    /// a PR does compose the template, so the fix narrowed the formula rather
-    /// than killing it.
+    /// A goal that merely MENTIONS pull requests (list them, summarize them)
+    /// must not compose the template: the mention question is a minority
+    /// weight, so on its own it stays under the threshold.
+    #[test]
+    fn the_shipped_ship_pr_formula_rejects_a_goal_that_only_mentions_prs() {
+        let (score, threshold) = shipped_ship_pr_score(
+            r#"{"model":"jev","answers":{
+                "delivers_pr":{"type":"noul","noul":0.4},
+                "build_then_pr":{"type":"noul","noul":0.1},
+                "pr_mention":{"type":"noul","noul":1.0},
+                "ship_language":{"type":"noul","noul":0.1}},"usage":{}}"#,
+        );
+
+        assert!(
+            score < threshold,
+            "a PR-mentioning goal scored {score} >= the sidecar threshold {threshold}"
+        );
+    }
+
+    /// The positive control for the tests above: a goal every question agrees is
+    /// a PR does compose the template, so the narrowing kept the formula alive.
     #[test]
     fn the_shipped_ship_pr_formula_selects_a_goal_that_delivers_a_pr() {
         let (score, threshold) = shipped_ship_pr_score(
             r#"{"model":"jev","answers":{
                 "delivers_pr":{"type":"noul","noul":0.95},
-                "needs_verification":{"type":"noul","noul":0.9},
-                "asks_for_review":{"type":"noul","noul":0.85},
-                "request_shape":{"type":"choice","choice":"direct",
-                    "probabilities":{"direct":0.9,"indirect":0.1,"unrelated":0.0},
-                    "confidence":0.9}},"usage":{}}"#,
+                "build_then_pr":{"type":"noul","noul":0.9},
+                "pr_mention":{"type":"noul","noul":0.9},
+                "ship_language":{"type":"noul","noul":0.85}},"usage":{}}"#,
         );
 
         assert!(

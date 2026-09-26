@@ -122,6 +122,9 @@ pub struct ParsedCliArgs {
     pub run_evals: bool,
     /// Optional case name for --run-evals.
     pub run_evals_name: Option<String>,
+    /// How many times --run-evals asks each case (`--runs N`, default 1): a
+    /// case whose runs disagree is reported as unstable.
+    pub run_evals_runs: usize,
     /// List the discovered skill pool and exit.
     pub skills: bool,
     /// Restore the shipped default skills into the home and exit.
@@ -282,6 +285,7 @@ impl Default for ParsedCliArgs {
             evals: false,
             run_evals: false,
             run_evals_name: None,
+            run_evals_runs: 1,
             skills: false,
             install_skills: false,
             stop: false,
@@ -852,6 +856,19 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
                         Some(value) => parsed.max_iterations = Some(value),
                         None => parsed.errors.push(format!(
                             "--max-iterations needs a positive integer, got \"{}\".",
+                            raw
+                        )),
+                    }
+
+                    index += 1;
+                }
+            }
+            "--runs" => {
+                if let Some(raw) = take_required_value(argv, index, "--runs", &mut parsed.errors) {
+                    match parse_positive_int(&raw) {
+                        Some(value) => parsed.run_evals_runs = value as usize,
+                        None => parsed.errors.push(format!(
+                            "--runs needs a positive integer, got \"{}\".",
                             raw
                         )),
                     }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "startup-panic",
+  "description": "A reported crash with an unknown cause: reproduce first, pin the fix with a regression test, verify.",
+  "kind": "task",
+  "expected": [
+    "debug-root-cause",
+    "tdd",
+    "verify-before-done"
+  ]
+}

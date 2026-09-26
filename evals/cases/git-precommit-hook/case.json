@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "git-precommit-hook",
+  "description": "A git hook, not a drip hook: hooks-setup must stay out; the hook itself is a repository change that should be verified.",
+  "kind": "prompt",
+  "expected": [
+    "verify-before-done"
+  ]
+}

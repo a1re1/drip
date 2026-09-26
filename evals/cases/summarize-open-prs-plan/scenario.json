@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "goal": "list the open pull requests on this repository and summarize what each one changes",
+  "candidates": [
+    "ship-pr"
+  ]
+}

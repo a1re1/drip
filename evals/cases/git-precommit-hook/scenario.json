@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "add a git pre-commit hook that runs cargo fmt --check before every commit",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

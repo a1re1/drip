@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "dependency-migration",
+  "description": "Moving the whole codebase to a new major version of a library: migration discipline plus verification.",
+  "kind": "task",
+  "expected": [
+    "migration-discipline",
+    "verify-before-done"
+  ]
+}

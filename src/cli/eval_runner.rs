@@ -9,6 +9,7 @@
 //! `verdict.json` (see `src/cli/evals.rs`) so the eval browser can show a run's
 //! matches next to the operator's judgment.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,16 @@ pub struct EvalRunOutcome {
     pub kind: EvalKind,
     pub expected: Vec<String>,
     pub scores: Vec<EvalMatch>,
+    /// Every candidate the classifier answered for, by score descending,
+    /// including the ones that stayed below threshold: the distance a miss
+    /// was from matching is what a tuning pass needs to see.
+    #[serde(default)]
+    pub considered: Vec<EvalMatch>,
+    /// Every question's normalized answer per candidate (see
+    /// `SkillSelection::answers`), so a tuning pass sees which question moved
+    /// a formula without re-asking the classifier.
+    #[serde(default)]
+    pub answers: BTreeMap<String, BTreeMap<String, f64>>,
     pub agreement: EvalAgreement,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -145,6 +156,19 @@ pub async fn run_eval(
         outcome.scores.push(EvalMatch { name, score });
     }
 
+    for (name, score) in selection.scored {
+        if !candidates.iter().any(|candidate| candidate.name == name) {
+            continue;
+        }
+        outcome.considered.push(EvalMatch { name, score });
+    }
+
+    outcome.answers = selection
+        .answers
+        .into_iter()
+        .filter(|(name, _)| candidates.iter().any(|candidate| candidate.name == *name))
+        .collect();
+
     outcome.agreement = eval_agreement(&outcome.matched(), &outcome.expected);
     outcome
 }
@@ -242,59 +266,227 @@ where
 }
 
 /// The operator-facing run listing.
+/// The whole run scored as one number set. A case passes when the matched set
+/// equals its expected set exactly (a case that expects nothing passes only
+/// when nothing matched); precision and recall are pooled over every run so a
+/// suite of many small cases reads like one classifier measurement.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvalRunSummary {
+    /// Distinct case names that ran.
+    pub cases: usize,
+    /// Case runs in total (`cases` × the repeat count, minus nothing).
+    pub runs: usize,
+    /// Runs whose matched set equalled the expected set.
+    pub passed: usize,
+    /// Runs that could not be answered at all.
+    pub errors: usize,
+    pub agreed: usize,
+    pub missed: usize,
+    pub spurious: usize,
+    /// agreed / (agreed + spurious); 1.0 when nothing matched at all.
+    pub precision: f64,
+    /// agreed / (agreed + missed); 1.0 when nothing was expected at all.
+    pub recall: f64,
+    /// Cases whose runs did not all agree with each other (repeat runs only),
+    /// as (name, passed runs, total runs).
+    pub unstable: Vec<(String, usize, usize)>,
+}
+
+/// One run passes when it matched exactly what it expected.
+pub fn eval_run_passes(outcome: &EvalRunOutcome) -> bool {
+    outcome.error.is_none()
+        && outcome.agreement.missed.is_empty()
+        && outcome.agreement.spurious.is_empty()
+}
+
+pub fn summarize_eval_run(outcomes: &[EvalRunOutcome]) -> EvalRunSummary {
+    let mut summary = EvalRunSummary::default();
+    let mut per_case: Vec<(String, usize, usize)> = Vec::new();
+
+    for outcome in outcomes {
+        summary.runs += 1;
+        let passed = eval_run_passes(outcome);
+
+        if outcome.error.is_some() {
+            summary.errors += 1;
+        }
+        if passed {
+            summary.passed += 1;
+        }
+        summary.agreed += outcome.agreement.agreed.len();
+        summary.missed += outcome.agreement.missed.len();
+        summary.spurious += outcome.agreement.spurious.len();
+
+        match per_case.iter_mut().find(|(name, _, _)| *name == outcome.name) {
+            Some((_, ok, total)) => {
+                *ok += usize::from(passed);
+                *total += 1;
+            }
+            None => per_case.push((outcome.name.clone(), usize::from(passed), 1)),
+        }
+    }
+
+    summary.cases = per_case.len();
+    summary.precision = ratio(summary.agreed, summary.agreed + summary.spurious);
+    summary.recall = ratio(summary.agreed, summary.agreed + summary.missed);
+    summary.unstable = per_case
+        .into_iter()
+        .filter(|(_, ok, total)| *total > 1 && *ok != 0 && ok != total)
+        .collect();
+
+    summary
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        1.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn format_scores(entries: &[EvalMatch]) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+
+    entries
+        .iter()
+        .map(|entry| format!("{} ({:.2})", entry.name, entry.score))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
     if outcomes.is_empty() {
         return "No eval cases ran.\n".to_string();
     }
 
     let mut out = String::new();
+    let mut seen: Vec<String> = Vec::new();
 
     for outcome in outcomes {
+        // A repeated case prints its later runs under the first one, labelled
+        // by run number, so the eye lands on the name once.
+        let repeat = seen.iter().filter(|name| **name == outcome.name).count();
+        seen.push(outcome.name.clone());
+        let label = if repeat == 0 {
+            outcome.name.clone()
+        } else {
+            format!("  run {}", repeat + 1)
+        };
+
         if let Some(error) = &outcome.error {
             out.push_str(&format!(
                 "{:<24} {:<6} error: {error}\n",
-                outcome.name,
+                label,
                 outcome.kind.as_str()
             ));
             continue;
         }
 
-        let matched = if outcome.scores.is_empty() {
-            "none".to_string()
+        let verdict = if outcome.expected.is_empty() && outcome.scores.is_empty() {
+            "PASS"
+        } else if eval_run_passes(outcome) {
+            "PASS"
         } else {
-            outcome
-                .scores
-                .iter()
-                .map(|entry| format!("{} ({:.2})", entry.name, entry.score))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "FAIL"
         };
         out.push_str(&format!(
-            "{:<24} {:<6} matched: {matched}\n",
-            outcome.name,
-            outcome.kind.as_str()
+            "{:<24} {:<6} {verdict}  matched: {}\n",
+            label,
+            outcome.kind.as_str(),
+            format_scores(&outcome.scores)
         ));
 
-        if !outcome.expected.is_empty() {
-            let plural = |count: usize| if count == 1 { "" } else { "es" };
-            let agreed = format!(
-                "{} match{}",
-                outcome.agreement.agreed.len(),
-                plural(outcome.agreement.agreed.len())
-            );
+        let below: Vec<EvalMatch> = outcome
+            .considered
+            .iter()
+            .filter(|entry| !outcome.scores.iter().any(|hit| hit.name == entry.name))
+            .cloned()
+            .collect();
+        if !below.is_empty() {
+            // The nearest misses only: an unscoped pool answers for every
+            // installed skill, and the tail says nothing a tuning pass needs.
+            const SHOWN: usize = 8;
+            let more = below.len().saturating_sub(SHOWN);
+            let mut line = format_scores(&below[..below.len().min(SHOWN)]);
+            if more > 0 {
+                line.push_str(&format!(", +{more} more"));
+            }
+            out.push_str(&format!("{:<24} {:<6}       below: {line}\n", "", ""));
+        }
+
+        // The answers behind the candidates that matter to this case: every
+        // expected one and every one that matched.
+        for (name, answers) in &outcome.answers {
+            let relevant = outcome.expected.iter().any(|expected| expected == name)
+                || outcome.scores.iter().any(|hit| hit.name == *name);
+            if !relevant || answers.is_empty() {
+                continue;
+            }
+            let rendered = answers
+                .iter()
+                .map(|(question, value)| format!("{question}={value:.2}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&format!("{:<24} {:<6}       {name}: {rendered}\n", "", ""));
+        }
+
+        if !outcome.expected.is_empty() || !outcome.scores.is_empty() {
+            let mut parts: Vec<String> = Vec::new();
+            if !outcome.agreement.missed.is_empty() {
+                parts.push(format!("missed {}", outcome.agreement.missed.join(", ")));
+            }
+            if !outcome.agreement.spurious.is_empty() {
+                parts.push(format!("spurious {}", outcome.agreement.spurious.join(", ")));
+            }
+            if parts.is_empty() {
+                parts.push(format!(
+                    "agreed {} of {}",
+                    outcome.agreement.agreed.len(),
+                    outcome.expected.len()
+                ));
+            }
             out.push_str(&format!(
-                "{:<24} {:<6} agreed {} · missed {} · spurious {}\n",
+                "{:<24} {:<6}       {}\n",
                 "",
                 "",
-                agreed,
-                outcome.agreement.missed.len(),
-                outcome.agreement.spurious.len(),
+                parts.join(" · ")
             ));
         }
 
         for warning in &outcome.warnings {
-            out.push_str(&format!("{:<24} {:<6} warning: {warning}\n", "", ""));
+            out.push_str(&format!("{:<24} {:<6}       warning: {warning}\n", "", ""));
         }
+    }
+
+    let summary = summarize_eval_run(outcomes);
+    out.push('\n');
+    out.push_str(&format!(
+        "summary: {}/{} runs pass across {} case{} · precision {:.2} · recall {:.2}",
+        summary.passed,
+        summary.runs,
+        summary.cases,
+        if summary.cases == 1 { "" } else { "s" },
+        summary.precision,
+        summary.recall,
+    ));
+    if summary.errors > 0 {
+        out.push_str(&format!(" · {} error{}", summary.errors, if summary.errors == 1 { "" } else { "s" }));
+    }
+    out.push('\n');
+    if !summary.unstable.is_empty() {
+        out.push_str(&format!(
+            "unstable: {}\n",
+            summary
+                .unstable
+                .iter()
+                .map(|(name, ok, total)| format!("{name} ({ok}/{total})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     out
@@ -427,6 +619,71 @@ mod tests {
         crate::cli::evals::load_eval(&discovered[0]).unwrap()
     }
 
+    fn outcome(name: &str, expected: &[&str], matched: &[&str]) -> EvalRunOutcome {
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        let matched: Vec<String> = matched.iter().map(|s| s.to_string()).collect();
+        EvalRunOutcome {
+            name: name.to_string(),
+            expected: expected.clone(),
+            scores: matched
+                .iter()
+                .map(|name| EvalMatch {
+                    name: name.clone(),
+                    score: 0.9,
+                })
+                .collect(),
+            agreement: eval_agreement(&matched, &expected),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_summary_pools_agreement_and_flags_cases_whose_repeats_disagree() {
+        let outcomes = vec![
+            outcome("a", &["tdd", "verify-before-done"], &["tdd", "verify-before-done"]),
+            outcome("a", &["tdd", "verify-before-done"], &["tdd"]),
+            outcome("b", &[], &[]),
+            outcome("b", &[], &[]),
+            outcome("c", &["tdd"], &["praeparare"]),
+            EvalRunOutcome {
+                name: "d".to_string(),
+                error: Some("no answer".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let summary = summarize_eval_run(&outcomes);
+        assert_eq!(summary.cases, 4);
+        assert_eq!(summary.runs, 6);
+        assert_eq!(summary.passed, 3);
+        assert_eq!(summary.errors, 1);
+        assert_eq!((summary.agreed, summary.missed, summary.spurious), (3, 2, 1));
+        assert!((summary.precision - 0.75).abs() < 1e-9);
+        assert!((summary.recall - 0.6).abs() < 1e-9);
+        assert_eq!(summary.unstable, vec![("a".to_string(), 1, 2)]);
+
+        let listing = format_eval_run_human(&outcomes);
+        assert!(listing.contains("a                        prompt PASS"), "{listing}");
+        assert!(listing.contains("  run 2                  prompt FAIL"), "{listing}");
+        assert!(listing.contains("b                        prompt PASS  matched: none"), "{listing}");
+        assert!(listing.contains("missed tdd · spurious praeparare"), "{listing}");
+        assert!(listing.contains("d                        prompt error: no answer"), "{listing}");
+        assert!(
+            listing.contains("summary: 3/6 runs pass across 4 cases · precision 0.75 · recall 0.60 · 1 error"),
+            "{listing}"
+        );
+        assert!(listing.contains("unstable: a (1/2)"), "{listing}");
+    }
+
+    #[test]
+    fn an_empty_expectation_passes_only_when_nothing_matched() {
+        assert!(eval_run_passes(&outcome("quiet", &[], &[])));
+        assert!(!eval_run_passes(&outcome("noisy", &[], &["tdd"])));
+        let summary = summarize_eval_run(&[outcome("quiet", &[], &[])]);
+        assert!((summary.precision - 1.0).abs() < 1e-9);
+        assert!((summary.recall - 1.0).abs() < 1e-9);
+    }
+
     #[test]
     fn the_state_matches_the_shape_a_loop_sends() {
         let dir = tempfile::tempdir().unwrap();
@@ -542,8 +799,10 @@ mod tests {
         assert_eq!(outcome.agreement.missed, vec!["verify-before-done"]);
         assert_eq!(outcome.agreement.spurious, vec!["tdd"]);
         let listing = format_eval_run_human(&[outcome]);
-        assert!(listing.contains("missed 1"), "{listing}");
-        assert!(listing.contains("spurious 1"), "{listing}");
+        assert!(listing.contains("FAIL"), "{listing}");
+        assert!(listing.contains("missed verify-before-done"), "{listing}");
+        assert!(listing.contains("spurious tdd"), "{listing}");
+        assert!(listing.contains("summary: 0/1 runs pass across 1 case"), "{listing}");
         server.join().unwrap();
     }
 

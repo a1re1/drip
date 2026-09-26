@@ -135,7 +135,14 @@ sessions happen to hold:
 ```sh
 drip --evals                        # the case library: name, kind, scope
 drip --run-evals flaky-test-fixup   # one case, real classifier, recorded verdict
+drip --run-evals                    # the whole pack: PASS/FAIL per case, pooled summary
+drip --run-evals --runs 3           # repeat every case; unstable cases are named
 ```
+
+The run prints every candidate's score (matched and below threshold) and, for
+each expected or matched candidate, the answer to every question in its
+`classifiers.json` — read those before touching a formula, and re-run the whole
+pack after every edit so a fix for one case is never paid for with another.
 
 Its `expected` list in `case.json` plays the part of a pinned case's `target`, and
 `missed` / `spurious` between `expected` and what was matched are exactly the two

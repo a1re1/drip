@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "tdd did not fire on the last loop even though the task was a bug fix \u2014 figure out why and tune its classifier questions",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

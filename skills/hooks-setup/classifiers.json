@@ -1,0 +1,16 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "notifications": {
+        "type": "noul",
+        "instructions": "Does the goal mention notifications, alerts, or pings triggered by session events?"
+      },
+      "event_script": {
+        "type": "noul",
+        "instructions": "Does the goal ask to run a script or send a notification when a drip session, loop, or tool event happens?"
+      }
+    },
+    "formula": "clamp(0.60 * notifications + 0.40 * event_script, 0, 1)"
+  }
+}

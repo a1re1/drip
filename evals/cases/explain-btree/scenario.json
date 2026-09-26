@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "explain how a B-tree keeps itself balanced on insert and cite where you got it",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

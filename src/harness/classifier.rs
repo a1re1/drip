@@ -675,17 +675,53 @@ pub struct DynamicSkill {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillSelection {
     pub selected: Vec<(String, f64)>,
+    /// Every candidate the classifier answered for, with its normalized score,
+    /// whether or not it cleared its threshold (or the unauthored cap). A
+    /// candidate whose request failed is absent. Selection order is not
+    /// implied; this is the evidence an eval needs to see HOW FAR a miss was
+    /// from matching.
+    pub scored: Vec<(String, f64)>,
+    /// The normalized answer to every question each candidate was asked,
+    /// keyed by candidate name then question id (an unauthored candidate's
+    /// single question is `relevance`; a choice or score answer also carries
+    /// one `id.member` entry per option). This is what a tuning pass reads to
+    /// see WHICH question moved a formula.
+    pub answers: BTreeMap<String, BTreeMap<String, f64>>,
     pub warnings: Vec<String>,
+}
+
+/// Every normalized value a formula could read from one answer: the answer's
+/// own value under `id`, plus `id.member` for each option or level.
+fn answer_entries(id: &str, answer: &DecisionAnswer) -> BTreeMap<String, f64> {
+    let mut entries = BTreeMap::new();
+    entries.insert(id.to_string(), answer_value(answer));
+
+    let members: Option<&BTreeMap<String, f64>> = match answer {
+        DecisionAnswer::Noul { .. } => None,
+        DecisionAnswer::Choice { probabilities, .. } => Some(probabilities),
+        DecisionAnswer::Score { probabilities, .. } => Some(probabilities),
+    };
+    if let Some(members) = members {
+        for (member, value) in members {
+            entries.insert(format!("{id}.{member}"), *value);
+        }
+    }
+
+    entries
 }
 
 enum SelectionOutcome {
     Unauthored {
         selected: Vec<(String, f64)>,
+        scored: Vec<(String, f64)>,
+        answers: BTreeMap<String, BTreeMap<String, f64>>,
         warnings: Vec<String>,
     },
     Authored {
         name: String,
         score: Option<f64>,
+        raw: Option<f64>,
+        answers: BTreeMap<String, f64>,
         warnings: Vec<String>,
     },
 }
@@ -768,21 +804,35 @@ pub async fn select_skills(
 
     let mut authored_selected: Vec<(String, f64)> = Vec::new();
     let mut unauthored_selected: Vec<(String, f64)> = Vec::new();
+    let mut scored: Vec<(String, f64)> = Vec::new();
+    let mut answers: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
 
     for outcome in outcomes {
         match outcome {
             SelectionOutcome::Unauthored {
                 selected,
+                scored: batch_scored,
+                answers: batch_answers,
                 warnings: extra,
             } => {
                 unauthored_selected.extend(selected);
+                scored.extend(batch_scored);
+                answers.extend(batch_answers);
                 warnings.extend(extra);
             }
             SelectionOutcome::Authored {
                 name,
                 score,
+                raw,
+                answers: own,
                 warnings: extra,
             } => {
+                if let Some(raw) = raw {
+                    scored.push((name.clone(), raw));
+                }
+                if !own.is_empty() {
+                    answers.insert(name.clone(), own);
+                }
                 if let Some(score) = score {
                     authored_selected.push((name, score));
                 }
@@ -793,11 +843,17 @@ pub async fn select_skills(
 
     by_score_descending(&mut authored_selected);
     by_score_descending(&mut unauthored_selected);
+    by_score_descending(&mut scored);
 
     let mut selected = authored_selected;
     selected.extend(unauthored_selected);
 
-    SkillSelection { selected, warnings }
+    SkillSelection {
+        selected,
+        scored,
+        answers,
+        warnings,
+    }
 }
 
 fn by_score_descending(entries: &mut [(String, f64)]) {
@@ -838,6 +894,8 @@ async fn select_unauthored_batch(
         Err(error) => {
             return SelectionOutcome::Unauthored {
                 selected: Vec::new(),
+                scored: Vec::new(),
+                answers: BTreeMap::new(),
                 warnings: vec![format!(
                     "classifier: skill relevance request failed: {error}"
                 )],
@@ -845,25 +903,31 @@ async fn select_unauthored_batch(
         }
     };
 
-    let mut scored: Vec<(String, f64)> = batch
+    let mut answers: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let scored: Vec<(String, f64)> = batch
         .iter()
         .filter_map(|(index, name, _)| {
             let answer = response.answers.get(&format!("skill_{index}"))?;
             let value = answer_value(answer);
+            answers.insert(name.clone(), answer_entries("relevance", answer));
 
-            if value.is_finite() && value >= UNAUTHORED_RELEVANCE_THRESHOLD {
-                Some((name.clone(), value))
-            } else {
-                None
-            }
+            value.is_finite().then(|| (name.clone(), value))
         })
         .collect();
 
-    by_score_descending(&mut scored);
-    scored.truncate(UNAUTHORED_SELECTION_CAP);
+    let mut selected: Vec<(String, f64)> = scored
+        .iter()
+        .filter(|(_, value)| *value >= UNAUTHORED_RELEVANCE_THRESHOLD)
+        .cloned()
+        .collect();
+
+    by_score_descending(&mut selected);
+    selected.truncate(UNAUTHORED_SELECTION_CAP);
 
     SelectionOutcome::Unauthored {
-        selected: scored,
+        selected,
+        scored,
+        answers,
         warnings: Vec::new(),
     }
 }
@@ -881,6 +945,8 @@ async fn select_authored_skill(
             return SelectionOutcome::Authored {
                 name,
                 score: None,
+                raw: None,
+                answers: BTreeMap::new(),
                 warnings: vec![format!("classifier: skill \"{label}\" dropped: {error}")],
             }
         }
@@ -901,6 +967,8 @@ async fn select_authored_skill(
                     return SelectionOutcome::Authored {
                         name,
                         score: None,
+                        raw: None,
+                        answers: BTreeMap::new(),
                         warnings: vec![format!("classifier: skill \"{label}\" dropped: {error}")],
                     }
                 }
@@ -925,18 +993,17 @@ async fn select_authored_skill(
         0.0
     };
 
-    if score >= threshold {
-        SelectionOutcome::Authored {
-            name,
-            score: Some(score),
-            warnings: Vec::new(),
-        }
-    } else {
-        SelectionOutcome::Authored {
-            name,
-            score: None,
-            warnings: Vec::new(),
-        }
+    let mut answers: BTreeMap<String, f64> = BTreeMap::new();
+    for (id, answer) in &response.answers {
+        answers.extend(answer_entries(id, answer));
+    }
+
+    SelectionOutcome::Authored {
+        name,
+        score: (score >= threshold).then_some(score),
+        raw: Some(score),
+        answers,
+        warnings: Vec::new(),
     }
 }
 

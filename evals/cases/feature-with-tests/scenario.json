@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "add a --since <date> filter to `drip --sessions` so the list only shows sessions updated after that date",
+  "task": "task-2: implement the filter in the sessions listing and cover it with a test",
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

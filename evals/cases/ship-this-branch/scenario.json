@@ -1,4 +1,7 @@
 {
   "version": 1,
-  "goal": "ship this branch: run the gates, merge the base branch, push, and open a draft PR"
+  "goal": "ship this branch: run the gates, merge the base branch, push, and open a draft PR",
+  "candidates": [
+    "ship-pr"
+  ]
 }

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "feature-with-tests",
+  "description": "Implementing a new CLI flag: test-first and verification apply, nothing about git, debugging or reviewing does.",
+  "kind": "task",
+  "expected": [
+    "tdd",
+    "verify-before-done"
+  ]
+}

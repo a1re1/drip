@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "feature-to-pr-plan",
+  "description": "A planning loop that builds a feature and delivers it as a PR: ship-pr.",
+  "kind": "plan",
+  "expected": [
+    "ship-pr"
+  ]
+}

@@ -9513,14 +9513,15 @@ mod background_jobs_tests {
             fixture.app.overlay.as_ref().map(|overlay| overlay.kind),
             Some(OverlayKind::Evals)
         );
+        let pack = crate::cli::evals::default_eval_names().len();
         assert_eq!(
             fixture.app.eval_browser.rows.len(),
-            2,
-            "the two starter cases are seeded into the home"
+            pack,
+            "the starter pack is seeded into the home"
         );
         let rows = strip(&fixture.app.live_region()).join("\n");
-        assert!(rows.contains("eval cases (2/2)"), "{rows}");
-        assert!(rows.contains("flaky-test-fixup"), "{rows}");
+        assert!(rows.contains(&format!("eval cases ({pack}/{pack})")), "{rows}");
+        assert!(rows.contains("commit-and-push"), "{rows}");
 
         // Enter opens the case's detail frame; `a` judges the candidate the
         // cursor sits on, written into the case's own directory — the home

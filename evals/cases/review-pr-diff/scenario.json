@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "goal": "review the diff on this branch against main and tell me whether it is safe to merge",
+  "role": "reviewer",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

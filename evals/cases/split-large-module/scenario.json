@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "split src/tui/app.rs into smaller modules without changing any behavior",
+  "task": "task-1: move the overlay rendering into its own module",
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

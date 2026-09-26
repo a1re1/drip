@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "explain-classifier-plan",
+  "description": "A planning loop for an explanation: the ship-pr plan must not classify as relevant.",
+  "kind": "plan",
+  "expected": []
+}

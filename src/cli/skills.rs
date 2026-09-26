@@ -10,35 +10,60 @@ use serde::{Deserialize, Serialize};
 // not in the pool.
 // ---------------------------------------------------------------------------
 
-const BUILTIN_CS_REFERENCE: &str = include_str!("../../skills/cs-reference/SKILL.md");
-const BUILTIN_COMMIT_DISCIPLINE: &str = include_str!("../../skills/commit-discipline/SKILL.md");
-const BUILTIN_DEBUG_ROOT_CAUSE: &str = include_str!("../../skills/debug-root-cause/SKILL.md");
-const BUILTIN_HOOKS_SETUP: &str = include_str!("../../skills/hooks-setup/SKILL.md");
-const BUILTIN_MIGRATION_DISCIPLINE: &str =
-    include_str!("../../skills/migration-discipline/SKILL.md");
-const BUILTIN_PRAEPARARE: &str = include_str!("../../skills/praeparare/SKILL.md");
-const BUILTIN_PROBATIO: &str = include_str!("../../skills/probatio/SKILL.md");
-const BUILTIN_REFACTOR_SAFELY: &str = include_str!("../../skills/refactor-safely/SKILL.md");
-const BUILTIN_REVIEW_INDEPENDENTLY: &str =
-    include_str!("../../skills/review-independently/SKILL.md");
-const BUILTIN_TDD: &str = include_str!("../../skills/tdd/SKILL.md");
-const BUILTIN_VERIFY_BEFORE_DONE: &str = include_str!("../../skills/verify-before-done/SKILL.md");
+/// One shipped default skill: its SKILL.md and its `classifiers.json`
+/// relevance sidecar, both embedded at compile time from `skills/<name>/`.
+/// Adding a default skill is adding that directory (with both files) and one
+/// line to `builtin_skill_entries`.
+macro_rules! builtin_skill {
+    ($name:literal) => {
+        BuiltinSkill {
+            name: $name,
+            content: include_str!(concat!("../../skills/", $name, "/SKILL.md")),
+            classifiers: include_str!(concat!("../../skills/", $name, "/classifiers.json")),
+        }
+    };
+}
 
-/// Returns the shipped default-skill templates as (name, content) pairs in
-/// filesystem-sort order. These are templates, not a discovered pack.
-fn builtin_skill_entries() -> Vec<(&'static str, &'static str)> {
+/// A shipped default-skill template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinSkill {
+    pub name: &'static str,
+    /// The SKILL.md markdown.
+    pub content: &'static str,
+    /// The `classifiers.json` sidecar that decides when the classifier composes
+    /// the skill (see `crate::harness::classifier`).
+    pub classifiers: &'static str,
+}
+
+impl BuiltinSkill {
+    /// Writes both files under `skill_dir`. The sidecar is written only when
+    /// the SKILL.md write succeeded, so a skill is never half-installed with a
+    /// sidecar and no document.
+    fn write_into(&self, skill_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(skill_dir)?;
+        std::fs::write(skill_dir.join("SKILL.md"), self.content)?;
+        std::fs::write(skill_dir.join(SKILL_CLASSIFIERS_FILE_NAME), self.classifiers)
+    }
+}
+
+/// The relevance sidecar's file name inside a skill directory.
+pub const SKILL_CLASSIFIERS_FILE_NAME: &str = "classifiers.json";
+
+/// Returns the shipped default-skill templates in filesystem-sort order. These
+/// are templates, not a discovered pack.
+fn builtin_skill_entries() -> Vec<BuiltinSkill> {
     vec![
-        ("commit-discipline", BUILTIN_COMMIT_DISCIPLINE),
-        ("cs-reference", BUILTIN_CS_REFERENCE),
-        ("debug-root-cause", BUILTIN_DEBUG_ROOT_CAUSE),
-        ("hooks-setup", BUILTIN_HOOKS_SETUP),
-        ("migration-discipline", BUILTIN_MIGRATION_DISCIPLINE),
-        ("praeparare", BUILTIN_PRAEPARARE),
-        ("probatio", BUILTIN_PROBATIO),
-        ("refactor-safely", BUILTIN_REFACTOR_SAFELY),
-        ("review-independently", BUILTIN_REVIEW_INDEPENDENTLY),
-        ("tdd", BUILTIN_TDD),
-        ("verify-before-done", BUILTIN_VERIFY_BEFORE_DONE),
+        builtin_skill!("commit-discipline"),
+        builtin_skill!("cs-reference"),
+        builtin_skill!("debug-root-cause"),
+        builtin_skill!("hooks-setup"),
+        builtin_skill!("migration-discipline"),
+        builtin_skill!("praeparare"),
+        builtin_skill!("probatio"),
+        builtin_skill!("refactor-safely"),
+        builtin_skill!("review-independently"),
+        builtin_skill!("tdd"),
+        builtin_skill!("verify-before-done"),
     ]
 }
 
@@ -95,15 +120,15 @@ fn write_default_skills_marker(path: &Path, installed: &[String]) {
 pub fn default_skill_template(name: &str) -> Option<&'static str> {
     builtin_skill_entries()
         .into_iter()
-        .find(|(entry_name, _)| *entry_name == name)
-        .map(|(_, content)| content)
+        .find(|skill| skill.name == name)
+        .map(|skill| skill.content)
 }
 
 /// The names of every default skill this binary ships, in sorted order.
 pub fn default_skill_names() -> Vec<String> {
     builtin_skill_entries()
         .into_iter()
-        .map(|(name, _)| name.to_string())
+        .map(|skill| skill.name.to_string())
         .collect()
 }
 
@@ -113,20 +138,16 @@ pub fn default_skill_names() -> Vec<String> {
 pub fn install_default_skills(skills_dir: &Path, overwrite: bool) -> Vec<String> {
     let mut written: Vec<String> = Vec::new();
 
-    for (name, content) in builtin_skill_entries() {
-        let skill_dir = skills_dir.join(name);
+    for skill in builtin_skill_entries() {
+        let skill_dir = skills_dir.join(skill.name);
         let path = skill_dir.join("SKILL.md");
 
         if !overwrite && path.exists() {
             continue;
         }
 
-        if std::fs::create_dir_all(&skill_dir).is_err() {
-            continue;
-        }
-
-        if std::fs::write(&path, content).is_ok() {
-            written.push(name.to_string());
+        if skill.write_into(&skill_dir).is_ok() {
+            written.push(skill.name.to_string());
         }
     }
 
@@ -147,13 +168,21 @@ pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<Strin
     let mut marker = read_default_skills_marker(&marker_path);
     let mut written: Vec<String> = Vec::new();
 
-    for (name, content) in builtin_skill_entries() {
-        if marker.installed.iter().any(|seen| seen == name) {
-            continue;
-        }
-
+    for skill in builtin_skill_entries() {
+        let name = skill.name;
         let skill_dir = skills_dir.join(name);
         let path = skill_dir.join("SKILL.md");
+
+        if marker.installed.iter().any(|seen| seen == name) {
+            // Already seeded. A home seeded before the sidecars shipped holds
+            // the shipped SKILL.md with no classifiers.json beside it; when the
+            // document is still byte-for-byte the template, the operator has
+            // not made the skill theirs, and the sidecar is added so the
+            // classifier can start asking the authored questions. An edited
+            // document is left exactly as it is.
+            add_missing_sidecar(&skill, &skill_dir);
+            continue;
+        }
 
         // A skill document the operator already has under a default name is
         // theirs and is never overwritten, but it does satisfy the seeding.
@@ -166,7 +195,7 @@ pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<Strin
         // would burn the skill forever: a home that was read-only, or a default
         // name occupied by a plain file, would list the name as installed with
         // nothing written, and no later start could ever retry it.
-        match std::fs::create_dir_all(&skill_dir).and_then(|()| std::fs::write(&path, content)) {
+        match skill.write_into(&skill_dir) {
             Ok(()) => {
                 marker.installed.push(name.to_string());
                 written.push(name.to_string());
@@ -182,6 +211,25 @@ pub fn seed_default_skills_once(home_root: &str, skills_dir: &Path) -> Vec<Strin
     marker.installed.dedup();
     write_default_skills_marker(&marker_path, &marker.installed);
     written
+}
+
+/// Writes the shipped sidecar next to an installed default whose SKILL.md is
+/// still the shipped template and which has no sidecar yet. Returns true when
+/// the sidecar was written.
+fn add_missing_sidecar(skill: &BuiltinSkill, skill_dir: &Path) -> bool {
+    let sidecar = skill_dir.join(SKILL_CLASSIFIERS_FILE_NAME);
+    if sidecar.exists() {
+        return false;
+    }
+
+    let pristine = std::fs::read_to_string(skill_dir.join("SKILL.md"))
+        .map(|installed| installed == skill.content)
+        .unwrap_or(false);
+    if !pristine {
+        return false;
+    }
+
+    std::fs::write(&sidecar, skill.classifiers).is_ok()
 }
 
 /// `drip --install-skills`: restore the shipped default skills. Files under
@@ -200,21 +248,19 @@ pub fn reinstall_default_skills(home_root: &str, skills_dir: &Path) -> Vec<Strin
 /// skill (`--praeparare`) even after the operator deleted it. Returns true when
 /// a file was written; an existing file (or an unknown name) is left alone.
 pub fn ensure_default_skill(home_root: &str, skills_dir: &Path, name: &str) -> bool {
-    let Some(content) = default_skill_template(name) else {
+    let Some(skill) = builtin_skill_entries()
+        .into_iter()
+        .find(|skill| skill.name == name)
+    else {
         return false;
     };
 
     let skill_dir = skills_dir.join(name);
-    let path = skill_dir.join("SKILL.md");
-    if path.exists() {
+    if skill_dir.join("SKILL.md").exists() {
         return false;
     }
 
-    if std::fs::create_dir_all(&skill_dir).is_err() {
-        return false;
-    }
-
-    if std::fs::write(&path, content).is_err() {
+    if skill.write_into(&skill_dir).is_err() {
         return false;
     }
 
@@ -733,7 +779,8 @@ pub fn collect_builtin_skills(builtin_dir: Option<&Path>) -> Vec<CliSkill> {
 
     builtin_skill_entries()
         .into_iter()
-        .map(|(name, content)| {
+        .map(|skill| {
+            let (name, content) = (skill.name, skill.content);
             let markdown = normalize_content(content);
             let frontmatter = parse_skill_frontmatter(&markdown);
             CliSkill {
@@ -852,8 +899,8 @@ pub fn load_skill_content(
         let name = &skill.name;
         builtin_skill_entries()
             .into_iter()
-            .find(|(n, _)| *n == name.as_str())
-            .map(|(_, c)| c.to_string())
+            .find(|skill| skill.name == name.as_str())
+            .map(|skill| skill.content.to_string())
             .ok_or_else(|| format!("Skill \"{}\": built-in content not found", skill.name))?
     } else {
         std::fs::read_to_string(&skill.path)
@@ -1658,6 +1705,102 @@ mod tests {
     }
 
     #[test]
+    fn every_shipped_sidecar_parses_as_a_relevance_spec_with_a_formula() {
+        // A sidecar that fails to parse is dropped with a warning at runtime,
+        // which would silently turn the skill back into an unauthored one.
+        for skill in builtin_skill_entries() {
+            let parsed: crate::harness::classifier::SkillClassifiers =
+                serde_json::from_str(skill.classifiers)
+                    .unwrap_or_else(|err| panic!("{} classifiers.json: {err}", skill.name));
+            let relevance = parsed
+                .relevance
+                .unwrap_or_else(|| panic!("{} declares relevance", skill.name));
+            assert!(!relevance.questions.is_empty(), "{} asks something", skill.name);
+            let formula = relevance
+                .formula
+                .unwrap_or_else(|| panic!("{} declares a formula", skill.name));
+            // Every variable the formula reads is a question it asks.
+            let known = |var: &str| -> Option<f64> {
+                let id = var.split('.').next().unwrap_or(var);
+                relevance.questions.contains_key(id).then_some(0.5)
+            };
+            crate::harness::classifier::eval_formula(&formula, &known)
+                .unwrap_or_else(|err| panic!("{} formula: {err}", skill.name));
+        }
+    }
+
+    #[test]
+    fn seeding_writes_the_sidecar_beside_each_default_skill() {
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        let home_root = home_root.to_str().unwrap();
+
+        seed_default_skills_once(home_root, &home_skills);
+
+        for name in default_skill_names() {
+            let sidecar = home_skills.join(&name).join(SKILL_CLASSIFIERS_FILE_NAME);
+            assert!(sidecar.is_file(), "{name} got its classifiers.json");
+        }
+        assert!(home_skills.join("tdd").join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn a_home_seeded_before_sidecars_shipped_gets_them_only_where_the_document_is_pristine() {
+        let tmp = make_temp_dir();
+        let home_root = tmp.path().join("home");
+        let home_skills = home_root.join("skills");
+        let home_root = home_root.to_str().unwrap();
+
+        // The old seeding: SKILL.md only, every name recorded.
+        for skill in builtin_skill_entries() {
+            write_file(&home_skills.join(skill.name), "SKILL.md", skill.content);
+        }
+        write_file(
+            &home_skills.join("tdd"),
+            "SKILL.md",
+            "---\nname: tdd\ndescription: mine\n---\nedited\n",
+        );
+        write_default_skills_marker(
+            &default_skills_marker_path(home_root),
+            &default_skill_names(),
+        );
+
+        let written = seed_default_skills_once(home_root, &home_skills);
+        assert!(written.is_empty(), "nothing is re-seeded");
+
+        assert!(home_skills
+            .join("verify-before-done")
+            .join(SKILL_CLASSIFIERS_FILE_NAME)
+            .is_file());
+        assert!(
+            !home_skills.join("tdd").join(SKILL_CLASSIFIERS_FILE_NAME).exists(),
+            "an edited skill is the operator's and gets no sidecar"
+        );
+        assert_eq!(
+            fs::read_to_string(home_skills.join("tdd").join("SKILL.md")).unwrap(),
+            "---\nname: tdd\ndescription: mine\n---\nedited\n"
+        );
+
+        // A sidecar the operator wrote is never replaced.
+        write_file(
+            &home_skills.join("commit-discipline"),
+            SKILL_CLASSIFIERS_FILE_NAME,
+            "{\"relevance\":{\"questions\":{}}}",
+        );
+        seed_default_skills_once(home_root, &home_skills);
+        assert_eq!(
+            fs::read_to_string(
+                home_skills
+                    .join("commit-discipline")
+                    .join(SKILL_CLASSIFIERS_FILE_NAME)
+            )
+            .unwrap(),
+            "{\"relevance\":{\"questions\":{}}}"
+        );
+    }
+
+    #[test]
     fn ensure_default_skill_restores_a_deleted_praeparare_only_when_absent() {
         let tmp = make_temp_dir();
         let home_root = tmp.path().join("home");
@@ -1706,7 +1849,7 @@ mod tests {
         // "the built-in pack stays in filesystem-sort order"
         let names: Vec<&str> = builtin_skill_entries()
             .iter()
-            .map(|(name, _)| *name)
+            .map(|skill| skill.name)
             .collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -2554,7 +2697,7 @@ mod tests {
     fn every_shipped_skill_directory_is_registered() {
         let registered: Vec<&str> = builtin_skill_entries()
             .into_iter()
-            .map(|(name, _)| name)
+            .map(|skill| skill.name)
             .collect();
         let mut shipped: Vec<String> =
             std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/skills"))

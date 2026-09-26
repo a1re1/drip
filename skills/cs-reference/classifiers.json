@@ -1,0 +1,16 @@
+{
+  "relevance": {
+    "threshold": 0.58,
+    "questions": {
+      "explain": {
+        "type": "noul",
+        "instructions": "Does the goal ask to explain how something works or what the difference between two concepts is?"
+      },
+      "cs_question": {
+        "type": "noul",
+        "instructions": "Is the goal a general computer-science question, such as how a data structure, algorithm, or lock works?"
+      }
+    },
+    "formula": "clamp(0.90 * explain + 0.50 * cs_question, 0, 1)"
+  }
+}

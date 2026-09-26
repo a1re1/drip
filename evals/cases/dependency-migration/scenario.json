@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "upgrade reqwest from 0.11 to 0.12 across the codebase and fix everything that breaks",
+  "task": "task-1: inventory every reqwest call site and migrate them",
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

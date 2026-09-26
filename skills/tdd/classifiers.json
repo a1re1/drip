@@ -1,0 +1,40 @@
+{
+  "relevance": {
+    "threshold": 0.5,
+    "questions": {
+      "tests": {
+        "type": "noul",
+        "instructions": "Does the task say to cover the change with a test, or to fix a test?"
+      },
+      "test_or_feature": {
+        "type": "noul",
+        "instructions": "Is the task about a test that fails or flakes, or a feature that needs a test?"
+      },
+      "fix_failing": {
+        "type": "noul",
+        "instructions": "Does the task fix a failing, flaky, or crashing program?"
+      },
+      "bug_fix": {
+        "type": "noul",
+        "instructions": "Is the task a bug fix?"
+      },
+      "classifier_work": {
+        "type": "noul",
+        "instructions": "Is the goal about why a skill did or did not fire, or about tuning or benchmarking the skill classifier?"
+      },
+      "reviewer": {
+        "type": "noul",
+        "instructions": "Is the role reviewer?"
+      },
+      "refactor_mention": {
+        "type": "noul",
+        "instructions": "Does the goal mention splitting a file or module, or renaming a type, everywhere?"
+      },
+      "git_history": {
+        "type": "noul",
+        "instructions": "Does the goal ask to commit, push, rebase, squash, or force-push git history?"
+      }
+    },
+    "formula": "clamp(0.40 * tests + 0.30 * test_or_feature + 0.15 * fix_failing + 0.25 * bug_fix - 0.60 * max(0, max(classifier_work, reviewer, refactor_mention, git_history) - 0.30), 0, 1)"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "commit-and-push",
+  "description": "Pure git housekeeping: commit discipline applies; no code changes, no tests, no PR.",
+  "kind": "prompt",
+  "expected": [
+    "commit-discipline"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "relevance": {
+    "threshold": 0.55,
+    "questions": {
+      "code_work": {
+        "type": "noul",
+        "instructions": "Is the task to implement, fix, migrate, refactor, rename, or upgrade code?"
+      },
+      "confirmable": {
+        "type": "noul",
+        "instructions": "Will there be a code change that tests or a build could confirm?"
+      },
+      "tests": {
+        "type": "noul",
+        "instructions": "Does the task say to cover the change with a test, or to fix a test?"
+      },
+      "migrate": {
+        "type": "noul",
+        "instructions": "Does the goal mention a version upgrade, a dependency, or replacing one API or pattern with another?"
+      },
+      "refactor_mention": {
+        "type": "noul",
+        "instructions": "Does the goal mention splitting a file or module, or renaming a type, everywhere?"
+      },
+      "broken": {
+        "type": "noul",
+        "instructions": "Is something broken that needs to be reproduced and diagnosed before it can be fixed?"
+      },
+      "git_history": {
+        "type": "noul",
+        "instructions": "Does the goal ask to commit, push, rebase, squash, or force-push git history?"
+      },
+      "reviewer": {
+        "type": "noul",
+        "instructions": "Is the role reviewer?"
+      },
+      "explain": {
+        "type": "noul",
+        "instructions": "Does the goal ask to explain how something works or what the difference between two concepts is?"
+      },
+      "classifier_work": {
+        "type": "noul",
+        "instructions": "Is the goal about why a skill did or did not fire, or about tuning or benchmarking the skill classifier?"
+      }
+    },
+    "formula": "clamp(max(0.60 * code_work + 0.40 * confirmable, tests, migrate, refactor_mention, broken) - 0.70 * max(0, max(git_history, reviewer, explain, classifier_work) - 0.30), 0, 1)"
+  }
+}

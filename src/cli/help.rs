@@ -263,7 +263,11 @@ OPTIONS
 	                              the skill classifier in a throwaway workspace and write
 	                              what it matched into the case's own verdict.json. No
 	                              session, transcript or run state is touched; needs a
-	                              classifier profile (--classifier <id> or the config)
+	                              classifier profile (--classifier <id> or the config).
+	                              Prints every candidate's score (matched and below
+	                              threshold) and a pooled pass/precision/recall summary
+	--runs <n>                    With --run-evals: ask each case n times and report the
+	                              cases whose runs disagree as unstable (default 1)
 	--install-skills              Re-copy every default skill into <home>/skills and exit
 	                              (the way back after deleting one)
 	--tools <path>                Tools directory (default ./tools, falls back to built-in)

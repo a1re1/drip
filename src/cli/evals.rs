@@ -34,12 +34,18 @@ pub const EVAL_VERDICT_FILE_NAME: &str = "verdict.json";
 /// resurrect the template on the next start.
 pub const DEFAULT_EVALS_MARKER_FILE: &str = "default-evals.json";
 
-const BUILTIN_CASE_FLAKY_TEST: &str = include_str!("../../evals/cases/flaky-test-fixup/case.json");
-const BUILTIN_SCENARIO_FLAKY_TEST: &str =
-    include_str!("../../evals/cases/flaky-test-fixup/scenario.json");
-const BUILTIN_CASE_SHIP_BRANCH: &str = include_str!("../../evals/cases/ship-this-branch/case.json");
-const BUILTIN_SCENARIO_SHIP_BRANCH: &str =
-    include_str!("../../evals/cases/ship-this-branch/scenario.json");
+/// One shipped case: its files are embedded at compile time from
+/// `evals/cases/<name>/`, so adding a case is adding a directory there and one
+/// line to `builtin_eval_entries`.
+macro_rules! builtin_case {
+    ($name:literal) => {
+        (
+            $name,
+            include_str!(concat!("../../evals/cases/", $name, "/case.json")),
+            include_str!(concat!("../../evals/cases/", $name, "/scenario.json")),
+        )
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Starter case pack — templates embedded at compile time and copied into
@@ -48,19 +54,34 @@ const BUILTIN_SCENARIO_SHIP_BRANCH: &str =
 // ---------------------------------------------------------------------------
 
 /// The shipped starter cases as (name, case.json, scenario.json) triples, in
-/// sorted order.
+/// sorted order. Every skill case scopes its `candidates` to the shipped
+/// default skills and every plan case to the shipped plans, so the pack scores
+/// the same on any machine with the defaults installed.
 fn builtin_eval_entries() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        (
-            "flaky-test-fixup",
-            BUILTIN_CASE_FLAKY_TEST,
-            BUILTIN_SCENARIO_FLAKY_TEST,
-        ),
-        (
-            "ship-this-branch",
-            BUILTIN_CASE_SHIP_BRANCH,
-            BUILTIN_SCENARIO_SHIP_BRANCH,
-        ),
+        builtin_case!("commit-and-push"),
+        builtin_case!("dependency-migration"),
+        builtin_case!("explain-btree"),
+        builtin_case!("explain-classifier-plan"),
+        builtin_case!("feature-to-pr-plan"),
+        builtin_case!("feature-with-tests"),
+        builtin_case!("flaky-test-fixup"),
+        builtin_case!("git-precommit-hook"),
+        builtin_case!("list-open-prs"),
+        builtin_case!("mutex-vs-rwlock"),
+        builtin_case!("pattern-migration"),
+        builtin_case!("prepare-draft-pr"),
+        builtin_case!("rebase-and-force-push"),
+        builtin_case!("rename-for-clarity"),
+        builtin_case!("review-finished-task"),
+        builtin_case!("review-pr-diff"),
+        builtin_case!("session-end-notification"),
+        builtin_case!("ship-this-branch"),
+        builtin_case!("split-large-module"),
+        builtin_case!("startup-panic"),
+        builtin_case!("summarize-open-prs-plan"),
+        builtin_case!("tune-classifier"),
+        builtin_case!("what-does-flag-do"),
     ]
 }
 
@@ -772,11 +793,25 @@ mod tests {
             );
         }
 
-        assert_eq!(
-            default_eval_names(),
-            vec!["flaky-test-fixup", "ship-this-branch"]
-        );
+        let names = default_eval_names();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "the pack stays in sorted order");
+        assert!(names.iter().any(|name| name == "flaky-test-fixup"));
+        assert!(names.iter().any(|name| name == "ship-this-branch"));
         assert!(default_eval_template("nope").is_none());
+
+        // Every evals/cases/<name> directory is registered: a case added
+        // without a registry line would never reach a home.
+        let mut shipped: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/evals/cases"))
+                .expect("evals/cases exists")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+        shipped.sort();
+        assert_eq!(names, shipped);
     }
 
     #[test]
@@ -838,7 +873,8 @@ mod tests {
         );
 
         let written = ensure_default_evals(root, &evals_dir);
-        assert_eq!(written, vec!["ship-this-branch".to_string()]);
+        assert!(!written.iter().any(|name| name == "flaky-test-fixup"));
+        assert_eq!(written.len(), default_eval_names().len() - 1);
         assert_eq!(
             std::fs::read_to_string(mine.join(EVAL_CASE_FILE_NAME)).unwrap(),
             r#"{"kind":"prompt","description":"mine"}"#

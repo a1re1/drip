@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "rename-for-clarity",
+  "description": "A rename across the codebase preserves behavior (refactor-safely), touches every call site (migration-discipline) and is verified.",
+  "kind": "task",
+  "expected": [
+    "migration-discipline",
+    "refactor-safely",
+    "verify-before-done"
+  ]
+}

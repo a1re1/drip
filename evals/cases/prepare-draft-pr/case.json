@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "prepare-draft-pr",
+  "description": "The pre-PR pass: praeparare owns it, and it commits and pushes on the way (commit-discipline).",
+  "kind": "prompt",
+  "expected": [
+    "praeparare",
+    "commit-discipline"
+  ]
+}

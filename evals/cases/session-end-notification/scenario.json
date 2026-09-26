@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "run a script that pings my phone whenever a drip session stops or a PR is ready",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

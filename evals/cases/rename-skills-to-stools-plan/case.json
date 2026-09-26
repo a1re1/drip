@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "rename-skills-to-stools-plan",
+  "description": "A repo-wide rename.",
+  "kind": "plan",
+  "expected": [
+    "sweep-rename"
+  ]
+}

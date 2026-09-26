@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "targeted-review-fixes-plan",
+  "description": "Review fixes scoped to a committed feature.",
+  "kind": "plan",
+  "expected": [
+    "fix-review-findings"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "finish-partial-patch-plan",
+  "description": "A partial patch handed over to be completed.",
+  "kind": "plan",
+  "expected": [
+    "finish-in-progress"
+  ]
+}

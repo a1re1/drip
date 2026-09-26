@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "plan-for-approval-plan",
+  "description": "An investigation whose deliverable is a plan.",
+  "kind": "plan",
+  "expected": [
+    "investigate-report"
+  ]
+}

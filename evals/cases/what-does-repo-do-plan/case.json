@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "what-does-repo-do-plan",
+  "description": "Orientation phrased as purpose.",
+  "kind": "plan",
+  "expected": [
+    "explain-repo"
+  ]
+}

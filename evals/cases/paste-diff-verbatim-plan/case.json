@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "paste-diff-verbatim-plan",
+  "description": "Run one diff and paste it.",
+  "kind": "plan",
+  "expected": [
+    "exact-commands"
+  ]
+}

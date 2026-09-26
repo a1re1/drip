@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Bootstrap claudecodex: a Rust HTTP proxy that speaks the Anthropic Messages API to Claude Code and translates to the OpenAI Responses API. The repo is empty (only a README)",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

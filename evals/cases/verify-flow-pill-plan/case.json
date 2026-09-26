@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "verify-flow-pill-plan",
+  "description": "Exercise built UI work in isolation.",
+  "kind": "plan",
+  "expected": [
+    "verify-only"
+  ]
+}

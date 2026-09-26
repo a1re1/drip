@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "remove-provisioning-plan",
+  "description": "A terse removal.",
+  "kind": "plan",
+  "expected": [
+    "remove-feature"
+  ]
+}

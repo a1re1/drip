@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Finish wiring the liquid-glass recipes into src/flow_ui.rs of the pwrde gpui app, then verify with cargo check",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

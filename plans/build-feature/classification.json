@@ -1,0 +1,27 @@
+{
+  "relevance": {
+    "threshold": 0.5,
+    "questions": {
+      "kind": {
+        "type": "choice",
+        "instructions": "Which kind of work does the goal ask for?",
+        "criteria": {
+          "feature": "add a new feature or capability to existing software",
+          "bugfix": "fix a reported error, crash, hang, or broken behavior",
+          "review_findings": "fix findings from a code review",
+          "finish": "finish work that is already partly done or uncommitted in the tree",
+          "port": "port a file or module from another language or codebase",
+          "remove": "remove or delete a feature, page, flag, or subsystem",
+          "sweep": "rename or scrub every mention of something across many files",
+          "investigate": "read-only investigation, audit, or research that ends in a report or plan",
+          "verify": "independently verify already-built work without changing it",
+          "commands": "run the exact shell or git commands given and report their output",
+          "scaffold": "build a brand new project, tool, or app from scratch",
+          "scoped_edit": "one small edit in a named file, such as a unit test or doc comment",
+          "explain": "explain what the repo is or what it contains"
+        }
+      }
+    },
+    "formula": "kind.feature"
+  }
+}

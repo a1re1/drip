@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "when i try to use layad with drip i get 400 bad request errors. drip expects the same api shape as jev. can you make sure the request drip sends matches",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

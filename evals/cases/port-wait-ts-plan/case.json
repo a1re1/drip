@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "port-wait-ts-plan",
+  "description": "A one-file TypeScript to Rust port with pasted source.",
+  "kind": "plan",
+  "expected": [
+    "port-module"
+  ]
+}

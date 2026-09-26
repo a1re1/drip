@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "bootstrap-proxy-plan",
+  "description": "Bootstrap a new service in an empty repo.",
+  "kind": "plan",
+  "expected": [
+    "scaffold-project"
+  ]
+}

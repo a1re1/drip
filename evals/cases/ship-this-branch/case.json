@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "ship-this-branch",
-  "description": "A planning loop that ends in a pull request: the shipped ship-pr plan should classify as relevant.",
+  "description": "A planning loop whose goal is the ship flow itself: ship-pr must classify as relevant. Candidates stay scoped to ship-pr because the shared kind question reads 'ship this branch' as finishing in-progress work.",
   "kind": "plan",
   "expected": [
     "ship-pr"

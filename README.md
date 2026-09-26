@@ -63,10 +63,41 @@ differ from the directory name, shadowing is decided by the frontmatter
 `name:`, so a project plan that declares `name: ship-pr` wins over a user plan
 of that name whatever the two directories are called.
 
-Drip ships one starter plan, `ship-pr` (baseline verification → draft PR →
-implement → push → watch checks → review → land green). Like the default
-skills it is copied into `<home>/plans` on the first start, and a marker beside
-`plans/` records the names this home was given — delete one and it stays gone:
+Drip ships a starter pack of plans, one per shape of work that recurs in real
+drip transcripts (the pack was drawn from ~500 distinct operator goals):
+
+| plan | shape of the goal |
+|---|---|
+| `ship-pr` | deliver the work as a draft PR: baseline → PR → implement → push → checks → review → land green |
+| `build-feature` | add a capability to existing software: learn the seams, implement in scoped tasks, test, verify |
+| `fix-bug` | a reported error, crash, hang, or wrong output: reproduce, root-cause, fix at the cause, regression test |
+| `fix-review-findings` | findings from a review (P0/P1, reviewer comments): triage each, fix the valid ones, record every resolution |
+| `finish-in-progress` | work already partly done or uncommitted: inventory, never reimplement, close the gaps, get green |
+| `port-module` | port a file or module from a reference implementation: read once, compiling chunks, port the tests |
+| `remove-feature` | delete a page, flag, or subsystem completely while keeping shared infrastructure |
+| `sweep-rename` | the same mechanical change across many files: enumerate, edit file by file, re-grep to zero |
+| `investigate-report` | read-only research, audit, or reconnaissance whose deliverable is a report or a plan |
+| `verify-only` | independent verification of already-built work: build, run the checks, exercise, report evidence, edit nothing |
+| `exact-commands` | run precisely the commands the operator wrote and return the output verbatim |
+| `scaffold-project` | a new project in an empty repo: layout, building skeleton, one vertical slice, first tests, README |
+| `explain-repo` | "what's in this repo?": orient the operator without editing |
+
+Every plan but `ship-pr` carries the same `classification.json`: one `choice`
+question ("Which kind of work does the goal ask for?") whose criteria are the
+thirteen shapes above, and a formula that reads its own option
+(`kind.bugfix`, `kind.port`, …) against a 0.5 threshold. A forced choice
+separates these shapes far better than independent yes/no questions do on a
+small classifier — but it always picks *something*, so a goal that needs no
+plan ("reply with ok") still lands on one, and a tiny scoped edit ("add one
+unit test to `outline.rs`") reads as a feature. `ship-pr` keeps its own yes/no
+questions because "ship it as a PR" is a delivery mode layered on any shape,
+and the classifier does not hear "/navis a pr" as a pull request — the
+explicit `/navis` skill covers that. The plan half of `drip --run-evals` pins
+these decisions per goal.
+
+Like the default skills the pack is copied into `<home>/plans` on the first
+start, and a marker beside `plans/` records the names this home was given —
+delete one and it stays gone:
 
 ```sh
 drip --plans            # list discovered plans with scope and description

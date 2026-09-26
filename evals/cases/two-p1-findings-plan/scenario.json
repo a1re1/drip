@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Fix the two P1 review findings on branch tw-lite-mode (one commit ahead of main) and amend that commit",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

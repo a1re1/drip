@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Finish and commit the in-progress praeparare feature: uncommitted changes are already in the working tree (skills/praeparare/SKILL.md, src/cli/skills.rs, src/tui/app.rs). Do not reimplement what is there",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "port-session-layer-plan",
+  "description": "A multi-file port of one layer.",
+  "kind": "plan",
+  "expected": [
+    "port-module"
+  ]
+}

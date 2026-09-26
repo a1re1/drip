@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "mcp-client-per-role-plan",
+  "description": "A contract-style feature spec for an existing codebase.",
+  "kind": "plan",
+  "expected": [
+    "build-feature"
+  ]
+}

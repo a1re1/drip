@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "verify-treenotes-plan",
+  "description": "Independent verification with no edits.",
+  "kind": "plan",
+  "expected": [
+    "verify-only"
+  ]
+}

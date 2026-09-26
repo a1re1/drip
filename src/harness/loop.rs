@@ -5783,6 +5783,81 @@ mod dynamic_skills_tests {
         assert!(!task.loop_system_prompt.contains("[1] establish a baseline"));
     }
 
+    // The loop-start telemetry must record the plans a planning loop was shaped
+    // by, and leave the field out for a loop that composed none.
+    #[tokio::test]
+    async fn loop_start_records_the_chosen_plans_and_omits_an_empty_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink: std::sync::Arc<std::sync::Mutex<Vec<HarnessEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = sink.clone();
+        let mut run = HarnessRun::new(SolidStateHarnessOptions {
+            goal: "test goal".into(),
+            state_path: Some(dir.path().join("state.json")),
+            on_event: Some(std::sync::Arc::new(move |event| {
+                collected.lock().unwrap().push(event)
+            })),
+            ..SolidStateHarnessOptions::default()
+        })
+        .await
+        .unwrap();
+        let base = spawn_classifier_mock(vec![
+            r#"{"model":"jev","answers":{"delivers_pr":{"type":"noul","noul":0.95}},"usage":{}}"#,
+            r#"{"model":"jev","answers":{"delivers_pr":{"type":"noul","noul":0.95}},"usage":{}}"#,
+        ]);
+        run.options.classifier = Some(crate::harness::classifier::ClassifierRoute {
+            url: format!("{base}/alpha/decisions"),
+            model: "~typesafe/jev-latest".to_string(),
+            headers: Vec::new(),
+            timeout_ms: 5_000,
+        });
+        run.options.plan_pool = vec![authored_plan(
+            "ship-pr",
+            "[1] establish a baseline\n[2] open a draft PR\n",
+        )];
+
+        // A planning loop (no current task) composes the plan.
+        run.select_plans().await;
+        let planning = run.begin_loop();
+        assert!(planning.loop_system_prompt.contains("## Plan: ship-pr"));
+
+        // The same pool on a task loop composes nothing.
+        crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from("do the work")],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        run.select_plans().await;
+        let _task = run.begin_loop();
+
+        let events = sink.lock().unwrap();
+        let starts: Vec<&HarnessEvent> = events
+            .iter()
+            .filter(|event| event.r#type == HarnessEventType::LoopStart)
+            .collect();
+        assert_eq!(starts.len(), 2, "begin_loop emits one loop-start per loop");
+        let planning_start = starts[0].data.as_ref().expect("loop-start carries data");
+        let plans = planning_start
+            .plans
+            .as_ref()
+            .expect("a planning loop must record the plans it composed");
+        assert_eq!(plans.as_slice(), ["ship-pr"]);
+        assert!(
+            starts[0].detail.contains("[plans: ship-pr]"),
+            "the prose suffix must mirror the field: {}",
+            starts[0].detail
+        );
+        // The task loop ran with no plan of its own: the field is omitted.
+        let task_start = starts[1].data.as_ref().expect("loop-start carries data");
+        assert!(task_start.plans.is_none());
+        assert!(
+            !starts[1].detail.contains("[plans:"),
+            "{}",
+            starts[1].detail
+        );
+        std::mem::forget(dir);
+    }
+
     // A no-classifier run must not compose anything, and a loop that previously
     // selected skills must clear them when nothing is selected this time.
     #[tokio::test]
@@ -9368,6 +9443,17 @@ impl HarnessRun {
                 loaded_skills.push(skill.name.clone());
             }
         }
+        let mut loaded_plans: Vec<String> = self
+            .active_plans
+            .iter()
+            .map(|plan| plan.name.clone())
+            .collect();
+        loaded_plans.dedup();
+        let plans_suffix = if loaded_plans.is_empty() {
+            String::new()
+        } else {
+            format!(" [plans: {}]", loaded_plans.join(", "))
+        };
         let skills_suffix = if loaded_skills.is_empty() {
             String::new()
         } else {
@@ -9379,9 +9465,10 @@ impl HarnessRun {
             format!(" [tools: {}]", summarize_names(&loaded_tools, 12))
         };
         let detail = format!(
-            "loop {}{}{}{} — {}",
+            "loop {}{}{}{}{} — {}",
             self.state.r#loop,
             skills_suffix,
+            plans_suffix,
             tools_suffix,
             role.as_ref()
                 .map(|r| format!(" [role: {}]", r.name))
@@ -9400,8 +9487,21 @@ impl HarnessRun {
         self.emit(HarnessEvent {
             data: Some(HarnessEventData {
                 r#loop: Some(self.state.r#loop),
-                skills: if loaded_skills.is_empty() { None } else { Some(loaded_skills) },
-                tools: if loaded_tools.is_empty() { None } else { Some(loaded_tools) },
+                skills: if loaded_skills.is_empty() {
+                    None
+                } else {
+                    Some(loaded_skills)
+                },
+                plans: if loaded_plans.is_empty() {
+                    None
+                } else {
+                    Some(loaded_plans)
+                },
+                tools: if loaded_tools.is_empty() {
+                    None
+                } else {
+                    Some(loaded_tools)
+                },
                 task_id: current_task_id.clone(),
                 ..Default::default()
             }),

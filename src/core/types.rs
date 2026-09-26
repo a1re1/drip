@@ -936,6 +936,11 @@ pub struct HarnessEventData {
 	/// (base-prompt `--skill` activations are not repeated here).
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub skills: Option<Vec<String>>,
+	/// "loop-start" events: the prebuilt plans this loop was shaped by, in
+	/// composition order. Absent when the loop ran with none of its own
+	/// (plans shape planning/replanning loops only).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub plans: Option<Vec<String>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub task_id: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_js_number_option")]

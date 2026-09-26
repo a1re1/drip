@@ -96,7 +96,7 @@ pub struct WatchViewModel {
     /// read from the loop-start telemetry of `transcript`. Empty when the
     /// session recorded none (or predates the field).
     pub skill_loads: Vec<SkillLoad>,
-    /// Page shown by the [4] Skills & Tools pane when its wrapped content does
+    /// Page shown by the [4] Skills, Tools & Plans pane when its wrapped content does
     /// not fit the pane (the renderer clamps it to the real pages).
     pub skill_page: usize,
     /// Global index into `skill_items` of the skill/tool picked in the [4]
@@ -732,7 +732,7 @@ fn transcript_rows(vm: &WatchViewModel, inner_w: usize, inner_h: usize) -> Vec<R
     flat[start..end].to_vec()
 }
 
-// ── Loop surface rows (the [4] Skills & Tools pane) ─────────────────────────
+// ── Loop surface rows (the [4] Skills, Tools & Plans pane) ─────────────────────────
 
 /// One loop's capability surface, exactly as the harness recorded it on its
 /// loop-start telemetry: the skills composed into its prompt (the
@@ -746,11 +746,12 @@ pub struct SkillLoad {
     pub iteration: i64,
     pub skills: Vec<String>,
     pub tools: Vec<String>,
+    pub plans: Vec<String>,
 }
 
 /// Every loop-start event in `transcript` that recorded a capability surface
-/// (skills, tools, or both), in transcript (chronological) order. Events from
-/// before the fields existed — or loops that ran with neither — carry neither
+/// (skills, tools, plans, or any combination), in transcript Events from
+/// before the fields existed — or loops that ran with none — carry none
 /// and are skipped, so an old session simply shows the pane's empty state.
 pub fn skill_loads(transcript: &[TranscriptEntry]) -> Vec<SkillLoad> {
     transcript
@@ -765,13 +766,15 @@ pub fn skill_loads(transcript: &[TranscriptEntry]) -> Vec<SkillLoad> {
             let data = event.data.as_ref()?;
             let skills = data.skills.clone().unwrap_or_default();
             let tools = data.tools.clone().unwrap_or_default();
-            if skills.is_empty() && tools.is_empty() {
+            let plans = data.plans.clone().unwrap_or_default();
+            if skills.is_empty() && tools.is_empty() && plans.is_empty() {
                 return None;
             }
             Some(SkillLoad {
                 iteration: event.iteration,
                 skills,
                 tools,
+                plans,
             })
         })
         .collect()
@@ -802,6 +805,12 @@ pub fn all_loaded_skills(loads: &[SkillLoad]) -> Vec<(String, usize)> {
 /// of loops that had it. This is the pane's "all available tools" section.
 pub fn all_loaded_tools(loads: &[SkillLoad]) -> Vec<(String, usize)> {
     roll_up(loads, |load| &load.tools)
+}
+
+/// The union of every plan the loops were shaped by across `loads`, with the
+/// number of loops that chose it. This is the pane's "all chosen plans" section.
+pub fn all_loaded_plans(loads: &[SkillLoad]) -> Vec<(String, usize)> {
+    roll_up(loads, |load| &load.plans)
 }
 
 /// The [4] pane's content rows plus, for every skill/tool it lists, the rows
@@ -842,6 +851,15 @@ fn skill_surface(vm: &WatchViewModel, inner_w: usize) -> SkillSurface {
         c::white,
         inner_w,
     );
+    let plans = all_loaded_plans(&vm.skill_loads);
+    if !plans.is_empty() {
+        rows.push(plain(
+            format!("all chosen plans ({})", plans.len()),
+            c::accent,
+        ));
+        let labels = comma_list(&plans);
+        push_plain_surface(&mut rows, "  ", "  ", &labels.join(", "), c::white, inner_w);
+    }
     rows.push(plain(
         format!("all available tools ({})", tools.len()),
         c::accent,
@@ -909,6 +927,16 @@ fn skill_surface(vm: &WatchViewModel, inner_w: usize) -> SkillSurface {
             c::gray,
             inner_w,
         );
+        if !load.plans.is_empty() {
+            push_plain_surface(
+                &mut rows,
+                "  plans   ",
+                "          ",
+                &load.plans.join(", "),
+                c::gray,
+                inner_w,
+            );
+        }
     }
     // The picked item paints in reverse video (render_pane's on_cyan) on its
     // own columns: the row it shares with other names keeps its colour, so the
@@ -1046,6 +1074,50 @@ fn push_surface_row(
         cont
     };
     rows.push(plain(format!("{prefix}{text}"), color));
+}
+
+/// A wrapped comma-separated line of plain, non-selectable names: the plans a
+/// loop was shaped by. Like `push_surface`, but the names carry no hit-test
+/// rows — only the skills and tools the pane lists are clickable.
+fn push_plain_surface(
+    rows: &mut Vec<RowCell>,
+    first: &str,
+    cont: &str,
+    text: &str,
+    color: fn(&str) -> String,
+    inner_w: usize,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let lead_w = string_width(first).max(string_width(cont));
+    let wrap_w = inner_w.saturating_sub(lead_w).max(1);
+    let section_start = rows.len();
+    let mut rest = text;
+    loop {
+        let (chunk, rem) = split_plain_at_width(rest, wrap_w);
+        push_surface_row(rows, first, cont, section_start, chunk.trim_end(), color);
+        rest = rem.trim_start();
+        if rest.is_empty() {
+            break;
+        }
+    }
+}
+
+/// `split_at_width`, backed off to the last `, ` boundary inside the chunk so a
+/// wrapped plan list breaks between names rather than mid-name.
+fn split_plain_at_width(text: &str, room: usize) -> (&str, &str) {
+    if string_width(text) <= room {
+        return (text, "");
+    }
+    let (chunk, rem) = split_at_width(text, room);
+    if rem.is_empty() {
+        return (chunk, rem);
+    }
+    match chunk.rfind(", ") {
+        Some(pos) => (&text[..pos + 2], &text[pos + 2..]),
+        None => (chunk, rem),
+    }
 }
 
 /// Split `text` at the last char boundary that fits `room` visible columns —
@@ -1254,10 +1326,10 @@ fn shells_title(vm: &WatchViewModel) -> String {
     format!("[3] Shells ({})", vm.shells.len())
 }
 
-/// `[4] Skills & Tools` — the pane's roll-up sections list the counts (top of
+/// `[4] Skills, Tools & Plans` — the pane's roll-up sections list the counts (top of
 /// the box: distinct skills, then the tools the loops had at their disposal).
 fn skills_title() -> String {
-    "[4] Skills & Tools".to_string()
+    "[4] Skills, Tools & Plans".to_string()
 }
 
 fn shell_detail_title(vm: &WatchViewModel) -> String {
@@ -1769,7 +1841,7 @@ mod tests {
             assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0), None, "skills top border");
             assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), None, "the empty state is not a row");
             if seated(regions[3]) >= 1 {
-                vm.skill_loads = vec![SkillLoad { iteration: 2, skills: vec!["navis".into()], tools: vec![] }];
+                vm.skill_loads = vec![SkillLoad { iteration: 2, skills: vec!["navis".into()], tools: vec![], plans: vec![] }];
                 let (sk0, _, skc0, _) = panel_regions(&vm, cols, rows)[3];
                 assert_eq!(list_row_at(&vm, cols, rows, skc0 + 3, sk0 + 1), Some((3, 0)), "first skills row");
                 vm.skill_loads.clear();
@@ -2055,11 +2127,13 @@ mod tests {
                     iteration: 1,
                     skills: vec!["navis".into()],
                     tools: vec!["BASH".into(), "READ".into()],
+                    plans: vec![],
                 },
                 SkillLoad {
                     iteration: 4,
                     skills: vec!["navis".into(), "verify-before-done".into()],
                     tools: vec!["PATCH".into(), "READ".into()],
+                    plans: vec![],
                 },
             ]
         );
@@ -2070,6 +2144,7 @@ mod tests {
                 iteration: 5,
                 skills: vec![],
                 tools: vec!["READ".into()],
+                plans: vec![],
             }]
         );
         // The roll-up counts loops per skill/tool, most-loaded first (ties by name).
@@ -2098,7 +2173,7 @@ mod tests {
         let _guard = crate::watch::ansi::color_test_lock();
         set_color_enabled(false);
         let mut vm = empty_vm();
-        assert_eq!(skills_title(), "[4] Skills & Tools");
+        assert_eq!(skills_title(), "[4] Skills, Tools & Plans");
         assert_eq!(skill_rows(&vm, 40, 10)[0].text, "  no loop telemetry yet");
 
         vm.skill_loads = vec![
@@ -2106,14 +2181,16 @@ mod tests {
                 iteration: 1,
                 skills: vec!["navis".into()],
                 tools: vec!["READ".into()],
+                plans: vec![],
             },
             SkillLoad {
                 iteration: 2,
                 skills: vec!["navis".into(), "tdd".into()],
                 tools: vec!["READ".into(), "PATCH".into()],
+                plans: vec![],
             },
         ];
-        assert_eq!(skills_title(), "[4] Skills & Tools");
+        assert_eq!(skills_title(), "[4] Skills, Tools & Plans");
         let texts: Vec<String> = skill_rows(&vm, 40, 20)
             .iter()
             .map(|r| r.text.clone())
@@ -2145,6 +2222,7 @@ mod tests {
             iteration: 1,
             skills: vec!["navis".into(), "cs-reference".into(), "tdd".into()],
             tools: (0..20).map(|i| format!("TOOL-{i}")).collect(),
+            plans: vec![],
         }];
         // Wide pane: every row fits, nothing is drawn one name per line.
         let rows = skill_rows(&vm, 76, 100);
@@ -2183,6 +2261,7 @@ mod tests {
             iteration: 3,
             skills: vec![],
             tools: vec!["READ".into()],
+            plans: vec![],
         }];
         let texts: Vec<String> = skill_lines(&vm, 76)
             .iter()
@@ -2206,6 +2285,7 @@ mod tests {
                 iteration: i,
                 skills: vec![format!("skill-{i}")],
                 tools: vec![format!("TOOL-{i}")],
+                plans: vec![],
             })
             .collect();
         let full = skill_lines(&vm, 40).len();
@@ -2277,6 +2357,7 @@ mod tests {
                 iteration: i,
                 skills: vec![format!("skill-{i}")],
                 tools: vec![format!("TOOL-{i}")],
+                plans: vec![],
             })
             .collect();
         let full = skill_lines(&vm, 30).len();
@@ -2302,11 +2383,14 @@ mod tests {
             iteration: 7,
             skills: vec!["navis".into()],
             tools: vec!["READ".into()],
+            plans: vec![],
         }];
         let frame = render_frame(&vm, 120, 40);
         let plain: Vec<String> = frame.split('\n').map(strip_ansi).collect();
         assert!(
-            plain.iter().any(|l| l.contains("[4] Skills & Tools")),
+            plain
+                .iter()
+                .any(|l| l.contains("[4] Skills, Tools & Plans")),
             "the frame titles the pane"
         );
         assert!(plain.iter().any(|l| l.contains("all loaded skills (1)")));
@@ -2340,11 +2424,13 @@ mod tests {
                 iteration: 1,
                 skills: vec!["navis".into()],
                 tools: vec!["READ".into()],
+                plans: vec![],
             },
             SkillLoad {
                 iteration: 2,
                 skills: vec!["navis".into(), "tdd".into()],
                 tools: vec!["READ".into(), "GREP".into()],
+                plans: vec![],
             },
         ];
 
@@ -2388,6 +2474,7 @@ mod tests {
             iteration: 1,
             skills: vec!["navis".into(), "tdd".into()],
             tools: vec!["READ".into()],
+            plans: vec![],
         }];
         vm.focus = 4;
         let (cols, rows) = (100usize, 30usize);
@@ -2474,6 +2561,7 @@ mod tests {
             iteration: 1,
             skills: vec!["navis".into(), "tdd".into()],
             tools: vec![],
+            plans: vec![],
         }];
         vm.focus = 4;
         let inner_w = 30;
@@ -2551,5 +2639,125 @@ mod tests {
             last.contains("of 40"),
             "the footer counts the whole listing: {last:?}"
         );
+    }
+
+    #[test]
+    fn loop_start_telemetry_reads_plans_and_omits_an_empty_set() {
+        use crate::cli::transcript::{TranscriptEntry, TranscriptEventEntry};
+        use crate::core::types::HarnessEventData;
+
+        fn loop_start(iteration: i64, plans: Option<Vec<&str>>) -> TranscriptEntry {
+            // A planning loop's plans and its composed skills arrive together,
+            // so the fixture keys the skills off the plans: a plans-free loop
+            // is skipped by the pane exactly as a bare loop is.
+            let plans: Vec<String> = plans
+                .unwrap_or_default()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let skills: Vec<String> = if plans.is_empty() {
+                Vec::new()
+            } else {
+                vec!["navis".to_string()]
+            };
+            TranscriptEntry::Event(TranscriptEventEntry {
+                at: "2026-01-01T00:00:00Z".into(),
+                data: Some(HarnessEventData {
+                    plans: Some(plans),
+                    skills: Some(skills),
+                    ..Default::default()
+                }),
+                detail: "loop 1".into(),
+                goal_id: "g1".into(),
+                iteration,
+                kind: HarnessEventType::LoopStart,
+            })
+        }
+
+        let transcript = vec![
+            loop_start(1, Some(vec!["goal-shaping"])),
+            loop_start(2, None),
+            loop_start(3, Some(vec![])),
+            loop_start(4, Some(vec!["goal-shaping", "review-brief"])),
+        ];
+        let loads = skill_loads(&transcript);
+        assert_eq!(
+            loads,
+            vec![
+                SkillLoad {
+                    iteration: 1,
+                    skills: vec!["navis".into()],
+                    tools: vec![],
+                    plans: vec!["goal-shaping".into()],
+                },
+                SkillLoad {
+                    iteration: 4,
+                    skills: vec!["navis".into()],
+                    tools: vec![],
+                    plans: vec!["goal-shaping".into(), "review-brief".into()],
+                },
+            ]
+        );
+        // A loop shaped by a plan but composing no skills is still a surface.
+        assert_eq!(skill_loads(&[loop_start(6, Some(vec!["solo"]))]).len(), 1);
+        // The roll-up counts loops per plan, most-chosen first (ties by name).
+        assert_eq!(
+            all_loaded_plans(&loads),
+            vec![
+                ("goal-shaping".to_string(), 2),
+                ("review-brief".to_string(), 1)
+            ]
+        );
+        assert!(all_loaded_plans(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_skills_and_tools_pane_lists_each_loops_chosen_plans() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        vm.skill_loads = vec![
+            SkillLoad {
+                iteration: 1,
+                skills: vec!["navis".into()],
+                tools: vec!["READ".into()],
+                plans: vec!["goal-shaping".into()],
+            },
+            SkillLoad {
+                iteration: 2,
+                skills: vec!["tdd".into()],
+                tools: vec!["PATCH".into()],
+                plans: vec![],
+            },
+        ];
+        let texts: Vec<String> = skill_lines(&vm, 40)
+            .iter()
+            .map(|r| r.text.clone())
+            .collect();
+        assert!(
+            texts.contains(&"all chosen plans (1)".to_string()),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("  plans   goal-shaping")),
+            "{texts:?}"
+        );
+        // Only the loop that chose one prints a plans row.
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("  plans")).count(),
+            1,
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(&"all loaded skills (2)".to_string()),
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(&"all available tools (2)".to_string()),
+            "{texts:?}"
+        );
+        assert!(texts.iter().all(|t| string_width(t) <= 40), "{texts:?}");
     }
 }

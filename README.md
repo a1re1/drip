@@ -73,6 +73,11 @@ drip --plans            # list discovered plans with scope and description
 drip --plans --json     # machine-readable
 ```
 
+The plan a planning loop actually ran with is recorded on its `loop-start`
+telemetry event (`plans`: the chosen names in composition order), and the
+`dripw` `[4]` pane rolls the chosen plans up and lists them per loop — so a
+transcript says which template shaped the task list a run produced.
+
 ## Eval cases
 
 An eval case is a **reusable scenario for the skill classifier**: a goal, a
@@ -1421,7 +1426,7 @@ sessions or the session index.
 dripw
 ```
 
-Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills & Tools, plus
+Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills, Tools & Plans, plus
 the transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
 `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
 With `[4]` focused, `j`/`k` (and the up/down arrows, and the scroll wheel) walk
@@ -1435,7 +1440,7 @@ name under the pointer — even a name that wrapped onto the next row. Hovering
 the transcript (or the shell log with `[3]` focused) and rolling the scroll
 wheel scrolls it too — older lines up, newer down.
 
-The `[4]` Skills & Tools pane shows what the focused session's loops actually
+The `[4]` Skills, Tools & Plans pane shows what the focused session's loops actually
 had at their disposal. On every loop-start telemetry event the harness writes
 the composed skill set — the classifier's picks plus the run's base-prompt
 `--skill` activations, deduped in composition order — and the loop's whole tool
@@ -1479,6 +1484,10 @@ the model is actually handed. A session that predates the snapshot, or spawned
 no server, still says `no definition available in this checkout`.
 
 dripw shows sessions started in the current directory or any directory beneath it.
+
+The `[4]` pane opens with the roll-up — every skill, tool and chosen plan
+the session's loops recorded — then a block per loop naming the skills and
+plans that loop ran with.
 
 ## Browser UI (`drip --ui`)
 

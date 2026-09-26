@@ -489,7 +489,7 @@ impl WatchApp {
                 let mut all = std::mem::take(&mut self.vm.transcript);
                 all.extend(added);
                 self.vm.transcript = trim_transcript(&all, MAX_TRANSCRIPT);
-                // The [4] Skills & Tools pane is a projection of the transcript's
+                // The [4] Skills, Tools & Plans pane is a projection of the transcript's
                 // loop-start telemetry, so it is refreshed with it — a skill
                 // loaded into a new loop appears the moment the loop starts.
                 self.vm.skill_loads = skill_loads(&self.vm.transcript);
@@ -1031,7 +1031,7 @@ impl WatchApp {
         self.draw();
     }
 
-    /// Turn the [4] Skills & Tools pane's page. Its content is a wrapped list
+    /// Turn the [4] Skills, Tools & Plans pane's page. Its content is a wrapped list
     /// that pages rather than scrolls, so the index is clamped to the pages this
     /// terminal actually seats (one while the content fits).
     fn page_skills(&mut self, delta: i64) {
@@ -1557,6 +1557,7 @@ mod tests {
             iteration: 1,
             skills: vec!["navis".into()],
             tools: vec!["READ".into()],
+            plans: vec![],
         }];
         let (cols, rows) = (100usize, 30usize);
         let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[3];
@@ -1580,6 +1581,7 @@ mod tests {
                 iteration: i,
                 skills: vec![format!("skill-{i}")],
                 tools: vec![format!("TOOL-{i}")],
+                plans: vec![],
             })
             .collect();
         app.vm.focus = 4;
@@ -1632,6 +1634,7 @@ mod tests {
             iteration: 1,
             skills: vec!["tdd".into()],
             tools: vec!["READ".into()],
+            plans: vec![],
         }];
         app.vm.focus = 4;
         assert!(app.vm.sel_skill.is_none(), "nothing is picked until a move");
@@ -1691,6 +1694,7 @@ mod tests {
                 iteration: i,
                 skills: vec![format!("skill-{i}")],
                 tools: vec![format!("TOOL-{i}")],
+                plans: vec![],
             })
             .collect();
         app.vm.focus = 4;
@@ -1723,6 +1727,7 @@ mod tests {
             iteration: 1,
             skills: vec![],
             tools: vec!["BASH_ASYNC".into()],
+            plans: vec![],
         }];
         app.vm.focus = 4;
         app.on_key("j");

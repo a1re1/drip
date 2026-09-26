@@ -122,6 +122,28 @@ precision/recall table, how many cases now pass, and the exact `classifiers.json
 diff that moved it. Never claim an improvement from a formula you did not re-run,
 and never edit the classifier's Rust code to satisfy one case.
 
+## Hand-written cases as well as harvested ones
+
+Harvesting is not the only source of cases. drip ships an **eval-case library**:
+`drip --evals` lists cases (each a directory of `case.json` + `scenario.json`,
+kind `prompt`, `task` or `plan`, project scope shadowing user scope, starter
+cases under `<home>/evals`), and `drip --run-evals [name]` runs one through the
+real classifier in a throwaway workspace and records what matched in that case's
+own `verdict.json`. Use it when you want a fixed scenario instead of whatever the
+sessions happen to hold:
+
+```sh
+drip --evals                        # the case library: name, kind, scope
+drip --run-evals flaky-test-fixup   # one case, real classifier, recorded verdict
+```
+
+Its `expected` list in `case.json` plays the part of a pinned case's `target`, and
+`missed` / `spurious` between `expected` and what was matched are exactly the two
+counts `compare` reports — so a scenario you keep meaning to fix can be pinned as
+a case and re-run with one command, no blind survey needed. The blind survey is
+still the honest instrument for judging a *new* question set, because it is the
+only one where the human does not know the classifier's answer.
+
 Done means: the survey had blind contexts, every disagreement is pinned in
 `cases.json`, the cases the questions were tuned against pass `replay`, and the
 match rate is stated as a number with its case count.

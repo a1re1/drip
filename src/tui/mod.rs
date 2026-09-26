@@ -3,6 +3,7 @@
 pub mod app;
 pub mod btw;
 pub mod compact;
+pub mod evals;
 pub mod images;
 pub mod jobs;
 pub mod markdown_ansi;

@@ -72,6 +72,9 @@ pub struct DripHome {
     pub config_path: String,
     /// <home>/env.vars — credential store read before the process environment.
     pub env_vars_path: String,
+    /// <home>/evals/ — the user's eval-case library (the scenario suites the
+    /// skill classifier is measured against), shared by every project.
+    pub evals_dir: String,
     /// <home>/marketplaces/ — cloned marketplace repos.
     pub marketplaces_dir: String,
     /// <home>/marketplaces.json — the marketplace registry.
@@ -280,6 +283,7 @@ pub fn open_drip_home(root: &str) -> DripHome {
     let home = DripHome {
         config_path: join(root, "config.json").to_string_lossy().into_owned(),
         env_vars_path: join(root, "env.vars").to_string_lossy().into_owned(),
+        evals_dir: join(root, "evals").to_string_lossy().into_owned(),
         marketplaces_dir: join(root, "marketplaces").to_string_lossy().into_owned(),
         marketplaces_path: join(root, "marketplaces.json")
             .to_string_lossy()
@@ -300,6 +304,7 @@ pub fn open_drip_home(root: &str) -> DripHome {
         &home.skills_dir,
         &home.marketplaces_dir,
         &home.plans_dir,
+        &home.evals_dir,
     ] {
         let _ = fs::create_dir_all(dir);
     }
@@ -322,6 +327,11 @@ pub fn open_drip_home(root: &str) -> DripHome {
     // starter plan is not resurrected: the marker beside plans/ records what
     // was already written.
     crate::cli::plans::ensure_default_plans(&home.root, Path::new(&home.plans_dir));
+    // <home>/evals/ is seeded once with the shipped starter eval cases (see
+    // src/cli/evals.rs). Same rule as plans: an operator case of the same name
+    // wins, and a deleted starter case is not resurrected — the marker beside
+    // evals/ records what was already written.
+    crate::cli::evals::ensure_default_evals(&home.root, Path::new(&home.evals_dir));
     // <home>/prompts/ is where system prompt profiles live — one directory per
     // profile, holding config.json and prompt.md — seeded with a README for the
     // same discoverability reason.
@@ -761,6 +771,9 @@ mod tests {
         );
         assert_eq!(home.skills_dir, s(&join(&root, ".drip/skills")));
         assert_eq!(home.marketplaces_dir, s(&join(&root, ".drip/marketplaces")));
+        // The eval-case library is created and seeded with the starter cases.
+        assert_eq!(home.evals_dir, s(&join(&root, ".drip/evals")));
+        assert!(Path::new(&home.evals_dir).join("flaky-test-fixup").is_dir());
     }
 
     #[test]

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "ship-this-branch",
+  "description": "A planning loop that ends in a pull request: the shipped ship-pr plan should classify as relevant.",
+  "kind": "plan",
+  "expected": ["ship-pr"]
+}

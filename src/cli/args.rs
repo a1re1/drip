@@ -115,6 +115,13 @@ pub struct ParsedCliArgs {
     pub undo_last_count: Option<i64>,
     /// List the discovered plan pool and exit.
     pub plans: bool,
+    /// List the discovered eval cases (project/user) and exit.
+    pub evals: bool,
+    /// Run every eval case — or just the named one — through the real skill
+    /// classifier and record what it matched, then exit.
+    pub run_evals: bool,
+    /// Optional case name for --run-evals.
+    pub run_evals_name: Option<String>,
     /// List the discovered skill pool and exit.
     pub skills: bool,
     /// Restore the shipped default skills into the home and exit.
@@ -272,6 +279,9 @@ impl Default for ParsedCliArgs {
             undo_last: false,
             undo_last_count: None,
             plans: false,
+            evals: false,
+            run_evals: false,
+            run_evals_name: None,
             skills: false,
             install_skills: false,
             stop: false,
@@ -663,6 +673,20 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--plans" => {
                 parsed.plans = true;
+            }
+            "--evals" => {
+                parsed.evals = true;
+            }
+            "--run-evals" => {
+                parsed.run_evals = true;
+                // An optional case name: a following token that is not another
+                // flag names the single case to run.
+                if let Some(next) = argv.get(index + 1) {
+                    if !next.starts_with('-') {
+                        parsed.run_evals_name = Some(next.clone());
+                        index += 1;
+                    }
+                }
             }
             "--skills" => {
                 parsed.skills = true;

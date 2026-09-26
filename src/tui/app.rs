@@ -23,6 +23,8 @@ use crate::cli::args::{praeparare_goal_with_context, PRAEPARARE_DEFAULT_MAX_ITER
 use crate::cli::commands::{
     get_slash_command_suggestions, parse_slash_command, SlashCommandSpec, SLASH_COMMANDS,
 };
+use crate::cli::eval_runner::EvalRunOutcome;
+use crate::cli::evals::{discover_evals, CliEval, EvalScope};
 use crate::cli::file_suggestions::{
     get_workspace_file_suggestions, WorkspaceFileSource, DEFAULT_FILE_SUGGESTION_LIMIT,
 };
@@ -82,6 +84,7 @@ use crate::tui::compact::{
     render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
     CompactCell, CompactEmitter,
 };
+use crate::tui::evals::{EvalBrowser, EvalRow, EvalRunSummary};
 use crate::tui::jobs::{
     background_counter, job_counts, render_job_detail, render_jobs_list, JOBS_REFRESH_MS,
 };
@@ -196,6 +199,7 @@ fn help_text() -> String {
             "  while a goal runs — enter queues the message for the next run (the queue is listed above the input); ctrl+s steers the running goal with what you typed, or with the whole queue when the input is empty ",
             "  /rename [name] — rename this session (also while a goal runs; applies immediately instead of queuing)",
             "  /jobs (or ctrl+b) — browse the background monitors and async shells; the status bar counts them while they run",
+            "  /evals [row] — browse the eval cases: enter runs one through the classifier, a/n judge the candidate under the cursor",
             "  /btw [question] — ask a separate drip about this session's transcript; the sidebar knows it is a side chat, not the run, and answers conversationally instead of summarising the run",
             "  /btw reset (or /btw with no question to review the thread) — clear or show the sidebar conversation",
             "  esc — clear the composer, or stop the running goal and its commands",
@@ -278,6 +282,7 @@ fn short_id(id: &str) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum OverlayKind {
+    Evals,
     Jobs,
     Model,
     Prompt,
@@ -441,6 +446,13 @@ enum Msg {
     Rename {
         epoch: u64,
         name: Option<String>,
+    },
+    /// One eval case finished on a background thread: the runner's outcome, or
+    /// the case file's own read error. A stale reply (the operator moved to
+    /// another case) is dropped by name.
+    Evals {
+        name: String,
+        outcome: Result<EvalRunOutcome, String>,
     },
     /// A /btw sidebar answer finished on a background thread. `reply` is None
     /// on any failure (no profile, offline, timeout, malformed output).
@@ -814,6 +826,13 @@ struct TuiApp {
     /// Which running job the /jobs browser is showing in detail; `None` is
     /// the list itself.
     job_detail: Option<usize>,
+    /// The eval-case browser. It owns the list cursor, the live filter, the
+    /// open case's judgment and the last run's matches, so `/evals` needs no
+    /// overlay items and draws its own frames.
+    eval_browser: EvalBrowser,
+    /// The discovered cases the browser's rows were built from, in row order:
+    /// a row index is an index here, so a run re-reads exactly that case.
+    eval_cases: Vec<CliEval>,
     /// Next refresh deadline of the running-job snapshot.
     jobs_next_refresh: Option<Instant>,
     /// The lease path the TUI is holding open for live background work while
@@ -1122,6 +1141,8 @@ impl TuiApp {
             job_counts,
             job_rows,
             job_detail: None,
+            eval_browser: EvalBrowser::default(),
+            eval_cases: Vec::new(),
             jobs_next_refresh: Some(Instant::now() + Duration::from_millis(JOBS_REFRESH_MS)),
             held_lease_path: None,
             status_line_output: None,
@@ -1731,6 +1752,8 @@ impl TuiApp {
                 rows.extend(self.skill_picker_rows(overlay));
             } else if overlay.kind == OverlayKind::Jobs {
                 rows.extend(self.jobs_rows(overlay));
+            } else if overlay.kind == OverlayKind::Evals {
+                rows.extend(self.eval_rows());
             } else {
                 rows.extend(render_picker(
                     &overlay.title,
@@ -2456,6 +2479,12 @@ impl TuiApp {
             return;
         }
 
+        // The eval browser owns its keys as well: search, cursor, judging and
+        // running a case all stay inside the overlay.
+        if self.on_evals_key(&key) {
+            return;
+        }
+
         // ctrl+b opens the jobs browser from both composer states -- idle and
         // mid-run -- so the live background work is one key away whenever
         // there is something to look at.
@@ -2773,6 +2802,9 @@ impl TuiApp {
             // The jobs browser carries a live running-job snapshot — opened
             // by open_jobs, never through this static menu path.
             OverlayKind::Jobs => return,
+            // The eval browser carries discovered cases and a live judgment —
+            // opened by open_evals, never through this static menu path.
+            OverlayKind::Evals => return,
             OverlayKind::Model => (
                 "model profiles",
                 list_cli_model_profiles(settings)
@@ -3149,6 +3181,10 @@ impl TuiApp {
                     self.record_survey_answer(Some(item.id), None);
                 }
             }
+            OverlayKind::Evals => {
+                // The eval browser is driven by its own key handler
+                // (on_evals_key); this arm keeps the match exhaustive.
+            }
             OverlayKind::Model => match set_active_cli_profile(self.config.clone(), &item.id) {
                 Ok(next) => self.save_config(next, format!("model profile set to {}", item.id)),
                 Err(error) => self.push_error(error.to_string()),
@@ -3194,6 +3230,347 @@ impl TuiApp {
                     self.switch_session(record);
                 }
             }
+        }
+    }
+
+    // ----- /evals ---------------------------------------------------------
+
+    /// `/evals [row]` — the eval-case browser. A row number opens that case's
+    /// detail frame directly (the `/jobs <row>` shape); otherwise the list.
+    /// Nothing lands in the transcript: the overlay is a live view, and the
+    /// only file it writes is a case's own `verdict.json`.
+    fn evals_command(&mut self, args: &str) {
+        self.refresh_eval_rows();
+        if self.eval_browser.rows.is_empty() {
+            self.push_info(format!(
+                "no eval cases found. Add <name>/case.json + scenario.json under {} or ./.drip/evals/, or run `drip --evals` for the CLI listing.",
+                self.bootstrap.home.evals_dir
+            ));
+            return;
+        }
+        let index = args.trim().parse::<usize>().unwrap_or(0);
+        self.open_evals();
+        if index >= 1 && index <= self.eval_browser.rows.len() {
+            self.eval_browser.selected = index - 1;
+            self.eval_browser.open_detail();
+            self.repaint();
+        }
+    }
+
+    /// Re-reads the discovered cases and rebuilds the browser's rows, so a case
+    /// added while the TUI runs appears without a restart. A row's detail comes
+    /// from the case's own files; a case whose files no longer parse keeps its
+    /// row (the listing is discovery's, not the loader's) and shows no scenario.
+    fn refresh_eval_rows(&mut self) {
+        let cwd = std::path::PathBuf::from(&self.bootstrap.cwd);
+        let home_evals = std::path::PathBuf::from(&self.bootstrap.home.evals_dir);
+        self.eval_cases = discover_evals(&cwd, &home_evals);
+
+        let rows: Vec<EvalRow> = self
+            .eval_cases
+            .iter()
+            .map(|eval| {
+                let scope = match eval.scope {
+                    EvalScope::Project => "project",
+                    EvalScope::User => "user",
+                };
+                let mut row = EvalRow {
+                    candidates: Vec::new(),
+                    description: eval.description.clone(),
+                    dir: std::path::Path::new(&eval.path)
+                        .parent()
+                        .map(|parent| parent.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    expected: Vec::new(),
+                    goal: String::new(),
+                    kind: eval.kind.as_str().to_string(),
+                    name: eval.name.clone(),
+                    scope: scope.to_string(),
+                };
+                if let Ok(loaded) = crate::cli::evals::load_eval(eval) {
+                    row.dir = loaded.dir.clone();
+                    row.goal = loaded.scenario.goal.clone();
+                    row.expected = loaded.case.expected.clone();
+                    row.candidates = loaded.scenario.candidates.clone();
+                }
+                row
+            })
+            .collect();
+
+        self.eval_browser = EvalBrowser::new(rows);
+    }
+
+    /// Opens the browser's list frame over the current rows.
+    fn open_evals(&mut self) {
+        self.overlay = Some(Overlay {
+            filter: String::new(),
+            items: Vec::new(),
+            kind: OverlayKind::Evals,
+            selected: 0,
+            title: "Eval cases".to_string(),
+        });
+        self.repaint();
+    }
+
+    /// The browser's frame: the open case's detail frame, or the list.
+    fn eval_rows(&self) -> Vec<String> {
+        match self.eval_browser.detail_row() {
+            Some(row) => crate::tui::evals::render_eval_detail(
+                row,
+                self.eval_browser.summary.as_ref(),
+                &self.eval_browser.applicable,
+                &self.eval_browser.not_applicable,
+                self.eval_browser.running,
+                self.cols,
+            ),
+            None => crate::tui::evals::render_evals_list(&self.eval_browser, self.cols),
+        }
+    }
+
+    /// Keeps the list highlight inside the filtered rows after the filter text
+    /// changed: a filter that hides the highlighted case moves the highlight to
+    /// the first visible one.
+    fn clamp_eval_selection(&mut self) {
+        let visible = self.eval_browser.visible();
+        if visible.is_empty() {
+            self.eval_browser.selected = 0;
+        } else if !visible.contains(&self.eval_browser.selected) {
+            self.eval_browser.selected = visible[0];
+        }
+    }
+
+    /// Key handling for the browser. Returns true when the key was consumed.
+    /// Esc steps out one level at a time (detail, then the list); in the detail
+    /// frame enter runs the case, the arrows walk its candidates and `a` / `n`
+    /// judge the one under the cursor; in the list the arrows move the
+    /// highlight and typing edits the filter.
+    fn on_evals_key(&mut self, key: &Key) -> bool {
+        if self.overlay.as_ref().map(|overlay| overlay.kind) != Some(OverlayKind::Evals) {
+            return false;
+        }
+        let in_detail = self.eval_browser.detail.is_some();
+
+        match key {
+            Key::Ctrl('c') => self.quit = true,
+            Key::Escape => {
+                if in_detail {
+                    // Leaving the detail frame is when the judgment is
+                    // persisted: the verdict is written into the case's own
+                    // directory, never the one shown next.
+                    self.persist_eval_verdict();
+                    self.eval_browser.close_detail();
+                } else {
+                    self.overlay = None;
+                }
+                self.repaint();
+            }
+            Key::Left | Key::Backspace if in_detail => {
+                self.persist_eval_verdict();
+                self.eval_browser.close_detail();
+                self.repaint();
+            }
+            Key::Up => {
+                if in_detail {
+                    self.eval_browser.move_candidate(-1);
+                } else {
+                    self.eval_browser.move_selection(-1);
+                }
+                self.repaint();
+            }
+            Key::Down => {
+                if in_detail {
+                    self.eval_browser.move_candidate(1);
+                } else {
+                    self.eval_browser.move_selection(1);
+                }
+                self.repaint();
+            }
+            Key::Backspace => {
+                self.eval_browser.filter.pop();
+                self.clamp_eval_selection();
+                self.repaint();
+            }
+            Key::Return => {
+                if in_detail {
+                    self.run_eval_case();
+                } else {
+                    self.eval_browser.open_detail();
+                    self.repaint();
+                }
+            }
+            Key::Text(text) | Key::Paste(text) => {
+                if in_detail && text == "a" {
+                    self.eval_browser.judge_selected(true);
+                    self.persist_eval_verdict();
+                    self.repaint();
+                } else if in_detail && text == "n" {
+                    self.eval_browser.judge_selected(false);
+                    self.persist_eval_verdict();
+                    self.repaint();
+                } else if !in_detail {
+                    self.eval_browser.filter.push_str(text);
+                    self.clamp_eval_selection();
+                    self.repaint();
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Runs the open case through the real classifier in the background: the
+    /// same call a loop makes, against the case's own candidate pool (skills,
+    /// or the plan pool for a `plan` case). The reply lands as `Msg::Evals`, so
+    /// nothing here blocks the UI.
+    fn run_eval_case(&mut self) {
+        if self.eval_browser.running {
+            return;
+        }
+        let Some(index) = self.eval_browser.detail else {
+            return;
+        };
+        let Some(eval) = self.eval_cases.get(index).cloned() else {
+            return;
+        };
+        if self.bootstrap.no_classifier {
+            self.push_error("the classifier is off (--no-classifier), so a case cannot be run");
+            return;
+        }
+        let settings = self.config.settings.clone();
+        let env = self.merged_env();
+        let route = match crate::harness::classifier::resolve_classifier_route(
+            &settings,
+            Some(&env),
+            self.bootstrap.classifier.as_deref(),
+        ) {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                self.push_error(
+                    "/evals needs a configured classifier profile (see /model, or start drip with --classifier <profile-id>).",
+                );
+                return;
+            }
+            Err(error) => {
+                self.push_error(format!("classifier: {error}"));
+                return;
+            }
+        };
+
+        let home = self.bootstrap.home.clone();
+        let cwd = std::path::PathBuf::from(&self.bootstrap.cwd);
+        let home_plans = std::path::PathBuf::from(&home.plans_dir);
+        let name = eval.name.clone();
+        let tx = self.tx.clone();
+        self.eval_browser.running = true;
+        self.push_info(format!("running eval case {name} through the classifier…"));
+
+        std::thread::spawn(move || {
+            let loaded = match crate::cli::evals::load_eval(&eval) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    let _ = tx.send(Msg::Evals {
+                        name,
+                        outcome: Err(error),
+                    });
+                    return;
+                }
+            };
+            let declared = loaded.scenario.candidates.clone();
+            let (candidates, missing) = match loaded.case.kind {
+                crate::cli::evals::EvalKind::Plan => {
+                    let pool = crate::cli::plans::build_plan_pool(&cwd, &home_plans);
+                    crate::cli::eval_runner::plan_candidates(&pool, &declared)
+                }
+                _ => crate::cli::eval_runner::skill_candidates(
+                    &discover_all_skills(&cwd, &home).unwrap_or_default(),
+                    &declared,
+                ),
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let mut outcome = match runtime {
+                Ok(runtime) => runtime.block_on(crate::cli::eval_runner::run_eval(
+                    &route,
+                    &loaded,
+                    &candidates,
+                )),
+                Err(error) => EvalRunOutcome {
+                    error: Some(format!("tokio runtime unavailable ({error})")),
+                    name: loaded.name.clone(),
+                    ..Default::default()
+                },
+            };
+            for missing in missing {
+                outcome
+                    .warnings
+                    .push(format!("{missing} is not installed at this scope"));
+            }
+            let _ = tx.send(Msg::Evals {
+                name,
+                outcome: Ok(outcome),
+            });
+        });
+    }
+
+    /// Applies a background run's outcome to the browser and records what was
+    /// matched beside the case (the CLI's rule: a run writes `matched` and
+    /// leaves the operator's judgment alone). A reply for a case that is no
+    /// longer open is dropped — the operator has moved on.
+    fn on_eval_run(&mut self, name: String, outcome: Result<EvalRunOutcome, String>) {
+        self.eval_browser.running = false;
+        let Some(row) = self.eval_browser.detail_row().cloned() else {
+            return;
+        };
+        if row.name != name {
+            return;
+        }
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.push_error(format!("eval case {name}: {error}"));
+                return;
+            }
+        };
+        let dir = std::path::PathBuf::from(&row.dir);
+        if let Err(error) = crate::cli::eval_runner::record_eval_run(&dir, &outcome) {
+            self.push_error(format!("could not record the eval run: {error}"));
+        }
+        for warning in &outcome.warnings {
+            self.push_info(format!("eval {name}: {warning}"));
+        }
+        if let Some(error) = &outcome.error {
+            self.push_error(format!("eval {name}: {error}"));
+        }
+        self.eval_browser.summary = Some(EvalRunSummary {
+            matched: outcome.matched(),
+            missed: outcome.agreement.missed.clone(),
+            spurious: outcome.agreement.spurious.clone(),
+            warnings: outcome.warnings.clone(),
+        });
+    }
+
+    /// Writes the open case's judgment into its own `verdict.json`, preserving
+    /// whatever `matched` the last run recorded.
+    fn persist_eval_verdict(&mut self) {
+        if !self.eval_browser.has_judgment() {
+            return;
+        }
+        let Some(row) = self.eval_browser.detail_row().cloned() else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(&row.dir);
+        let mut verdict = crate::cli::evals::load_eval_verdict(&dir).unwrap_or_default();
+        verdict.applicable = self.eval_browser.applicable.clone();
+        verdict.not_applicable = self.eval_browser.not_applicable.clone();
+        verdict.judged_at = Some(now_iso());
+        match crate::cli::evals::save_eval_verdict(&dir, &verdict) {
+            Ok(()) => self.push_info(format!(
+                "eval verdict for {} saved to {}",
+                row.name,
+                crate::cli::evals::eval_verdict_path(&dir).to_string_lossy()
+            )),
+            Err(error) => self.push_error(format!("could not save the eval verdict: {error}")),
         }
     }
 
@@ -3684,6 +4061,7 @@ impl TuiApp {
                 }
             }
             "jobs" => self.jobs_command(args),
+            "evals" => self.evals_command(args),
             "skills" => {
                 // Interactive picker instead of a transcript dump: search,
                 // cursor movement and on/off toggles, and nothing lands in
@@ -5270,6 +5648,10 @@ impl TuiApp {
                     reply,
                 }) => {
                     self.apply_btw_result(epoch, &question, reply);
+                    self.repaint();
+                }
+                Ok(Msg::Evals { name, outcome }) => {
+                    self.on_eval_run(name, outcome);
                     self.repaint();
                 }
                 Ok(Msg::Info(text)) => self.push_info(text),
@@ -9121,6 +9503,54 @@ mod background_jobs_tests {
         let rows = strip(&fixture.app.live_region()).join("\n");
         assert!(rows.contains("Shell details"), "{rows}");
         assert!(rows.contains("Script: cargo test --lib"), "{rows}");
+    }
+
+    #[test]
+    fn the_evals_command_opens_the_browser_and_a_judgment_lands_beside_the_case() {
+        let mut fixture = make_app(vec![]);
+        fixture.app.dispatch_command("evals", "");
+        assert_eq!(
+            fixture.app.overlay.as_ref().map(|overlay| overlay.kind),
+            Some(OverlayKind::Evals)
+        );
+        assert_eq!(
+            fixture.app.eval_browser.rows.len(),
+            2,
+            "the two starter cases are seeded into the home"
+        );
+        let rows = strip(&fixture.app.live_region()).join("\n");
+        assert!(rows.contains("eval cases (2/2)"), "{rows}");
+        assert!(rows.contains("flaky-test-fixup"), "{rows}");
+
+        // Enter opens the case's detail frame; `a` judges the candidate the
+        // cursor sits on, written into the case's own directory — the home
+        // evals dir it was discovered in.
+        fixture.app.on_key(Key::Return);
+        assert!(fixture.app.eval_browser.detail.is_some());
+        let candidate = fixture
+            .app
+            .eval_browser
+            .selected_candidate()
+            .expect("the starter case declares candidates");
+        fixture.app.on_key(Key::Text("a".to_string()));
+
+        let dir = fixture
+            .app
+            .eval_browser
+            .detail_row()
+            .cloned()
+            .expect("a case is open")
+            .dir;
+        let verdict = crate::cli::evals::load_eval_verdict(std::path::Path::new(&dir))
+            .expect("the judgment was persisted");
+        assert!(verdict.applicable.contains(&candidate), "{verdict:?}");
+        assert!(verdict.judged_at.is_some(), "the judgment is stamped");
+        assert!(
+            dir.starts_with(&fixture._home.path().to_string_lossy().into_owned()),
+            "the verdict stays at the case's own scope: {dir}"
+        );
+        let rendered = strip(&fixture.app.live_region()).join("\n");
+        assert!(rendered.contains("applicable"), "{rendered}");
     }
 
     #[test]

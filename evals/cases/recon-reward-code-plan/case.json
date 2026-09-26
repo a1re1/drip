@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "recon-reward-code-plan",
+  "description": "Read-only recon with a written report.",
+  "kind": "plan",
+  "expected": [
+    "investigate-report"
+  ]
+}

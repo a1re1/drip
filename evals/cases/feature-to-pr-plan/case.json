@@ -4,6 +4,7 @@
   "description": "A planning loop that builds a feature and delivers it as a PR: ship-pr.",
   "kind": "plan",
   "expected": [
-    "ship-pr"
+    "ship-pr",
+    "build-feature"
   ]
 }

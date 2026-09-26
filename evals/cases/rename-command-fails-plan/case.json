@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "rename-command-fails-plan",
+  "description": "A bug report that also says '/navis a pr': fix-bug owns it. ship-pr is left out of the candidates because the classifier does not hear '/navis a pr' as a pull request; the explicit /navis skill covers that.",
+  "kind": "plan",
+  "expected": [
+    "fix-bug"
+  ]
+}

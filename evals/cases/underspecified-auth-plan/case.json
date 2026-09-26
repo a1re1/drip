@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "underspecified-auth-plan",
+  "description": "An underspecified feature request is still a feature build.",
+  "kind": "plan",
+  "expected": [
+    "build-feature"
+  ]
+}

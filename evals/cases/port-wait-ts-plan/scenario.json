@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Port src/cli/wait.ts into drip/src/cli/wait.rs (currently absent). The complete TS source is pasted below; do not read any other files",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

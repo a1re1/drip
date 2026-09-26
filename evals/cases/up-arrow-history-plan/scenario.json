@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "help me add a feature to hit the up arrow key in chat where the last goal i sent is repeated, similar to how up in the terminal brings back the last command. down should go forward in history",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "verify-activity-charts-plan",
+  "description": "Read-only verification of a branch.",
+  "kind": "plan",
+  "expected": [
+    "verify-only"
+  ]
+}

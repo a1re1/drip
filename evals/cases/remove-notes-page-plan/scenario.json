@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Remove the experimental Notes page and its 'notes' feature flag from this Rust/gpui app. Keep the generic feature-flag infrastructure",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

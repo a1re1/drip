@@ -2,6 +2,18 @@
   "version": 1,
   "goal": "add a --since filter to the sessions list, cover it with tests, and put it up as a draft PR",
   "candidates": [
-    "ship-pr"
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
   ]
 }

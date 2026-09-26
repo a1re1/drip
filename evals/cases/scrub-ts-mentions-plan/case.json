@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "scrub-ts-mentions-plan",
+  "description": "A comment scrub over one directory.",
+  "kind": "plan",
+  "expected": [
+    "sweep-rename"
+  ]
+}

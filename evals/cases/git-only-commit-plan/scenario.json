@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Git-only, no code edits or tests: run git checkout damascus && git add -A -- README.md skills src && git commit -q -m 'WIP: address review findings' and report the output",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

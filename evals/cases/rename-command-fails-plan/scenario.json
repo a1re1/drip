@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "goal": "when i run /rename i get a message that it failed. manual names work fine, but the automatic name generation seems broken. can you fix it and /navis a pr",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

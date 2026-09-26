@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Investigate, without editing application files or committing, how to implement the GANTRY workspace design refresh in this gpui app and prepare an implementation plan for user approval",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

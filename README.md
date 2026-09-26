@@ -122,7 +122,7 @@ applicable) name its false negatives and positives — the same two counts
 ```sh
 drip --evals                        # list cases: name, kind, scope, description
 drip --evals --json                 # machine-readable
-drip --run-evals                    # run every case and print what matched
+drip --run-evals                    # run every case, printing each as it is answered
 drip --run-evals ship-this-branch   # run one case by name
 drip --run-evals --runs 3           # ask each case three times; report unstable ones
 drip --run-evals --json             # {"runs": [...], "summary": {...}}
@@ -138,6 +138,12 @@ classifier. The run ends with one pooled line — runs passed, precision
 exits non-zero when any run failed, so it works as a regression gate. With
 `--runs N` every case is asked N times and a case whose runs disagree is
 listed as `unstable`.
+
+Results stream out as they arrive: each run's block is printed — and stdout
+flushed — the moment it is answered, so a long suite shows partial progress
+instead of finishing in silence, and the pooled summary is printed once at the
+end. With `--json`, stdout stays a single JSON document and a one-line-per-run
+progress report goes to stderr.
 
 Running cases opens no session and writes no transcript or run state — only the
 case's own `verdict.json` is updated — so it is safe from any directory. It does

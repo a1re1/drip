@@ -2153,8 +2153,9 @@ in the background, and the result then says to use `ASYNC_WAIT` (blocks) or
 list includes `BASH_ASYNC` always gets `ASYNC_WAIT` and `ASYNC_TAIL` too —
 recorded sessions without them spent whole loops on "sleep 12; cat log"
 rounds. The read-only nudge ("N reads and nothing written") waits for the
-second cycle of a loop (or sixteen reads): eight reads in a fresh loop's first
-cycle is orientation, not drift.
+second cycle of a loop (or sixteen reads — eight when the file outline
+already landed in that loop's first prompt): eight reads in a fresh loop's
+first cycle is orientation, not drift.
 
 A Cargo workspace gets a build warm-up in the background at run start (its
 output goes nowhere; the job is killed with the run), so the author's first
@@ -2307,12 +2308,15 @@ effort setting they produced a median 1,162 completion tokens per call (3,782
 on the slow ones) against about 105 for the same model at low effort, taking
 75s per file. The review banner names the effort in use.
 
-A cycle allows sixteen tool rounds (was eight). A cycle boundary folds the
-transcript's cold tool results and adds a continuation message, so every
-boundary costs the model a page of re-orientation READs; with cold results
-folded as the transcript grows anyway, longer cycles are the cheaper way to
-keep context bounded. The multi-cycle bench tasks ran 11-29% faster at
-sixteen rounds in a three-repeat A/B.
+A cycle allows twelve tool rounds (was eight, then sixteen). A cycle
+boundary folds the transcript's cold tool results and adds a continuation
+message, so every boundary costs the model a page of re-orientation READs;
+with cold results folded as the transcript grows anyway, longer cycles are
+the cheaper way to keep context bounded. The multi-cycle bench tasks ran
+11-29% faster at sixteen rounds in a three-repeat A/B, but the recorded audit
+found loops whose cycle boundary came too late to act on what they had read
+(calls per loop p90 44, and 24% of loops made 30 or more), so the cap came
+back down to twelve.
 
 Auto plan mode now skips the planner for goals up to 2,500 characters naming
 up to ten paths (was 700 and three) when the goal declares a backticked

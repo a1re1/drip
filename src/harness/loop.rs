@@ -2569,6 +2569,24 @@ pub fn build_read_only_loop_nudge(read_only_calls: i64, cycle: i64, max_cycles: 
     )
 }
 
+/// Reads a fresh loop may spend on orientation before the read-only nudge
+/// fires. The allowance only ever binds inside a loop's *first* cycle: a loop
+/// whose first prompt already carried the file outline has had that pass
+/// handed to it, so it gets half the allowance (the nudge constant), while a
+/// loop that had to orient itself with READs gets the full one. A non-outlined
+/// loop needs sixteen reads to reach the doubled threshold, which the
+/// twelve-round cycle-1 cap no longer permits: in cycle 1 its nudge in practice
+/// never fires and the count resumes into cycle 2, where the eight-read
+/// multiple lands instead. The constant is kept as the described orientation
+/// allowance, not as a count that always lands.
+pub fn read_only_rounds_before_nudge(outlined: bool) -> i64 {
+    if outlined {
+        READ_ONLY_NUDGE_EVERY
+    } else {
+        READ_ONLY_NUDGE_EVERY * 2
+    }
+}
+
 // Workspace-relative file paths a goal names explicitly ("NEW FILE
 // src/lib/widget.rs", "update `drip/src/cli/entry.rs`"). Requires a directory
 // separator so prose like "v1.2" or "README.md" never counts. The boundary
@@ -6342,6 +6360,11 @@ pub struct LoopScope {
     /// Successful READ/GREP/DIR calls so far this loop, and whether anything
     /// has been written or recorded — the read-only nudge's inputs.
     pub read_only_calls_this_loop: i64,
+    /// This loop's first cycle prompt carried the file outline (definitions for
+    /// the files the task names) — set in cycle 1 only, the sole cycle that
+    /// builds outlines: the loop's orientation reads there are already paid
+    /// for, so the read-only nudge waits half as long.
+    pub outlined_this_loop: bool,
     pub persisted_this_loop: bool,
     pub verification_stuck_this_loop: bool,
     pub narration_nudge_used: bool,
@@ -9551,6 +9574,7 @@ impl HarnessRun {
             delivery_cycles: 0,
             made_progress: false,
             read_only_calls_this_loop: 0,
+            outlined_this_loop: false,
             persisted_this_loop: false,
             verification_stuck_this_loop: false,
             narration_nudge_used: false,
@@ -10075,6 +10099,15 @@ impl HarnessRun {
                 }
                 _ => None,
             };
+            // A prompt that already carried the file outline has had this
+            // loop's orientation pass; the read-only nudge can fire earlier.
+            // Outlines are only built for cycle 1, so the flag is set here and
+            // nowhere else: recomputing `file_outlines.is_some()` on a later
+            // cycle would clear it even though this loop did start with the
+            // outline in hand.
+            if cycle == 1 {
+                scope.outlined_this_loop = file_outlines.is_some();
+            }
             let repo_memory_index = self.options.repo_memory_index.clone();
             let repo_memory_dir = self
                 .options
@@ -11808,10 +11841,20 @@ impl HarnessRun {
             if (deduped_tool || read_only_bash) && !execution.failed {
                 scope.read_only_calls_this_loop += 1;
                 // Eight reads in the first cycle of a fresh loop is normal
-                // orientation, not drift: the nudge waits for the second
-                // cycle (or sixteen reads), so it lands when it means something.
-                let orientation =
-                    scope.cycle <= 1 && scope.read_only_calls_this_loop < READ_ONLY_NUDGE_EVERY * 2;
+                // orientation, not drift: the nudge waits past it, so it lands
+                // when it means something. A loop whose first prompt already
+                // carried the file outline gets half the allowance — its reads
+                // from there are drift, not orientation.
+                //
+                // Only cycle 1 is exempt. The doubled allowance cannot bind
+                // there any more: the per-cycle round cap is twelve, so a
+                // non-outlined loop cannot log its sixteenth read before that
+                // cycle ends, and its nudge fires on the count resuming in
+                // cycle 2. The outlined half still lands inside cycle 1, at
+                // eight reads.
+                let orientation = scope.cycle == 1
+                    && scope.read_only_calls_this_loop
+                        < read_only_rounds_before_nudge(scope.outlined_this_loop);
                 if !scope.persisted_this_loop
                     && !scope.review_loop
                     && !orientation
@@ -15113,5 +15156,15 @@ mod review_opt_out_tests {
         ));
         assert!(!loop_allows_tool("MCP__github__search", None, None));
         assert!(!loop_allows_tool("MCP__github__search", None, Some(&[])));
+    }
+
+    // A loop whose first prompt already carried the file outline reads on
+    // drift rather than orientation, so the read-only nudge fires at half the
+    // read count it takes in a loop that had to orient itself with READs.
+    #[test]
+    fn the_read_only_nudge_fires_earlier_when_the_outline_was_injected() {
+        assert_eq!(READ_ONLY_NUDGE_EVERY, 8);
+        assert_eq!(read_only_rounds_before_nudge(false), 16);
+        assert_eq!(read_only_rounds_before_nudge(true), 8);
     }
 }

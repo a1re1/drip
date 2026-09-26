@@ -553,6 +553,11 @@ pub fn format_eval_summary_human(outcomes: &[EvalRunOutcome]) -> String {
 /// the composition of `format_eval_outcome_human` and
 /// `format_eval_summary_human`, so a streaming run prints exactly what this
 /// one-shot report shows.
+///
+/// `--run-evals` streams the blocks itself and calls the two halves directly,
+/// so this is the report as one string — used by tests and any one-shot caller;
+/// the empty-suite message below is its zero-outcome case (the CLI never gets
+/// there, it exits before the loop when no case is discovered).
 pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
     if outcomes.is_empty() {
         return "No eval cases ran.\n".to_string();
@@ -972,6 +977,11 @@ mod tests {
         composed.push_str(&format_eval_summary_human(&outcomes));
 
         assert_eq!(composed, format_eval_run_human(&outcomes));
+    }
+
+    #[test]
+    fn an_empty_report_says_no_case_ran() {
+        assert_eq!(format_eval_run_human(&[]), "No eval cases ran.\n");
     }
 
     #[test]

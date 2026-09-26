@@ -1576,14 +1576,14 @@ mod tests {
     #[test]
     fn the_focused_skills_pane_pages_with_brackets_and_walks_items_with_j_k() {
         let mut app = WatchApp::new(project(), "/r".into());
-        app.vm.skill_loads = (1..=40)
-            .map(|i| crate::watch::render::SkillLoad {
-                iteration: i,
-                skills: vec![format!("skill-{i}")],
-                tools: vec![format!("TOOL-{i}")],
-                plans: vec![],
-            })
-            .collect();
+        // Only the active loop is listed, so its own surface must be long
+        // enough to need more than one page.
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 40,
+            skills: (1..=40).map(|i| format!("skill-{i}")).collect(),
+            tools: (1..=40).map(|i| format!("TOOL-{i}")).collect(),
+            plans: vec![],
+        }];
         app.vm.focus = 4;
         assert!(crate::watch::render::skill_page_count(&app.vm, 80, 24) > 1);
 
@@ -1668,11 +1668,11 @@ mod tests {
         app.on_key("k");
         assert_eq!(app.vm.sel_skill, Some(0));
         assert_eq!(app.vm.skill_detail.as_ref().unwrap().title, "skill · tdd");
-        // From nothing, `k` enters at the far end of the list — the last
-        // listing, which here is the loop block's own READ.
+        // From nothing, `k` enters at the far end of the list — the active
+        // loop's tools follow its skills, so the far end is READ.
         app.vm.sel_skill = None;
         app.on_key("k");
-        assert_eq!(app.vm.sel_skill, Some(3));
+        assert_eq!(app.vm.sel_skill, Some(1));
         assert_eq!(app.vm.skill_detail.as_ref().unwrap().title, "tool · READ");
 
         // A click in [4] picks the name under the pointer.
@@ -1689,14 +1689,12 @@ mod tests {
     #[test]
     fn a_pick_survives_a_page_turn_and_clamps_when_the_surface_changes() {
         let mut app = WatchApp::new(project(), "/r".into());
-        app.vm.skill_loads = (1..=8)
-            .map(|i| crate::watch::render::SkillLoad {
-                iteration: i,
-                skills: vec![format!("skill-{i}")],
-                tools: vec![format!("TOOL-{i}")],
-                plans: vec![],
-            })
-            .collect();
+        app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
+            iteration: 8,
+            skills: (1..=8).map(|i| format!("skill-{i}")).collect(),
+            tools: (1..=8).map(|i| format!("TOOL-{i}")).collect(),
+            plans: vec![],
+        }];
         app.vm.focus = 4;
         app.on_key("j");
         app.on_key("j");

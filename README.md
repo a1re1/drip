@@ -75,8 +75,8 @@ drip --plans --json     # machine-readable
 
 The plan a planning loop actually ran with is recorded on its `loop-start`
 telemetry event (`plans`: the chosen names in composition order), and the
-`dripw` `[4]` pane rolls the chosen plans up and lists them per loop — so a
-transcript says which template shaped the task list a run produced.
+`dripw` `[4]` pane lists the active loop's chosen plans — so a transcript says
+which template shaped the task list a run produced.
 
 ## Eval cases
 
@@ -1476,22 +1476,23 @@ name under the pointer — even a name that wrapped onto the next row. Hovering
 the transcript (or the shell log with `[3]` focused) and rolling the scroll
 wheel scrolls it too — older lines up, newer down.
 
-The `[4]` Skills, Tools & Plans pane shows what the focused session's loops actually
-had at their disposal. On every loop-start telemetry event the harness writes
-the composed skill set — the classifier's picks plus the run's base-prompt
-`--skill` activations, deduped in composition order — and the loop's whole tool
-surface: the packed tools its role allowlist and the `--mcp` gate leave
-callable, plus the harness tools (`plan_tasks`, `finish_task`, `ask_user`, …).
-dripw reads those events straight out of the session transcript and shows a
-roll-up of every skill and every tool seen across the run with how many loops
-had it, then one block per loop, newest first, so you can see what a run could
-reach for now and how the surface moved as it ran. Names are printed as
-comma-separated lists that wrap to the pane width rather than one name per line,
-so a loop reaching for twenty tools costs a couple of rows; when the whole list
-still does not fit the pane it pages — `[/]` (or `h`/`l`) turn the page while `[4]`
-is focused, and the pane's last row reads `page 2/5 · [/] pages · j/k/↑↓ picks`
-(the same `j`/`k`/arrow pick as elsewhere). Sessions recorded before
-this telemetry existed just show the empty state.
+The `[4]` Skills, Tools & Plans pane shows what the active loop actually has at
+its disposal — the one surface a new loop would run with — and keeps the pane to
+a couple of rows instead of the whole run's history. On every loop-start
+telemetry event the harness writes the composed skill set — the classifier's
+picks plus the run's base-prompt `--skill` activations, deduped in composition
+order — and the loop's whole tool surface: the packed tools its role allowlist
+and the `--mcp` gate leave callable, plus the harness tools (`plan_tasks`,
+`finish_task`, `ask_user`, …). dripw reads those events straight out of the
+session transcript and lists the latest loop's own skills, plans and tools under
+a `loop N · X skills · Y tools` header; the older loops' surfaces stay in the
+telemetry, not in the pane. Names are printed as comma-separated lists that wrap
+to the pane width rather than one name per line, so a loop reaching for twenty
+tools costs a couple of rows; when that list still does not fit the pane it
+pages — `[/]` (or `h`/`l`) turn the page while `[4]` is focused, and the pane's
+last row reads `page 2/5 · [/] pages · j/k/↑↓ picks` (the same `j`/`k`/arrow pick
+as elsewhere). Sessions recorded before this telemetry existed just show the
+empty state.
 
 With `[4]` focused, `↑`/`↓` (or `j`/`k`, the wheel, or a click) move over those
 names individually — the picked name alone paints in reverse video (the rest of
@@ -1521,9 +1522,9 @@ no server, still says `no definition available in this checkout`.
 
 dripw shows sessions started in the current directory or any directory beneath it.
 
-The `[4]` pane opens with the roll-up — every skill, tool and chosen plan
-the session's loops recorded — then a block per loop naming the skills and
-plans that loop ran with.
+The `[4]` pane lists only the active loop — the latest skills, plans and tools
+the session recorded — and never the run-wide roll-up or the per-loop history
+the telemetry keeps.
 
 ## Browser UI (`drip --ui`)
 

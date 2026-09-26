@@ -5,6 +5,8 @@ pub mod classifier_pool;
 pub mod commands;
 pub mod delegate_tool;
 pub mod entry;
+pub mod eval_runner;
+pub mod evals;
 pub mod file_suggestions;
 pub mod follow;
 pub mod gc;

@@ -55,6 +55,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "jobs",
     },
     SlashCommandSpec {
+        args: Some("[row]"),
+        description: "Browse the eval cases, run one through the classifier, judge it.",
+        name: "evals",
+    },
+    SlashCommandSpec {
         args: None,
         description: "Pick skills interactively: search, move, toggle on/off.",
         name: "skills",

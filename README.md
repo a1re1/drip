@@ -78,6 +78,88 @@ telemetry event (`plans`: the chosen names in composition order), and the
 `dripw` `[4]` pane rolls the chosen plans up and lists them per loop — so a
 transcript says which template shaped the task list a run produced.
 
+## Eval cases
+
+An eval case is a **reusable scenario for the skill classifier**: a goal, a
+role, and — optionally — the candidate names to run it against, plus the names
+that *should* be composed. Running a case asks the real classifier the same
+question a loop asks it and records what it matched, so a `classifiers.json`
+change is measured instead of guessed at.
+
+A case is a directory; `case.json` and `scenario.json` make it loadable, and a `verdict.json` appears beside them once it has been run or judged:
+
+```
+<home>/evals/<name>/case.json              # the case: kind + expected candidates
+<home>/evals/<name>/scenario.json          # the classifier's input
+<home>/evals/<name>/verdict.json           # written by a run, or by the operator
+<project>/.drip/evals/<name>/...           # project-scoped, wins by name
+```
+
+`case.json` carries `name` (defaults to the directory name), `description`, an
+optional `expected` (the candidate names that should be composed) and `kind`,
+one of:
+
+- `prompt` — a bare prompt with no task yet (the loop's first planning pass),
+- `task` — a prompt plus a task title (the task-loop shape),
+- `plan` — a planning loop, classified against the **plan** pool rather than the
+  skill pool.
+
+`scenario.json` carries the context the classifier sees: `goal`, and optionally
+`task`, `notes`, `role`, `tools`, `mcpServers` and `candidates`. Names listed in
+`candidates` fix the pool and its order — a declared name that is not installed
+is reported as missing rather than silently swapped for something else. Without
+`candidates`, a case runs against everything discovered.
+
+A run writes `verdict.json` **inside the case's own directory**, so a
+project-shadowed case records its verdict at the project scope and never at the
+user one, and a home-scoped case stays in the home. Only `matched` is written,
+so an operator's judgment in the same file survives a re-run. The verdict's
+`applicable` / `notApplicable` lists are what the classifier is scored against:
+`missed` (applicable but not matched) and `spurious` (matched but not
+applicable) name its false negatives and positives — the same two counts
+`probatio` reports for harvested loops.
+
+```sh
+drip --evals                        # list cases: name, kind, scope, description
+drip --evals --json                 # machine-readable
+drip --run-evals                    # run every case and print what matched
+drip --run-evals ship-this-branch   # run one case by name
+```
+
+Running cases opens no session and writes no transcript or run state — only the
+case's own `verdict.json` is updated — so it is safe from any directory. It does
+need a classifier profile (`runtime.classifier_profile_id` in
+`~/.drip/config.json`, or `--classifier <profile-id>`), because the case is
+answered by the same model that classifies a real loop. Drip ships two starter
+cases — `flaky-test-fixup` (a task loop where `tdd` and `verify-before-done`
+should compose) and `ship-this-branch` (a planning loop where the shipped
+`ship-pr` plan should classify as relevant) — and copies them into `<home>/evals`
+on the first start, with a marker beside `evals/` recording the names this home
+was given, so a deleted starter case stays deleted.
+
+### Eval cases in the TUI
+
+`drip --tui` carries the same library as an overlay: `/evals` (or `/evals 2`
+to jump straight into a case) opens the list — name, kind and scope per case,
+with a live filter over the names and descriptions — and enter opens a case's
+detail frame with its scenario goal, its `expected` names and the pool it is
+judged against.
+
+```
+/evals        browse the cases (type to filter, enter to open)
+              enter  run the open case through the real classifier
+              up/down  walk the case's candidates
+              a / n  judge the candidate under the cursor applicable / not
+              esc    back to the list, writing the judgment on the way out
+```
+
+Enter runs the case in the background through the same classifier the loop
+uses, and shows `matched`, `missed` and `spurious` where they land. The
+judgment is persisted the moment you leave the case, into that case's own
+`verdict.json` — a project case records at the project scope — so a run's
+`matched` and your `applicable` list end up in the same file the CLI writes,
+and `drip --run-evals` reads it back.
+
 ## MCP server (drip-mcp)
 
 Claude Code normally drives drip through the Bash tool. With Bash disabled,
@@ -1061,6 +1143,18 @@ covers the harness itself;
 `evals/classifier/README.md` documents the full CLI and the case schema. A case
 is only a regression test once `replay` reports `pass` — an `open`/`fail` case is
 the tuning queue, and a pinned case is never weakened to make it pass.
+
+Harvested loops are not the only input. The **eval-case library** (see
+[Eval cases](#eval-cases)) runs a hand-written scenario — goal, task, role,
+candidate pool and expected names — through the same real classifier and records
+what matched in the case's own `verdict.json`. A `missed`/`spurious` pair there
+is the same finding `compare` reports for a harvested loop, and it is the shape a
+pinned regression case takes when it is worth keeping by hand:
+
+```sh
+drip --evals                        # what cases exist, and at which scope
+drip --run-evals flaky-test-fixup   # re-run one and see what the classifier matched
+```
 
 ## Code review (`--review`)
 

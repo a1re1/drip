@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "flaky-test-fixup",
+  "description": "A flaky-test goal with a task title: tdd and verify-before-done should both be in play.",
+  "kind": "task",
+  "expected": ["tdd", "verify-before-done"]
+}

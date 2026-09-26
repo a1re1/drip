@@ -1758,7 +1758,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 17] = [
+    let exclusive_modes: [(&str, bool); 19] = [
         ("--answer", cli_args.answer),
         ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
@@ -1769,6 +1769,8 @@ pub async fn main(argv: Vec<String>) -> i32 {
         ("--review", cli_args.review),
         ("--send", cli_args.send),
         ("--plans", cli_args.plans),
+        ("--evals", cli_args.evals),
+        ("--run-evals", cli_args.run_evals),
         ("--skills", cli_args.skills),
         ("--praeparare", cli_args.praeparare),
         ("--state", cli_args.state),
@@ -2261,6 +2263,144 @@ pub async fn main(argv: Vec<String>) -> i32 {
         }
 
         print!("{}", crate::cli::plans::format_plans_human(&plans));
+        return 0;
+    }
+
+    if cli_args.evals {
+        let evals = crate::cli::evals::discover_evals(Path::new(&cwd), Path::new(&home.evals_dir));
+
+        if cli_args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&evals).unwrap_or_default()
+            );
+            return 0;
+        }
+
+        if evals.is_empty() {
+            println!(
+                "No eval cases found. Add case.json + scenario.json under {}/<name>/ or ./.drip/evals/<name>/.",
+                home.evals_dir
+            );
+            return 0;
+        }
+
+        print!("{}", crate::cli::evals::format_evals_human(&evals));
+        return 0;
+    }
+
+    if cli_args.run_evals {
+        // A throwaway workspace: no session is opened, no transcript is
+        // written and no run state is touched — the classifier is asked a
+        // case's scenario and the answer is recorded in the case's own
+        // verdict.json (see src/cli/eval_runner.rs).
+        let all = crate::cli::evals::discover_evals(Path::new(&cwd), Path::new(&home.evals_dir));
+        let selected: Vec<crate::cli::evals::CliEval> = match cli_args.run_evals_name.as_deref() {
+            Some(name) => all
+                .into_iter()
+                .filter(|eval| eval.name == name)
+                .collect(),
+            None => all,
+        };
+
+        if selected.is_empty() {
+            match cli_args.run_evals_name.as_deref() {
+                Some(name) => eprintln!("No eval case named \"{name}\" under {}/ or ./.drip/evals/.", home.evals_dir),
+                None => eprintln!(
+                    "No eval cases found. Add case.json + scenario.json under {}/<name>/ or ./.drip/evals/<name>/.",
+                    home.evals_dir
+                ),
+            }
+            return 1;
+        }
+
+        let process_env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        let eval_env: std::collections::HashMap<String, String> =
+            crate::core::env_vars::load_merged_env(Path::new(&home.env_vars_path), Some(&process_env))
+                .into_iter()
+                .collect();
+        let route = if cli_args.no_classifier {
+            None
+        } else {
+            match crate::harness::classifier::resolve_classifier_route(
+                &config.settings,
+                Some(&eval_env),
+                cli_args.classifier.as_deref(),
+            ) {
+                Ok(route) => route,
+                Err(error) => {
+                    eprintln!("{error}");
+                    None
+                }
+            }
+        };
+        let Some(route) = route else {
+            eprintln!(
+                "--run-evals needs a classifier profile: set one in {} or pass --classifier <id>.",
+                home.config_path
+            );
+            return 1;
+        };
+
+        let discovered = match discover_all_skills(Path::new(&cwd), &home) {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
+        let plan_pool = crate::cli::plans::build_plan_pool(Path::new(&cwd), Path::new(&home.plans_dir));
+
+        let mut outcomes: Vec<crate::cli::eval_runner::EvalRunOutcome> = Vec::new();
+
+        for eval in &selected {
+            let loaded = match crate::cli::evals::load_eval(eval) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            };
+
+            // The candidate pool follows the case's kind: a plan case offers
+            // the plan pool, everything else offers the discovered skills.
+            let (candidates, missing) = match &loaded.case.kind {
+                crate::cli::evals::EvalKind::Plan => {
+                    crate::cli::eval_runner::plan_candidates(&plan_pool, &loaded.scenario.candidates)
+                }
+                _ => crate::cli::eval_runner::skill_candidates(&discovered, &loaded.scenario.candidates),
+            };
+
+            for name in &missing {
+                eprintln!(
+                    "eval \"{}\": no candidate named \"{name}\" is installed",
+                    loaded.name
+                );
+            }
+
+            let outcome = crate::cli::eval_runner::run_eval(&route, &loaded, &candidates).await;
+
+            if let Err(error) =
+                crate::cli::eval_runner::record_eval_run(Path::new(&loaded.dir), &outcome)
+            {
+                eprintln!(
+                    "eval \"{}\": could not record the run: {error}",
+                    loaded.name
+                );
+            }
+
+            outcomes.push(outcome);
+        }
+
+        if cli_args.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&outcomes).unwrap_or_default()
+            );
+            return 0;
+        }
+
+        print!("{}", crate::cli::eval_runner::format_eval_run_human(&outcomes));
         return 0;
     }
 

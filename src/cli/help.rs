@@ -26,6 +26,9 @@ USAGE
 	drip --stop [id]               Stop a session's running goal (state persists; resumable)
 	drip --skills                  List the discovered skill pool (project/user/marketplace)
 	drip --plans                   List the discovered plan pool (project/user)
+drip --evals                   List discovered eval cases (project/user)
+drip --run-evals [name]        Run eval case(s) through the classifier in a
+                              throwaway workspace and record what matched
 	drip --help                    Show this text
 	drip --version                 Print the drip CLI version
 	drip --marketplace-list        List marketplaces/plugins (also: --marketplace-add <src> [name],
@@ -252,6 +255,15 @@ OPTIONS
 	                              <home>/plans on the first start, where it is ordinary and
 	                              deletable. The planner composes the plans relevant to a
 	                              goal into the planning loop's prompt only
+	--evals                       List discovered eval cases with kind, scope and
+	                              description; the shipped starter pair (flaky-test-fixup,
+	                              ship-this-branch) is copied into <home>/evals on the
+	                              first start
+	--run-evals [name]            Run every discovered eval case (or the one named) through
+	                              the skill classifier in a throwaway workspace and write
+	                              what it matched into the case's own verdict.json. No
+	                              session, transcript or run state is touched; needs a
+	                              classifier profile (--classifier <id> or the config)
 	--install-skills              Re-copy every default skill into <home>/skills and exit
 	                              (the way back after deleting one)
 	--tools <path>                Tools directory (default ./tools, falls back to built-in)
@@ -302,6 +314,8 @@ STORAGE
 	<project>/.drip/skills/, roles.json, plugins.json   Project-scoped configuration
 	~/.drip/plans/<name>/ + <project>/.drip/plans/       Plan templates: PLAN.md +
 	                              classification.json
+	~/.drip/evals/<name>/ + <project>/.drip/evals/<name>/   Eval cases: case.json +
+	                              scenario.json (+ verdict.json once run or judged)
 	(skill precedence: project > user > marketplace)
 	~/.drip/config.json                  Model profiles + settings (shared with the web app)
 	~/.drip/profiles/<name>/             Role profiles: config.json + prompt.md

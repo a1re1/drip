@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "tune-classifier",
+  "description": "Asking why a skill did not fire and how to tune it: probatio.",
+  "kind": "prompt",
+  "expected": [
+    "probatio"
+  ]
+}

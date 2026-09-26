@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "what-does-flag-do",
+  "description": "A question about the tool itself: no skill should compose.",
+  "kind": "prompt",
+  "expected": []
+}

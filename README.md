@@ -124,18 +124,39 @@ drip --evals                        # list cases: name, kind, scope, description
 drip --evals --json                 # machine-readable
 drip --run-evals                    # run every case and print what matched
 drip --run-evals ship-this-branch   # run one case by name
+drip --run-evals --runs 3           # ask each case three times; report unstable ones
+drip --run-evals --json             # {"runs": [...], "summary": {...}}
 ```
+
+Each case prints `PASS` or `FAIL` (a pass is an exact match: nothing missed,
+nothing spurious), the matched candidates with their scores, the nearest
+candidates that stayed **below** threshold, and — for every expected or
+matched candidate — the normalized answer to each classifier question, so a
+tuning pass sees which question moved a formula without re-asking the
+classifier. The run ends with one pooled line — runs passed, precision
+(agreed / matched) and recall (agreed / expected) over the whole pack — and
+exits non-zero when any run failed, so it works as a regression gate. With
+`--runs N` every case is asked N times and a case whose runs disagree is
+listed as `unstable`.
 
 Running cases opens no session and writes no transcript or run state — only the
 case's own `verdict.json` is updated — so it is safe from any directory. It does
 need a classifier profile (`runtime.classifier_profile_id` in
 `~/.drip/config.json`, or `--classifier <profile-id>`), because the case is
-answered by the same model that classifies a real loop. Drip ships two starter
-cases — `flaky-test-fixup` (a task loop where `tdd` and `verify-before-done`
-should compose) and `ship-this-branch` (a planning loop where the shipped
-`ship-pr` plan should classify as relevant) — and copies them into `<home>/evals`
-on the first start, with a marker beside `evals/` recording the names this home
-was given, so a deleted starter case stays deleted.
+answered by the same model that classifies a real loop. Drip ships a starter
+pack of cases under `evals/cases/` — at least one positive case per default
+skill (a flaky test for `debug-root-cause` + `tdd` + `verify-before-done`, a
+branch to push for `commit-discipline`, a session notification for
+`hooks-setup`, a dependency upgrade for `migration-discipline`, …), negative
+cases that should compose nothing (a read-only question, a question about a
+flag), near-misses (a git pre-commit hook that is not a drip hook), and plan
+cases for and against the shipped `ship-pr`
+plan. Every skill case scopes `candidates` to the default skills and every plan
+case to the shipped plans, so the pack scores the same on any machine with the
+defaults installed. The pack is copied into `<home>/evals` on the first start,
+with a marker beside `evals/` recording the names this home was given, so a
+deleted starter case stays deleted; a case added to a later release is seeded
+on the next start because its name is not yet in the marker.
 
 ### Eval cases in the TUI
 
@@ -1077,8 +1098,17 @@ entirely and stores no cache row: the author stated it.
 
 ### `classifiers.json`
 
-Optional sidecar next to a skill's `SKILL.md`. Built-in skills can never have
-one.
+Optional sidecar next to a skill's `SKILL.md`. Every shipped default skill
+carries one (`skills/<name>/classifiers.json` in the checkout, embedded in the
+binary and installed beside the skill's `SKILL.md`); a home seeded before the
+sidecars shipped gets them added on the next start wherever its `SKILL.md` is
+still byte-for-byte the template, and never where the operator edited it.
+The shipped sidecars are tuned against the eval-case pack (`drip --run-evals`)
+with the local `laya` classifier, which answers short, concrete questions far
+more reliably than abstract ones and does not handle negated questions at all
+("is this unrelated to X?" scores low everywhere) — so the shipped questions
+are short positives, and a formula subtracts a *competing* positive signal
+(`git_history`, `reviewer`, `classifier_work`) instead of asking a negative.
 
 ```json
 {

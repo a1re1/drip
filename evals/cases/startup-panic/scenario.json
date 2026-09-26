@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "goal": "users report drip panics on startup when ~/.drip/config.json is missing \u2014 fix it",
+  "task": "task-1: reproduce the panic and fix its cause",
+  "notes": [
+    "a fresh home with no config.json is enough to trigger it"
+  ],
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

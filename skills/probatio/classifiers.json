@@ -1,0 +1,12 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "classifier_work": {
+        "type": "noul",
+        "instructions": "Is the goal about why a skill did or did not fire, or about tuning or benchmarking the skill classifier?"
+      }
+    },
+    "formula": "classifier_work"
+  }
+}

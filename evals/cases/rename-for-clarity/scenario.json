@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "rename `LoopRunner` to `LoopDriver` everywhere and tidy the imports; nothing should behave differently",
+  "task": "task-1: rename the type and update every use",
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

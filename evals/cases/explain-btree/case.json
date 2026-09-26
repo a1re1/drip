@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "explain-btree",
+  "description": "A computer-science question: cs-reference; no code changes, so nothing else applies.",
+  "kind": "prompt",
+  "expected": [
+    "cs-reference"
+  ]
+}

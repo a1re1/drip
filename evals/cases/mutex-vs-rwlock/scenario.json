@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "what is the difference between a mutex and a read-write lock, and when is each the wrong choice?",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

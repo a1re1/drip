@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "summarize-open-prs-plan",
+  "description": "A planning loop that only reads pull requests: ship-pr must not classify as relevant just because PRs are mentioned.",
+  "kind": "plan",
+  "expected": []
+}

@@ -1,0 +1,24 @@
+{
+  "relevance": {
+    "threshold": 0.82,
+    "questions": {
+      "pre_pr": {
+        "type": "noul",
+        "instructions": "Does the goal ask to prepare the branch for a pull request: clean up, commit, merge the base branch, push, and open a draft PR?"
+      },
+      "draft_pr": {
+        "type": "noul",
+        "instructions": "Does the goal ask to clean up the branch and open a draft PR?"
+      },
+      "merge_then_pr": {
+        "type": "noul",
+        "instructions": "Does the goal ask to merge the base branch and then open a draft PR?"
+      },
+      "reviewer": {
+        "type": "noul",
+        "instructions": "Is the role reviewer?"
+      }
+    },
+    "formula": "clamp((pre_pr + draft_pr + merge_then_pr) / 3 - 0.20 * reviewer, 0, 1)"
+  }
+}

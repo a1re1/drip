@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "mutex-vs-rwlock",
+  "description": "A concepts question with no repository work: cs-reference only.",
+  "kind": "prompt",
+  "expected": [
+    "cs-reference"
+  ]
+}

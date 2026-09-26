@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "goal": "explain how the skill classifier scores skills, in a short write-up I can read",
+  "candidates": [
+    "ship-pr"
+  ]
+}

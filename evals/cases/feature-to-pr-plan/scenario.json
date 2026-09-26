@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "goal": "add a --since filter to the sessions list, cover it with tests, and put it up as a draft PR",
+  "candidates": [
+    "ship-pr"
+  ]
+}

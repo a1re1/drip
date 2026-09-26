@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "goal": "clean up the branch, commit what is there, merge main into it, push, and open a draft PR",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

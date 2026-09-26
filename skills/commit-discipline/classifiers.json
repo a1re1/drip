@@ -1,0 +1,12 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "git_history": {
+        "type": "noul",
+        "instructions": "Does the goal ask to commit, push, rebase, squash, or force-push git history?"
+      }
+    },
+    "formula": "git_history"
+  }
+}

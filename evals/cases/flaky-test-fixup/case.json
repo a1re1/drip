@@ -1,7 +1,11 @@
 {
   "version": 1,
   "name": "flaky-test-fixup",
-  "description": "A flaky-test goal with a task title: tdd and verify-before-done should both be in play.",
+  "description": "A flaky-test goal with a task title: the failure must be reproduced and diagnosed (debug-root-cause), the fix pinned by a test (tdd) and verified (verify-before-done).",
   "kind": "task",
-  "expected": ["tdd", "verify-before-done"]
+  "expected": [
+    "debug-root-cause",
+    "tdd",
+    "verify-before-done"
+  ]
 }

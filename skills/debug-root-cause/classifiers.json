@@ -1,0 +1,20 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "failure_observed": {
+        "type": "noul",
+        "instructions": "Does the goal describe a failure that has been observed: an error, crash, panic, flake, or wrong output?"
+      },
+      "broken": {
+        "type": "noul",
+        "instructions": "Is something broken that needs to be reproduced and diagnosed before it can be fixed?"
+      },
+      "classifier_work": {
+        "type": "noul",
+        "instructions": "Is the goal about why a skill did or did not fire, or about tuning or benchmarking the skill classifier?"
+      }
+    },
+    "formula": "clamp(0.50 * failure_observed + 0.50 * broken - 0.40 * max(0, classifier_work - 0.50), 0, 1)"
+  }
+}

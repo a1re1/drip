@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "session-end-notification",
+  "description": "A drip lifecycle hook request: hooks-setup and nothing else.",
+  "kind": "prompt",
+  "expected": [
+    "hooks-setup"
+  ]
+}

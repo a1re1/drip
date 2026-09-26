@@ -1,0 +1,16 @@
+{
+  "relevance": {
+    "threshold": 0.6,
+    "questions": {
+      "reviewer": {
+        "type": "noul",
+        "instructions": "Is the role reviewer?"
+      },
+      "review_asked": {
+        "type": "noul",
+        "instructions": "Does the goal or task ask to review, check, or accept a diff or a finished task?"
+      }
+    },
+    "formula": "clamp(0.70 * reviewer + 0.30 * review_asked, 0, 1)"
+  }
+}

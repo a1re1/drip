@@ -1,9 +1,22 @@
 {
   "version": 1,
-  "goal": "the status-line test flakes about one run in twenty — find out why and make it deterministic",
+  "goal": "the status-line test flakes about one run in twenty \u2014 find out why and make it deterministic",
   "task": "task-1: reproduce the flake and fix its cause",
   "notes": [
     "the failure shows up as a SIGTERM on the spawned child, not as an assertion"
   ],
-  "role": "author"
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
 }

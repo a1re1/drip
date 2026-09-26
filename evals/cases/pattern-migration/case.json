@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "pattern-migration",
+  "description": "Replacing one pattern with another everywhere: migration discipline; verification of the result.",
+  "kind": "task",
+  "expected": [
+    "migration-discipline",
+    "verify-before-done"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "replace every hand-rolled `match` on Option with the `?` operator where the function already returns Option or Result",
+  "task": "task-1: migrate the call sites in src/cli",
+  "role": "author",
+  "candidates": [
+    "commit-discipline",
+    "cs-reference",
+    "debug-root-cause",
+    "hooks-setup",
+    "migration-discipline",
+    "praeparare",
+    "probatio",
+    "refactor-safely",
+    "review-independently",
+    "tdd",
+    "verify-before-done"
+  ]
+}

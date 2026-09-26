@@ -1,0 +1,20 @@
+{
+  "relevance": {
+    "threshold": 0.55,
+    "questions": {
+      "refactor_mention": {
+        "type": "noul",
+        "instructions": "Does the goal mention splitting a file or module, or renaming a type, everywhere?"
+      },
+      "behavior_kept": {
+        "type": "noul",
+        "instructions": "Does the goal say that nothing should behave differently, or that behavior must not change?"
+      },
+      "migrate": {
+        "type": "noul",
+        "instructions": "Does the goal mention a version upgrade, a dependency, or replacing one API or pattern with another?"
+      }
+    },
+    "formula": "clamp(0.70 * refactor_mention + 0.30 * behavior_kept - 0.30 * migrate, 0, 1)"
+  }
+}

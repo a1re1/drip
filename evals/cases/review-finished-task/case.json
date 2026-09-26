@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "review-finished-task",
+  "description": "A reviewer looking at completed work: review-independently, no authoring skills.",
+  "kind": "task",
+  "expected": [
+    "review-independently"
+  ]
+}

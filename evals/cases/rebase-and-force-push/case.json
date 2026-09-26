@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "rebase-and-force-push",
+  "description": "Rewriting history on a shared remote is exactly what commit-discipline guards.",
+  "kind": "prompt",
+  "expected": [
+    "commit-discipline"
+  ]
+}

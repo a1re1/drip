@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "split-large-module",
+  "description": "A behavior-preserving refactor: refactor-safely, verified before done; not tdd, no bug involved.",
+  "kind": "task",
+  "expected": [
+    "refactor-safely",
+    "verify-before-done"
+  ]
+}

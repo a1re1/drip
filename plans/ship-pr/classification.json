@@ -4,22 +4,21 @@
     "questions": {
       "delivers_pr": {
         "type": "noul",
-        "instructions": "Does the operator want the work delivered as a pull request that ends up reviewable (open a PR, push to the PR, ship this)?"
+        "instructions": "Does the operator want the work delivered as a pull request they can review \u2014 ship it, open or update a PR, push a branch and PR it?"
       },
-      "needs_verification": {
+      "build_then_pr": {
         "type": "noul",
-        "instructions": "Does the goal change code that must be verified (tests, build, lint) before it can be considered done?"
+        "instructions": "Does the goal ask to build or change something and then open a PR for it?"
       },
-      "asks_for_review": {
+      "pr_mention": {
         "type": "noul",
-        "instructions": "Does the operator expect an independent review, or CI checks going green, before they look at the work?"
+        "instructions": "Does the goal mention a pull request or PR?"
       },
-      "request_shape": {
-        "type": "choice",
-        "instructions": "How closely does the goal match 'build this and get it into a reviewable PR'?",
-        "criteria": { "direct": null, "indirect": null, "unrelated": null }
+      "ship_language": {
+        "type": "noul",
+        "instructions": "Does the goal describe the ship flow itself \u2014 run the gates or checks, merge or rebase the base branch, push, open a draft PR, get checks green?"
       }
     },
-    "formula": "clamp(0.40 * delivers_pr + 0.25 * needs_verification + 0.20 * asks_for_review + 0.15 * request_shape.direct, 0, 1)"
+    "formula": "clamp(0.35 * delivers_pr + 0.35 * build_then_pr + 0.15 * pr_mention + 0.15 * ship_language, 0, 1)"
   }
 }

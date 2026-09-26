@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "review-pr-diff",
+  "description": "Reviewing a diff on request: review-independently; nothing is being changed.",
+  "kind": "prompt",
+  "expected": [
+    "review-independently"
+  ]
+}

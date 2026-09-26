@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "name": "list-open-prs",
+  "description": "Read-only repository question: no skill should compose.",
+  "kind": "prompt",
+  "expected": []
+}

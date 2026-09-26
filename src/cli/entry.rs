@@ -2378,30 +2378,41 @@ pub async fn main(argv: Vec<String>) -> i32 {
                 );
             }
 
-            let outcome = crate::cli::eval_runner::run_eval(&route, &loaded, &candidates).await;
+            // Every repeat is a fresh request; the verdict keeps the last run's
+            // matches, and the report says when the runs disagreed.
+            for _ in 0..cli_args.run_evals_runs.max(1) {
+                let outcome =
+                    crate::cli::eval_runner::run_eval(&route, &loaded, &candidates).await;
 
-            if let Err(error) =
-                crate::cli::eval_runner::record_eval_run(Path::new(&loaded.dir), &outcome)
-            {
-                eprintln!(
-                    "eval \"{}\": could not record the run: {error}",
-                    loaded.name
-                );
+                if let Err(error) =
+                    crate::cli::eval_runner::record_eval_run(Path::new(&loaded.dir), &outcome)
+                {
+                    eprintln!(
+                        "eval \"{}\": could not record the run: {error}",
+                        loaded.name
+                    );
+                }
+
+                outcomes.push(outcome);
             }
-
-            outcomes.push(outcome);
         }
+
+        let summary = crate::cli::eval_runner::summarize_eval_run(&outcomes);
 
         if cli_args.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&outcomes).unwrap_or_default()
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "runs": outcomes,
+                    "summary": summary,
+                }))
+                .unwrap_or_default()
             );
-            return 0;
+            return i32::from(summary.passed != summary.runs);
         }
 
         print!("{}", crate::cli::eval_runner::format_eval_run_human(&outcomes));
-        return 0;
+        return i32::from(summary.passed != summary.runs);
     }
 
     if cli_args.skills {

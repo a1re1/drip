@@ -358,112 +358,166 @@ fn format_scores(entries: &[EvalMatch]) -> String {
         .join(", ")
 }
 
-pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
-    if outcomes.is_empty() {
-        return "No eval cases ran.\n".to_string();
+/// The verdict a run's block and its progress line both print: a case that
+/// expected nothing and matched nothing passes trivially, otherwise it passes
+/// only when it matched exactly what it expected.
+fn eval_verdict(outcome: &EvalRunOutcome) -> &'static str {
+    if (outcome.expected.is_empty() && outcome.scores.is_empty()) || eval_run_passes(outcome) {
+        "PASS"
+    } else {
+        "FAIL"
     }
+}
+
+/// The per-outcome block: one case run as the report prints it. `repeat_index`
+/// is the zero-based index of this run among the runs of the same case name
+/// (`0` is the first), so a later repeat is labelled `run 2`, `run 3`, ... The
+/// first run carries the case name.
+pub fn format_eval_outcome_human(outcome: &EvalRunOutcome, repeat_index: usize) -> String {
+    let label = if repeat_index == 0 {
+        outcome.name.clone()
+    } else {
+        format!("  run {}", repeat_index + 1)
+    };
 
     let mut out = String::new();
-    let mut seen: Vec<String> = Vec::new();
 
-    for outcome in outcomes {
-        // A repeated case prints its later runs under the first one, labelled
-        // by run number, so the eye lands on the name once.
-        let repeat = seen.iter().filter(|name| **name == outcome.name).count();
-        seen.push(outcome.name.clone());
-        let label = if repeat == 0 {
-            outcome.name.clone()
-        } else {
-            format!("  run {}", repeat + 1)
-        };
-
-        if let Some(error) = &outcome.error {
-            out.push_str(&format!(
-                "{:<24} {:<6} error: {error}\n",
-                label,
-                outcome.kind.as_str()
-            ));
-            continue;
-        }
-
-        let verdict = if outcome.expected.is_empty() && outcome.scores.is_empty() {
-            "PASS"
-        } else if eval_run_passes(outcome) {
-            "PASS"
-        } else {
-            "FAIL"
-        };
+    if let Some(error) = &outcome.error {
         out.push_str(&format!(
-            "{:<24} {:<6} {verdict}  matched: {}\n",
+            "{:<24} {:<6} error: {error}\n",
             label,
-            outcome.kind.as_str(),
-            format_scores(&outcome.scores)
+            outcome.kind.as_str()
         ));
-
-        let below: Vec<EvalMatch> = outcome
-            .considered
-            .iter()
-            .filter(|entry| !outcome.scores.iter().any(|hit| hit.name == entry.name))
-            .cloned()
-            .collect();
-        if !below.is_empty() {
-            // The nearest misses only: an unscoped pool answers for every
-            // installed skill, and the tail says nothing a tuning pass needs.
-            const SHOWN: usize = 8;
-            let more = below.len().saturating_sub(SHOWN);
-            let mut line = format_scores(&below[..below.len().min(SHOWN)]);
-            if more > 0 {
-                line.push_str(&format!(", +{more} more"));
-            }
-            out.push_str(&format!("{:<24} {:<6}       below: {line}\n", "", ""));
-        }
-
-        // The answers behind the candidates that matter to this case: every
-        // expected one and every one that matched.
-        for (name, answers) in &outcome.answers {
-            let relevant = outcome.expected.iter().any(|expected| expected == name)
-                || outcome.scores.iter().any(|hit| hit.name == *name);
-            if !relevant || answers.is_empty() {
-                continue;
-            }
-            let rendered = answers
-                .iter()
-                .map(|(question, value)| format!("{question}={value:.2}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&format!("{:<24} {:<6}       {name}: {rendered}\n", "", ""));
-        }
-
-        if !outcome.expected.is_empty() || !outcome.scores.is_empty() {
-            let mut parts: Vec<String> = Vec::new();
-            if !outcome.agreement.missed.is_empty() {
-                parts.push(format!("missed {}", outcome.agreement.missed.join(", ")));
-            }
-            if !outcome.agreement.spurious.is_empty() {
-                parts.push(format!("spurious {}", outcome.agreement.spurious.join(", ")));
-            }
-            if parts.is_empty() {
-                parts.push(format!(
-                    "agreed {} of {}",
-                    outcome.agreement.agreed.len(),
-                    outcome.expected.len()
-                ));
-            }
-            out.push_str(&format!(
-                "{:<24} {:<6}       {}\n",
-                "",
-                "",
-                parts.join(" · ")
-            ));
-        }
-
-        for warning in &outcome.warnings {
-            out.push_str(&format!("{:<24} {:<6}       warning: {warning}\n", "", ""));
-        }
+        return out;
     }
 
+    let verdict = eval_verdict(outcome);
+    out.push_str(&format!(
+        "{:<24} {:<6} {verdict}  matched: {}\n",
+        label,
+        outcome.kind.as_str(),
+        format_scores(&outcome.scores)
+    ));
+
+    let below: Vec<EvalMatch> = outcome
+        .considered
+        .iter()
+        .filter(|entry| !outcome.scores.iter().any(|hit| hit.name == entry.name))
+        .cloned()
+        .collect();
+    if !below.is_empty() {
+        // The nearest misses only: an unscoped pool answers for every
+        // installed skill, and the tail says nothing a tuning pass needs.
+        const SHOWN: usize = 8;
+        let more = below.len().saturating_sub(SHOWN);
+        let mut line = format_scores(&below[..below.len().min(SHOWN)]);
+        if more > 0 {
+            line.push_str(&format!(", +{more} more"));
+        }
+        out.push_str(&format!("{:<24} {:<6}       below: {line}\n", "", ""));
+    }
+
+    // The answers behind the candidates that matter to this case: every
+    // expected one and every one that matched.
+    for (name, answers) in &outcome.answers {
+        let relevant = outcome.expected.iter().any(|expected| expected == name)
+            || outcome.scores.iter().any(|hit| hit.name == *name);
+        if !relevant || answers.is_empty() {
+            continue;
+        }
+        let rendered = answers
+            .iter()
+            .map(|(question, value)| format!("{question}={value:.2}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!("{:<24} {:<6}       {name}: {rendered}\n", "", ""));
+    }
+
+    if !outcome.expected.is_empty() || !outcome.scores.is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        if !outcome.agreement.missed.is_empty() {
+            parts.push(format!("missed {}", outcome.agreement.missed.join(", ")));
+        }
+        if !outcome.agreement.spurious.is_empty() {
+            parts.push(format!("spurious {}", outcome.agreement.spurious.join(", ")));
+        }
+        if parts.is_empty() {
+            parts.push(format!(
+                "agreed {} of {}",
+                outcome.agreement.agreed.len(),
+                outcome.expected.len()
+            ));
+        }
+        out.push_str(&format!(
+            "{:<24} {:<6}       {}\n",
+            "",
+            "",
+            parts.join(" · ")
+        ));
+    }
+
+    for warning in &outcome.warnings {
+        out.push_str(&format!("{:<24} {:<6}       warning: {warning}\n", "", ""));
+    }
+
+    out
+}
+
+/// The one-line-per-run progress report written to stderr while `--json` keeps
+/// stdout a single JSON document. `index` is this run's 1-based position in the
+/// whole suite and `total` the suite's run count.
+pub fn format_eval_progress_line(
+    outcome: &EvalRunOutcome,
+    repeat_index: usize,
+    index: usize,
+    total: usize,
+) -> String {
+    let name = if repeat_index == 0 {
+        outcome.name.clone()
+    } else {
+        format!("{} (run {})", outcome.name, repeat_index + 1)
+    };
+
+    let verdict = if let Some(error) = &outcome.error {
+        format!("error: {error}")
+    } else {
+        eval_verdict(outcome).to_string()
+    };
+
+    format!("[{index}/{total}] {name} - {verdict}\n")
+}
+
+/// One streamed run: the `[index/total]` progress prefix plus the run's block,
+/// with every line after the first indented to the prefix's width so the
+/// report's columns stay aligned when the blocks are printed as they arrive.
+pub fn format_eval_progress_block(
+    outcome: &EvalRunOutcome,
+    repeat_index: usize,
+    index: usize,
+    total: usize,
+) -> String {
+    let prefix = format!("[{index}/{total}] ");
+    let indent = " ".repeat(prefix.len());
+    let block = format_eval_outcome_human(outcome, repeat_index);
+
+    let mut out = String::new();
+    for (position, line) in block.lines().enumerate() {
+        out.push_str(if position == 0 {
+            prefix.as_str()
+        } else {
+            indent.as_str()
+        });
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The pooled closing block: the summary line plus any unstable cases. It is
+/// printed once, after the per-run blocks.
+pub fn format_eval_summary_human(outcomes: &[EvalRunOutcome]) -> String {
     let summary = summarize_eval_run(outcomes);
-    out.push('\n');
+    let mut out = String::new();
     out.push_str(&format!(
         "summary: {}/{} runs pass across {} case{} · precision {:.2} · recall {:.2}",
         summary.passed,
@@ -474,7 +528,11 @@ pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
         summary.recall,
     ));
     if summary.errors > 0 {
-        out.push_str(&format!(" · {} error{}", summary.errors, if summary.errors == 1 { "" } else { "s" }));
+        out.push_str(&format!(
+            " · {} error{}",
+            summary.errors,
+            if summary.errors == 1 { "" } else { "s" }
+        ));
     }
     out.push('\n');
     if !summary.unstable.is_empty() {
@@ -488,6 +546,36 @@ pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
                 .join(", ")
         ));
     }
+    out
+}
+
+/// The whole report: every run's block in order, then the pooled summary. It is
+/// the composition of `format_eval_outcome_human` and
+/// `format_eval_summary_human`, so a streaming run prints exactly what this
+/// one-shot report shows.
+///
+/// `--run-evals` streams the blocks itself and calls the two halves directly,
+/// so this is the report as one string — used by tests and any one-shot caller;
+/// the empty-suite message below is its zero-outcome case (the CLI never gets
+/// there, it exits before the loop when no case is discovered).
+pub fn format_eval_run_human(outcomes: &[EvalRunOutcome]) -> String {
+    if outcomes.is_empty() {
+        return "No eval cases ran.\n".to_string();
+    }
+
+    let mut out = String::new();
+    let mut seen: Vec<String> = Vec::new();
+
+    for outcome in outcomes {
+        // A repeated case prints its later runs under the first one, labelled
+        // by run number, so the eye lands on the name once.
+        let repeat = seen.iter().filter(|name| **name == outcome.name).count();
+        seen.push(outcome.name.clone());
+        out.push_str(&format_eval_outcome_human(outcome, repeat));
+    }
+
+    out.push('\n');
+    out.push_str(&format_eval_summary_human(outcomes));
 
     out
 }
@@ -865,5 +953,108 @@ mod tests {
             vec!["no candidates are installed for this case"]
         );
         assert!(format_eval_run_human(&[outcome]).contains("matched: none"));
+    }
+    #[test]
+    fn the_per_run_block_and_summary_compose_the_whole_report() {
+        let outcomes = vec![
+            outcome("a", &["tdd"], &["tdd"]),
+            outcome("a", &["tdd"], &["praeparare"]),
+            EvalRunOutcome {
+                name: "b".to_string(),
+                error: Some("no answer".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut composed = String::new();
+        let mut seen: Vec<String> = Vec::new();
+        for outcome in &outcomes {
+            let repeat = seen.iter().filter(|name| **name == outcome.name).count();
+            seen.push(outcome.name.clone());
+            composed.push_str(&format_eval_outcome_human(outcome, repeat));
+        }
+        composed.push('\n');
+        composed.push_str(&format_eval_summary_human(&outcomes));
+
+        assert_eq!(composed, format_eval_run_human(&outcomes));
+    }
+
+    #[test]
+    fn an_empty_report_says_no_case_ran() {
+        assert_eq!(format_eval_run_human(&[]), "No eval cases ran.\n");
+    }
+
+    #[test]
+    fn a_repeat_run_is_labelled_run_twice() {
+        let first = outcome("a", &["tdd"], &["tdd"]);
+        let second = outcome("a", &["tdd"], &["tdd"]);
+
+        let first_block = format_eval_outcome_human(&first, 0);
+        assert!(first_block.starts_with("a "), "{first_block}");
+
+        let second_block = format_eval_outcome_human(&second, 1);
+        assert!(second_block.contains("run 2"), "{second_block}");
+        assert!(!second_block.contains("run 1"), "{second_block}");
+    }
+
+    #[test]
+    fn the_progress_line_names_the_case_verdict_and_position() {
+        let passing = format_eval_progress_line(&outcome("a", &["tdd"], &["tdd"]), 0, 1, 4);
+        assert!(passing.contains("[1/4]"), "{passing}");
+        assert!(passing.contains("a - PASS"), "{passing}");
+
+        let failing = format_eval_progress_line(&outcome("b", &["tdd"], &["praeparare"]), 0, 3, 4);
+        assert!(failing.contains("[3/4]"), "{failing}");
+        assert!(failing.contains("b - FAIL"), "{failing}");
+
+        let repeat = format_eval_progress_line(&outcome("b", &["tdd"], &["tdd"]), 1, 4, 4);
+        assert!(repeat.contains("b (run 2) - PASS"), "{repeat}");
+
+        let errored = EvalRunOutcome {
+            name: "c".to_string(),
+            error: Some("no answer".to_string()),
+            ..Default::default()
+        };
+        let line = format_eval_progress_line(&errored, 0, 4, 4);
+        assert!(line.contains("error: no answer"), "{line}");
+    }
+
+    #[test]
+    fn a_streamed_block_indents_every_line_under_the_prefix() {
+        let outcome = EvalRunOutcome {
+            name: "a".to_string(),
+            expected: vec!["tdd".to_string()],
+            scores: vec![EvalMatch {
+                name: "praeparare".to_string(),
+                score: 0.4,
+            }],
+            considered: vec![
+                EvalMatch {
+                    name: "praeparare".to_string(),
+                    score: 0.4,
+                },
+                EvalMatch {
+                    name: "tdd".to_string(),
+                    score: 0.35,
+                },
+            ],
+            warnings: vec!["careful".to_string()],
+            ..Default::default()
+        };
+
+        let prefix = "[2/5] ";
+        let block = format_eval_progress_block(&outcome, 0, 2, 5);
+        let lines: Vec<&str> = block.lines().collect();
+
+        assert!(lines[0].starts_with(prefix), "{block}");
+        assert!(lines.len() > 1, "the case has continuation lines: {block}");
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with(&" ".repeat(prefix.len())),
+                "continuation lines align under the prefix: {block}"
+            );
+        }
+        assert!(lines.iter().any(|line| line.contains("below:")), "{block}");
+        assert!(lines.iter().any(|line| line.contains("warning:")), "{block}");
     }
 }

@@ -264,8 +264,10 @@ OPTIONS
 	                              what it matched into the case's own verdict.json. No
 	                              session, transcript or run state is touched; needs a
 	                              classifier profile (--classifier <id> or the config).
-	                              Prints every candidate's score (matched and below
-	                              threshold) and a pooled pass/precision/recall summary
+	                              Prints each case's block as soon as it is answered, so
+	                              progress is visible run by run, then a pooled
+	                              pass/precision/recall summary. Every candidate's score
+	                              (matched and below threshold) is printed with its case
 	--runs <n>                    With --run-evals: ask each case n times and report the
 	                              cases whose runs disagree as unstable (default 1)
 	--install-skills              Re-copy every default skill into <home>/skills and exit

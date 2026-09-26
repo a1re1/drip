@@ -2352,6 +2352,13 @@ pub async fn main(argv: Vec<String>) -> i32 {
         let plan_pool = crate::cli::plans::build_plan_pool(Path::new(&cwd), Path::new(&home.plans_dir));
 
         let mut outcomes: Vec<crate::cli::eval_runner::EvalRunOutcome> = Vec::new();
+        let repeat_runs = cli_args.run_evals_runs.max(1);
+        // The suite's run count is known before the first request: every case
+        // runs `repeat_runs` times, so the progress prefix can say `[k/N]` from
+        // the very first run.
+        let total_runs = selected.len() * repeat_runs;
+        let mut run_index: usize = 0;
+        let mut seen: Vec<String> = Vec::new();
 
         for eval in &selected {
             let loaded = match crate::cli::evals::load_eval(eval) {
@@ -2380,7 +2387,7 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
             // Every repeat is a fresh request; the verdict keeps the last run's
             // matches, and the report says when the runs disagreed.
-            for _ in 0..cli_args.run_evals_runs.max(1) {
+            for _ in 0..repeat_runs {
                 let outcome =
                     crate::cli::eval_runner::run_eval(&route, &loaded, &candidates).await;
 
@@ -2391,6 +2398,31 @@ pub async fn main(argv: Vec<String>) -> i32 {
                         "eval \"{}\": could not record the run: {error}",
                         loaded.name
                     );
+                }
+
+                run_index += 1;
+                let repeat = seen.iter().filter(|name| **name == outcome.name).count();
+                seen.push(outcome.name.clone());
+
+                // Print each run the moment it is answered so a long suite
+                // shows progress case by case; --json keeps stdout a single
+                // JSON document and sends its progress to stderr instead.
+                if cli_args.json {
+                    eprint!(
+                        "{}",
+                        crate::cli::eval_runner::format_eval_progress_line(
+                            &outcome, repeat, run_index, total_runs
+                        )
+                    );
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                } else {
+                    print!(
+                        "{}",
+                        crate::cli::eval_runner::format_eval_progress_block(
+                            &outcome, repeat, run_index, total_runs
+                        )
+                    );
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
 
                 outcomes.push(outcome);
@@ -2411,7 +2443,15 @@ pub async fn main(argv: Vec<String>) -> i32 {
             return i32::from(summary.passed != summary.runs);
         }
 
-        print!("{}", crate::cli::eval_runner::format_eval_run_human(&outcomes));
+        // The run blocks have already been printed, so the summary only needs
+        // the blank line the one-shot report leaves before it.
+        if !outcomes.is_empty() {
+            print!("\n");
+        }
+        print!(
+            "{}",
+            crate::cli::eval_runner::format_eval_summary_human(&outcomes)
+        );
         return i32::from(summary.passed != summary.runs);
     }
 

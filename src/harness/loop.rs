@@ -279,6 +279,21 @@ fn message_chars(message: &TransportRequestMessage) -> usize {
     }
 }
 
+/// Where the activated-skill sections begin inside a composed system prompt:
+/// the earliest of a `# Skill: <name>` section or the `# Skill step contract`
+/// block that closes them. Everything before it is the base system prompt, the
+/// rest is the "Skills" context bucket. A prompt without skill sections has no
+/// marker, so every character counts as system prompt.
+fn skill_sections_start(system_prompt: &str) -> usize {
+    let mut start = system_prompt.chars().count();
+    for marker in ["# Skill: ", "# Skill step contract"] {
+        if let Some(at) = system_prompt.find(marker) {
+            start = start.min(at);
+        }
+    }
+    start
+}
+
 fn message_text(message: &TransportRequestMessage) -> &str {
     match &message.content {
         Some(TransportContent::Text(text)) => text.as_str(),
@@ -4554,6 +4569,26 @@ mod loop_helpers_tests {
         assert_eq!(next_verification_record_id(&Some(vec![])), "v1");
     }
 
+    #[test]
+    fn the_skill_split_attributes_skill_bodies_not_just_the_step_contract() {
+        // Classifier-selected and role-embedded skills land as `# Skill: <name>`
+        // sections and carry no step contract; the split must still find them.
+        let base = "You are an agent.";
+        let composed =
+            format!("{base}\n\n# Skill: navis\n\nship it\n\n# Skill step contract\n\n- do steps\n");
+        let start = super::skill_sections_start(&composed);
+        assert_eq!(
+            composed[..start].trim_end(),
+            base,
+            "the base prompt stays system"
+        );
+        assert!(composed[start..].contains("# Skill: navis"));
+        assert!(composed[start..].contains("# Skill step contract"));
+        // A prompt with no skill sections attributes every char to system.
+        assert_eq!(super::skill_sections_start("plain"), 5);
+        assert_eq!(super::skill_sections_start(""), 0);
+    }
+
     fn tool_message(name: &str, content: &str) -> TransportRequestMessage {
         TransportRequestMessage {
             content: Some(TransportContent::Text(content.to_string())),
@@ -6065,6 +6100,10 @@ pub struct SolidStateHarnessOptions {
     pub max_task_reopens: Option<i64>,
     pub max_tool_rounds_per_iteration: Option<i64>,
     pub model: Option<String>,
+    /// The active inference profile's declared context window, threaded through
+    /// so per-cycle context telemetry can report used/max without re-reading
+    /// settings.
+    pub max_context_tokens: Option<i64>,
     pub now: Option<NowFn>,
     pub on_event: Option<EmitFn>,
     pub provider: Option<String>,
@@ -6177,6 +6216,11 @@ pub struct HarnessRun {
     pub usage_inbox: Arc<UsageInbox>,
     /// Current loop role name; set in begin_loop, taken for accounting.
     pub active_role: Option<String>,
+    /// The active profile's declared context window (None when unknown).
+    pub max_context_tokens: Option<i64>,
+    /// Prompt tokens reported by the most recent model call, if any — the real
+    /// size the last activation sent, next to the chars/4 estimate.
+    pub last_prompt_tokens: Option<i64>,
     /// Accumulated per-role inference totals (calls / latency / completion
     /// tokens), keyed by loop role name; "default" for roleless loops.
     pub role_inference: std::collections::BTreeMap<String, RoleInferenceTotals>,
@@ -6876,9 +6920,12 @@ impl HarnessRun {
         );
 
         let run_answers_path = options.answers_path.clone();
+        let max_context_tokens = options.max_context_tokens;
         Ok(HarnessRun {
             usage_inbox,
             active_role: None,
+            max_context_tokens,
+            last_prompt_tokens: None,
             role_inference: Default::default(),
             options,
             now,
@@ -6987,6 +7034,7 @@ impl HarnessRun {
             .unwrap_or(0)
             .max(0) as u64;
 
+        self.last_prompt_tokens = usage.and_then(|usage| usage.prompt_tokens);
         let prompt_tokens = usage.and_then(|usage| usage.prompt_tokens).unwrap_or(0);
         let completion_tokens = usage.and_then(|usage| usage.completion_tokens).unwrap_or(0);
         // Anthropic native reports explicit cache writes/reads; OpenAI-compatible
@@ -10320,6 +10368,122 @@ impl HarnessRun {
             }
         }
 
+        // Context-window telemetry: estimate each prompt bucket at chars/4 so a
+        // UI can show a /context-style breakdown next to the real prompt size
+        // the last model call reported.
+        {
+            let mut categories: Vec<crate::core::types::HarnessContextCategory> = Vec::new();
+            {
+                let mut add = |name: &str, chars: usize| {
+                    let tokens = (chars as i64 + 3) / 4;
+                    if tokens > 0 {
+                        categories.push(crate::core::types::HarnessContextCategory {
+                            name: name.to_string(),
+                            tokens,
+                        });
+                    }
+                };
+                let system_prompt = scope.loop_system_prompt.clone();
+                let skills_start = skill_sections_start(&system_prompt);
+                let skills_chars = system_prompt
+                    .get(skills_start..)
+                    .map(str::chars)
+                    .map(Iterator::count)
+                    .unwrap_or(0);
+                add("System prompt", skills_start);
+                add("Skills", skills_chars);
+                add(
+                    "Tool schemas",
+                    serde_json::to_string(&scope.loop_transport_tools)
+                        .map(|text| text.chars().count())
+                        .unwrap_or(0),
+                );
+                add(
+                    "Repo memory (long-term)",
+                    self.options
+                        .repo_memory_index
+                        .as_deref()
+                        .map(str::chars)
+                        .map(Iterator::count)
+                        .unwrap_or(0),
+                );
+                let short_term: usize = self
+                    .state
+                    .memory
+                    .iter()
+                    .map(|note| format!("{note:?}").chars().count())
+                    .sum::<usize>()
+                    + self
+                        .state
+                        .observations
+                        .iter()
+                        .map(|observation| format!("{observation:?}").chars().count())
+                        .sum::<usize>();
+                add("Session memory (short-term)", short_term);
+                add(
+                    "Warm context",
+                    self.state
+                        .promoted_context
+                        .iter()
+                        .map(|entry| format!("{entry:?}").chars().count())
+                        .sum::<usize>(),
+                );
+                add(
+                    "Goal & state",
+                    self.state.goal.chars().count()
+                        + self
+                            .state
+                            .tasks
+                            .iter()
+                            .map(|task| format!("{task:?}").chars().count())
+                            .sum::<usize>(),
+                );
+                add(
+                    "Carried-over transcript",
+                    self.carryover
+                        .as_ref()
+                        .map(|carryover| {
+                            carryover.messages.iter().map(message_chars).sum::<usize>()
+                        })
+                        .unwrap_or(0),
+                );
+                add(
+                    "This loop's transcript",
+                    scope
+                        .transport_messages
+                        .iter()
+                        .map(message_chars)
+                        .sum::<usize>(),
+                );
+            }
+            let total_tokens = categories
+                .iter()
+                .map(|category| category.tokens)
+                .sum::<i64>();
+            self.emit(HarnessEvent {
+                data: Some(HarnessEventData {
+                    r#loop: Some(self.state.r#loop),
+                    task_id: scope.current_task_id.clone(),
+                    context: Some(crate::core::types::HarnessContextBreakdown {
+                        total_tokens,
+                        max_tokens: self.max_context_tokens,
+                        prompt_tokens: self.last_prompt_tokens,
+                        categories: categories.clone(),
+                    }),
+                    ..Default::default()
+                }),
+                detail: format!(
+                    "context estimate for cycle {}: {} tokens across {} categor{}",
+                    cycle,
+                    total_tokens,
+                    categories.len(),
+                    if categories.len() == 1 { "y" } else { "ies" }
+                ),
+                iteration: self.state.iteration,
+                r#type: HarnessEventType::ContextRefreshed,
+            });
+        }
+
         true
     }
 
@@ -13452,6 +13616,63 @@ mod ask_user_survey_tests {
         };
         configure(&mut options);
         HarnessRun::new(options).await.unwrap()
+    }
+
+    /// The per-cycle context breakdown must reach the event stream with buckets
+    /// that add up: a UI that keys its /context panel off this event prints a
+    /// per-category list whose tokens are exactly the total it also prints.
+    #[tokio::test]
+    async fn a_cycle_emits_a_context_breakdown_whose_categories_sum_to_the_total() {
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<Mutex<Vec<HarnessEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut run = test_run_in(&dir, move |options| {
+            options.max_context_tokens = Some(200_000);
+            options.on_event = Some(Arc::new(move |event: HarnessEvent| {
+                sink.lock().unwrap().push(event);
+            }));
+        })
+        .await;
+        crate::core::state::add_tasks(
+            &mut run.state,
+            vec![crate::core::state::HarnessTaskInput::from("do the work")],
+            crate::core::state::HarnessTaskPlacement::End,
+        );
+        let mut scope = run.begin_loop();
+        assert!(run.begin_cycle(&mut scope, 1), "cycle 1 must start");
+        let breakdown = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| {
+                (event.r#type == HarnessEventType::ContextRefreshed)
+                    .then(|| event.data.as_ref().and_then(|data| data.context.clone()))
+                    .flatten()
+            })
+            .expect("begin_cycle must emit a context breakdown event");
+        assert!(
+            !breakdown.categories.is_empty(),
+            "the breakdown must report at least one category"
+        );
+        for category in &breakdown.categories {
+            assert!(
+                category.tokens >= 0,
+                "category {} reported negative tokens",
+                category.name
+            );
+        }
+        assert_eq!(
+            breakdown
+                .categories
+                .iter()
+                .map(|category| category.tokens)
+                .sum::<i64>(),
+            breakdown.total_tokens,
+            "the categories must sum exactly to the reported total"
+        );
+        assert_eq!(breakdown.max_tokens, Some(200_000));
     }
 
     #[tokio::test]

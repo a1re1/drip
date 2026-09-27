@@ -881,6 +881,29 @@ impl HarnessSurveyAnswers {
 /// per-kind: tool events carry toolName/callId/failed/durationMs, rate-limit
 /// events carry waitSeconds, operator-message events carry sentAt/latencyMs,
 /// loop/task events carry loop/taskId.
+/// One bucket of an estimated context-window breakdown (chars/4 heuristic).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessContextCategory {
+    pub name: String,
+    pub tokens: i64,
+}
+
+/// Estimated composition of one activation's prompt, plus the provider's
+/// observed prompt size and the model's declared window. `total_tokens` is the
+/// sum of `categories` (the estimate); `prompt_tokens` is what the last model
+/// call actually reported, so a UI can show estimate vs reality.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessContextBreakdown {
+    pub categories: Vec<HarnessContextCategory>,
+    pub total_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessEventData {
@@ -952,6 +975,11 @@ pub struct HarnessEventData {
 	pub survey_answers: Option<HarnessSurveyAnswers>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub question_survey: Option<QuestionSurvey>,
+	/// "context-breakdown" events: the estimated size of each prompt bucket for
+	/// this activation, with the model's declared window and the last observed
+	/// prompt size.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub context: Option<HarnessContextBreakdown>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

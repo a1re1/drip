@@ -1481,6 +1481,77 @@ pub fn task_detail_max_scroll(vm: &WatchViewModel, cols: usize, rows: usize) -> 
         .saturating_sub(inner_h)
 }
 
+// ── Context rows (the [5] Context pane) ──────────────────────────────────────
+
+/// The model the focused session's newest run was launched on, as the [5]
+/// header names it. Empty when the transcript recorded none (sessions written
+/// before the route was recorded), which `header_text` renders as `unknown`.
+pub fn latest_model(transcript: &[TranscriptEntry]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            TranscriptEntry::Model(model) => Some(model.model.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// The [5] pane's rows: a Claude-`/context`-style header (model · used/max ·
+/// percent), the glyph grid over the used share of the window, then "Estimated
+/// usage by category" including the free space — every piece built by
+/// `watch::context_panel` from the active loop's newest context breakdown.
+///
+/// One dim row when the session carries no breakdown (or predates the
+/// telemetry): the pane says so instead of painting an empty budget.
+pub fn context_rows(vm: &WatchViewModel, inner_w: usize) -> Vec<RowCell> {
+    let w = inner_w.max(1);
+    let Some(breakdown) = crate::watch::context_panel::latest_context(&vm.transcript) else {
+        return vec![plain("  no context telemetry for this session", c::dim)];
+    };
+    let mut rows = Vec::new();
+    let header =
+        crate::watch::context_panel::header_text(&breakdown, &latest_model(&vm.transcript));
+    for line in wrap_plain(&header, w) {
+        rows.push(plain(line, c::bold));
+    }
+    rows.push(plain("", c::dim));
+    for line in crate::watch::context_panel::glyph_rows(&breakdown) {
+        rows.push(plain(line, c::accent));
+    }
+    rows.push(plain("", c::dim));
+    for line in wrap_plain("Estimated usage by category", w) {
+        rows.push(plain(line, c::cyan));
+    }
+    for cat in crate::watch::context_panel::category_lines(&breakdown) {
+        let text = format!(
+            "  {} · {} ({:.1}%)",
+            cat.name,
+            crate::watch::context_panel::fmt_tokens(cat.tokens),
+            cat.percent
+        );
+        let color: fn(&str) -> String = if cat.name == "Free space" {
+            c::dim
+        } else {
+            c::gray
+        };
+        for line in wrap_plain(&text, w) {
+            rows.push(plain(line, color));
+        }
+    }
+    rows
+}
+
+/// How many rows [5] wants at `inner_w` — the layout hugs the pane to it. Zero
+/// when it shows its empty-state message (a session with no breakdown reads
+/// nothing, so the pane collapses rather than reserving a box for a message).
+fn context_row_count(vm: &WatchViewModel, inner_w: usize) -> usize {
+    if crate::watch::context_panel::latest_context(&vm.transcript).is_none() {
+        return 0;
+    }
+    context_rows(vm, inner_w).len()
+}
+
 // ── Titles / footer notes ────────────────────────────────────────────────────
 
 fn sessions_title(vm: &WatchViewModel) -> String {
@@ -1499,6 +1570,11 @@ fn shells_title(vm: &WatchViewModel) -> String {
 /// skills, the plans that shaped it and the tools it can call.
 fn skills_title() -> String {
     "[4] Skills, Tools & Plans".to_string()
+}
+
+/// `[5] Context` — the active loop's estimated context-window budget.
+fn context_title() -> String {
+    "[5] Context".to_string()
 }
 
 fn shell_detail_title(vm: &WatchViewModel) -> String {
@@ -1525,15 +1601,16 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 // ── Frame ────────────────────────────────────────────────────────────────────
 
 const FOOTER_HINT: &str =
-    "1/2/3/4 focus · tab cycle · r mode · j/k move · [/] h/l page · PgUp/Dn read-up/task · q quit";
+    "1/2/3/4/5 focus · tab cycle · r mode · j/k move · [/] h/l page · PgUp/Dn read-up/task · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
 /// The pane geometry `render_frame` paints with, read by every hit test so the
 /// rectangles a click is measured against cannot drift from the frame.
 struct PaneLayout {
-    /// Sessions / Tasks / Shells / Skills & Tools heights, top to bottom.
-    heights: [usize; 4],
+    /// Sessions / Tasks / Shells / Skills & Tools / Context heights, top to
+    /// bottom.
+    heights: [usize; 5],
     /// Width of the list column (portrait: the full frame).
     list_w: usize,
     /// Height of the `[0]` pane: the stacked transcript in portrait, the full
@@ -1567,37 +1644,41 @@ fn pane_layout(vm: &WatchViewModel, cols: usize, rows: usize) -> Option<PaneLayo
                 vm.tasks.len(),
                 vm.shells.len(),
                 skill_row_count(vm, cols.saturating_sub(2)),
+                context_row_count(vm, cols.saturating_sub(2)),
                 0,
             ],
         );
         return Some(PaneLayout {
-            heights: [heights[0], heights[1], heights[2], heights[3]],
+            heights: [heights[0], heights[1], heights[2], heights[3], heights[4]],
             list_w: cols,
-            zero_h: heights[4],
+            zero_h: heights[5],
             zero_w: None,
         });
     }
 
-    // Landscape: left [1]/[2]/[3]/[4] (~40% width), right full-height [0].
+    // Landscape: left [1]/[2]/[3]/[4]/[5] (~40% width), right full-height [0].
     // Content-hug sessions, shells and skills; tasks takes the rest of the left
     // column (its ledger is the one list that grows without a natural bound).
     let list_w = (cols * 2 / 5).max(30).min(cols - 20);
     let sessions_desired = vm.sessions.len().max(1) + 2;
     let shells_desired = vm.shells.len().max(1) + 2;
     let skills_desired = skill_row_count(vm, list_w.saturating_sub(2)).max(1) + 2;
-    let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(3 * MIN_PANE)));
-    let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + 2 * MIN_PANE)));
-    let mut h4 = skills_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + MIN_PANE)));
-    let mut h2 = body_h as i64 - h1 as i64 - h3 as i64 - h4 as i64;
+    let context_desired = context_row_count(vm, list_w.saturating_sub(2)).max(1) + 2;
+    let mut h1 = sessions_desired.min(MIN_PANE.max(body_h.saturating_sub(4 * MIN_PANE)));
+    let mut h3 = shells_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + 3 * MIN_PANE)));
+    let mut h4 = skills_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + 2 * MIN_PANE)));
+    let mut h5 = context_desired.min(MIN_PANE.max(body_h.saturating_sub(h1 + h3 + h4 + MIN_PANE)));
+    let mut h2 = body_h as i64 - h1 as i64 - h3 as i64 - h4 as i64 - h5 as i64;
     if h2 < MIN_PANE as i64 {
-        let capped = split_heights(body_h, &[4, 4, 3, 3]);
+        let capped = split_heights(body_h, &[4, 4, 3, 3, 3]);
         h1 = capped[0];
         h2 = capped[1] as i64;
         h3 = capped[2];
         h4 = capped[3];
+        h5 = capped[4];
     }
     Some(PaneLayout {
-        heights: [h1, h2.max(0) as usize, h3, h4],
+        heights: [h1, h2.max(0) as usize, h3, h4, h5],
         list_w,
         zero_h: body_h,
         zero_w: Some(cols - list_w),
@@ -1650,6 +1731,19 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
         )
     };
 
+    // The [5] Context pane: the active loop's estimated token budget, painted
+    // Claude-`/context` style — header, glyph grid, category list. Read-only.
+    let mk_context = |w: usize, height: usize| -> Vec<String> {
+        render_pane(
+            w,
+            height,
+            &context_title(),
+            vm.focus == 5,
+            &context_rows(vm, w.saturating_sub(2)),
+            None,
+        )
+    };
+
     // The [0] column: the transcript normally; a skill/tool read-up while one
     // is picked in [4]; a shell-detail box over a raw stdout/stderr tail box
     // when the Shells pane is focused (sub-zero's renderRight). Always emits
@@ -1691,7 +1785,13 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
 
     // The one place the pane budgeting lives; the hit tests below read it too.
     let layout = pane_layout(vm, cols, rows).expect("terminal size checked above");
-    let (h1, h2, h3, h4) = (layout.heights[0], layout.heights[1], layout.heights[2], layout.heights[3]);
+    let (h1, h2, h3, h4, h5) = (
+        layout.heights[0],
+        layout.heights[1],
+        layout.heights[2],
+        layout.heights[3],
+        layout.heights[4],
+    );
 
     let body: Vec<String> = match layout.zero_w {
         None => {
@@ -1699,6 +1799,7 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
             body.extend(mk_tasks(layout.list_w, h2.saturating_sub(2), h2));
             body.extend(mk_shells(layout.list_w, h3));
             body.extend(mk_skills(layout.list_w, h4));
+            body.extend(mk_context(layout.list_w, h5));
             body.extend(mk_zero(layout.list_w, layout.zero_h));
             body
         }
@@ -1708,6 +1809,7 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
             left.extend(mk_tasks(left_w, h2.saturating_sub(2), h2));
             left.extend(mk_shells(left_w, h3));
             left.extend(mk_skills(left_w, h4));
+            left.extend(mk_context(left_w, h5));
             let right = mk_zero(right_w, layout.zero_h);
             hconcat(&left, &right)
         }
@@ -1748,9 +1850,9 @@ pub fn transcript_region(vm: &WatchViewModel, cols: usize, rows: usize) -> Optio
     }
 }
 
-/// The 1-based inclusive rectangle of each list pane, in panel order — `[0]`
-/// Sessions, `[1]` Tasks, `[2]` Shells, `[3]` Skills & Tools — as `(row_start,
-/// row_end, col_start, col_end)`.
+/// The 1-based inclusive rectangle of each list pane, in panel order — `[1]`
+/// Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills & Tools, `[5]` Context —
+/// as `(row_start, row_end, col_start, col_end)`.
 ///
 /// Read from `pane_layout`, the same geometry `render_frame` paints with
 /// (portrait stacks them full-width; landscape seats them in the left column),
@@ -1775,10 +1877,17 @@ pub fn panel_regions(vm: &WatchViewModel, cols: usize, rows: usize) -> Vec<(usiz
 /// `vm.sessions` / `vm.shells`; Tasks index into `ordered_tasks`).
 ///
 /// `None` for a cell on a border, on a pane's empty-state message, past the
-/// last row, or when the terminal is too small to paint the frame. Panel 3 (the
-/// Skills & Tools pane) has no selection of its own, so it reports the row's position
-/// only to tell a click it landed on the pane rather than on a border.
-pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, row: usize) -> Option<(usize, usize)> {
+/// last row, or when the terminal is too small to paint the frame. Panels 3
+/// (Skills & Tools) and 4 (Context) have no selection of their own, so they
+/// report the row's position only to tell a click it landed on the pane rather
+/// than on a border.
+pub fn list_row_at(
+    vm: &WatchViewModel,
+    cols: usize,
+    rows: usize,
+    col: usize,
+    row: usize,
+) -> Option<(usize, usize)> {
     for (panel, &(r0, r1, c0, c1)) in panel_regions(vm, cols, rows).iter().enumerate() {
         if row < r0 || row > r1 || col < c0 || col > c1 {
             continue;
@@ -1799,7 +1908,8 @@ pub fn list_row_at(vm: &WatchViewModel, cols: usize, rows: usize, col: usize, ro
             0 => (vm.sessions.len(), vm.sel_session),
             1 => (ordered_tasks(&vm.tasks).len(), vm.sel_task),
             2 => (vm.shells.len(), vm.sel_shell),
-            _ => (skill_row_count(vm, c1.saturating_sub(c0 + 1).max(1)), 0),
+            3 => (skill_row_count(vm, c1.saturating_sub(c0 + 1).max(1)), 0),
+            _ => (context_row_count(vm, c1.saturating_sub(c0 + 1).max(1)), 0),
         };
         if len == 0 {
             continue; // the pane shows its empty-state message, not rows
@@ -1927,6 +2037,111 @@ mod tests {
         assert!(portrait_heights(40, &[2, 5, 0, 0]).iter().all(|&h| h >= 1));
     }
 
+    fn context_breakdown(total: i64) -> crate::core::types::HarnessContextBreakdown {
+        use crate::core::types::{HarnessContextBreakdown, HarnessContextCategory};
+        HarnessContextBreakdown {
+            categories: vec![
+                HarnessContextCategory {
+                    name: "tools".to_string(),
+                    tokens: 24_600,
+                },
+                HarnessContextCategory {
+                    name: "system prompt".to_string(),
+                    tokens: 9_400,
+                },
+            ],
+            total_tokens: total,
+            max_tokens: Some(200_000),
+            prompt_tokens: Some(total),
+        }
+    }
+
+    fn context_entry(total: i64) -> TranscriptEntry {
+        use crate::cli::transcript::{TranscriptEntry, TranscriptEventEntry};
+        use crate::core::types::{HarnessEventData, HarnessEventType};
+        TranscriptEntry::Event(TranscriptEventEntry {
+            at: String::new(),
+            data: Some(HarnessEventData {
+                context: Some(context_breakdown(total)),
+                ..HarnessEventData::default()
+            }),
+            detail: String::new(),
+            goal_id: String::new(),
+            iteration: 0,
+            kind: HarnessEventType::ContextRefreshed,
+        })
+    }
+
+    #[test]
+    fn the_layout_reserves_a_fifth_pane_and_panel_regions_maps_it() {
+        let mut vm = empty_vm();
+        let layout = pane_layout(&vm, 100, 40).expect("a 100x40 frame must lay out");
+        assert_eq!(layout.heights.len(), 5, "[5] Context gets its own height");
+        assert_eq!(panel_regions(&vm, 100, 40).len(), 5);
+
+        // Every pane keeps its border plus a content row.
+        assert!(layout.heights.iter().all(|h| *h >= MIN_PANE));
+        assert!(layout.zero_h >= MIN_PANE);
+
+        // Portrait stacks the five pane heights plus the transcript inside the
+        // body; landscape gives the transcript its own full-height column.
+        let portrait = pane_layout(&vm, 80, 40).expect("a portrait 80x40 frame");
+        let stacked: usize = portrait.heights.iter().sum::<usize>() + portrait.zero_h;
+        assert_eq!(stacked, 40 - 1, "one footer row");
+
+        vm.transcript = vec![context_entry(34_000)];
+        let with_ctx = pane_layout(&vm, 80, 40).unwrap();
+        assert!(with_ctx.heights[4] >= MIN_PANE);
+        assert!(
+            with_ctx.heights[4] > portrait.heights[4],
+            "telemetry grows [5]"
+        );
+    }
+
+    #[test]
+    fn the_context_pane_paints_the_latest_breakdowns_header_grid_and_categories() {
+        let mut vm = empty_vm();
+        assert_eq!(
+            context_rows(&vm, 40)[0].text,
+            "  no context telemetry for this session"
+        );
+        assert_eq!(context_row_count(&vm, 40), 0);
+        assert_eq!(context_title(), "[5] Context");
+
+        vm.transcript = vec![context_entry(34_000)];
+        let rows = context_rows(&vm, 40);
+        let text: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text[0], "unknown · 34k / 200k (17%)");
+        assert!(
+            text.contains(&"#########."),
+            "the glyph grid lights 17% of the cells: {text:?}"
+        );
+        assert!(text.contains(&"Estimated usage by category"));
+        assert!(
+            text.iter()
+                .any(|t| t.starts_with("  tools · 24.6k (12.3%)")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|t| t.starts_with("  system prompt · 9.4k (4.7%)")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter()
+                .any(|t| t.starts_with("  Free space · 166k (83.0%)")),
+            "the list closes with the unspent remainder: {text:?}"
+        );
+        assert_eq!(context_row_count(&vm, 40), rows.len());
+
+        // A newer breakdown drives the pane; the older one is history.
+        vm.transcript.push(context_entry(400_000));
+        assert_eq!(
+            context_rows(&vm, 40)[0].text,
+            "unknown · 400k / 200k (200%)"
+        );
+    }
+
     #[test]
     fn transcript_region_matches_the_rendered_pane() {
         let vm = empty_vm();
@@ -1973,7 +2188,7 @@ mod tests {
 
         for (cols, rows) in [(100usize, 30usize), (60, 24)] {
             let regions = panel_regions(&vm, cols, rows);
-            assert_eq!(regions.len(), 4, "{cols}x{rows}");
+            assert_eq!(regions.len(), 5, "{cols}x{rows}");
             let (sr0, sr1, sc0, sc1) = regions[0];
             // Every pane's rows are bracketed by its own top and bottom border.
             assert_eq!(list_row_at(&vm, cols, rows, sc0 + 3, sr0), None, "top border {cols}x{rows}");

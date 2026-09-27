@@ -1496,9 +1496,20 @@ sessions or the session index.
 dripw
 ```
 
-Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills, Tools & Plans, plus
-the transcript. Keys: `1`/`2`/`3`/`4` focus a panel, `Tab` cycles through them,
-`j`/`k` move the selection, `[/]` (or `h`/`l`) scroll the transcript, `q` quits.
+Panels: `[1]` Sessions, `[2]` Tasks, `[3]` Shells, `[4]` Skills, Tools & Plans,
+`[5]` Context, plus the transcript. Keys: `1`/`2`/`3`/`4`/`5` focus a panel,
+`Tab` cycles through them, `j`/`k` move the selection, `[/]` (or `h`/`l`) scroll
+the transcript, `q` quits.
+The `[5]` Context pane is read-only and shows, Claude-`/context` style, where
+the focused session's active loop is spending its context window: a header line
+(`model · used / max (percent)`) — read from the session's recorded model
+route — a small glyph grid whose lit cells are the used share of the window,
+and an "Estimated usage by category" list (system prompt, tool schemas, skills,
+memory, warm context, task list, transcript, …) that closes with the remaining
+free space. It is built from the per-cycle context-breakdown telemetry the
+harness writes to the transcript; a session with no such event says so instead
+of painting an empty budget.
+
 With `[4]` focused, `j`/`k` (and the up/down arrows, and the scroll wheel) walk
 that pane's skills and tools one at a time, while `[/]` (or `h`/`l`) turns its
 page, since its list is paged rather than scrolled. Once a name is picked,

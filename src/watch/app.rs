@@ -817,12 +817,22 @@ impl WatchApp {
             return;
         }
 
-        // Tab cycles Sessions → Tasks → Shells → Skills & Tools
+        // Focus the Context pane — the active loop's estimated token budget,
+        // read from the transcript's newest context-breakdown event. Read-only:
+        // nothing in it is selectable.
+        if key == "5" {
+            self.vm.focus = 5;
+            self.draw();
+            return;
+        }
+
+        // Tab cycles Sessions → Tasks → Shells → Skills & Tools → Context
         if key == "\t" {
             self.vm.focus = match self.vm.focus {
                 1 => 2,
                 2 => 3,
                 3 => 4,
+                4 => 5,
                 _ => 1,
             };
             if self.vm.focus == 3 {
@@ -924,7 +934,7 @@ impl WatchApp {
                 self.vm.sel_shell = self.painted_shell_row(index);
                 self.sync_shell_log();
             }
-            _ => {
+            3 => {
                 // The Skills & Tools pane: focus it, and pick the skill/tool
                 // under the pointer — resolved by `skill_item_at` against the
                 // same wrapped rows the frame painted, so a name broken over
@@ -939,6 +949,11 @@ impl WatchApp {
                         self.refresh_skill_detail();
                     }
                 }
+            }
+            _ => {
+                // The Context pane is read-only: a click on it focuses it and
+                // nothing more.
+                self.vm.focus = 5;
             }
         }
         self.draw();
@@ -1599,6 +1614,56 @@ mod tests {
     }
 
     #[test]
+    fn key_5_and_a_click_focus_the_context_pane_and_tab_cycles_five_panes() {
+        use crate::cli::transcript::{TranscriptEntry, TranscriptEventEntry};
+        use crate::core::types::{
+            HarnessContextBreakdown, HarnessContextCategory, HarnessEventData, HarnessEventType,
+        };
+
+        let mut app = WatchApp::new(project(), "/r".into());
+
+        // Key 5, and Tab after [4], both land on the Context pane; Tab wraps
+        // from [5] back to [1].
+        app.on_key("5");
+        assert_eq!(app.vm.focus, 5);
+        app.on_key("1");
+        for expected in [2, 3, 4, 5, 1] {
+            app.on_key("\t");
+            assert_eq!(app.vm.focus, expected);
+        }
+
+        // A session with context telemetry gives the pane content and a real
+        // rectangle, and a click inside that rectangle focuses it.
+        app.vm.transcript = vec![TranscriptEntry::Event(TranscriptEventEntry {
+            at: String::new(),
+            data: Some(HarnessEventData {
+                context: Some(HarnessContextBreakdown {
+                    categories: vec![HarnessContextCategory {
+                        name: "tools".to_string(),
+                        tokens: 24_600,
+                    }],
+                    total_tokens: 24_600,
+                    max_tokens: Some(200_000),
+                    prompt_tokens: None,
+                }),
+                ..HarnessEventData::default()
+            }),
+            detail: String::new(),
+            goal_id: String::new(),
+            iteration: 0,
+            kind: HarnessEventType::ContextRefreshed,
+        })];
+        let (cols, rows) = (100usize, 44usize);
+        let regions = crate::watch::render::panel_regions(&app.vm, cols, rows);
+        assert_eq!(regions.len(), 5, "the Context pane must have a region");
+        let (r0, r1, c0, _) = regions[4];
+        assert!(r1 > r0, "the pane must be painted with rows");
+        app.vm.focus = 1;
+        app.click_at(c0 + 1, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 5);
+    }
+
+    #[test]
     fn a_skills_and_tools_click_focuses_the_read_only_pane() {
         let mut app = WatchApp::new(project(), "/r".into());
         app.vm.skill_loads = vec![crate::watch::render::SkillLoad {
@@ -1617,6 +1682,8 @@ mod tests {
         app.on_key("1");
         app.on_key("4");
         assert_eq!(app.vm.focus, 4);
+        app.on_key("\t");
+        assert_eq!(app.vm.focus, 5, "[4] advances to the Context pane");
         app.on_key("\t");
         assert_eq!(app.vm.focus, 1);
     }

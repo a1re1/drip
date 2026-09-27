@@ -1,5 +1,6 @@
 pub mod ansi;
 pub mod app;
+pub mod context_panel;
 pub mod data;
 pub mod mouse;
 pub mod ps;

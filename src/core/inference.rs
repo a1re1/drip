@@ -79,6 +79,9 @@ pub struct ResolvedInferenceConfig {
     pub system_prompt: String,
     pub tool_route: Option<ResolvedModelRoute>,
     pub tool_route_warning: Option<String>,
+    /// The active profile's declared context window, resolved alongside the
+    /// route so harness telemetry never has to re-read settings.
+    pub max_context_tokens: Option<i64>,
 }
 
 impl std::ops::Deref for ResolvedInferenceConfig {
@@ -581,6 +584,7 @@ pub fn resolve_inference_config(
     env: EnvSource<'_>,
 ) -> Result<ResolvedInferenceConfig> {
     let profile = resolve_active_inference_profile(settings)?;
+    let max_context_tokens = profile.max_context_tokens;
     let system_prompt_profile = resolve_active_system_prompt_profile(settings)?;
     let tool_profile = resolve_active_tool_profile(settings)?;
     let profiles = parse_inference_model_profiles(settings)?;
@@ -619,6 +623,7 @@ pub fn resolve_inference_config(
         system_prompt: system_prompt_profile.prompt,
         tool_route,
         tool_route_warning,
+        max_context_tokens,
     })
 }
 

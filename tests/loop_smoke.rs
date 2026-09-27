@@ -1394,10 +1394,13 @@ async fn plan_finish_summary_completes_the_run() {
     let expected = [
         "loop-start",
         "iteration-start",
+        // The harness emits a per-cycle context breakdown before the inference call.
+        "context-refreshed",
         "inference",
         "harness-op",
         "loop-start",
         "iteration-start",
+        "context-refreshed",
         "inference",
         "task-finished",
         // The summary call reports usage too, so it emits its own inference event.

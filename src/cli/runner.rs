@@ -425,6 +425,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         goal_context,
         goal_images: args.goal_images.clone(),
         headers: args.inference.headers.clone(),
+        max_context_tokens: args.inference.max_context_tokens,
         initial_state: state,
         max_iterations: args.max_iterations,
         max_loops: args.max_loops,

@@ -335,6 +335,7 @@ mod tests {
                     url: "http://127.0.0.1:1/v1/chat/completions".to_string(),
                 },
                 system_prompt: String::new(),
+                max_context_tokens: None,
                 tool_route: None,
                 tool_route_warning: None,
             },

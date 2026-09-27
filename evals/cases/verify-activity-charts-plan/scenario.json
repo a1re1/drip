@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Independent verification of the Activity-page visualizations on branch tw-frankfurt-f3ikh. READ-ONLY: do not modify, create or delete any file in the repo. Put the evidence in the summary",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "skill-slash-autoload-plan",
+  "description": "A wish phrased as 'i'd love': still a feature build.",
+  "kind": "plan",
+  "expected": [
+    "build-feature"
+  ]
+}

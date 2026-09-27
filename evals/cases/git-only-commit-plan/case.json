@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "git-only-commit-plan",
+  "description": "A git-only mechanical task.",
+  "kind": "plan",
+  "expected": [
+    "exact-commands"
+  ]
+}

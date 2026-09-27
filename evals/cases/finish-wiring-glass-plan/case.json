@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "finish-wiring-glass-plan",
+  "description": "Finish a half-wired change and verify.",
+  "kind": "plan",
+  "expected": [
+    "finish-in-progress"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "build-treenotes-cli-plan",
+  "description": "A new standalone CLI.",
+  "kind": "plan",
+  "expected": [
+    "scaffold-project"
+  ]
+}

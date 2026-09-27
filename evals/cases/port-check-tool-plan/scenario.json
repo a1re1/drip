@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Port tools/check-tool.ts (the CHECK tool) into drip/src/tools/builtin/check.rs, which is currently a 1-line stub. Pattern to imitate: drip/src/tools/builtin/read.rs",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

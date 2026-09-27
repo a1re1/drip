@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "skills-picker-to-pr-plan",
+  "description": "A feature request that also says '/navis a pr': build-feature owns it. ship-pr is left out of the candidates because the classifier does not hear '/navis a pr' as a pull request; the explicit /navis skill covers that.",
+  "kind": "plan",
+  "expected": [
+    "build-feature"
+  ]
+}

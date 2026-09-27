@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "two-p1-findings-plan",
+  "description": "Named P1 findings plus an amend instruction.",
+  "kind": "plan",
+  "expected": [
+    "fix-review-findings"
+  ]
+}

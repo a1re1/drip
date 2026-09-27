@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "i tried running treenotes in drip and got this error: `treenotes read error: tree listing name mismatch`. please fix it",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

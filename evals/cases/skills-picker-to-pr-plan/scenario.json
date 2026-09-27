@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "goal": "when i type /skills in the tui it dumps the list into the history and it stays there. make it an interactive picker like claude has, and /navis a pr",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

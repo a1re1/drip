@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "finish-praeparare-plan",
+  "description": "Uncommitted partial work to complete.",
+  "kind": "plan",
+  "expected": [
+    "finish-in-progress"
+  ]
+}

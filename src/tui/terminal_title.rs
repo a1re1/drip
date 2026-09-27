@@ -130,18 +130,49 @@ pub fn resolve_title_route(
     }
 }
 
-/// /rename resolves through the same model profile as titles but is NOT gated
-/// on the terminal-title feature: an explicit command must work even when
-/// automatic titles are disabled. The empty tool profile keeps tool-profile
-/// resolution from interfering with the route.
+/// /rename and /btw resolve through the same model profile as titles but are
+/// NOT gated on the terminal-title feature: an explicit command must work even
+/// when automatic titles are disabled. The empty tool profile keeps
+/// tool-profile resolution from interfering with the route.
+///
+/// The configured title profile is preferred, but it is not always usable:
+/// `runtime.terminal_title_profile_id` may name a profile that is no longer in
+/// `~/.drip/config.json` or whose credential is unset, which is exactly the
+/// "/btw and /rename need a configured inference profile" failure. When that
+/// profile cannot resolve, fall back to the session's own active profile
+/// (`runtime.active_profile_id`) — the model the operator already runs the chat
+/// on — so the command works instead of erroring out.
 pub fn resolve_session_route(
     settings: &indexmap::IndexMap<String, String>,
+    env: EnvSource<'_>,
+) -> Option<ModelRoute> {
+    let title_profile = terminal_title_profile_id(settings);
+    if let Some(route) = resolve_session_route_for(settings, &title_profile, env) {
+        return Some(route);
+    }
+    let active_profile = settings
+        .get(ACTIVE_INFERENCE_PROFILE_SETTING_ID)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    if active_profile == title_profile {
+        return None;
+    }
+    resolve_session_route_for(settings, &active_profile, env)
+}
+
+/// Resolves one inference route for the session-name/`/btw` call by pinning
+/// `profile_id` as the active inference and tool profile on a cloned settings
+/// map. `None` when that profile does not resolve (unknown id, missing
+/// credential, malformed settings).
+fn resolve_session_route_for(
+    settings: &indexmap::IndexMap<String, String>,
+    profile_id: &str,
     env: EnvSource<'_>,
 ) -> Option<ModelRoute> {
     let mut scoped = settings.clone();
     scoped.insert(
         ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
-        terminal_title_profile_id(settings),
+        profile_id.to_string(),
     );
     scoped.insert(ACTIVE_TOOL_PROFILE_SETTING_ID.to_string(), String::new());
     match resolve_inference_config(&scoped, env) {
@@ -341,6 +372,60 @@ mod tests {
         let route = resolve_title_route(&settings, Some(&env)).expect("route resolves");
         assert_eq!(route.model, "m");
         assert!(route.url.starts_with("http://127.0.0.1:9"));
+    }
+
+    #[test]
+    fn resolve_session_route_prefers_the_configured_title_profile() {
+        let mut settings = default_setting_values();
+        let profiles = r#"[{"id":"title","label":"T","model":"t","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:TITLE_KEY"},{"id":"main","label":"M","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:8/v1/","apiKeyRef":"env:MAIN_KEY"}]"#;
+        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles.to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "main".to_string(),
+        );
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "title".to_string(),
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("TITLE_KEY".to_string(), "k".to_string());
+        env.insert("MAIN_KEY".to_string(), "k".to_string());
+        let route = resolve_session_route(&settings, Some(&env)).expect("title profile resolves");
+        assert_eq!(route.model, "t");
+    }
+
+    #[test]
+    fn resolve_session_route_falls_back_to_the_active_profile() {
+        // The reported bug: the settings carry a title profile that is not in
+        // the profile list, so /btw and /rename used to fail outright.
+        let mut settings = default_setting_values();
+        let profiles = r#"[{"id":"main","label":"M","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:MAIN_KEY"}]"#;
+        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), profiles.to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "main".to_string(),
+        );
+        settings.insert(
+            TERMINAL_TITLE_PROFILE_SETTING_ID.to_string(),
+            "glm-5-3-flash".to_string(),
+        );
+        let mut env = std::collections::HashMap::new();
+        env.insert("MAIN_KEY".to_string(), "k".to_string());
+        let route = resolve_session_route(&settings, Some(&env)).expect("active profile resolves");
+        assert_eq!(route.model, "m");
+        assert!(route.url.starts_with("http://127.0.0.1:9"));
+    }
+
+    #[test]
+    fn resolve_session_route_is_none_when_no_profile_resolves() {
+        let mut settings = default_setting_values();
+        settings.insert(MODEL_PROFILES_SETTING_ID.to_string(), "[]".to_string());
+        settings.insert(
+            ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "main".to_string(),
+        );
+        let env = std::collections::HashMap::new();
+        assert!(resolve_session_route(&settings, Some(&env)).is_none());
     }
 
     #[test]

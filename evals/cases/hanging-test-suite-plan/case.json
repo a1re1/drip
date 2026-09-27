@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "hanging-test-suite-plan",
+  "description": "A hang with a named file to fix: fix-bug.",
+  "kind": "plan",
+  "expected": [
+    "fix-bug"
+  ]
+}

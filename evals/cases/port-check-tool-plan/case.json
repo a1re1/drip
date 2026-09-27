@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "port-check-tool-plan",
+  "description": "A port into a stub with a sibling to imitate.",
+  "kind": "plan",
+  "expected": [
+    "port-module"
+  ]
+}

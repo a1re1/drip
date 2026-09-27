@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "bevy-hello-world-plan",
+  "description": "A greenfield game scaffold.",
+  "kind": "plan",
+  "expected": [
+    "scaffold-project"
+  ]
+}

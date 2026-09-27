@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Independent verification only, do not change any repository files or commit. Confirm treenotes local-only behavior: build it, run the tests, exercise the CLI, and report the evidence",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

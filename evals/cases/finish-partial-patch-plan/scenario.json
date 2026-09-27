@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Finish the existing partial claim-granular evidence patch and its tests as one implementation task; the supervising session owns review and shipping",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

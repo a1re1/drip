@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "i'd love to be able to type a skill into the tui like /navis and have it automatically enabled for the session instead of needing to type /skill navis",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "one-bash-verbatim-plan",
+  "description": "One exact command, verbatim output.",
+  "kind": "plan",
+  "expected": [
+    "exact-commands"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "i want to create a multiplayer 2d sidescroller game in rust with bevy. can you spin up a hello world project in this repo with a basic map: a rect that acts as a floor and a sprite for a character",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

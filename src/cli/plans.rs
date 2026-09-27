@@ -31,9 +31,18 @@ pub const PLAN_CLASSIFICATION_FILE_NAME: &str = "classification.json";
 /// resurrect the template on the next start.
 pub const DEFAULT_PLANS_MARKER_FILE: &str = "default-plans.json";
 
-const BUILTIN_SHIP_PR_PLAN: &str = include_str!("../../plans/ship-pr/PLAN.md");
-const BUILTIN_SHIP_PR_CLASSIFICATION: &str =
-    include_str!("../../plans/ship-pr/classification.json");
+/// One shipped plan: its files are embedded at compile time from
+/// `plans/<name>/`, so adding a plan is adding a directory there and one line
+/// to `builtin_plan_entries`.
+macro_rules! builtin_plan {
+    ($name:literal) => {
+        (
+            $name,
+            include_str!(concat!("../../plans/", $name, "/PLAN.md")),
+            include_str!(concat!("../../plans/", $name, "/classification.json")),
+        )
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Starter plan pack — templates embedded at compile time and copied into
@@ -44,11 +53,21 @@ const BUILTIN_SHIP_PR_CLASSIFICATION: &str =
 /// The shipped starter plans as (name, PLAN.md, classification.json) triples,
 /// in sorted order.
 fn builtin_plan_entries() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![(
-        "ship-pr",
-        BUILTIN_SHIP_PR_PLAN,
-        BUILTIN_SHIP_PR_CLASSIFICATION,
-    )]
+    vec![
+        builtin_plan!("build-feature"),
+        builtin_plan!("exact-commands"),
+        builtin_plan!("explain-repo"),
+        builtin_plan!("finish-in-progress"),
+        builtin_plan!("fix-bug"),
+        builtin_plan!("fix-review-findings"),
+        builtin_plan!("investigate-report"),
+        builtin_plan!("port-module"),
+        builtin_plan!("remove-feature"),
+        builtin_plan!("scaffold-project"),
+        builtin_plan!("ship-pr"),
+        builtin_plan!("sweep-rename"),
+        builtin_plan!("verify-only"),
+    ]
 }
 
 /// The names of every starter plan this binary ships, in sorted order.
@@ -519,22 +538,57 @@ mod tests {
 
     #[test]
     fn the_shipped_starter_plan_parses_with_the_skill_classifier_schema() {
+        let (_, classification) = default_plan_template("ship-pr").expect("shipped plan");
         let classifiers: SkillClassifiers =
-            serde_json::from_str(BUILTIN_SHIP_PR_CLASSIFICATION).expect("starter classification");
+            serde_json::from_str(classification).expect("starter classification");
         let relevance = classifiers.relevance.expect("relevance block");
 
-        assert_eq!(relevance.threshold, Some(0.6));
+        assert_eq!(relevance.threshold, Some(0.67));
         assert!(relevance.questions.len() >= 3);
         assert!(relevance.formula.is_some());
     }
 
     #[test]
+    fn every_shipped_plan_parses_and_names_itself() {
+        // Every plans/<name> directory is registered, in sorted order: a plan
+        // added without a registry line would never reach a home.
+        let names = default_plan_names();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "the pack stays in sorted order");
+        let mut shipped: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/plans"))
+                .expect("plans exists")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+        shipped.sort();
+        assert_eq!(names, shipped);
+
+        for name in &names {
+            let (plan, classification) = default_plan_template(name).unwrap();
+            let frontmatter = parse_plan_frontmatter(plan);
+            assert_eq!(frontmatter.name.as_deref(), Some(name.as_str()), "{name}");
+            assert!(frontmatter.description.is_some(), "{name} has a description");
+            assert!(plan_body(plan).contains("1. **"), "{name} is a numbered step template");
+
+            let classifiers: SkillClassifiers = serde_json::from_str(classification)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let relevance = classifiers.relevance.expect("relevance block");
+            assert!(relevance.threshold.is_some(), "{name} owns its threshold");
+            assert!(relevance.formula.is_some(), "{name} has a formula");
+        }
+    }
+
+    #[test]
     fn the_shipped_starter_plan_reads_as_a_step_template() {
-        let frontmatter = parse_plan_frontmatter(BUILTIN_SHIP_PR_PLAN);
+        let (plan, _) = default_plan_template("ship-pr").expect("shipped plan");
+        let frontmatter = parse_plan_frontmatter(plan);
         assert_eq!(frontmatter.name.as_deref(), Some("ship-pr"));
         assert!(frontmatter.description.is_some());
 
-        let body = plan_body(BUILTIN_SHIP_PR_PLAN);
+        let body = plan_body(plan);
         assert!(body.to_lowercase().contains("draft pr"));
         assert!(body.contains("Baseline verification"));
         assert!(!body.contains("name: ship-pr"));
@@ -572,14 +626,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(PLAN_FILE_NAME), "operator plan\n").unwrap();
 
-        assert!(ensure_default_plans(root, &plans_dir).is_empty());
+        // The other starters are seeded; the operator's ship-pr is not touched.
+        let written = ensure_default_plans(root, &plans_dir);
+        assert!(!written.iter().any(|name| name == "ship-pr"));
+        assert_eq!(written.len(), default_plan_names().len() - 1);
         assert_eq!(
             std::fs::read_to_string(dir.join(PLAN_FILE_NAME)).unwrap(),
             "operator plan\n"
         );
 
         let plans = discover_plans(home.path(), &plans_dir);
-        assert_eq!(plans[0].description, "operator plan");
+        let ship = plans.iter().find(|plan| plan.name == "ship-pr").unwrap();
+        assert_eq!(ship.description, "operator plan");
     }
 
     #[test]
@@ -912,7 +970,7 @@ mod plan_pool_tests {
     /// probability").
     fn shipped_ship_pr_score(answers: &str) -> (f64, f64) {
         let sidecar: serde_json::Value =
-            serde_json::from_str(BUILTIN_SHIP_PR_CLASSIFICATION).unwrap();
+            serde_json::from_str(default_plan_template("ship-pr").unwrap().1).unwrap();
         let relevance = &sidecar["relevance"];
         let formula = relevance["formula"].as_str().unwrap();
         let threshold = relevance["threshold"].as_f64().unwrap();

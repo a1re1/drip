@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "treenotes-read-error-plan",
+  "description": "A pasted error and 'please fix it': fix-bug.",
+  "kind": "plan",
+  "expected": [
+    "fix-bug"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "I ran a drip review. Here are the findings. Please address them as needed: P1 the retry path swallows the error; P2 the doc comment on flush is stale",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

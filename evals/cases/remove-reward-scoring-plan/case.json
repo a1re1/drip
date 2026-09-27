@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "remove-reward-scoring-plan",
+  "description": "Strip one mechanism while keeping its siblings.",
+  "kind": "plan",
+  "expected": [
+    "remove-feature"
+  ]
+}

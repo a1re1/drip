@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Read-only reconnaissance, do NOT edit any files. Report concisely, with exact paths and line numbers, where the reward and calibration code lives and which tests cover it",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

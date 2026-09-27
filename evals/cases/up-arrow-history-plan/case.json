@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "up-arrow-history-plan",
+  "description": "A conversational feature request for the TUI: build-feature, no PR asked.",
+  "kind": "plan",
+  "expected": [
+    "build-feature"
+  ]
+}

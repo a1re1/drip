@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "address-review-findings-plan",
+  "description": "Pasted review findings to address.",
+  "kind": "plan",
+  "expected": [
+    "fix-review-findings"
+  ]
+}

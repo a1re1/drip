@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Add MCP client support to drip, scoped per role: spawn the stdio MCP servers declared in config, list their tools, and expose them to the model as workspace tools named mcp__<server>__<tool>",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

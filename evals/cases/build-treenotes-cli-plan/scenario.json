@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "goal": "Build treenotes, a new Rust CLI for content-versioned notes that maps git repository files and directories for external LLM agents",
+  "candidates": [
+    "build-feature",
+    "exact-commands",
+    "explain-repo",
+    "finish-in-progress",
+    "fix-bug",
+    "fix-review-findings",
+    "investigate-report",
+    "port-module",
+    "remove-feature",
+    "scaffold-project",
+    "ship-pr",
+    "sweep-rename",
+    "verify-only"
+  ]
+}

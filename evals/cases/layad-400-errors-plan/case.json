@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "layad-400-errors-plan",
+  "description": "An HTTP error report against an integration.",
+  "kind": "plan",
+  "expected": [
+    "fix-bug"
+  ]
+}

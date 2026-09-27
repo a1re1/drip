@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "whats-in-repo-plan",
+  "description": "The most common orientation question.",
+  "kind": "plan",
+  "expected": [
+    "explain-repo"
+  ]
+}

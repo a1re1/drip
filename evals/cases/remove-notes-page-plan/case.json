@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "name": "remove-notes-page-plan",
+  "description": "Delete a page and flag, keep the infrastructure.",
+  "kind": "plan",
+  "expected": [
+    "remove-feature"
+  ]
+}

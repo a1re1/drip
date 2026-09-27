@@ -149,7 +149,37 @@ fn one_line(raw: &str, max_chars: usize) -> String {
 /// prefix), so a sidebar never digests its own previous answers as session
 /// history.
 fn is_btw_line(text: &str) -> bool {
-    text.trim_start().starts_with("btw")
+    classify_btw_line(text).is_some()
+}
+
+/// Which sidebar voice a chat line carries. The sidebar prints the question
+/// you asked (`btw · …`) and then the sidebar's own answer (`btw | …`), so a
+/// side chat is recognizable — and colourable — from the line alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BtwLineKind {
+    /// `btw · what is it doing?` — the echoed question (your voice).
+    Question,
+    /// `btw | …` — the sidebar's answer, including the `/btw` state tail's
+    /// `btw | you: …` echo.
+    Reply,
+}
+
+/// Classify a chat line as sidebar output, or `None` for an ordinary chat
+/// line. Both the digest skip (`is_btw_line`) and the TUI's sidebar colouring
+/// key off this one predicate.
+pub fn classify_btw_line(text: &str) -> Option<BtwLineKind> {
+    let rest = text.trim_start().strip_prefix("btw")?;
+
+    // `btw` must stand alone (`btw | …`, never `btwish …` or `btw:…`).
+    if !rest.starts_with(' ') {
+        return None;
+    }
+
+    match rest.trim_start().chars().next()? {
+        '·' => Some(BtwLineKind::Question),
+        '|' => Some(BtwLineKind::Reply),
+        _ => None,
+    }
 }
 
 /// One readable digest line for a transcript event, or None for the events

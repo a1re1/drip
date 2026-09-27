@@ -204,6 +204,7 @@ fn empty_vm(now: i64) -> WatchViewModel {
         sel_skill: None,
         skill_detail: None,
         skill_detail_scroll: 0,
+        task_detail_scroll: 0,
     }
 }
 
@@ -725,6 +726,9 @@ impl WatchApp {
         // [0] column goes back to the transcript.
         self.vm.sel_skill = None;
         self.vm.skill_detail = None;
+        // A new session's [2] ledger is loaded elsewhere and its selection
+        // clamped; the detail column starts at the top with it.
+        self.vm.task_detail_scroll = 0;
         self.tail = None;
 
         let Some(record) = record else { return };
@@ -858,6 +862,14 @@ impl WatchApp {
             return;
         }
 
+        // PageUp / PageDown scroll the [0] task detail while [2] holds the
+        // focus: the whole ledger record is longer than the column.
+        if (key == "\x1b[5~" || key == "\x1b[6~") && self.task_detail_showing() {
+            self.scroll_task_detail(if key == "\x1b[5~" { -PAGE } else { PAGE });
+            self.draw();
+            return;
+        }
+
         // Page / scroll: [ ] or h / l — scroll the transcript pane; with [4]
         // focused they turn that pane's page.
         if key == "[" || key == "h" || key == "\x1b[D" {
@@ -905,6 +917,7 @@ impl WatchApp {
             1 => {
                 self.vm.focus = 2;
                 self.vm.sel_task = self.painted_task_row(index);
+                self.vm.task_detail_scroll = 0;
             }
             2 => {
                 self.vm.focus = 3;
@@ -969,6 +982,16 @@ impl WatchApp {
                 }
             }
         }
+        // A wheel over the [0] task detail scrolls the ledger record it shows.
+        if self.task_detail_showing() {
+            if let Some(region) = transcript_region(&self.vm, cols, rows) {
+                if scroll.inside(region) {
+                    self.scroll_task_detail(scroll.delta(WHEEL_LINES));
+                    self.draw();
+                    return;
+                }
+            }
+        }
         let Some(region) = transcript_region(&self.vm, cols, rows) else {
             return;
         };
@@ -1001,8 +1024,13 @@ impl WatchApp {
             self.vm.sel_session = clamp_sel(self.vm.sel_session as i64 + delta, self.vm.sessions.len());
             self.sync_focused();
         } else if self.vm.focus == 2 {
-            // Selecting a task only moves the highlight.
-            self.vm.sel_task = clamp_sel(self.vm.sel_task as i64 + delta, self.vm.tasks.len());
+            // Selecting a task moves the highlight; the [0] column's detail
+            // follows it, back at the top.
+            let next = clamp_sel(self.vm.sel_task as i64 + delta, self.vm.tasks.len());
+            if next != self.vm.sel_task {
+                self.vm.task_detail_scroll = 0;
+            }
+            self.vm.sel_task = next;
         } else {
             self.vm.sel_shell = clamp_sel(self.vm.sel_shell as i64 + delta, self.vm.shells.len());
             self.sync_shell_log();
@@ -1076,6 +1104,26 @@ impl WatchApp {
         let max = crate::watch::render::skill_detail_max_scroll(&self.vm, cols, rows);
         let next = self.vm.skill_detail_scroll as i64 + delta;
         self.vm.skill_detail_scroll = next.clamp(0, max as i64) as usize;
+    }
+
+    /// Whether the [0] column is currently the full task-detail record: the
+    /// Tasks pane has the focus and it has a task selected to show. With an
+    /// empty ledger the column still holds the transcript, so it keeps the
+    /// PgUp/PgDn and wheel scrolling for itself.
+    fn task_detail_showing(&self) -> bool {
+        self.vm.focus == 2
+            && crate::watch::render::ordered_tasks(&self.vm.tasks)
+                .get(self.vm.sel_task)
+                .is_some()
+    }
+
+    /// Scroll the [0] task detail by `delta` rows, clamped to what the ledger
+    /// record overflows the column by — its top and its end are floors.
+    fn scroll_task_detail(&mut self, delta: i64) {
+        let (cols, rows) = terminal_size();
+        let max = crate::watch::render::task_detail_max_scroll(&self.vm, cols, rows);
+        let scroll = (self.vm.task_detail_scroll as i64 + delta).clamp(0, max as i64);
+        self.vm.task_detail_scroll = scroll as usize;
     }
 
     /// The skill/tool currently picked in the [4] pane.
@@ -1811,5 +1859,101 @@ mod tests {
         app.vm.sel_skill = None;
         app.on_key("j");
         assert_eq!(app.vm.skill_detail_scroll, 0);
+    }
+
+    #[test]
+    fn focusing_a_task_shows_its_detail_in_the_zero_column_and_pagedn_scrolls_it() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.tasks = vec![task("task-1", HarnessTaskStatus::Pending)];
+        app.vm.tasks[0].summary = Some("the summary text".into());
+        app.vm.tasks[0].notes = vec!["a note".into()];
+        let (cols, rows) = (100usize, 30usize);
+
+        // The transcript owns [0] until the Tasks pane is focused.
+        let before = crate::watch::ansi::strip_ansi(&crate::watch::render::render_frame(
+            &app.vm, cols, rows,
+        ));
+        assert!(!before.contains("Task · task-1"));
+
+        let (r0, _, c0, _) = crate::watch::render::panel_regions(&app.vm, cols, rows)[1];
+        app.click_at(c0 + 3, r0 + 1, cols, rows);
+        assert_eq!(app.vm.focus, 2);
+        let frame = crate::watch::ansi::strip_ansi(&crate::watch::render::render_frame(
+            &app.vm, cols, rows,
+        ));
+        assert!(
+            frame.contains("Task · task-1"),
+            "the [0] column reads the task"
+        );
+        assert!(frame.contains("the summary text"), "the full summary");
+        assert!(frame.contains("a note"), "every note");
+        assert_eq!(app.vm.task_detail_scroll, 0);
+
+        // PgUp/PgDn scroll the detail, clamped to what it overflows by.
+        app.vm.tasks[0].notes = (0..200).map(|i| format!("note {i:03}")).collect();
+        app.vm.task_detail_scroll = 0;
+        // The app clamps against the real terminal, not this test's frame size.
+        let (tcols, trows) = terminal_size();
+        let max = crate::watch::render::task_detail_max_scroll(&app.vm, tcols, trows);
+        assert!(max > 0, "a 200-note ledger outruns the column");
+        app.on_key("\x1b[5~");
+        assert_eq!(app.vm.task_detail_scroll, 0, "the top is a floor");
+        app.on_key("\x1b[6~");
+        assert_eq!(app.vm.task_detail_scroll, PAGE as usize);
+        for _ in 0..400 {
+            app.on_key("\x1b[6~");
+        }
+        assert_eq!(app.vm.task_detail_scroll, max, "the end is a floor");
+
+        // The wheel over the [0] column scrolls the detail too.
+        let (wr0, _, wc0, _) =
+            crate::watch::render::transcript_region(&app.vm, cols, rows).expect("the [0] column");
+        app.scroll_at(
+            crate::watch::mouse::MouseScroll {
+                wheel: crate::watch::mouse::MouseWheel::Up,
+                col: wc0 + 1,
+                row: wr0 + 1,
+            },
+            cols,
+            rows,
+        );
+        assert_eq!(
+            app.vm.task_detail_scroll,
+            max.saturating_sub(WHEEL_LINES as usize),
+            "the wheel walks the detail back"
+        );
+
+        // Moving to another task starts its own detail at the top.
+        app.vm
+            .tasks
+            .push(task("task-2", HarnessTaskStatus::Pending));
+        app.on_key("j");
+        assert_eq!(app.vm.task_detail_scroll, 0);
+    }
+
+    #[test]
+    fn an_empty_task_ledger_leaves_the_zero_column_scrolling_the_transcript() {
+        let mut app = WatchApp::new(project(), "/r".into());
+        app.vm.focus = 2;
+        assert!(app.vm.tasks.is_empty());
+        let (cols, rows) = (100usize, 30usize);
+        let (r0, _, c0, _) =
+            crate::watch::render::transcript_region(&app.vm, cols, rows).expect("the [0] column");
+
+        // PgUp/PgDn and the wheel are not captured by a detail that is not
+        // there: with nothing to show, the transcript keeps scrolling.
+        app.on_key("\x1b[6~");
+        assert_eq!(app.vm.task_detail_scroll, 0, "no detail to scroll");
+        app.scroll_at(
+            crate::watch::mouse::MouseScroll {
+                wheel: crate::watch::mouse::MouseWheel::Up,
+                col: c0 + 1,
+                row: r0 + 1,
+            },
+            cols,
+            rows,
+        );
+        assert_eq!(app.vm.task_detail_scroll, 0, "no detail to scroll");
+        assert!(!app.vm.following, "the transcript took the wheel instead");
     }
 }

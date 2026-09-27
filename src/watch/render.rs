@@ -6,7 +6,10 @@ use std::collections::HashMap;
 
 use crate::cli::transcript::{format_model_route_lines, TranscriptEntry};
 use crate::core::sessions::SessionRecord;
-use crate::core::types::{HarnessEventType, HarnessTask, HarnessTaskStatus};
+use crate::core::types::{
+    ClaimedConfidence, HarnessEventType, HarnessRecoveryAction, HarnessTask, HarnessTaskBlocker,
+    HarnessTaskStatus,
+};
 use crate::watch::ansi::{c, char_width, fit, string_width, strip_ansi};
 use crate::watch::ps::PsProc;
 pub use crate::watch::transcript_view::{flatten_transcript, RowCell};
@@ -109,6 +112,10 @@ pub struct WatchViewModel {
     /// Rows scrolled into the read-up body while it holds more than the [0]
     /// column seats. The box clamps it; the app zeroes it on a new pick.
     pub skill_detail_scroll: usize,
+    /// Rows scrolled into the [2] task detail while it holds more than the [0]
+    /// column seats. The box clamps it; the app zeroes it when the selection
+    /// moves to another task.
+    pub task_detail_scroll: usize,
 }
 
 /// A skill or tool the [4] pane lists, named as the pane shows it — the
@@ -1215,6 +1222,265 @@ pub fn skill_detail_max_scroll(vm: &WatchViewModel, cols: usize, rows: usize) ->
         .saturating_sub(inner_h)
 }
 
+// ── Task detail (the [2] pane's selection, read in the [0] column) ───────────
+
+/// A one-row `label value` field line of the task detail body.
+fn task_field(label: &str, value: String) -> RowCell {
+    plain(format!("  {label:<14} {value}"), c::white)
+}
+
+/// A heading line separating the detail's groups.
+fn task_section(label: &str) -> RowCell {
+    plain(format!("  {label}"), c::accent)
+}
+
+/// A labelled free-text block wrapped to `inner_w`: the first line carries the
+/// dim-spaced label, every continuation aligns under the value.
+fn task_wrapped_block(label: &str, text: &str, inner_w: usize) -> Vec<RowCell> {
+    let room = inner_w.saturating_sub(17).max(1);
+    let mut out: Vec<RowCell> = Vec::new();
+    for (i, line) in wrap_plain(text, room).into_iter().enumerate() {
+        let prefix = if i == 0 {
+            format!("  {label:<14} ")
+        } else {
+            " ".repeat(17)
+        };
+        out.push(plain(format!("{prefix}{line}"), c::white));
+    }
+    if out.is_empty() {
+        out.push(plain(format!("  {label:<14} —"), c::dim));
+    }
+    out
+}
+
+fn task_status_text(status: HarnessTaskStatus) -> &'static str {
+    match status {
+        HarnessTaskStatus::Blocked => "blocked",
+        HarnessTaskStatus::Completed => "completed",
+        HarnessTaskStatus::Dropped => "dropped",
+        HarnessTaskStatus::InProgress => "in progress",
+        HarnessTaskStatus::Pending => "pending",
+    }
+}
+
+fn task_list_or_dash(items: &[String]) -> String {
+    if items.is_empty() {
+        "—".to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+fn recovery_action_text(action: HarnessRecoveryAction) -> &'static str {
+    match action {
+        HarnessRecoveryAction::Blocked => "blocked",
+        HarnessRecoveryAction::Dropped => "dropped",
+        HarnessRecoveryAction::Exhausted => "exhausted",
+        HarnessRecoveryAction::Reopened => "reopened",
+        HarnessRecoveryAction::OperatorReply => "operator reply",
+    }
+}
+
+/// Every recorded field of one task, wrapped to `inner_w`: identity, status,
+/// role wiring, counters, then the free-text summary/notes/footprint and the
+/// bounded recovery trail. This is the [2] pane's one-line title opened up.
+fn task_detail_rows(task: &HarnessTask, inner_w: usize) -> Vec<RowCell> {
+    let mut rows: Vec<RowCell> = Vec::new();
+
+    rows.push(task_section("Task"));
+    rows.push(task_field("id", task.id.clone()));
+    rows.extend(task_wrapped_block("title", task.title.trim(), inner_w));
+    let (glyph, color) = task_glyph(task.status);
+    rows.push(selectable(
+        format!(
+            "  {:<14} {glyph} {}",
+            "status",
+            task_status_text(task.status)
+        ),
+        color,
+        false,
+    ));
+
+    rows.push(task_section("Role & wiring"));
+    rows.push(task_field(
+        "role",
+        task.role.clone().unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(task_field(
+        "depends on",
+        task_list_or_dash(&task.depends_on.clone().unwrap_or_default()),
+    ));
+    if let Some(review_of) = &task.review_of {
+        rows.push(task_field("review of", review_of.clone()));
+    }
+    if let Some(reviews) = &task.reviews {
+        rows.push(task_field("reviews", task_list_or_dash(reviews)));
+    }
+    if let Some(by) = &task.awaiting_review_by {
+        rows.push(task_field("awaiting", by.clone()));
+    }
+    if let Some(blocked_on) = task.blocked_on {
+        rows.push(task_field(
+            "blocked on",
+            match blocked_on {
+                HarnessTaskBlocker::Operator => "operator".to_string(),
+            },
+        ));
+    }
+    rows.push(task_field(
+        "confidence",
+        task.confidence
+            .map(|c| match c {
+                ClaimedConfidence::Low => "low".to_string(),
+                ClaimedConfidence::Medium => "medium".to_string(),
+                ClaimedConfidence::High => "high".to_string(),
+            })
+            .unwrap_or_else(|| "—".into()),
+    ));
+
+    rows.push(task_section("Progress"));
+    rows.push(task_field(
+        "created iter",
+        task.created_at_iteration.to_string(),
+    ));
+    rows.push(task_field(
+        "finished iter",
+        task.finished_at_iteration
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(task_field(
+        "loops run",
+        task.loops_run
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(task_field(
+        "activations",
+        task.activations
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(task_field("stalls", task.stall_count.to_string()));
+    rows.push(task_field(
+        "reopens",
+        task.reopen_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(task_field(
+        "review round",
+        task.review_round
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".into()),
+    ));
+
+    if let Some(summary) = &task.summary {
+        rows.push(task_section("Summary"));
+        rows.extend(task_wrapped_block("summary", summary, inner_w));
+    }
+    if !task.notes.is_empty() {
+        rows.push(task_section(&format!("Notes ({})", task.notes.len())));
+        for note in &task.notes {
+            rows.extend(task_wrapped_block("note", note, inner_w));
+        }
+    }
+    if let Some(footprint) = &task.footprint {
+        if !footprint.is_empty() {
+            rows.push(task_section("Footprint"));
+            for entry in footprint {
+                rows.extend(task_wrapped_block("path", entry, inner_w));
+            }
+        }
+    }
+    if let Some(history) = &task.recovery_history {
+        if !history.is_empty() {
+            rows.push(task_section("Recovery"));
+            for event in history {
+                let mut value = format!(
+                    "{} · iter {}",
+                    recovery_action_text(event.action),
+                    event.at_iteration
+                );
+                if let Some(blocked) = &event.blocked_on {
+                    value.push_str(&format!(" · blocked on {blocked}"));
+                }
+                rows.push(task_field("event", value));
+                if let Some(detail) = &event.detail {
+                    rows.extend(task_wrapped_block("detail", detail, inner_w));
+                }
+                if let Some(evidence) = &event.evidence {
+                    rows.extend(task_wrapped_block("evidence", evidence, inner_w));
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// The [0] column's detail for the [2] pane's selected task: `height` lines of
+/// a titled box around `task_detail_rows` of `ordered_tasks(vm.tasks)` at
+/// `vm.sel_task`. `None` while the Tasks pane is not the focus (the column
+/// keeps the transcript) or while there is no task to read.
+pub fn task_detail_box(vm: &WatchViewModel, width: usize, height: usize) -> Option<Vec<String>> {
+    if vm.focus != 2 {
+        return None;
+    }
+    let task = ordered_tasks(&vm.tasks).get(vm.sel_task).copied()?;
+    let inner_w = width.saturating_sub(2).max(1);
+    let all = task_detail_rows(task, inner_w);
+    // The body scrolls: a ledger record with a long summary, many notes or a
+    // recovery trail is taller than the column, and all of it has to stay
+    // reachable. `vm.task_detail_scroll` is clamped here, so a value left over
+    // from a taller terminal or another task still paints.
+    let inner_h = height.saturating_sub(2).max(1);
+    let total = all.len();
+    let max_scroll = total.saturating_sub(inner_h);
+    let scroll = vm.task_detail_scroll.min(max_scroll);
+    let rows: Vec<RowCell> = all.into_iter().skip(scroll).collect();
+    let note = if max_scroll == 0 {
+        "j/k or click picks a task · [2]".to_string()
+    } else {
+        format!(
+            "{}-{} of {} · PgUp/PgDn or wheel scrolls",
+            scroll + 1,
+            (scroll + inner_h).min(total),
+            total
+        )
+    };
+    Some(render_pane(
+        width,
+        height,
+        &format!("[0] Task · {}", task.id),
+        true,
+        &rows,
+        Some(note.as_str()),
+    ))
+}
+
+/// How far the [0] task detail can scroll in a `cols` x `rows` terminal: the
+/// rows its body overflows the box by (`0` while it all fits), so the app can
+/// clamp its wheel and PageDown steps to a ledger record that ends.
+pub fn task_detail_max_scroll(vm: &WatchViewModel, cols: usize, rows: usize) -> usize {
+    if vm.focus != 2 {
+        return 0;
+    }
+    let Some(layout) = pane_layout(vm, cols, rows) else {
+        return 0;
+    };
+    let Some(task) = ordered_tasks(&vm.tasks).get(vm.sel_task).copied() else {
+        return 0;
+    };
+    let inner_w = match layout.zero_w {
+        None => layout.list_w,
+        Some(w) => w,
+    };
+    let inner_h = layout.zero_h.saturating_sub(2).max(1);
+    task_detail_rows(task, inner_w.saturating_sub(2).max(1))
+        .len()
+        .saturating_sub(inner_h)
+}
+
 // ── Titles / footer notes ────────────────────────────────────────────────────
 
 fn sessions_title(vm: &WatchViewModel) -> String {
@@ -1259,7 +1525,7 @@ fn pos_note(sel: usize, len: usize) -> Option<String> {
 // ── Frame ────────────────────────────────────────────────────────────────────
 
 const FOOTER_HINT: &str =
-    "1/2/3/4 focus · tab cycle · r mode · j/k move · [/] h/l page · [4] PgUp/Dn read-up · q quit";
+    "1/2/3/4 focus · tab cycle · r mode · j/k move · [/] h/l page · PgUp/Dn read-up/task · q quit";
 
 /// Pure full-frame render. Returns a single string of exactly `rows` lines
 /// joined by \n, each line exactly `cols` visible columns.
@@ -1389,6 +1655,9 @@ pub fn render_frame(vm: &WatchViewModel, cols: usize, rows: usize) -> String {
     // when the Shells pane is focused (sub-zero's renderRight). Always emits
     // exactly `height` lines.
     let mk_zero = |w: usize, height: usize| -> Vec<String> {
+        if let Some(box_lines) = task_detail_box(vm, w, height) {
+            return box_lines;
+        }
         if let Some(box_lines) = skill_detail_box(vm, w, height) {
             return box_lines;
         }
@@ -1572,6 +1841,7 @@ mod tests {
             sel_skill: None,
             skill_detail: None,
             skill_detail_scroll: 0,
+            task_detail_scroll: 0,
         }
     }
 
@@ -2494,6 +2764,71 @@ mod tests {
             1,
             "{body:?}"
         );
+    }
+
+    #[test]
+    fn the_task_detail_box_only_replaces_the_transcript_while_tasks_is_focused() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        let mut t = task(
+            "task-1",
+            "a long title that must show in full",
+            HarnessTaskStatus::InProgress,
+        );
+        t.summary = Some("the summary text".into());
+        t.notes = vec!["first note".into(), "second note".into()];
+        t.role = Some("author".into());
+        vm.tasks = vec![t];
+
+        // No task detail while the Tasks pane is not the focus.
+        assert!(task_detail_box(&vm, 40, 10).is_none());
+        vm.focus = 2;
+        let box_lines = task_detail_box(&vm, 40, 10).expect("the task detail box");
+        assert_eq!(
+            box_lines.len(),
+            10,
+            "the box is exactly as tall as its column"
+        );
+        assert!(box_lines[0].contains("Task · task-1"), "{:?}", box_lines[0]);
+        // The whole record, read in a box tall enough to seat it.
+        let tall = task_detail_box(&vm, 40, 60).expect("the tall task detail box");
+        let body = strip_ansi(&tall.join("\n"));
+        // The title shows in full, wrapped across the column's width.
+        assert!(body.contains("a long title that mus"), "{body}");
+        assert!(body.contains("t show in full"), "{body}");
+        assert!(body.contains("the summary text"), "{body}");
+        assert!(body.contains("first note"), "{body}");
+        assert!(body.contains("second note"), "{body}");
+        assert!(body.contains("author"), "{body}");
+
+        // The frame carries it; without the focus it is the transcript again.
+        assert!(strip_ansi(&render_frame(&vm, 100, 30)).contains("Task · task-1"));
+        vm.focus = 1;
+        assert!(!strip_ansi(&render_frame(&vm, 100, 30)).contains("Task · task-1"));
+    }
+
+    #[test]
+    fn the_task_detail_scroll_clamps_to_what_the_body_overflows_by() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        set_color_enabled(false);
+        let mut vm = empty_vm();
+        let mut t = task("task-1", "a task", HarnessTaskStatus::InProgress);
+        t.notes = (0..200).map(|i| format!("note {i:03}")).collect();
+        vm.tasks = vec![t];
+        vm.focus = 2;
+
+        let max = task_detail_max_scroll(&vm, 100, 30);
+        assert!(max > 0, "a 200-note ledger outruns the column");
+        // An index left past the end still paints a full-height box.
+        vm.task_detail_scroll = max + 100;
+        let clamped = task_detail_box(&vm, 40, 10).expect("the task detail box");
+        assert_eq!(clamped.len(), 10, "the box stays exactly its column");
+        // With nothing selected there is no detail at all.
+        let mut empty = empty_vm();
+        empty.focus = 2;
+        assert!(task_detail_box(&empty, 40, 10).is_none());
+        assert_eq!(task_detail_max_scroll(&empty, 100, 30), 0);
     }
 
     #[test]

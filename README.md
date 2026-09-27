@@ -1539,6 +1539,16 @@ scrolls, so a long `SKILL.md` or schema stays readable end to end: `PageUp`/
 says where in the listing you are. Leaving `[4]` or switching sessions puts the
 transcript back in the `[0]` column.
 
+Focusing `[2]` (or clicking a task row) turns the `[0]` column into that task's
+full detail instead — the whole ledger record, not just the one-line title the
+pane shows: id, the full wrapped title, status, role, dependencies, review
+wiring (`reviews`, `awaiting`, `blocked on`) and confidence, the created/finished
+iterations, loops run, activations, stalls, reopens and review round, the wrapped
+summary and every note, the recorded footprint, and the bounded recovery
+history. `PageUp`/`PageDown` (or the wheel over the `[0]` column) scroll it when
+the record outruns the column; moving the selection to another task shows that
+task's record from the top, and only leaving `[2]` puts the transcript back.
+
 A tool read-up resolves against the surfaces the focused session actually
 recorded, and an MCP tool's definition exists in no checkout at all: only the
 server process knows it. So a run records what its own spawned servers

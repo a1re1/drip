@@ -5144,7 +5144,11 @@ impl TuiApp {
     /// `is_tty` is injected so lifecycle tests can drive the spinner wiring
     /// without a real terminal.
     fn begin_title_with(&mut self, goal_text: &str, env: &HashMap<String, String>, is_tty: bool) {
-        let settings = self.config.settings.clone();
+        // The config's settings plus the `~/.drip/prompts/` directories: since
+        // system prompt profiles moved out of `runtime.system_prompt_profiles`,
+        // the raw settings no longer carry the active profile the resolver
+        // needs, and every title route would fail to resolve.
+        let settings = crate::core::config::system_prompt_settings(&self.config);
         // An explicit /rename name wins over a generated title: when
         // session.json already carries one, the one-shot auto-title never
         // runs, so the next goal cannot overwrite the user's choice.
@@ -5225,7 +5229,9 @@ impl TuiApp {
         let goal = self.session.last_goal.clone().unwrap_or_default();
         let digest = read_session_name_context(&goal, &self.cells);
         let env = self.merged_env();
-        let settings = self.config.settings.clone();
+        // Prompt profiles live in `~/.drip/prompts/` now, so the raw settings
+        // are not enough for the resolver (see `system_prompt_settings`).
+        let settings = crate::core::config::system_prompt_settings(&self.config);
         let Some(route) = resolve_session_route(&settings, Some(&env)) else {
             self.push_error("/rename needs a configured inference profile (see /model).");
             return;
@@ -5328,7 +5334,9 @@ impl TuiApp {
     /// bounded, so the UI never blocks; the reply lands via Msg::Btw.
     fn ask_btw(&mut self, question: &str) {
         let env = self.merged_env();
-        let settings = self.config.settings.clone();
+        // Prompt profiles live in `~/.drip/prompts/` now, so the raw settings
+        // are not enough for the resolver (see `system_prompt_settings`).
+        let settings = crate::core::config::system_prompt_settings(&self.config);
         let Some(route) = resolve_session_route(&settings, Some(&env)) else {
             self.push_error("/btw needs a configured inference profile (see /model).");
             return;
@@ -6546,6 +6554,81 @@ mod rename_tests {
         // thread instead of the "no profile configured" error branch.
         app.env_overlay = Some(BTreeMap::new());
         app
+    }
+
+    /// A /rename on a config whose system prompt profile lives only in the
+    /// `~/.drip/prompts/` directory beside the config file — the shape every
+    /// migrated config has. The raw settings carry an empty
+    /// `runtime.system_prompt_profiles`, so resolving the route from them
+    /// fails on the active profile and /rename reports "needs a configured
+    /// inference profile"; the config-derived view must be used instead.
+    #[test]
+    fn rename_resolves_profiles_from_the_configs_prompt_directories() {
+        let dir = temp_dir("prompt-dirs");
+        let _home = TempHome(dir.clone());
+        let mut app = rename_app(&dir);
+        app.pane_title = Some(PaneTitle::new("ship the release"));
+
+        // The isolated config file and the prompt directory beside it: the
+        // active system prompt id resolves only when the directories are
+        // folded into the settings view.
+        let config_path = dir.join("config.json");
+        let prompt_dir = dir.join("prompts").join("agent");
+        std::fs::create_dir_all(&prompt_dir).expect("prompt dir");
+        std::fs::write(prompt_dir.join("prompt.md"), "You are the agent.\n").expect("prompt.md");
+        std::fs::write(
+            prompt_dir.join("config.json"),
+            r#"{"id":"agent","label":"Agent"}"#,
+        )
+        .expect("config.json");
+        app.config.path = Some(config_path);
+
+        app.config.settings.insert(
+            crate::core::config::MODEL_PROFILES_SETTING_ID.to_string(),
+            r#"[{"id":"mock","label":"Mock","model":"m","provider":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1/","apiKeyRef":"env:MOCK_KEY"}]"#.to_string(),
+        );
+        app.config.settings.insert(
+            crate::core::config::ACTIVE_INFERENCE_PROFILE_SETTING_ID.to_string(),
+            "mock".to_string(),
+        );
+        app.config.settings.insert(
+            crate::core::config::ACTIVE_SYSTEM_PROMPT_PROFILE_SETTING_ID.to_string(),
+            "agent".to_string(),
+        );
+        app.env_overlay = Some(
+            [("MOCK_KEY".to_string(), "k".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        // The raw settings do not carry the active `agent` profile at all:
+        // the directory is its only source, and resolving from the raw
+        // settings must fail on the missing active system prompt profile.
+        assert!(
+            !app.config
+                .settings
+                .get(crate::core::config::SYSTEM_PROMPT_PROFILES_SETTING_ID)
+                .map(|raw| raw.contains("\"agent\""))
+                .unwrap_or(false),
+            "the raw settings must not already carry the directory's profile"
+        );
+        assert!(
+            resolve_session_route(&app.config.settings, Some(&app.merged_env())).is_none(),
+            "raw settings without the prompt directories cannot resolve the active profile"
+        );
+        let merged = crate::core::config::system_prompt_settings(&app.config);
+        assert!(
+            resolve_session_route(&merged, Some(&app.merged_env())).is_some(),
+            "the prompt directories beside the config file must supply the active profile"
+        );
+
+        // The regression: /rename must reach the rename path (epoch bumped,
+        // no "needs a configured inference profile" error) on this config.
+        app.begin_rename();
+        assert_eq!(
+            app.rename_epoch, 1,
+            "begin_rename must resolve the route from the config's prompt directories"
+        );
     }
 
     fn label(app: &TuiApp) -> String {

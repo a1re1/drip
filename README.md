@@ -1356,6 +1356,9 @@ the thread and the transcript path; `/btw reset` clears it. A sidebar answer tak
 inference profile (`/model`), times out after 60s, and its size and the transcript digest are both
 bounded, so asking is cheap. It applies immediately during a run instead of queuing behind the goal.
 
+In the TUI the sidebar's lines are colour-coded — the echoed question in magenta, the answer in cyan
+— so a side chat is told apart from the session's own output at a glance.
+
 ---
 
 ## Compact TUI timeline

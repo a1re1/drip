@@ -82,6 +82,36 @@ pub fn render_timeline_cell(entry: &TranscriptEntry, width: usize) -> Vec<String
         .collect()
 }
 
+/// Painted rows for a plain notice. A sidebar (`/btw`) conversation gets its
+/// own colours — the echoed question in magenta, the sidebar's answer in cyan
+/// — so a side chat never reads like the session's own output, while ordinary
+/// notices stay dim. A line that arrives already painted keeps its own colour.
+fn info_note_rows(text: &str, width: usize) -> Vec<String> {
+    use crate::tui::btw::{classify_btw_line, BtwLineKind};
+    use crate::tui::theme::paint;
+
+    let rows = wrap_ansi(text, width);
+    if !crate::watch::ansi::color_enabled() {
+        return rows.iter().map(|line| strip_ansi(line)).collect();
+    }
+
+    let color: fn(&str) -> String = match classify_btw_line(text) {
+        Some(BtwLineKind::Question) => paint("purple"),
+        Some(BtwLineKind::Reply) => paint("blueBright"),
+        None => c::dim,
+    };
+
+    rows.iter()
+        .map(|line| {
+            if line.contains('\x1b') {
+                line.clone()
+            } else {
+                color(line)
+            }
+        })
+        .collect()
+}
+
 fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<String> {
     match entry {
         TranscriptEntry::Goal(goal) => {
@@ -171,21 +201,7 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
         // An info row may carry its own color (the startup banner paints
         // itself); an uncolored note still renders dim. With color switched
         // off the escapes are removed instead of printed literally.
-        TranscriptEntry::Info(note) => {
-            let rows = wrap_ansi(&note.text, width);
-            if !crate::watch::ansi::color_enabled() {
-                return rows.iter().map(|line| strip_ansi(line)).collect();
-            }
-            rows.iter()
-                .map(|line| {
-                    if line.contains('\x1b') {
-                        line.clone()
-                    } else {
-                        c::dim(line)
-                    }
-                })
-                .collect()
-        }
+        TranscriptEntry::Info(note) => info_note_rows(&note.text, width),
         TranscriptEntry::Error(note) => {
             let mut rows = vec![String::new()];
 
@@ -475,6 +491,28 @@ mod tests {
 
         assert_eq!(make(1), "∎ run completed after 1 cycle");
         assert_eq!(make(3), "∎ run completed after 3 cycles");
+    }
+
+    #[test]
+    fn sidebar_lines_take_the_sidebar_colours() {
+        let _guard = crate::watch::ansi::color_test_lock();
+        crate::watch::ansi::set_color_enabled(true);
+
+        let question = render_timeline_cell(&note("btw · why slow?"), 80)[0].clone();
+        let reply = render_timeline_cell(&note("btw | it is on PATCH."), 80)[0].clone();
+        let plain = render_timeline_cell(&note("notice: pane title updated"), 80)[0].clone();
+
+        // magenta question, cyan-bold answer, dim everything else.
+        assert!(question.contains("\u{1b}[35m"), "{question:?}");
+        assert!(reply.contains("\u{1b}[1;36m"), "{reply:?}");
+        assert!(plain.contains("\u{1b}[2m"), "{plain:?}");
+        assert_ne!(question, reply);
+        assert_ne!(reply, plain);
+        assert_ne!(question, plain);
+
+        // The text itself is unchanged — only the colour differs.
+        assert_eq!(strip_ansi(&question), "btw · why slow?");
+        assert_eq!(strip_ansi(&reply), "btw | it is on PATCH.");
     }
 
     #[test]

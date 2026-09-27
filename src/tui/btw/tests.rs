@@ -289,3 +289,23 @@ fn chat_lines_echo_the_question_and_prefix_every_reply_line() {
     let digest = build_btw_digest(&entries, "s", "/t", false, None, 4_000);
     assert!(!digest.contains("Because it is on PATCH"));
 }
+
+#[test]
+fn sidebar_lines_classify_by_voice_and_ignore_ordinary_chat() {
+    assert_eq!(
+        classify_btw_line("btw · why slow?"),
+        Some(BtwLineKind::Question)
+    );
+    assert_eq!(
+        classify_btw_line("btw | it is on PATCH."),
+        Some(BtwLineKind::Reply)
+    );
+    assert_eq!(
+        classify_btw_line("  btw | you: earlier ask"),
+        Some(BtwLineKind::Reply),
+    );
+    assert_eq!(classify_btw_line("btw"), None);
+    assert_eq!(classify_btw_line("btwish chatter"), None);
+    assert_eq!(classify_btw_line("btw:sidebar without marker"), None);
+    assert_eq!(classify_btw_line("notice: pane title updated"), None);
+}

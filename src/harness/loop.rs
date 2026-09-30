@@ -12717,6 +12717,8 @@ mod ask_user_survey_tests {
             state_path: Some(dir.path().join("session/state.json")),
             ask_user_enabled: true,
             ask_user_timeout_seconds: Some(1),
+            // Tests never reach a provider; anything that does is bounded.
+            request_timeout_ms: Some(2_000),
             ..SolidStateHarnessOptions::default()
         };
         configure(&mut options);
@@ -13008,9 +13010,6 @@ mod ask_user_survey_tests {
         assert!(validate(&survey, &empty).is_err());
     }
 
-    /// The injected operator feedback must carry the exact mandated
-    /// plan-revision directive.
-    #[test]
     /// A chat record renders the whole-survey directive, every question and
     /// option, and the operator's message — never the per-answer directive.
     #[test]
@@ -13047,6 +13046,9 @@ mod ask_user_survey_tests {
         assert!(rendered.contains("Operator: Let us talk this through: polls please"));
     }
 
+    /// The injected operator feedback must carry the exact mandated
+    /// plan-revision directive.
+    #[test]
     fn ask_user_answer_directive_matches_the_mandated_text() {
         assert_eq!(
             crate::harness::prompt::ASK_USER_ANSWER_DIRECTIVE,

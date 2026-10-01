@@ -108,7 +108,7 @@ pub struct ParsedCliArgs {
     pub new_goal: bool,
     /// Start the goal in a background process and print the session handle.
     pub detach: bool,
-    /// With --gc: compute and report without touching disk.
+    /// With --gc or --reap-tmux: compute and report without touching disk.
     pub dry_run: bool,
     /// Undo the last N journaled PATCH edits and exit.
     pub undo_last: bool,
@@ -179,6 +179,8 @@ pub struct ParsedCliArgs {
     pub plugin_disable_key: Option<String>,
     /// Garbage-collect old idle session data (images, logs, long transcripts).
     pub gc: bool,
+    /// Reap unused drip-owned tmux sessions left behind by BASH_ASYNC jobs.
+    pub reap_tmux: bool,
     /// Delete sessions whose updatedAt is older than this many days (default 14).
     pub older_than: Option<i64>,
     /// Review the working-tree diff file-by-file and print a holistic report (read-only).
@@ -313,6 +315,7 @@ impl Default for ParsedCliArgs {
             plugin_disable: false,
             plugin_disable_key: None,
             gc: false,
+            reap_tmux: false,
             older_than: None,
             review: false,
             praeparare: false,
@@ -561,6 +564,9 @@ pub fn parse_cli_args(argv: &[String]) -> ParsedCliArgs {
             }
             "--gc" => {
                 parsed.gc = true;
+            }
+            "--reap-tmux" => {
+                parsed.reap_tmux = true;
             }
             "--older-than" => {
                 if let Some(raw) =
@@ -1716,6 +1722,17 @@ mod tests {
         assert!(parsed.gc);
         assert!(parsed.dry_run);
         assert_eq!(parsed.older_than, Some(7));
+        assert!(!parsed.reap_tmux);
+    }
+
+    #[test]
+    fn parses_reap_tmux_with_dry_run_and_json() {
+        let parsed = parse(&["--reap-tmux", "--dry-run", "--json"]);
+
+        assert!(parsed.reap_tmux);
+        assert!(parsed.dry_run);
+        assert!(parsed.json);
+        assert!(parsed.errors.is_empty());
     }
 
     #[test]

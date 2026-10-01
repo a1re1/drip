@@ -16,9 +16,7 @@ use crate::cli::delegate_tool::{build_delegate_tool, DelegateToolWiring};
 use crate::cli::follow::{
     format_transcript_entry_line, parse_transcript_line, read_appended_jsonl_lines,
 };
-use crate::cli::gc::{
-    collect_gc_plan, execute_gc_plan, reap_orphan_tmux_sessions, sweep_async_job_logs,
-};
+use crate::cli::gc::{collect_gc_plan, execute_gc_plan, sweep_async_job_logs};
 use crate::cli::headless_output::{
     headless_event_line, headless_result_payload, HeadlessResultArgs,
 };
@@ -447,6 +445,58 @@ fn print_session_list(
 // Shared by --result and --wait: print a persisted run record in the exact
 // shape a live run's final line has, and hand back the run's exit code so
 // `drip --wait; echo $?` reads like the run itself.
+/// Ad-hoc / cron-safe tmux reaping: never needs a project index or inference
+/// config, so it is safe to run from a crontab in any directory.
+fn run_reap_tmux(cli_args: &crate::cli::args::ParsedCliArgs) -> i32 {
+    let result = match crate::tools::tmux_reap::reap_tmux_sessions(cli_args.dry_run) {
+        Ok(result) => result,
+        Err(error) => {
+            if cli_args.json {
+                println!("{}", json!({"ok": false, "error": error}));
+            } else {
+                eprintln!("tmux reap failed: {error}");
+            }
+            return 1;
+        }
+    };
+
+    if cli_args.json {
+        let kept: Vec<serde_json::Value> = result
+            .kept_reasons
+            .iter()
+            .map(|(name, reason)| json!({"name": name, "reason": reason}))
+            .collect();
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "dryRun": result.dry_run,
+                "killed": result.killed,
+                "kept": result.kept,
+                "keptReasons": kept,
+            })
+        );
+        return 0;
+    }
+
+    let verb = if result.dry_run { "would reap" } else { "reaped" };
+    if result.killed.is_empty() {
+        println!("No unused drip tmux sessions to reap.");
+    } else {
+        println!("{verb} {} session(s):", result.killed.len());
+        for name in &result.killed {
+            println!("  {name}");
+        }
+    }
+    if !result.kept.is_empty() {
+        println!("kept {} session(s):", result.kept.len());
+        for (name, reason) in &result.kept_reasons {
+            println!("  {name} ({reason})");
+        }
+    }
+    0
+}
+
 fn print_run_record(json: bool, paths: &SessionPaths, record: &RunRecord, session_id: &str) -> i32 {
     let payload = headless_result_payload(HeadlessResultArgs {
         record,
@@ -1760,11 +1810,12 @@ pub async fn main(argv: Vec<String>) -> i32 {
 
     // One exclusion table for every non-goal mode (debt audit S1): the ad-hoc
     // per-handler conflict lists had already drifted apart.
-    let exclusive_modes: [(&str, bool); 19] = [
+    let exclusive_modes: [(&str, bool); 20] = [
         ("--answer", cli_args.answer),
         ("--bash", cli_args.bash.is_some()),
         ("--follow", cli_args.follow),
         ("--gc", cli_args.gc),
+        ("--reap-tmux", cli_args.reap_tmux),
         ("--inspect", cli_args.inspect),
         ("--list", cli_args.list),
         ("--result", cli_args.result),
@@ -1812,6 +1863,13 @@ pub async fn main(argv: Vec<String>) -> i32 {
     if let Some(message) = praeparare_tui_conflict_message(&cli_args) {
         eprintln!("{message}");
         return 1;
+    }
+
+    // --reap-tmux owns no project state: it reaps marked tmux sessions and
+    // runs before any index/config resolution so a cron entry works from any
+    // directory, and in a repo that has never seen a drip run.
+    if cli_args.reap_tmux {
+        return run_reap_tmux(&cli_args);
     }
 
     if cli_args.list {
@@ -1870,24 +1928,13 @@ pub async fn main(argv: Vec<String>) -> i32 {
         let index = open_session_index(&project.index_db_path);
         let plan = collect_gc_plan(&index, &project, older_than_ms, &chrono::Utc::now);
         let result = execute_gc_plan(&plan, cli_args.dry_run);
-        // Orphaned drip- tmux sessions older than the cutoff die with the same sweep.
-        let listing = std::process::Command::new("tmux")
-            .args(["ls", "-F", "#{session_name} #{session_created}"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            .unwrap_or_default();
-        let reaped = reap_orphan_tmux_sessions(
-            &listing,
-            older_than_ms,
-            cli_args.dry_run,
-            chrono::Utc::now().timestamp_millis(),
-            &|name: &str| {
-                crate::tools::builtin::bash::kill_tmux_session(name)
-                    .map_err(|error| error.to_string())
-            },
-        );
+        // Unused drip-owned tmux sessions die with the same sweep, using the
+        // shared conservative policy (marked + detached + dead panes only).
+        let reaped = crate::tools::tmux_reap::reap_tmux_sessions(cli_args.dry_run)
+            .unwrap_or_else(|error| {
+                eprintln!("tmux reap skipped: {error}");
+                crate::tools::tmux_reap::ReapResult::default()
+            });
         let swept_logs =
             sweep_async_job_logs(&project, older_than_ms, cli_args.dry_run, &chrono::Utc::now);
 
@@ -3339,6 +3386,17 @@ mod tests {
             praeparare_tui_conflict_message(&parse_entry(&["--praeparare", "notes"])),
             None
         );
+    }
+
+    #[test]
+    fn reap_tmux_parses_without_a_goal_or_a_session_ref() {
+        let parsed = parse_entry(&["--reap-tmux", "--dry-run", "--json"]);
+
+        assert!(parsed.reap_tmux);
+        assert!(parsed.dry_run);
+        assert!(parsed.json);
+        assert!(parsed.errors.is_empty());
+        assert!(parsed.goal.is_none());
     }
 
     #[test]

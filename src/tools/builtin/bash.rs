@@ -766,8 +766,14 @@ pub fn assert_tmux_available() -> anyhow::Result<()> {
 }
 
 pub fn tmux_session_exists(session_name: &str) -> bool {
+    // tmux resolves `-t <name>` by prefix match, so a bare name can report a
+    // different session (`drip-abc` for `drip-abc12`). Use the exact-name form.
     std::process::Command::new("tmux")
-        .args(["has-session", "-t", session_name])
+        .args([
+            "has-session",
+            "-t",
+            &crate::tools::tmux_reap::exact_session_id(session_name),
+        ])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -819,7 +825,7 @@ pub fn start_tmux_session(args: StartTmuxSessionArgs) -> anyhow::Result<()> {
             &[
                 "set-window-option",
                 "-t",
-                args.session_name,
+                &crate::tools::tmux_reap::exact_session_target(args.session_name),
                 "remain-on-exit",
                 "on",
             ],
@@ -828,11 +834,27 @@ pub fn start_tmux_session(args: StartTmuxSessionArgs) -> anyhow::Result<()> {
                 args.session_name
             ),
         )?;
+        // Stamp ownership before the command runs: the reaper only ever
+        // touches sessions carrying this marker, so an unmarked or foreign
+        // `drip-`-prefixed session is never killed by convention.
+        run_tmux_command(
+            &[
+                "set-option",
+                "-t",
+                &crate::tools::tmux_reap::exact_session_target(args.session_name),
+                crate::tools::tmux_reap::TMUX_OWNER_OPTION,
+                crate::tools::tmux_reap::TMUX_OWNER_MARKER,
+            ],
+            &format!(
+                "Unable to mark tmux session \"{}\" as drip-owned.",
+                args.session_name
+            ),
+        )?;
         run_tmux_command(
             &[
                 "send-keys",
                 "-t",
-                args.session_name,
+                &crate::tools::tmux_reap::exact_session_target(args.session_name),
                 &build_tmux_pane_command(&wrapped_command),
                 "Enter",
             ],
@@ -856,15 +878,41 @@ pub fn kill_tmux_session(session_name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    std::process::Command::new("tmux")
-        .args(["kill-session", "-t", session_name])
+    // Exact session id: a bare name prefix-matches, so killing `drip-abc`
+    // would destroy a live `drip-abc12`. The exit status is checked too — a
+    // kill that failed (a race with the session exiting, a permissions
+    // problem) must be reported rather than silently treated as success.
+    let output = std::process::Command::new("tmux")
+        .args([
+            "kill-session",
+            "-t",
+            &crate::tools::tmux_reap::exact_session_id(session_name),
+        ])
         .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The session exiting between the existence check and the kill is the
+        // ordinary benign race: the goal (the session is gone) already holds.
+        if stderr.contains("can't find session") || stderr.contains("no server running") {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "Unable to kill tmux session \"{}\": {}",
+            session_name,
+            stderr.trim()
+        );
+    }
 
     Ok(())
 }
 
 pub fn wait_for_tmux_session_exit(session_name: &str) -> anyhow::Result<Option<i32>> {
-    let pane_target = session_name;
+    // Exact session + default window: polling must never read the exit status
+    // of a same-prefix session.
+    let pane_target = crate::tools::tmux_reap::exact_session_target(session_name);
 
     loop {
         let output = std::process::Command::new("tmux")
@@ -872,7 +920,7 @@ pub fn wait_for_tmux_session_exit(session_name: &str) -> anyhow::Result<Option<i
                 "display-message",
                 "-p",
                 "-t",
-                pane_target,
+                pane_target.as_str(),
                 "#{pane_dead} #{pane_dead_status}",
             ])
             .output()?;

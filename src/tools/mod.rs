@@ -11,4 +11,5 @@ pub mod loader;
 pub mod mcp;
 pub mod pack;
 pub mod patch_journal;
+pub mod tmux_reap;
 pub mod types;

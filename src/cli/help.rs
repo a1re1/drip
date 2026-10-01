@@ -44,7 +44,19 @@ OPTIONS
 	                              last update is older than --older-than days (default 14). Sessions
 	                              with a live lease are never touched. Combine with --dry-run to
 	                              preview without writing and --json for machine-readable output.
-	--older-than <days>           Age threshold for --gc (positive integer, default 14)
+	--reap-tmux                   Kill unused drip-owned tmux sessions left behind by BASH_ASYNC
+	                              jobs. A session is reaped only when it carries drip's ownership
+	                              marker, every pane is dead, it is detached, and its exit status
+	                              was already recorded (or the pane has been dead past a short
+	                              grace window). Attached sessions, live panes, unrelated tmux
+	                              and unmarked sessions from older drip versions are never
+	                              touched. Combine with --dry-run to preview and --json for
+	                              machine-readable output. Needs no project or model config, so
+	                              it is safe on a cron. Sessions are addressed by exact name,
+	                              so a name that is a prefix of another is never affected.
+	--older-than <days>           Age threshold for --gc session compaction (positive integer,
+	                              default 14). The tmux reap in --gc is state-based, not
+	                              age-based, and ignores it.
 	--ui                          Serve the browser UI for the sessions under this
 	                              directory: drip unpacks a small Bun/React app under
 	                              ~/.drip/ui/ and runs it with bun (installed from
@@ -332,6 +344,10 @@ AUTOMATION RECIPES
 	Start a run and capture the session id:
 		drip                         # prints "session <id>" plus paths
 		drip --resume <id> "do the thing" --max-iterations 20
+	Reap unused drip tmux sessions after runs, or from cron:
+		drip --reap-tmux --dry-run   # preview what would go
+		drip --reap-tmux             # reap them now
+		*/15 * * * * drip --reap-tmux >/dev/null 2>&1
 	Follow a run from another terminal (or another agent):
 		drip --follow <id>          # formatted; or tail -f ~/.drip/projects/<slug>/sessions/<id>/transcript.jsonl
 	Steer a running goal without stopping it:
@@ -434,6 +450,7 @@ mod tests {
             "--timeout-secs",
             "--full",
             "--gc",
+            "--reap-tmux",
             "--older-than",
             "--help",
             "--version",

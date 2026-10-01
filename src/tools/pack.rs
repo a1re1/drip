@@ -280,6 +280,8 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
         .map_err(|error| error.to_string())?;
     builtin::bash::assert_tmux_available().map_err(|error| error.to_string())?;
 
+    // Exact-name check: a bare name prefix-matches, which would reject a new
+    // session name only because an unrelated longer name exists.
     if builtin::bash::tmux_session_exists(&session_name) {
         return Err(format!(
             "tmux session \"{session_name}\" already exists. Choose a different sessionName."
@@ -325,6 +327,17 @@ fn async_bash_execute(request: ChatToolExecuteRequest<'_>) -> Result<ChatToolRes
                     };
 
                     logger.line(&format!("[tmux-exit] session={run_session_name} exitCode={exit_code}"))?;
+
+                    // The exit status is durable in the job log now, so the
+                    // dead tmux session can be collected immediately instead of
+                    // dangling until an ad-hoc or cron reap pass.
+                    //
+                    // Only when the shared policy agrees it is unused: an
+                    // operator attached to the session keeps its pane (and the
+                    // later cron/`--reap-tmux` pass collects it once they
+                    // detach), and a session with a live pane is never touched.
+                    crate::tools::tmux_reap::mark_result_recorded(&run_session_name);
+                    let _ = crate::tools::tmux_reap::reap_session_if_eligible(&run_session_name);
 
                     if exit_code != 0 {
                         anyhow::bail!("tmux session \"{run_session_name}\" exited with code {exit_code}.");

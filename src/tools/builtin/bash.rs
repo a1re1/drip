@@ -767,7 +767,10 @@ pub fn assert_tmux_available() -> anyhow::Result<()> {
 
 pub fn tmux_session_exists(session_name: &str) -> bool {
     // tmux resolves `-t <name>` by prefix match, so a bare name can report a
-    // different session (`drip-abc` for `drip-abc12`). Use the exact-name form.
+    // different session (`drip-abc` for `drip-abc12`). Use the exact-name
+    // form, which needs tmux >= 2.6 (2017); on anything older this reports
+    // "absent", and the caller's re-create attempt fails loudly rather than
+    // touching another session.
     std::process::Command::new("tmux")
         .args([
             "has-session",

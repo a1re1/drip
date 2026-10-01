@@ -511,11 +511,6 @@ fn a_session_that_vanishes_mid_pass_is_kept_and_the_rest_still_reaps() {
         empty.killed.is_empty() && empty.kept.is_empty(),
         "{empty:?}"
     );
-
-    match previous {
-        Some(value) => std::env::set_var("TMUX_TMPDIR", value),
-        None => std::env::remove_var("TMUX_TMPDIR"),
-    }
 }
 
 #[test]
@@ -629,7 +624,7 @@ fn a_finished_bash_async_job_is_collected_and_its_result_stays_readable() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = TmuxServer::new();
-    let _previous = set_process_socket(server.socket());
+    let _restore = SocketRestore(set_process_socket(server.socket()));
 
     let cwd = tempfile::tempdir().unwrap();
     let services = services_for(cwd.path());
@@ -676,7 +671,7 @@ fn a_running_bash_async_job_survives_a_pass_and_its_result_outlives_cleanup() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = TmuxServer::new();
-    let _previous = set_process_socket(server.socket());
+    let _restore = SocketRestore(set_process_socket(server.socket()));
 
     let cwd = tempfile::tempdir().unwrap();
     let services = services_for(cwd.path());
@@ -734,7 +729,7 @@ fn monitor_work_rides_no_tmux_session_and_survives_a_pass() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = TmuxServer::new();
-    let _previous = set_process_socket(server.socket());
+    let _restore = SocketRestore(set_process_socket(server.socket()));
     server.dead_owned_session("drip-bystander", true);
 
     let cwd = tempfile::tempdir().unwrap();
@@ -797,6 +792,24 @@ fn set_process_socket(socket: &Path) -> Option<std::ffi::OsString> {
     previous
 }
 
+/// Restores what `set_process_socket` replaced. The library assertions in
+/// between can panic, and the panicking thread would otherwise leave this
+/// process pointed at a socket directory that is being deleted, breaking every
+/// later test that reads `TMUX_TMPDIR`. `Drop` restores on both paths.
+struct SocketRestore(Option<std::ffi::OsString>);
+
+impl Drop for SocketRestore {
+    fn drop(&mut self) {
+        // The suite serializes these tests through ENV_LOCK, so no other
+        // thread is touching the environment here (same reasoning as
+        // `set_process_socket`).
+        match self.0.take() {
+            Some(value) => std::env::set_var("TMUX_TMPDIR", value),
+            None => std::env::remove_var("TMUX_TMPDIR"),
+        }
+    }
+}
+
 fn tmux_session_exists(server: &TmuxServer, name: &str) -> bool {
     server.sessions().iter().any(|session| session == name)
 }
@@ -810,7 +823,7 @@ fn an_exact_target_never_resolves_to_a_longer_same_prefix_session() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = TmuxServer::new();
-    let _previous = set_process_socket(server.socket());
+    let _restore = SocketRestore(set_process_socket(server.socket()));
 
     // Only the LONGER name exists. tmux resolves a bare `-t` target by prefix
     // match, so `drip-e2e-collide` would otherwise address this live session.
@@ -853,7 +866,7 @@ fn a_live_second_window_keeps_the_session() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = TmuxServer::new();
-    let _previous = set_process_socket(server.socket());
+    let _restore = SocketRestore(set_process_socket(server.socket()));
     let name = "drip-e2e-two-windows";
 
     // Window 1 is dead (and its result recorded, so age never matters). A

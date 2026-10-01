@@ -218,12 +218,27 @@ pub fn parse_session_listing(listing: &str) -> Vec<TmuxSessionListing> {
             continue;
         }
 
-        let mut fields = line.split('|');
-        let name = fields.next().unwrap_or("").trim().to_string();
+        let mut fields: Vec<&str> = line.split('|').collect();
+
+        let name = fields.first().copied().unwrap_or("").trim().to_string();
 
         if name.is_empty() {
             continue;
         }
+
+        // Read the two marker fields from the END of the line. Only the names
+        // drip creates are sanitized, so a foreign session (listed here too)
+        // may contain `|` and shift every middle field: taken this way a
+        // shifted parse can never invent an ownership marker or a recorded
+        // result, it can only degrade to "unmarked"/"unrecorded" — which keep.
+        // A line too short to be a full record keeps no markers at all.
+        let (owner, result) = if fields.len() >= 6 {
+            let result = fields.pop().unwrap_or("").trim().to_string();
+            let owner = fields.pop().unwrap_or("").trim().to_string();
+            (owner, result)
+        } else {
+            (String::new(), String::new())
+        };
 
         let number_field = |raw: Option<&str>| -> i64 {
             raw.map(str::trim)
@@ -231,11 +246,10 @@ pub fn parse_session_listing(listing: &str) -> Vec<TmuxSessionListing> {
                 .unwrap_or(0)
         };
 
-        let created = number_field(fields.next());
-        let activity = number_field(fields.next());
-        let attached = number_field(fields.next());
-        let owner = fields.next().unwrap_or("").trim().to_string();
-        let result = fields.next().unwrap_or("").trim().to_string();
+        let mut middle = fields.into_iter().skip(1);
+        let created = number_field(middle.next());
+        let activity = number_field(middle.next());
+        let attached = number_field(middle.next());
 
         sessions.push(TmuxSessionListing {
             name,
@@ -598,6 +612,22 @@ mod tests {
         assert_eq!(sessions[1].owner, "");
         assert_eq!(sessions[1].result, "");
         assert!(!sessions[1].owned_by_drip());
+    }
+
+    #[test]
+    fn parse_never_invents_a_marker_for_a_foreign_name_containing_the_separator() {
+        // Foreign session names are not sanitized, so a name holding `|`
+        // shifts the middle fields. The marker fields are taken from the end,
+        // so the worst case is "unmarked" (a keep), never a fabricated owner.
+        let listing_text = "my|session|name|1000|1000|0|recorded-v1\n";
+
+        let sessions = parse_session_listing(listing_text);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "my");
+        assert_eq!(sessions[0].owner, "0");
+        assert_eq!(sessions[0].result, "recorded-v1");
+        assert!(!sessions[0].owned_by_drip());
     }
 
     #[test]

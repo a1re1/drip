@@ -9,8 +9,9 @@
 // Reaping is deliberately narrow. A session is killed only when every one of
 // these holds:
 //   * drip stamped it with its ownership marker (`@drip_owner`) when it
-//     created the session — an unmarked `drip-`-prefixed session (a legacy
-//     session, or one another tool owns) is never touched;
+//     created the session — a session carrying no such marker (a legacy
+//     session of ours, or one another tool owns) is never touched, whatever
+//     its name looks like;
 //   * a fresh server-side probe says the session exists, nobody is attached to
 //     it, and every pane in it is dead (the pane command exited);
 //   * either the job's exit status is already durably recorded
@@ -42,8 +43,10 @@ pub const TMUX_RESULT_MARKER: &str = "recorded-v1";
 /// `#{pane_dead_status}`; it is never reaped inside the window.
 pub const DEAD_PANE_GRACE_MS: i64 = 120_000;
 
-/// The `tmux ls -F` format the reaper parses. `|` keeps the fields
-/// unambiguous (session names are sanitized, so they never contain it).
+/// The `tmux ls -F` format the reaper parses. The two marker fields are read
+/// from the END of the line, so a foreign session name containing `|` can only
+/// shift the middle fields and degrade a record to unmarked/unrecorded (both
+/// keeps) — never invent an ownership marker or a recorded result.
 pub const TMUX_LIST_FORMAT: &str = "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{@drip_owner}|#{@drip_result}";
 
 /// One tmux session as reported by `tmux ls -F <TMUX_LIST_FORMAT>`.
@@ -129,8 +132,9 @@ pub enum KeepReason {
     /// Carries a non-empty `@drip_owner` that is not drip's current marker:
     /// some other tool stamped it, so it is not ours to kill.
     NotDripOwned,
-    /// `drip-`-prefixed but unmarked: created before ownership stamping (or by
-    /// another tool). Kept rather than guessed at.
+    /// Carries no `@drip_owner` marker at all: created before ownership
+    /// stamping (or by another tool that stamps nothing). Every unmarked
+    /// session is kept rather than guessed at, whatever its name.
     LegacyUnmarked,
     /// A client is attached (or the probe could not prove it is detached).
     Attached,

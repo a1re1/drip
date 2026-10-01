@@ -932,6 +932,32 @@ pub fn build_run_summary_messages(
     state: &HarnessState,
     args: &RunSummaryMessagesArgs<'_>,
 ) -> Vec<TransportRequestMessage> {
+    let mut sections = run_summary_sections(state, args);
+    sections.push(
+        "instruction: The run has ended. Write a message to the user summarizing the results with enough depth that they can trust it without re-reading the run: what was accomplished, and anything blocked or dropped and why. Write it in this order: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did (use its footprint lines, not only its finish summary); a 'Testing & verification' section repeating every harness-recorded verification listed above with its command, outcome, executed/passed/failed counts and anchor, or saying plainly that no verification command was recorded; then anything blocked, dropped, or left unverified and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
+            .to_string(),
+    );
+
+    vec![
+        TransportRequestMessage {
+            content: Some(TransportContent::Text(compose_run_summary_system_prompt(
+                args.summary_preferences,
+            ))),
+            role: ChatRoleTag::System,
+            ..Default::default()
+        },
+        TransportRequestMessage {
+            content: Some(TransportContent::Text(sections.join("\n\n"))),
+            role: ChatRoleTag::User,
+            ..Default::default()
+        },
+    ]
+}
+
+/// What the run recorded, as the sections both end-of-run writers are handed:
+/// the goal, the ledger, the verification records, memory, history and the
+/// workspace's ground truth. Each writer adds its own instruction.
+fn run_summary_sections(state: &HarnessState, args: &RunSummaryMessagesArgs<'_>) -> Vec<String> {
     let mut sections: Vec<String> = vec![
         format!("current_date: {}", args.current_date),
         format!("goal: {}", state.goal),
@@ -1055,25 +1081,7 @@ pub fn build_run_summary_messages(
         sections.push(build_tool_usage_line(tool_usage));
     }
 
-    sections.push(
-        "instruction: The run has ended. Write a message to the user summarizing the results with enough depth that they can trust it without re-reading the run: what was accomplished, and anything blocked or dropped and why. Write it in this order: one opening sentence on the outcome; a 'What happened' list with one bullet per task saying what the task actually did (use its footprint lines, not only its finish summary); a 'Testing & verification' section repeating every harness-recorded verification listed above with its command, outcome, executed/passed/failed counts and anchor, or saying plainly that no verification command was recorded; then anything blocked, dropped, or left unverified and why. Report task counts exactly as given in task_stats. Ground every claim in the data above: only state that a verification (tests, build, typecheck) passed if a task summary or memory note above records its output, and never describe the output of a command that no section above records — if you would need to run something to know, say so instead. Mention a tool, a child session, or a delegation only if tool_usage counts it. Never claim that work was not started or a file does not exist unless a task summary, memory note, or workspace_changes confirms that; if the budget ran out with a task unfinished, describe it as not confirmed complete rather than not done, and mention any workspace_changes that suggest partial progress on it. If any task summary or note mentions a failed command, retry, or workaround, include a short Deviations section naming it. Plain markdown text only; no tool calls."
-            .to_string(),
-    );
-
-    vec![
-        TransportRequestMessage {
-            content: Some(TransportContent::Text(compose_run_summary_system_prompt(
-                args.summary_preferences,
-            ))),
-            role: ChatRoleTag::System,
-            ..Default::default()
-        },
-        TransportRequestMessage {
-            content: Some(TransportContent::Text(sections.join("\n\n"))),
-            role: ChatRoleTag::User,
-            ..Default::default()
-        },
-    ]
+    sections
 }
 
 #[cfg(test)]
@@ -1229,6 +1237,102 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
     Some(lines.join("\n"))
 }
 
+/// The closing-message writer's system prompt: the last thing a person reads
+/// when a run ends, written to be read rather than audited.
+pub const CLOSING_MESSAGE_SYSTEM_PROMPT: &str = concat!(
+    "You write the closing message a person reads when a coding-agent run ends.",
+    " They asked for the goal, then watched the run from a terminal; this message is the result they came for, so it must stand on its own.",
+    " You are given the goal, the task list with each task's own summary and footprint, the harness-recorded verifications, notes, the workspace's changes and the last tool results the run saw.",
+    " Reply with plain markdown text. Do not call tools."
+);
+
+const CLOSING_MESSAGE_INSTRUCTION: &str = concat!(
+    "instruction: The run has ended. Write the closing message to the person who asked for the goal.",
+    " Lead with the result itself: if the goal asked a question, answer it in full with the specifics the run found (names, paths, commits, numbers, the actual findings from recent_work and the task summaries) — never just say that it was looked into;",
+    " if the goal asked for a change, say what now behaves differently and where (the files, and the gist of each change).",
+    " Then, only where they apply: what was verified and how it came out, in one plain sentence per check;",
+    " when the goal only asked a question and the run changed no files, write no verification or testing section at all and do not remark that nothing was tested;",
+    " and anything not done, blocked, dropped or left uncertain, with the reason and what the person should do next.",
+    " Write complete sentences in plain words; use short headed sections or bullets when there are several things to report, and give every item enough detail to act on — do not abbreviate, do not trail off, do not compress findings into a one-line digest.",
+    " Leave out the run's bookkeeping: no task ids, verification record ids, expectation ids, cycle or loop numbers, anchors, tool-call counts, or harness terms like 'unreconciled' or 'bounced' — if the run did not finish cleanly, say in ordinary words what is unfinished or unconfirmed.",
+    " Do not narrate the process step by step and do not restate the goal back.",
+    " Ground every statement in the data above: state that a check passed only if a harness-recorded verification shows it, and never present something as done or found that the data does not show."
+);
+
+/// The tail of the run's last loop — what its tools actually returned and
+/// what the model last said — clamped per message and overall, so the
+/// closing message can report findings the task summaries only allude to.
+pub fn render_recent_work(messages: &[TransportRequestMessage]) -> Option<String> {
+    const PER_MESSAGE_CHARS: usize = 2_400;
+    const TOTAL_CHARS: usize = 14_000;
+    let mut blocks: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for message in messages.iter().rev() {
+        let Some(TransportContent::Text(text)) = &message.content else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || message.role == ChatRoleTag::System {
+            continue;
+        }
+        let label = match (&message.role, message.name.as_deref()) {
+            (ChatRoleTag::Tool, Some(name)) => format!("tool result ({name})"),
+            (ChatRoleTag::Tool, None) => "tool result".to_string(),
+            (ChatRoleTag::Assistant, _) => "agent".to_string(),
+            _ => "input".to_string(),
+        };
+        let clamped = clamp_summary_line_keep_lines(text, PER_MESSAGE_CHARS);
+        used += clamped.chars().count();
+        if used > TOTAL_CHARS && !blocks.is_empty() {
+            break;
+        }
+        blocks.push(format!("--- {label}\n{clamped}"));
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+    blocks.reverse();
+    Some(blocks.join("\n"))
+}
+
+fn clamp_summary_line_keep_lines(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// Messages for the closing-message model call: the same recorded facts the
+/// run summary is written from, plus the last loop's tool results, under an
+/// instruction to write for a reader.
+pub fn build_closing_message_messages(
+    state: &HarnessState,
+    args: &RunSummaryMessagesArgs<'_>,
+    recent_work: Option<&str>,
+) -> Vec<TransportRequestMessage> {
+    let mut sections = run_summary_sections(state, args);
+    if let Some(recent_work) = recent_work.filter(|text| !text.trim().is_empty()) {
+        sections.push(format!(
+            "recent_work (the last tool results and agent text of the run, oldest first — the source for specifics):\n{recent_work}"
+        ));
+    }
+    sections.push(CLOSING_MESSAGE_INSTRUCTION.to_string());
+    vec![
+        TransportRequestMessage {
+            content: Some(TransportContent::Text(CLOSING_MESSAGE_SYSTEM_PROMPT.to_string())),
+            role: ChatRoleTag::System,
+            ..Default::default()
+        },
+        TransportRequestMessage {
+            content: Some(TransportContent::Text(sections.join("\n\n"))),
+            role: ChatRoleTag::User,
+            ..Default::default()
+        },
+    ]
+}
+
 /// The run summary as a person following along wants to read it (the TUI
 /// renders this; headless output keeps the full summary text): what each
 /// task did in its own words, what is left and why, and the latest
@@ -1237,11 +1341,22 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
 /// bookkeeping are for a driver to check, not for a reader.
 pub fn build_run_summary_display(state: &HarnessState, reason: HarnessRunReason) -> String {
     let mut paragraphs = display_task_paragraphs(state, reason);
-    paragraphs.push(display_verification_sentence(state));
+    // A run that recorded no check and edited nothing (a question answered
+    // from reading) has nothing to verify; saying so would only be noise.
+    let edited = state.tasks.iter().any(|task| {
+        task.footprint
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|entry| entry.starts_with("edited"))
+    });
+    if edited || !summary_verification_records(state).is_empty() {
+        paragraphs.push(display_verification_sentence(state));
+    }
     paragraphs.join("\n\n")
 }
 
-/// A task's finish summary cut down to what it did: the first sentence,
+/// A task's finish summary as the reader gets it: whole, on one line,
 /// without harness annotations (`[harness: …]`) or parentheticals that only
 /// cite record ids (`(v4, 1/1 passed)`).
 fn display_task_line(summary: &str) -> String {
@@ -1255,18 +1370,7 @@ fn display_task_line(summary: &str) -> String {
         Some(at) => flat[..at].trim_end().to_string(),
         None => flat,
     };
-    let flat = citation.replace_all(&flat, "").to_string();
-    // The first sentence: up to a period that is followed by a space and a
-    // capital, so `greet.py prints` and `v1.2` do not end it.
-    let mut end = flat.len();
-    let bytes = flat.as_bytes();
-    for (index, _) in flat.match_indices(". ") {
-        if bytes.get(index + 2).is_some_and(|next| next.is_ascii_uppercase()) {
-            end = index + 1;
-            break;
-        }
-    }
-    let mut line = clamp_summary_line(flat[..end].trim(), 240);
+    let mut line = citation.replace_all(&flat, "").trim().to_string();
     if !line.ends_with(['.', '!', '?', '…']) {
         line.push('.');
     }
@@ -2201,7 +2305,7 @@ mod run_summary_depth_tests {
     #[test]
     fn display_summary_states_each_verification_outcome_plainly() {
         let mut state = create_harness_state("goal");
-        state.tasks = vec![task("task-1", "wire it", "Wired.", None)];
+        state.tasks = vec![task("task-1", "wire it", "Wired.", Some(vec!["edited src/a.rs"]))];
         let sentence = |state: &HarnessState| {
             build_run_summary_display(state, HarnessRunReason::Completed)
                 .rsplit("\n\n")
@@ -2243,6 +2347,82 @@ mod run_summary_depth_tests {
     }
 
     #[test]
+    fn display_summary_skips_the_verification_note_for_a_read_only_run() {
+        let mut state = create_harness_state("what is on this branch?");
+        state.tasks = vec![task(
+            "task-1",
+            "survey the branch",
+            "The branch has one feature commit and a merge of main.",
+            Some(vec!["ran git log main..HEAD"]),
+        )];
+        assert_eq!(
+            build_run_summary_display(&state, HarnessRunReason::Completed),
+            "The branch has one feature commit and a merge of main."
+        );
+    }
+
+    #[test]
+    fn closing_message_prompt_carries_the_facts_and_the_last_tool_results() {
+        let mut state = create_harness_state("what is on this branch?");
+        state.tasks = vec![task("task-1", "survey the branch", "Surveyed.", None)];
+        let recent = render_recent_work(&[
+            TransportRequestMessage {
+                content: Some(TransportContent::Text("system rules".to_string())),
+                role: ChatRoleTag::System,
+                ..Default::default()
+            },
+            TransportRequestMessage {
+                content: Some(TransportContent::Text("e558ff4 Make drip --tui read like Claude Code".to_string())),
+                name: Some("BASH".to_string()),
+                role: ChatRoleTag::Tool,
+                ..Default::default()
+            },
+            TransportRequestMessage {
+                content: Some(TransportContent::Text("x".repeat(5_000))),
+                name: Some("READ".to_string()),
+                role: ChatRoleTag::Tool,
+                ..Default::default()
+            },
+        ])
+        .expect("tool results render");
+        assert!(!recent.contains("system rules"), "{recent}");
+        assert!(recent.starts_with("--- tool result (BASH)\ne558ff4 Make drip"), "{recent}");
+        assert!(recent.ends_with('…') && recent.chars().count() < 2_600, "the long result is clamped");
+
+        let messages = build_closing_message_messages(
+            &state,
+            &RunSummaryMessagesArgs {
+                current_date: "2026-10-01T00:00:00.000Z",
+                reason: HarnessRunReason::Completed,
+                tool_usage: None,
+                workspace_changes: Some(" M README.md".to_string()),
+                summary_preferences: None,
+            },
+            Some(&recent),
+        );
+        let text = |message: &TransportRequestMessage| match &message.content {
+            Some(TransportContent::Text(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text(&messages[0]), CLOSING_MESSAGE_SYSTEM_PROMPT);
+        let user = text(&messages[1]);
+        for part in [
+            "goal: what is on this branch?",
+            "task-1",
+            "workspace_changes (ground truth at run end):\n M README.md",
+            "recent_work (",
+            "e558ff4 Make drip --tui read like Claude Code",
+        ] {
+            assert!(user.contains(part), "{part} missing: {user}");
+        }
+        assert!(user.ends_with(CLOSING_MESSAGE_INSTRUCTION), "{user}");
+        // The summary's own instruction (its verification section, its task
+        // counts) is not what this writer is asked for.
+        assert!(!user.contains("'Testing & verification' section"), "{user}");
+        assert!(render_recent_work(&[]).is_none());
+    }
+
+    #[test]
     fn display_summary_says_what_is_left_when_the_run_did_not_finish() {
         let mut state = create_harness_state("goal");
         let mut blocked = task("task-2", "deploy it", "needs the staging token", None);
@@ -2255,12 +2435,12 @@ mod run_summary_depth_tests {
         let text = build_run_summary_display(&state, HarnessRunReason::MaxIterations);
         assert_eq!(
             text,
-            "Finished 1 of 3 tasks.\n\n- Wired.\n\nBlocked: deploy it — needs the staging token. 1 task is not finished yet. The cycle budget ran out; resume the goal to continue.\n\nNothing was verified: no test, build or typecheck command ran."
+            "Finished 1 of 3 tasks.\n\n- Wired.\n\nBlocked: deploy it — needs the staging token. 1 task is not finished yet. The cycle budget ran out; resume the goal to continue."
         );
     }
 
     #[test]
-    fn display_summary_cuts_task_summaries_down_to_what_they_did() {
+    fn display_summary_keeps_task_summaries_whole_minus_harness_annotations() {
         let mut state = create_harness_state("goal");
         let mut review = task("task-3", "Review task-1, task-2", "Review accepted: all good.", None);
         review.reviews = Some(vec!["task-1".to_string(), "task-2".to_string()]);
@@ -2286,7 +2466,7 @@ mod run_summary_depth_tests {
         let text = build_run_summary_display(&state, HarnessRunReason::Unreconciled);
         assert_eq!(
             text,
-            "- greet() now returns 'Hello, <name>!' — python3 greet.py prints 'Hello, world!'.\n- Created notes.txt (contains 'line one') for the parser (v1.2) and updated README.md.\n\nThe goal finished, but at least one expectation was left unreconciled, so review that before trusting the result.\n\nThe last check passed (12 tests)."
+            "- greet() now returns 'Hello, <name>!' — python3 greet.py prints 'Hello, world!'. Expectation e2 (notes.txt) is still unobserved: it belongs to task-2.\n- Created notes.txt (contains 'line one') for the parser (v1.2) and updated README.md.\n\nThe goal finished, but at least one expectation was left unreconciled, so review that before trusting the result.\n\nThe last check passed (12 tests)."
         );
     }
 

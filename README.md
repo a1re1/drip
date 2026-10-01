@@ -1369,8 +1369,11 @@ never shown; a call whose input names no path, command, pattern or URL
 leaves the summary on its own.
 
 Those rows are **transient**. The folded tool summary, the cycle transition
-line and every op or warning row blink on the activity block directly above
-the composer and are erased when the run ends. That block is debounced
+line and every op, context or warning row blink on the activity block
+directly above the composer and are erased when the run ends. Every row
+there shares the `●` style, one line each: `● Cycle 1/3 — replanning
+blocked tasks`, `● Loop 3 — task-1: Fix the parser` (a loop's skill, plan
+and tool lists stay in the transcript), `● Rate limited, waiting 2s`. That block is debounced
 (`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that arrives inside the window
 opened by the last swap is queued instead of replacing what is on screen,
 so a burst of fast-arriving ops coalesces into one update instead of
@@ -1413,14 +1416,23 @@ count; `.gitignore` is respected. The preview shows up to 12 lines of up to
 carries up to 200 lines for each of up to 20 files. Outside a git
 repository, or when a loop changed nothing, no event is emitted.
 
-**The closing message.** The run summary is shown as prose: what was done
-(the tasks' own summaries, without task ids or footprint lines), what is
-left and why when the run did not finish, and the latest verification in
-one sentence such as `cargo test` passed (412 tests). That text rides on
-the `run-summary` event as `data.display`; the event's `detail`, the
-`summary` of the headless result and `drip --result` keep the full summary
-with its record-by-record verification breakdown. The run then ends on one
-line:
+**The closing message.** A run ends on a message written to be read. A
+direct answer (`respond`) is shown as it is. Otherwise the TUI asks the
+model for one more message at the end of the run: it leads with the result
+itself — the answer to the question, with the specifics the run found, or
+what now behaves differently and where — then what was verified and
+anything left undone, in plain words with no task ids, record ids or
+harness bookkeeping. That writer is handed the same recorded facts as the
+run summary plus the last loop's tool results, so it can report findings
+the task summaries only allude to. If the call fails, the message is
+composed from the tasks' own summaries and the latest verification
+instead. Only the TUI asks for this message (one extra model call per
+run); headless runs compose it without a call.
+
+The text rides on the `run-summary` event as `data.display`; the event's
+`detail`, the `summary` of the headless result and `drip --result` keep the
+full summary with its record-by-record verification breakdown. The run then
+ends on one line:
 
 ```
 ✻ Worked for 3m 12s · 4 cycles · 5/5 tasks

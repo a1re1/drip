@@ -418,58 +418,72 @@ pub fn select_compact_tail_start(cells: &[CompactCell], terminal_rows: usize) ->
     0
 }
 
-/// Numbered cycle-transition preview row painted from an IterationStart
-/// detail ("cycle 2/5 — task-3: Title: plan text [budget 1234/60000 tokens]").
-/// Carries the same `[  2 14:23:41]` iteration + local-clock block as every
-/// other timeline row.
-/// Whitespace-flattened, width-aware: the budget indicator is retained but is
-/// the first thing dropped when the terminal is too narrow; the body is then
-/// hard-clipped so the row always occupies exactly one line. Clipping happens
-/// on the plain text BEFORE painting, so ANSI escapes stay balanced.
+/// A transient notice as its painted `● text` row: a coloured bullet, then
+/// the text clipped (before painting) so the row always occupies one line.
+fn notice_row(kind: HarnessEventType, text: &str, width: usize, text_paint: fn(&str) -> String) -> Vec<String> {
+    let mut chars = text.chars();
+    let text: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    let plain = clip_row(format!("\u{25cf} {text}"), width);
+    let bullet = crate::tui::theme::event_paint(kind);
+    vec![match plain.strip_prefix('\u{25cf}') {
+        Some(rest) => format!("{}{}", bullet("\u{25cf}"), text_paint(rest)),
+        None => text_paint(&plain),
+    }]
+}
+
+/// Cycle-transition preview row painted from an IterationStart detail
+/// ("cycle 2/5 — task-3: Title: plan text [budget 1234/60000 tokens]") in the
+/// same `●` style as the tool summary: `● Cycle 2/5 — task-3: Title: plan text`.
+/// Whitespace-flattened, width-aware: the trailing budget indicator is kept
+/// only while the whole row fits; the body is then hard-clipped so the row
+/// always occupies exactly one line.
 pub fn render_cycle_transition(event: &TranscriptEventEntry, width: usize) -> Vec<String> {
     let flat = event
         .detail
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let budget_marker = " [budget ";
-    let (body, budget) = match flat.rfind(budget_marker) {
-        Some(start) => (
-            flat[..start].trim_end().to_string(),
-            Some(flat[start..].to_string()),
-        ),
-        None => (flat.clone(), None),
+    let (body, budget) = match flat.rfind(" [") {
+        Some(start) if flat.ends_with(']') => (&flat[..start], Some(&flat[start..])),
+        _ => (flat.as_str(), None),
     };
-
-    let prefix = crate::tui::timeline::entry_prefix(event.iteration, &event.at);
-
     // Keep the budget indicator only while the whole row fits; otherwise the
     // planning text is the part worth reading.
-    let mut plain = match &budget {
-        Some(b) if width == 0 || string_width(&format!("{prefix}{body} {b}")) <= width => {
-            format!("{prefix}{body} {b}")
+    let text = match budget {
+        Some(budget) if width == 0 || string_width(&format!("\u{25cf} {body}{budget}")) <= width => {
+            format!("{body}{budget}")
         }
-        _ => format!("{prefix}{body}"),
+        _ => body.to_string(),
     };
+    notice_row(event.kind, &text, width, c::white)
+}
 
-    if width > 0 && string_width(&plain) > width {
-        let mut clipped: String = plain.chars().take(width.saturating_sub(1)).collect();
-
-        while string_width(&clipped) > width.saturating_sub(1) {
-            clipped.pop();
+/// One transient event on the activity block above the working line, in the
+/// `●` style every row there shares. A cycle transition keeps its preview, a
+/// loop start is cut down to `● Loop 3 — task-1: Title` (its skill, plan and
+/// tool lists stay in the transcript), anything else shows its detail on one
+/// clipped row.
+pub fn render_activity_notice(event: &TranscriptEventEntry, width: usize) -> Vec<String> {
+    let flat = event
+        .detail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match event.kind {
+        HarnessEventType::IterationStart => render_cycle_transition(event, width),
+        HarnessEventType::LoopStart => {
+            let head = flat.split(" [").next().unwrap_or_default();
+            let text = match flat.rsplit_once(" \u{2014} ") {
+                Some((_, what)) if !head.contains(" \u{2014} ") => format!("{head} \u{2014} {what}"),
+                _ => head.to_string(),
+            };
+            notice_row(event.kind, &text, width, c::dim)
         }
-
-        clipped.push('\u{2026}');
-        plain = clipped;
+        _ => notice_row(event.kind, &flat, width, c::dim),
     }
-
-    if prefix.is_empty() {
-        return vec![c::white(&plain)];
-    }
-
-    let cut = plain.find(']').map(|i| i + 1).unwrap_or(0);
-    let (head, rest) = plain.split_at(cut);
-    vec![format!("{}{}", c::dim(head), c::white(rest))]
 }
 
 /// What an IterationStart detail says the run is doing, for the working line:
@@ -907,13 +921,13 @@ mod tests {
 		};
 
         let wide = strip_ansi(&render_cycle_transition(&entry, 200)[0]);
-        assert!(wide.contains("cycle 12/40"));
+        assert!(wide.starts_with("● Cycle 12/40"), "{wide:?}");
         assert!(wide.contains("écriture"));
         assert!(wide.contains("[budget 123456/60000 tokens]"));
 
         let mid = strip_ansi(&render_cycle_transition(&entry, 60)[0]);
         assert!(!mid.contains("[budget"), "{mid:?}");
-        assert!(mid.contains("cycle 12/40"), "{mid:?}");
+        assert!(mid.starts_with("● Cycle 12/40"), "{mid:?}");
         assert!(mid.ends_with('…'));
 
         let narrow = render_cycle_transition(&entry, 10)[0].clone();
@@ -1333,11 +1347,9 @@ mod tests {
     }
 
     #[test]
-    fn cycle_transition_row_carries_the_iteration_clock() {
-        let stamp = "2026-01-01T12:34:56.000Z";
-        let clock = crate::tui::timeline::clock_time(stamp).unwrap();
+    fn cycle_transition_row_is_a_dot_row_without_the_iteration_block() {
         let event = TranscriptEventEntry {
-            at: stamp.to_string(),
+            at: "2026-01-01T12:34:56.000Z".to_string(),
             data: None,
             detail: "cycle 2/5 — task-2: wire the composer [budget 100/60000 tokens]".to_string(),
             goal_id: "g".to_string(),
@@ -1345,17 +1357,9 @@ mod tests {
             kind: HarnessEventType::IterationStart,
         };
 
-        let row = strip_ansi(&render_cycle_transition(&event, 200)[0]);
-        assert!(
-            row.starts_with(&format!(
-                "[  2 {clock}] cycle 2/5 — task-2: wire the composer"
-            )),
-            "{row:?}"
-        );
-        assert!(row.ends_with("[budget 100/60000 tokens]"), "{row:?}");
-        assert!(
-            !row.starts_with("[  2] "),
-            "the clock must ride in the block: {row:?}"
+        assert_eq!(
+            strip_ansi(&render_cycle_transition(&event, 200)[0]),
+            "● Cycle 2/5 — task-2: wire the composer [budget 100/60000 tokens]"
         );
 
         for width in [10usize, 24, 60, 200] {
@@ -1367,6 +1371,58 @@ mod tests {
                 strip_ansi(&rows[0])
             );
         }
+    }
+
+    #[test]
+    fn every_transient_notice_is_one_dot_row() {
+        let notice = |kind: HarnessEventType, detail: &str, width: usize| {
+            let rows = render_activity_notice(
+                &TranscriptEventEntry {
+                    at: "2026-01-01T12:34:56.000Z".to_string(),
+                    data: None,
+                    detail: detail.to_string(),
+                    goal_id: "g".to_string(),
+                    iteration: 4,
+                    kind,
+                },
+                width,
+            );
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            strip_ansi(&rows[0])
+        };
+
+        assert_eq!(
+            notice(HarnessEventType::IterationStart, "cycle 1/3 — replanning blocked tasks", 120),
+            "● Cycle 1/3 — replanning blocked tasks"
+        );
+        assert_eq!(
+            notice(
+                HarnessEventType::ContextRefreshed,
+                "context estimate for cycle 1: 38243 tokens across 6 categories",
+                120
+            ),
+            "● Context estimate for cycle 1: 38243 tokens across 6 categories"
+        );
+        // A loop start names the loop and its task; the skill, plan and tool
+        // lists never spill onto the block.
+        assert_eq!(
+            notice(
+                HarnessEventType::LoopStart,
+                "loop 3 [skills: verify-before-done] [tools: BASH_ASYNC, CHECK, DIR, FETCH, GREP, READ] [role: author] — task-1: Fix the parser",
+                120
+            ),
+            "● Loop 3 — task-1: Fix the parser"
+        );
+        assert_eq!(notice(HarnessEventType::LoopStart, "loop 1 — planning", 120), "● Loop 1 — planning");
+        // Long or multi-line details stay on one clipped row.
+        let warning = notice(
+            HarnessEventType::RunWarning,
+            &format!("read-only nudge:\n{}", "nothing written ".repeat(20)),
+            40,
+        );
+        assert!(warning.starts_with("● Read-only nudge: nothing written"), "{warning:?}");
+        assert!(string_width(&warning) <= 40 && warning.ends_with('…'), "{warning:?}");
+        assert!(!warning.contains('['), "{warning:?}");
     }
 
     #[test]

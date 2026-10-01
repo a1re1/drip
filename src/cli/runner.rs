@@ -80,6 +80,10 @@ pub struct CliGoalRunArgs {
     pub skills: Vec<LoadedCliSkill>,
     pub state_path: PathBuf,
     pub summarize_run: Option<bool>,
+    /// Write the closing message a person reads at the end of the run (the
+    /// run-summary event's `data.display`) with a model call. Set by the TUI;
+    /// unset, the display text is composed from the ledger at no cost.
+    pub closing_message: Option<bool>,
     /// The operator's summary preferences, read from the home the run's config
     /// came from (`~/.drip/summary-preferences.md`).
     pub summary_preferences: Option<String>,
@@ -448,6 +452,7 @@ pub async fn run_cli_goal(args: CliGoalRunArgs) -> Result<HarnessRunResult, Stri
         signal: args.signal.clone(),
         state_path: Some(args.state_path.clone()),
         summarize_run: args.summarize_run,
+        closing_message: args.closing_message,
         run_summary_preferences: args.summary_preferences.clone(),
         lite: args.lite,
         no_review: args.no_review || args.lite,

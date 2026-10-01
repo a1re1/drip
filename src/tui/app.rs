@@ -81,7 +81,7 @@ use crate::tui::btw::{
     BTW_DIGEST_CHARS, BTW_TIMEOUT_MS,
 };
 use crate::tui::compact::{
-    render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
+    render_activity_notice, render_compact_cell, render_tool_group, select_compact_tail_start,
     CompactCell, CompactEmitter,
 };
 use crate::tui::evals::{EvalBrowser, EvalRow, EvalRunSummary};
@@ -906,19 +906,28 @@ fn scrollback_cells(cells: &[CompactCell]) -> Vec<CompactCell> {
         .collect()
 }
 
-/// One transient notice row: a folded tool summary keeps its
-/// `● Read 3 files, ran 1 command` summary, a cycle transition keeps its numbered
-/// `[  2 14:23:41]` preview (`render_cycle_transition`), every other transient
-/// event renders as the ordinary timeline row.
+/// One transient notice on the activity block, always in the `●` style: a
+/// folded tool summary, a transient event (`render_activity_notice`), or any
+/// other transient entry on one clipped row.
 fn activity_notice_rows(cell: &CompactCell, width: usize) -> Vec<String> {
     match cell {
         CompactCell::ToolGroup(group) => render_tool_group(group, width),
-        CompactCell::Passthrough(TranscriptEntry::Event(event))
-            if event.kind == HarnessEventType::IterationStart =>
-        {
-            render_cycle_transition(event, width)
+        CompactCell::Passthrough(TranscriptEntry::Event(event)) => {
+            render_activity_notice(event, width)
         }
-        CompactCell::Passthrough(other) => crate::tui::timeline::render_timeline_cell(other, width),
+        CompactCell::Passthrough(other) => {
+            let text = crate::tui::timeline::render_timeline_cell(other, 0)
+                .iter()
+                .map(|row| strip_ansi(row))
+                .find(|row| !row.trim().is_empty())
+                .unwrap_or_default();
+            let plain = format!("● {}", text.trim());
+            vec![crate::watch::ansi::c::dim(&if width > 0 {
+                crate::watch::ansi::fit(&plain, width, true).trim_end().to_string()
+            } else {
+                plain
+            })]
+        }
     }
 }
 
@@ -5072,6 +5081,7 @@ impl TuiApp {
                 signal: Some(signal),
                 skills,
                 summarize_run: None,
+                closing_message: Some(true),
                 lite: false,
                 no_review: false,
                 tools: {
@@ -9007,7 +9017,7 @@ mod compact_ephemeral_tests {
             "{rows:?}"
         );
         assert!(rows.iter().any(|row| row.contains("All done.")), "{rows:?}");
-        for noise in ["cycle 1/2", "●", "rate limited"] {
+        for noise in ["ycle 1/2", "●", "ate limited"] {
             assert!(
                 !rows.iter().any(|row| row.contains(noise)),
                 "{noise} leaked into scrollback: {rows:?}"
@@ -9077,8 +9087,13 @@ mod compact_ephemeral_tests {
         assert!(
             live[..spinner]
                 .iter()
-                .any(|row| row.contains("rate limited")),
+                .any(|row| row == "● Rate limited, waiting 2s"),
             "the newest op/warning row sits above the working line: {live:?}"
+        );
+        let block: Vec<&String> = live[..spinner].iter().filter(|row| !row.is_empty()).collect();
+        assert!(
+            block.iter().all(|row| row.starts_with('●') || row.starts_with("  ⎿")),
+            "every row of the block is in the dot style: {live:?}"
         );
         assert!(
             live[spinner + 1].starts_with('─') && live[spinner + 2].contains('❯'),
@@ -9088,7 +9103,7 @@ mod compact_ephemeral_tests {
 
         fixture.app.finish_run();
         let after = plain(&fixture.app.live_region());
-        for noise in ["●", "rate limited", "cycle 1/2"] {
+        for noise in ["●", "ate limited", "ycle 1/2"] {
             assert!(
                 !after.iter().any(|row| row.contains(noise)),
                 "{noise} outlived the run: {after:?}"

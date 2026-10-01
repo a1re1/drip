@@ -245,6 +245,7 @@ pub fn build_delegate_tool(wiring: DelegateToolWiring) -> ChatToolDefinition {
                     signal: Some(child_signal.clone()),
                     skills: wiring.skills.clone(),
                     summarize_run: None,
+                    closing_message: None,
                     lite: false,
                     no_review: false,
                     tools: child_tools,

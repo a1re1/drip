@@ -259,6 +259,88 @@ async fn no_op_verification_cannot_clear_completion_even_on_repeat() {
 /// is re-verified by the harness itself: the same assertion runs again,
 /// passes, and the finish is accepted in the same round — no extra model
 /// call, no bounce message for the model to act on.
+/// With `closing_message` set (the TUI does), one more model call writes the
+/// message a person reads; it travels as `data.display` while the summary
+/// every other surface reports stays what the summary call returned.
+#[tokio::test]
+async fn closing_message_rides_on_the_run_summary_event_as_display_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = Arc::new(Mutex::new(Vec::<HarnessEvent>::new()));
+    let sink = events.clone();
+    let tools = drip::tools::pack::builtin_tool_pack(Default::default());
+    let assertion = "test \"$(cat artifact.txt)\" = correct && printf 'DRIP_VERIFY {\"executed\":1,\"passed\":1,\"failed\":0}\\n'";
+    let (url, server) = spawn_scripted_server(vec![
+        tool_call_response(
+            "p",
+            "plan_tasks",
+            serde_json::json!({"tasks":["produce artifact"]}),
+        ),
+        tool_call_response(
+            "w",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"draft\n"}),
+        ),
+        tool_call_response("a", "VERIFY", serde_json::json!({"command":"true"})),
+        // Edit after the check, then finish: stale, so the harness re-runs
+        // the assertion itself and accepts the finish in this round.
+        tool_call_response(
+            "w2",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
+        tool_call_response("a2", "VERIFY", serde_json::json!({"command":assertion})),
+        tool_call_response(
+            "w3",
+            "PATCH",
+            serde_json::json!({"path":"artifact.txt","content":"correct\n"}),
+        ),
+        tool_call_response(
+            "f",
+            "finish_task",
+            serde_json::json!({"status":"completed","summary":"done","anchor":"none","anchorNote":"self-authored assertion only"}),
+        ),
+        text_response("Artifact verified."),
+        text_response("artifact.txt now holds the corrected content, and the check on it passed."),
+    ]);
+    let result = run_solid_state_harness(SolidStateHarnessOptions {
+        cwd: Some(dir.path().to_string_lossy().into()),
+        goal: "produce a verified artifact".into(),
+        max_iterations: Some(6),
+        model: Some("mock".into()),
+        summarize_run: Some(true),
+        closing_message: Some(true),
+        url: Some(url),
+        tools,
+        on_event: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        state_path: Some(dir.path().join("state.json")),
+        tool_services: Some(create_chat_tool_runtime_services(
+            CreateChatToolRuntimeServicesOptions {
+                cwd: Some(dir.path().into()),
+                jobs_root: Some(dir.path().join("jobs")),
+            },
+        )),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(result.reason, HarnessRunReason::Completed, "{:?}", result.error_message);
+    let events = events.lock().unwrap();
+    let summary = events
+        .iter()
+        .find(|event| event.r#type == drip::core::types::HarnessEventType::RunSummary)
+        .expect("a run summary is emitted");
+    assert_eq!(summary.detail, "Artifact verified.");
+    assert_eq!(
+        summary.data.as_ref().and_then(|data| data.display.as_deref()),
+        Some("artifact.txt now holds the corrected content, and the check on it passed.")
+    );
+    assert_eq!(
+        result.state.run_summary.as_ref().map(|note| note.text.as_str()),
+        Some("Artifact verified.")
+    );
+}
+
 #[tokio::test]
 async fn stale_finish_is_reverified_by_the_harness_without_another_round() {
     let dir = tempfile::tempdir().unwrap();

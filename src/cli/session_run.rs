@@ -111,6 +111,10 @@ pub struct SessionGoalArgs<'a> {
     pub signal: Option<AbortSignal>,
     pub skills: Vec<LoadedCliSkill>,
     pub summarize_run: Option<bool>,
+    /// Write the closing message a person reads at the end of the run (the
+    /// run-summary event's `data.display`) with a model call. Set by the TUI;
+    /// unset, the display text is composed from the ledger at no cost.
+    pub closing_message: Option<bool>,
     /// Draft mode (--lite): terminal reason "draft" and no run summary.
     pub lite: bool,
     /// Operator review/verify opt-out (implied by lite): no reviewer chain,
@@ -348,6 +352,7 @@ pub async fn run_session_goal(
         skills: args.skills,
         state_path: paths.state_path.clone().into(),
         summarize_run: args.summarize_run,
+        closing_message: args.closing_message,
         lite: args.lite,
         no_review: args.no_review || args.lite,
         monitor_background_handoff: args.monitor_background_handoff,

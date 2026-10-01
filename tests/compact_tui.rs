@@ -458,7 +458,7 @@ fn narrow_terminals_clip_rows_ansi_safely() {
     let transition = render_cycle_transition(&iteration_event, 24);
     assert_eq!(transition.len(), 1);
     let plain = strip_ansi(&transition[0]);
-    assert!(plain.contains("cycle 2/5"), "{plain}");
+    assert!(plain.starts_with("● Cycle 2/5"), "{plain}");
     assert!(plain.contains('…'), "{plain}");
     assert!(!plain.contains("budget"), "{plain}");
 }

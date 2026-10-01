@@ -6132,6 +6132,10 @@ pub struct SolidStateHarnessOptions {
     pub plan_mode: Option<String>,
     pub state_path: Option<PathBuf>,
     pub summarize_run: Option<bool>,
+    /// Write the closing message a person reads at the end of the run (the
+    /// run-summary event's `data.display`) with a model call. Set by the TUI;
+    /// unset, the display text is composed from the ledger at no cost.
+    pub closing_message: Option<bool>,
     /// The operator's summary preferences (~/.drip/summary-preferences.md),
     /// read once by the caller; appended to the run-summary system prompt.
     pub run_summary_preferences: Option<String>,
@@ -12418,8 +12422,7 @@ impl HarnessRun {
         // 5-10% of a one-task run).
         if reason == HarnessRunReason::Completed && self.options.summarize_run.is_none() {
             if let Some(text) = crate::harness::prompt::build_composed_run_summary(&self.state, 6) {
-                let display =
-                    crate::harness::prompt::build_run_summary_display(&self.state, reason);
+                let display = self.write_closing_message(reason, None).await;
                 self.record_run_summary(reason, text, Some(display));
                 return;
             }
@@ -12441,6 +12444,7 @@ impl HarnessRun {
             .collect_run_facts
             .as_mut()
             .and_then(|collect| collect());
+        let closing_facts = workspace_changes.clone();
 
         let messages = crate::harness::prompt::build_run_summary_messages(
             &self.state,
@@ -12479,13 +12483,83 @@ impl HarnessRun {
         };
         self.drain_usage_inbox();
 
-        let display = crate::harness::prompt::build_run_summary_display(&self.state, reason);
+        let display = self.write_closing_message(reason, Some(closing_facts)).await;
         let text = if summary_text.is_empty() {
             crate::harness::prompt::build_fallback_run_summary(&self.state, reason)
         } else {
             summary_text
         };
         self.record_run_summary(reason, text, Some(display));
+    }
+
+    /// The closing message for a person following the run (the run-summary
+    /// event's `data.display`). With `closing_message` set — the TUI does — a
+    /// model writes it from the recorded facts plus the last loop's tool
+    /// results, so the reader gets the answer or the change itself rather
+    /// than a ledger digest; otherwise, or when that call fails, it is
+    /// composed from the ledger. `workspace_changes` is the run-end ground
+    /// truth when the caller already gathered it (None gathers it here).
+    async fn write_closing_message(
+        &mut self,
+        reason: HarnessRunReason,
+        workspace_changes: Option<Option<String>>,
+    ) -> String {
+        let fallback = crate::harness::prompt::build_run_summary_display(&self.state, reason);
+        if self.options.closing_message != Some(true) {
+            return fallback;
+        }
+        let workspace_changes = match workspace_changes {
+            Some(gathered) => gathered,
+            None => self
+                .options
+                .collect_run_facts
+                .as_mut()
+                .and_then(|collect| collect()),
+        };
+        let recent_work = self
+            .carryover
+            .as_ref()
+            .and_then(|carryover| crate::harness::prompt::render_recent_work(&carryover.messages));
+        let messages = crate::harness::prompt::build_closing_message_messages(
+            &self.state,
+            &crate::harness::prompt::RunSummaryMessagesArgs {
+                current_date: &(self.now)().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                reason,
+                tool_usage: None,
+                workspace_changes,
+                summary_preferences: None,
+            },
+            recent_work.as_deref(),
+        );
+        let written = match self
+            .call_model
+            .call_model(
+                messages,
+                Some(crate::harness::model_call::ModelCallOptions {
+                    include_tools: Some(false),
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(response) => response
+                .choices
+                .as_ref()
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.message.as_ref())
+                .and_then(|message| message.content.as_ref())
+                .map(extract_response_text)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            Err(_) => String::new(),
+        };
+        self.drain_usage_inbox();
+        if written.is_empty() {
+            fallback
+        } else {
+            written
+        }
     }
 
     /// Record a run summary: persist on state and emit `run-summary`. `text`

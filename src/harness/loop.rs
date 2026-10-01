@@ -6239,6 +6239,10 @@ pub struct HarnessRun {
     /// the reviewer's brief is diffed against, so the review sees the run's
     /// whole change set even when the author committed along the way.
     pub run_start_head: Option<String>,
+    /// The working tree as the previous task loop left it (at run start for
+    /// the first loop), as a git tree id: what each loop's "loop-changes"
+    /// event is diffed against. None outside a git repo.
+    pub loop_changes_tree: Option<String>,
     /// `Number.POSITIVE_INFINITY` when unset → `i64::MAX`.
     pub max_iterations: i64,
     /// `i64::MAX` when unset.
@@ -6665,6 +6669,9 @@ impl HarnessRun {
         let max_iterations = options.max_iterations.unwrap_or(i64::MAX);
         let max_loops = options.max_loops.unwrap_or(i64::MAX);
         let run_start_head = git_head(&cwd);
+        let loop_changes_tree = run_start_head
+            .as_ref()
+            .and_then(|_| crate::harness::workspace_diff::snapshot_tree(&cwd));
         let warmup = build_warmup_command(&cwd, &options.goal).and_then(|(program, args)| {
             crate::tools::child_process::WarmupJob::spawn(&program, &args, &cwd).ok()
         });
@@ -6932,6 +6939,7 @@ impl HarnessRun {
             emit_fn,
             run_started_at_ms,
             run_start_head,
+            loop_changes_tree,
             abort_requested_at_ms: None,
             run_usage,
             redact,
@@ -12215,6 +12223,36 @@ impl HarnessRun {
         };
 
         self.record_loop_digest(scope, &outcome);
+        self.emit_loop_changes(scope);
+    }
+
+    /// What this loop changed in the workspace since the previous loop ended,
+    /// for whoever is following along. Best-effort and display-only: silent
+    /// outside git or when git fails, and never part of a prompt.
+    fn emit_loop_changes(&mut self, scope: &LoopScope) {
+        let Some(before) = self.loop_changes_tree.clone() else {
+            return;
+        };
+        let Some(after) = crate::harness::workspace_diff::snapshot_tree(&self.cwd) else {
+            return;
+        };
+        let changes = crate::harness::workspace_diff::diff_trees(&self.cwd, &before, &after);
+        self.loop_changes_tree = Some(after);
+        let Some(changes) = changes else {
+            return;
+        };
+        self.emit(HarnessEvent {
+            data: Some(crate::core::types::HarnessEventData {
+                r#loop: Some(self.state.r#loop),
+                task_id: scope.current_task_id.clone(),
+                truncated: changes.truncated.then_some(true),
+                files: Some(changes.files.clone()),
+                ..Default::default()
+            }),
+            detail: changes.headline(),
+            iteration: self.state.iteration,
+            r#type: HarnessEventType::LoopChanges,
+        });
     }
 
     /// stall accounting, auto-block, reopen/drop
@@ -12727,7 +12765,12 @@ impl HarnessRun {
                 run_error,
                 crate::harness::prompt::build_fallback_run_summary(&self.state, reason)
             );
-            self.record_run_summary(reason, text);
+            let display = format!(
+                "The run failed: {}\n\n{}",
+                run_error,
+                crate::harness::prompt::build_run_summary_display(&self.state, reason)
+            );
+            self.record_run_summary(reason, text, Some(display));
             return;
         }
 
@@ -12735,7 +12778,8 @@ impl HarnessRun {
         // instead of paying for (and risking drift from) a second summarization.
         if let Some(direct) = self.state.direct_response.clone() {
             if direct.created_at_iteration > self.start_iteration {
-                self.record_run_summary(reason, direct.text);
+                // Already written for the reader: shown as is.
+                self.record_run_summary(reason, direct.text, None);
                 return;
             }
         }
@@ -12747,7 +12791,9 @@ impl HarnessRun {
         // 5-10% of a one-task run).
         if reason == HarnessRunReason::Completed && self.options.summarize_run.is_none() {
             if let Some(text) = crate::harness::prompt::build_composed_run_summary(&self.state, 6) {
-                self.record_run_summary(reason, text);
+                let display =
+                    crate::harness::prompt::build_run_summary_display(&self.state, reason);
+                self.record_run_summary(reason, text, Some(display));
                 return;
             }
         }
@@ -12806,23 +12852,29 @@ impl HarnessRun {
         };
         self.drain_usage_inbox();
 
+        let display = crate::harness::prompt::build_run_summary_display(&self.state, reason);
         let text = if summary_text.is_empty() {
             crate::harness::prompt::build_fallback_run_summary(&self.state, reason)
         } else {
             summary_text
         };
-        self.record_run_summary(reason, text);
+        self.record_run_summary(reason, text, Some(display));
     }
 
-    /// Record a run summary: persist on state and emit `run-summary`.
-    fn record_run_summary(&mut self, reason: HarnessRunReason, text: String) {
+    /// Record a run summary: persist on state and emit `run-summary`. `text`
+    /// is the summary every surface reports; `display` rides along as the
+    /// prose rendering for a person following the run.
+    fn record_run_summary(&mut self, reason: HarnessRunReason, text: String, display: Option<String>) {
         self.state.run_summary = Some(crate::core::types::HarnessRunSummaryNote {
             created_at_iteration: self.state.iteration,
             reason,
             text: text.clone(),
         });
         self.emit(HarnessEvent {
-            data: None,
+            data: display.map(|display| crate::core::types::HarnessEventData {
+                display: Some(display),
+                ..Default::default()
+            }),
             detail: text,
             iteration: self.state.iteration,
             r#type: HarnessEventType::RunSummary,

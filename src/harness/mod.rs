@@ -16,3 +16,4 @@ pub mod redact;
 pub mod roles;
 pub mod telemetry;
 pub mod transport;
+pub mod workspace_diff;

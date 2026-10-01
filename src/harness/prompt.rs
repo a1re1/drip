@@ -1229,6 +1229,197 @@ pub fn build_composed_run_summary(state: &HarnessState, max_tasks: usize) -> Opt
     Some(lines.join("\n"))
 }
 
+/// The run summary as a person following along wants to read it (the TUI
+/// renders this; headless output keeps the full summary text): what each
+/// task did in its own words, what is left and why, and the latest
+/// verification in one plain sentence. Composed from the ledger rather than
+/// from the full summary, whose task ids, record ids, anchors and harness
+/// bookkeeping are for a driver to check, not for a reader.
+pub fn build_run_summary_display(state: &HarnessState, reason: HarnessRunReason) -> String {
+    let mut paragraphs = display_task_paragraphs(state, reason);
+    paragraphs.push(display_verification_sentence(state));
+    paragraphs.join("\n\n")
+}
+
+/// A task's finish summary cut down to what it did: the first sentence,
+/// without harness annotations (`[harness: …]`) or parentheticals that only
+/// cite record ids (`(v4, 1/1 passed)`).
+fn display_task_line(summary: &str) -> String {
+    static RECORD_CITATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let citation = RECORD_CITATION.get_or_init(|| {
+        // `(v4)`, `(v4, 1/1 passed)`, `(e2: unobserved)` — but not `(v1.2)`.
+        regex::Regex::new(r"\s*\([ve]\d+(?:[,;:\s][^()]*)?\)").expect("valid regex")
+    });
+    let flat = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = match flat.find("[harness:") {
+        Some(at) => flat[..at].trim_end().to_string(),
+        None => flat,
+    };
+    let flat = citation.replace_all(&flat, "").to_string();
+    // The first sentence: up to a period that is followed by a space and a
+    // capital, so `greet.py prints` and `v1.2` do not end it.
+    let mut end = flat.len();
+    let bytes = flat.as_bytes();
+    for (index, _) in flat.match_indices(". ") {
+        if bytes.get(index + 2).is_some_and(|next| next.is_ascii_uppercase()) {
+            end = index + 1;
+            break;
+        }
+    }
+    let mut line = clamp_summary_line(flat[..end].trim(), 240);
+    if !line.ends_with(['.', '!', '?', '…']) {
+        line.push('.');
+    }
+    line
+}
+
+fn display_task_paragraphs(state: &HarnessState, reason: HarnessRunReason) -> Vec<String> {
+    let said = |task: &HarnessTask| -> String {
+        display_task_line(
+            task.summary
+                .as_deref()
+                .filter(|summary| !summary.trim().is_empty())
+                .unwrap_or(&task.title),
+        )
+    };
+    // Review tasks check the work; the recap is about the work itself.
+    let authored: Vec<&HarnessTask> = state
+        .tasks
+        .iter()
+        .filter(|task| task.review_of.is_none() && task.reviews.is_none())
+        .collect();
+    let done: Vec<&HarnessTask> = authored
+        .iter()
+        .copied()
+        .filter(|task| task.status == HarnessTaskStatus::Completed)
+        .collect();
+    let blocked: Vec<&HarnessTask> = authored
+        .iter()
+        .copied()
+        .filter(|task| task.status == HarnessTaskStatus::Blocked)
+        .collect();
+    let dropped = authored
+        .iter()
+        .filter(|task| task.status == HarnessTaskStatus::Dropped)
+        .count();
+    let unfinished = authored.len() - done.len() - blocked.len() - dropped;
+
+    let mut paragraphs: Vec<String> = Vec::new();
+    if authored.is_empty() {
+        paragraphs.push("No tasks were planned.".to_string());
+    } else if done.len() == authored.len() && done.len() == 1 {
+        paragraphs.push(said(done[0]));
+    } else {
+        let mut lines: Vec<String> = Vec::new();
+        if done.len() < authored.len() {
+            lines.push(format!("Finished {} of {} tasks.", done.len(), authored.len()));
+            if !done.is_empty() {
+                lines.push(String::new());
+            }
+        }
+        lines.extend(done.iter().map(|task| format!("- {}", said(task))));
+        paragraphs.push(lines.join("\n"));
+    }
+
+    let mut left: Vec<String> = Vec::new();
+    for task in &blocked {
+        left.push(match task.summary.as_deref().filter(|summary| !summary.trim().is_empty()) {
+            Some(why) => format!("Blocked: {} — {}", task.title.trim(), display_task_line(why)),
+            None => format!("Blocked: {}.", task.title.trim()),
+        });
+    }
+    if dropped > 0 {
+        left.push(format!(
+            "{dropped} task{} dropped without being finished.",
+            if dropped == 1 { " was" } else { "s were" }
+        ));
+    }
+    if unfinished > 0 {
+        left.push(format!(
+            "{unfinished} task{} not finished yet.",
+            if unfinished == 1 { " is" } else { "s are" }
+        ));
+    }
+    if let Some(why) = display_reason_sentence(reason) {
+        left.push(why.to_string());
+    }
+    if !state.anomalies.is_empty() {
+        left.push(format!(
+            "{} recorded anomal{} still to review.",
+            state.anomalies.len(),
+            if state.anomalies.len() == 1 { "y is" } else { "ies are" }
+        ));
+    }
+    if !left.is_empty() {
+        paragraphs.push(left.join(" "));
+    }
+    paragraphs
+}
+
+/// Why a run that did not simply complete stopped, and what to do next.
+fn display_reason_sentence(reason: HarnessRunReason) -> Option<&'static str> {
+    match reason {
+        HarnessRunReason::Completed => None,
+        HarnessRunReason::AwaitingInput => Some("The run is paused until you answer the pending questions."),
+        HarnessRunReason::Aborted => Some("The run was stopped before the goal was finished."),
+        HarnessRunReason::Draft => Some("This is a draft: resume to review and harden it."),
+        HarnessRunReason::Error => Some("The run failed on an endpoint or infrastructure error; the session is saved and can be resumed."),
+        HarnessRunReason::Futile => Some("The run kept stalling without finishing work, so the approach or the goal needs to change before resuming."),
+        HarnessRunReason::MaxIterations => Some("The cycle budget ran out; resume the goal to continue."),
+        HarnessRunReason::MaxLoops => Some("The task-loop budget ran out; resume the goal to continue."),
+        HarnessRunReason::BlockedOnInput => Some("Nothing more can be done without your input; resume the session with it as the prompt."),
+        HarnessRunReason::Partial => Some("The goal was only partly accomplished; re-run it or give more direction to finish the rest."),
+        HarnessRunReason::Planned => Some("Only the plan was written; resume the session to carry it out."),
+        HarnessRunReason::Unreconciled => Some("The goal finished, but at least one expectation was left unreconciled, so review that before trusting the result."),
+    }
+}
+
+/// The latest verification record in one sentence.
+fn display_verification_sentence(state: &HarnessState) -> String {
+    let Some(record) = summary_verification_records(state).last().copied() else {
+        return "Nothing was verified: no test, build or typecheck command ran.".to_string();
+    };
+    // A one-liner is named; a long or multi-line check is not worth quoting.
+    let command = record.command.trim();
+    let command = if command.chars().count() <= 60 && !command.contains('\n') {
+        format!("`{command}`")
+    } else {
+        "The last check".to_string()
+    };
+    let evidence = record.evidence.as_ref();
+    let tests = evidence.filter(|evidence| {
+        matches!(
+            evidence.kind,
+            VerificationEvidenceKind::Tests | VerificationEvidenceKind::Custom
+        ) && evidence.executed > 0
+    });
+    let noun = |count: i64| if count == 1 { "test" } else { "tests" };
+    let mut sentence = if record.failed {
+        match tests.filter(|evidence| evidence.failed > 0) {
+            Some(evidence) => format!(
+                "{command} failed: {} of {} {} failed.",
+                evidence.failed,
+                evidence.executed,
+                noun(evidence.executed)
+            ),
+            None => format!("{command} failed."),
+        }
+    } else if record.ran_no_tests == Some(true) {
+        format!("{command} ran but executed no tests, so nothing was verified.")
+    } else if !evidence.is_some_and(|evidence| evidence.verifies_work()) {
+        format!("{command} ran, but its result does not verify the work.")
+    } else {
+        match tests {
+            Some(evidence) => format!("{command} passed ({} {}).", evidence.executed, noun(evidence.executed)),
+            None => format!("{command} passed."),
+        }
+    };
+    if state.mutations_since_verification.unwrap_or(0) > 0 {
+        sentence.push_str(" Files were edited after that check, so it may be out of date.");
+    }
+    sentence
+}
+
 pub fn build_fallback_run_summary(state: &HarnessState, reason: HarnessRunReason) -> String {
     if state.tasks.is_empty() {
         return format!(
@@ -1981,6 +2172,122 @@ mod run_summary_depth_tests {
             "{text}"
         );
         assert!(text.contains("anchor: undeclared"), "{text}");
+    }
+
+    #[test]
+    fn display_summary_is_prose_without_ids_anchors_or_cycles() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![
+            task("task-1", "wire it", "Wired the parser into the CLI.", Some(vec!["edited src/a.rs"])),
+            task("task-2", "test it", "Added parser tests.", None),
+        ];
+        state.last_verification = Some(record("cargo test --lib"));
+
+        let text = build_run_summary_display(&state, HarnessRunReason::Completed);
+        assert_eq!(
+            text,
+            "- Wired the parser into the CLI.\n- Added parser tests.\n\n`cargo test --lib` passed (12 tests)."
+        );
+        for machine in ["task-1", "[v3]", "anchor", "cycle", "edited src/a.rs", "Testing & verification"] {
+            assert!(!text.contains(machine), "{machine} leaked: {text}");
+        }
+
+        // One task: its own summary is the whole recap.
+        state.tasks.truncate(1);
+        let text = build_run_summary_display(&state, HarnessRunReason::Completed);
+        assert_eq!(text, "Wired the parser into the CLI.\n\n`cargo test --lib` passed (12 tests).");
+    }
+
+    #[test]
+    fn display_summary_states_each_verification_outcome_plainly() {
+        let mut state = create_harness_state("goal");
+        state.tasks = vec![task("task-1", "wire it", "Wired.", None)];
+        let sentence = |state: &HarnessState| {
+            build_run_summary_display(state, HarnessRunReason::Completed)
+                .rsplit("\n\n")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            sentence(&state),
+            "Nothing was verified: no test, build or typecheck command ran."
+        );
+
+        let mut failed = record("cargo test");
+        failed.failed = true;
+        failed.evidence.as_mut().unwrap().passed = 9;
+        failed.evidence.as_mut().unwrap().failed = 3;
+        state.last_verification = Some(failed);
+        assert_eq!(sentence(&state), "`cargo test` failed: 3 of 12 tests failed.");
+
+        let mut empty = record("cargo test nothing");
+        empty.ran_no_tests = Some(true);
+        state.last_verification = Some(empty);
+        assert_eq!(
+            sentence(&state),
+            "`cargo test nothing` ran but executed no tests, so nothing was verified."
+        );
+
+        let mut bare = record("make check");
+        bare.evidence = None;
+        state.last_verification = Some(bare);
+        assert_eq!(sentence(&state), "`make check` ran, but its result does not verify the work.");
+
+        state.last_verification = Some(record("cargo test"));
+        state.mutations_since_verification = Some(2);
+        assert_eq!(
+            sentence(&state),
+            "`cargo test` passed (12 tests). Files were edited after that check, so it may be out of date."
+        );
+    }
+
+    #[test]
+    fn display_summary_says_what_is_left_when_the_run_did_not_finish() {
+        let mut state = create_harness_state("goal");
+        let mut blocked = task("task-2", "deploy it", "needs the staging token", None);
+        blocked.status = HarnessTaskStatus::Blocked;
+        let mut pending = task("task-3", "document it", "", None);
+        pending.status = HarnessTaskStatus::Pending;
+        pending.summary = None;
+        state.tasks = vec![task("task-1", "wire it", "Wired.", None), blocked, pending];
+
+        let text = build_run_summary_display(&state, HarnessRunReason::MaxIterations);
+        assert_eq!(
+            text,
+            "Finished 1 of 3 tasks.\n\n- Wired.\n\nBlocked: deploy it — needs the staging token. 1 task is not finished yet. The cycle budget ran out; resume the goal to continue.\n\nNothing was verified: no test, build or typecheck command ran."
+        );
+    }
+
+    #[test]
+    fn display_summary_cuts_task_summaries_down_to_what_they_did() {
+        let mut state = create_harness_state("goal");
+        let mut review = task("task-3", "Review task-1, task-2", "Review accepted: all good.", None);
+        review.reviews = Some(vec!["task-1".to_string(), "task-2".to_string()]);
+        state.tasks = vec![
+            task(
+                "task-1",
+                "fix greet",
+                "greet() now returns 'Hello, <name>!' — python3 greet.py prints 'Hello, world!' (v4, 1/1 passed). Expectation e2 (notes.txt) is still unobserved: it belongs to task-2.",
+                None,
+            ),
+            task(
+                "task-2",
+                "notes",
+                "Created notes.txt (contains 'line one') for the parser (v1.2) and updated README.md (v6, 2/2) [harness: finished unreconciled after 2 identical bounces — not accepted yet]",
+                None,
+            ),
+            review,
+        ];
+        let mut long = record("cargo test");
+        long.command = format!("[ \"$(cat notes.txt)\" = \"{}\" ] && python3 greet.py", "x".repeat(60));
+        state.last_verification = Some(long);
+
+        let text = build_run_summary_display(&state, HarnessRunReason::Unreconciled);
+        assert_eq!(
+            text,
+            "- greet() now returns 'Hello, <name>!' — python3 greet.py prints 'Hello, world!'.\n- Created notes.txt (contains 'line one') for the parser (v1.2) and updated README.md.\n\nThe goal finished, but at least one expectation was left unreconciled, so review that before trusting the result.\n\nThe last check passed (12 tests)."
+        );
     }
 
     #[test]

@@ -41,6 +41,15 @@ pub struct TranscriptRunEndEntry {
     pub goal_id: String,
     pub iterations: i64,
     pub reason: HarnessRunReason,
+    /// Wall-clock length of the run. Absent on entries written before the
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// Completed and total tasks at run end. Absent on older entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks_done: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks_total: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,6 +344,9 @@ mod tests {
             goal_id: "goal-1".into(),
             iterations: 3,
             reason: HarnessRunReason::Completed,
+            duration_ms: None,
+            tasks_done: None,
+            tasks_total: None,
         });
         let line = serde_json::to_string(&entry).unwrap();
         assert_eq!(

@@ -826,25 +826,73 @@ pub fn format_working_clock(elapsed: Duration) -> String {
     }
 }
 
+/// What the activity line says beyond the clock, as far as the run has told
+/// the TUI: every part is left out until it is known.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkingStatus {
+    /// "Working on Fix the parser" / "Planning"; None reads as "Working".
+    pub activity: Option<String>,
+    /// "2/5": the cycle within the current task loop.
+    pub cycle: Option<String>,
+    /// Completion tokens the run's model calls have returned so far.
+    pub output_tokens: i64,
+}
+
+/// `640 tokens`, `12.3k tokens`.
+pub fn format_token_count(tokens: i64) -> String {
+    if tokens < 1000 {
+        format!("{tokens} tokens")
+    } else {
+        format!("{:.1}k tokens", tokens as f64 / 1000.0)
+    }
+}
+
 /// Claude-style activity line drawn directly above the chat while a goal run
-/// is in flight: one braille spinner frame plus "working for {clock}". The
+/// is in flight: one braille spinner frame, what the run is working on, and
+/// the clock, cycle and tokens so far —
+/// `⠋ Working on Fix the parser… (1m 05s · cycle 2/5 · ↓ 12.3k tokens)`. The
 /// caller owns the frame (see `pane_title::frame_for`) and the elapsed time;
-/// this is pure formatting. A row that does not fit `width` is clipped with an
-/// ellipsis, and a zero-width row renders as nothing.
-pub fn render_working_line(frame: &str, elapsed: Duration, width: usize) -> String {
+/// this is pure formatting. A long activity is clipped so the parenthesis
+/// still fits; a row too narrow even for that is clipped with an ellipsis,
+/// and a zero-width row renders as nothing.
+pub fn render_working_line(
+    frame: &str,
+    elapsed: Duration,
+    status: &WorkingStatus,
+    width: usize,
+) -> String {
     if width == 0 {
         return String::new();
     }
-    let room = width.saturating_sub(string_width(frame));
-    let body = format!(" working for {}", format_working_clock(elapsed));
-    let body = if string_width(&body) <= room {
-        body
-    } else {
-        fit(&body, room, true)
-    };
     let accent = paint(ACCENT_COLOR);
     let dim = paint(DIM_COLOR);
-    format!("{}{}", accent(frame), dim(&body))
+    let room = width.saturating_sub(string_width(frame));
+    let mut stats = vec![format_working_clock(elapsed)];
+    if let Some(cycle) = &status.cycle {
+        stats.push(format!("cycle {cycle}"));
+    }
+    if status.output_tokens > 0 {
+        stats.push(format!("↓ {}", format_token_count(status.output_tokens)));
+    }
+    let stats = format!(" ({})", stats.join(" · "));
+    let activity = status.activity.as_deref().unwrap_or("Working");
+    // " " + activity + "…" + stats
+    let activity_room = room.saturating_sub(string_width(&stats) + 2);
+    if activity_room < 8 {
+        let body = format!(" {activity}…{stats}");
+        let body = if string_width(&body) <= room {
+            body
+        } else {
+            fit(&body, room, true)
+        };
+        return format!("{}{}", accent(frame), dim(&body));
+    }
+    let activity = if string_width(activity) <= activity_room {
+        activity.to_string()
+    } else {
+        fit(activity, activity_room, false).trim_end().to_string()
+    };
+    format!("{} {}…{}", accent(frame), activity, dim(&stats))
 }
 
 #[cfg(test)]
@@ -1797,21 +1845,57 @@ mod tests {
 
     #[test]
     fn working_line_paints_the_spinner_frame_before_the_counting_clock() {
-        let row = render_working_line("⠙", Duration::from_secs(65), 60);
+        let row = render_working_line("⠙", Duration::from_secs(65), &WorkingStatus::default(), 60);
         assert!(
             row.contains("\u{1b}["),
             "the frame and the clock carry their own colours: {row:?}"
         );
-        assert_eq!(plain(&[row])[0], "⠙ working for 1m 05s");
+        assert_eq!(plain(&[row])[0], "⠙ Working… (1m 05s)");
+    }
+
+    #[test]
+    fn working_line_names_the_task_cycle_and_tokens_once_known() {
+        let mut status = WorkingStatus {
+            activity: Some("Working on Fix the parser".to_string()),
+            cycle: Some("2/5".to_string()),
+            output_tokens: 640,
+        };
+        let row = render_working_line("⠋", Duration::from_secs(65), &status, 80);
+        assert_eq!(
+            plain(&[row])[0],
+            "⠋ Working on Fix the parser… (1m 05s · cycle 2/5 · ↓ 640 tokens)"
+        );
+
+        status.output_tokens = 12_340;
+        status.activity = Some("Planning".to_string());
+        let row = render_working_line("⠋", Duration::from_secs(3), &status, 80);
+        assert_eq!(plain(&[row])[0], "⠋ Planning… (3s · cycle 2/5 · ↓ 12.3k tokens)");
+    }
+
+    #[test]
+    fn working_line_clips_a_long_task_title_and_keeps_the_stats() {
+        let status = WorkingStatus {
+            activity: Some(format!("Working on {}", "a very long task title ".repeat(6))),
+            cycle: Some("1/3".to_string()),
+            output_tokens: 0,
+        };
+        let row = render_working_line("⠋", Duration::from_secs(9), &status, 50);
+        let plain_row = &plain(&[row])[0];
+        assert!(string_width(plain_row) <= 50, "{plain_row:?}");
+        assert!(plain_row.starts_with("⠋ Working on a very long"), "{plain_row:?}");
+        assert!(plain_row.ends_with("… (9s · cycle 1/3)"), "{plain_row:?}");
     }
 
     #[test]
     fn working_line_clips_a_row_that_does_not_fit_the_width() {
-        let row = render_working_line("⠋", Duration::from_secs(3661), 12);
+        let row = render_working_line("⠋", Duration::from_secs(3661), &WorkingStatus::default(), 12);
         let plain_row = &plain(&[row])[0];
         assert_eq!(string_width(plain_row), 12, "{plain_row:?}");
         assert!(plain_row.ends_with('…'), "{plain_row:?}");
-        assert!(plain_row.starts_with("⠋ working"), "{plain_row:?}");
-        assert_eq!(render_working_line("⠋", Duration::from_secs(1), 0), "");
+        assert!(plain_row.starts_with("⠋ Working"), "{plain_row:?}");
+        assert_eq!(
+            render_working_line("⠋", Duration::from_secs(1), &WorkingStatus::default(), 0),
+            ""
+        );
     }
 }

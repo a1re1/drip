@@ -305,6 +305,7 @@ pub async fn run_session_goal(
         std::path::Path::new(&crate::core::home::open_drip_home(&args.project.home_root).plans_dir),
     );
 
+    let run_started = std::time::Instant::now();
     let result = run_cli_goal(CliGoalRunArgs {
         ask_user_enabled: args.ask_user_enabled,
         classifier: args.classifier.clone(),
@@ -363,6 +364,16 @@ pub async fn run_session_goal(
             goal_id: goal_id.clone(),
             iterations: result.iterations,
             reason: result.reason,
+            duration_ms: Some(run_started.elapsed().as_millis() as i64),
+            tasks_done: Some(
+                result
+                    .state
+                    .tasks
+                    .iter()
+                    .filter(|task| task.status == crate::core::types::HarnessTaskStatus::Completed)
+                    .count() as i64,
+            ),
+            tasks_total: Some(result.state.tasks.len() as i64),
         }),
     );
     sync_session_memories(args.index, &args.session.id, &result.state.memory);

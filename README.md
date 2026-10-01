@@ -1364,33 +1364,76 @@ In the TUI the sidebar's lines are colour-coded — the echoed question in magen
 ## Compact TUI timeline
 
 In the interactive TUI (`drip --tui`), back-to-back tool activity within a
-cycle is folded into a single summary row such as
+cycle is folded into a short summary of what the tools did, with the path
+or command of the most recent call under it:
 
 ```
-[  3 14:22:41] ── 5 Tools called: READ, PATCH, BASH ──
+● Read 3 files, made 2 edits, ran 4 commands · 1 failed
+  ⎿ $ cargo test --lib
 ```
 
-Every numbered row's block carries the local wall-clock time (`HH:MM:SS`)
-alongside the cycle number, so the scrollback shows when each op, task,
-warn or tool summary settled as the run advances. The clock of a folded
-tool row is the first call in that group.
+The counts update in place while the tools run. Raw tool arguments are
+never shown; a call whose input names no path, command, pattern or URL
+leaves the summary on its own.
 
-The count updates in place while the tools run, and the row is finalized
-once the cycle ends.
+Those rows are **transient**. The folded tool summary, the cycle transition
+line and every op or warning row blink on the activity block directly above
+the composer and are erased when the run ends. That block is debounced
+(`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that arrives inside the window
+opened by the last swap is queued instead of replacing what is on screen,
+so a burst of fast-arriving ops coalesces into one update instead of
+blinking. A single blank row separates it from the working line, which
+names the current task beside the spinner and counts the run's clock, the
+cycle within the task loop and the tokens the model has returned so far:
 
-In the Claude-style TUI those rows are **transient**. The folded tool
-summary, the cycle transition line and every op or warning row blink on the
-activity line directly above the composer, beside the braille spinner and
-the clock counting up from the run's start, and they are erased when the run
-ends. That block is debounced (`ACTIVITY_DEBOUNCE_MS`, 500 ms): a row that
-arrives inside the window opened by the last swap is queued instead of
-replacing what is on screen, so a burst of fast-arriving ops coalesces into
-one update instead of blinking, and a single blank row separates the status
-lines from the `working for …` line below them. Nothing on that line is
-written into scrollback, so returning to a
+```
+⠋ Working on Fix the parser… (1m 05s · cycle 2/5 · ↓ 12.3k tokens)
+```
+
+Nothing on those lines is written into scrollback, so returning to a
 transcript shows the goal and the model's answers instead of every tool
-call. The durable rows are goals, model text, run summaries, run ends and
-the operator info/error notices.
+call. The durable rows are goals, model text, the changes each task loop
+made, run summaries, run ends and the operator info/error notices.
+
+**What changed.** When a task loop ends, the harness diffs the working
+tree against how the previous loop left it (the run's start, for the first
+loop) and emits a `loop-changes` event; the TUI settles it into scrollback
+as a headline, the changed files and a short line-numbered preview of each
+diff:
+
+```
+● Changed 2 files (+14 −3)
+  ⎿ src/parser.rs (+13 −3)
+      41   fn parse(input: &str) -> Ast {
+      42 -     todo!()
+      42 +     let tokens = lex(input);
+         … +9 more lines
+  ⎿ notes.md (new, +1 −0)
+       1 + parser wired in
+```
+
+The diff comes from git, not from the edit tools' own records, so files
+rewritten by a script or a shell command are included. Both sides are
+snapshotted as tree objects through a temporary index: nothing is
+committed and the index, HEAD and branch are left alone. Untracked files
+count; `.gitignore` is respected. The preview shows up to 12 lines of up to
+6 files, and the event itself (in the transcript and the `--json` stream)
+carries up to 200 lines for each of up to 20 files. Outside a git
+repository, or when a loop changed nothing, no event is emitted.
+
+**The closing message.** The run summary is shown as prose: what was done
+(the tasks' own summaries, without task ids or footprint lines), what is
+left and why when the run did not finish, and the latest verification in
+one sentence such as `cargo test` passed (412 tests). That text rides on
+the `run-summary` event as `data.display`; the event's `detail`, the
+`summary` of the headless result and `drip --result` keep the full summary
+with its record-by-record verification breakdown. The run then ends on one
+line:
+
+```
+✻ Worked for 3m 12s · 4 cycles · 5/5 tasks
+✻ Stopped after 3m 12s · 4 cycles · 3/5 tasks (max-iterations)
+```
 
 This is a presentation-only projection: compaction is a TUI default and
 nothing is deleted from the record. The full transcript — every tool call,

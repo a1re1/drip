@@ -773,6 +773,10 @@ pub enum HarnessEventType {
 	Inference,
 	#[serde(rename = "iteration-start")]
 	IterationStart,
+	/// A task loop ended with the workspace different from how the previous
+	/// loop left it: the per-file diff rides in `data.files`.
+	#[serde(rename = "loop-changes")]
+	LoopChanges,
 	#[serde(rename = "loop-start")]
 	LoopStart,
 	#[serde(rename = "model-text")]
@@ -980,6 +984,35 @@ pub struct HarnessEventData {
 	/// prompt size.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub context: Option<HarnessContextBreakdown>,
+	/// "loop-changes" events: the files the loop changed, each with its capped
+	/// unified diff.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub files: Option<Vec<LoopChangedFile>>,
+	/// "loop-changes" events: true when files or diff lines were cut to fit
+	/// the event caps.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub truncated: Option<bool>,
+	/// "run-summary" events: the summary as prose for a person following along
+	/// (the TUI renders this); `detail` stays the full summary text.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub display: Option<String>,
+}
+
+/// One file of a "loop-changes" event.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopChangedFile {
+	pub path: String,
+	pub added: i64,
+	pub removed: i64,
+	/// "added", "deleted" or "modified".
+	pub status: String,
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub binary: bool,
+	/// Unified diff hunks (from the first `@@` on), capped; absent for binary
+	/// files and for files past the per-event file cap.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1186,6 +1219,10 @@ mod tests {
 		assert_eq!(
 			serde_json::to_value(HarnessEventType::Question).unwrap(),
 			"question"
+		);
+		assert_eq!(
+			serde_json::to_value(HarnessEventType::LoopChanges).unwrap(),
+			"loop-changes"
 		);
 		assert_eq!(
 			serde_json::to_value(HarnessTaskStatus::Dropped).unwrap(),

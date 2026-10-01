@@ -115,6 +115,9 @@ fn run_end(iterations: i64) -> TranscriptEntry {
         goal_id: "g".to_string(),
         iterations,
         reason: HarnessRunReason::Completed,
+        duration_ms: None,
+        tasks_done: None,
+        tasks_total: None,
     })
 }
 
@@ -217,7 +220,7 @@ fn failed_tool_calls_surface_in_the_compact_row_and_raw_result_text_stays_hidden
         .collect();
     assert!(
         rows.iter()
-            .any(|row| row.contains("3 Tools called") && row.contains("(2 failed)")),
+            .any(|row| row.starts_with('●') && row.ends_with("· 2 failed")),
         "{rows:?}"
     );
     // Raw result text stays hidden behind the fold even when calls fail.
@@ -245,7 +248,7 @@ fn read_result_infer_patch_result_folds_into_one_two_tool_row() {
     );
     assert!(
         rows.iter()
-            .any(|r| r.contains("── 2 Tools called: READ, PATCH ──")),
+            .any(|r| r == "● Read 1 file, made 1 edit"),
         "{rows:?}"
     );
     // absorbed: tool results and inference telemetry are not TUI rows
@@ -288,7 +291,7 @@ fn next_cycle_begins_fresh_row_with_numbered_task_preview() {
         "{transition}"
     );
     assert!(
-        rows.iter().any(|r| r.contains("── 1 Tool called: BASH ──")),
+        rows.iter().any(|r| r == "● Ran 1 command"),
         "{rows:?}"
     );
 }
@@ -311,11 +314,11 @@ fn separate_goals_with_repeated_iteration_numbers_never_merge() {
     assert!(rows.iter().any(|r| r.contains("answer one")), "{rows:?}");
     assert!(rows.iter().any(|r| r.contains("second goal")), "{rows:?}");
     assert!(
-        rows.iter().any(|r| r.contains("── 1 Tool called: READ ──")),
+        rows.iter().any(|r| r == "● Read 1 file"),
         "{rows:?}"
     );
     assert!(
-        rows.iter().any(|r| r.contains("── 1 Tool called: BASH ──")),
+        rows.iter().any(|r| r == "● Ran 1 command"),
         "{rows:?}"
     );
 }
@@ -337,7 +340,7 @@ fn empty_cycle_produces_no_group_row() {
     let rows = compact_rows(&p, 120);
     assert!(rows.iter().any(|r| r.contains("cycle 1/3")), "{rows:?}");
     assert!(rows.iter().any(|r| r.contains("All done.")), "{rows:?}");
-    assert!(!rows.iter().any(|r| r.contains("Tools called")), "{rows:?}");
+    assert!(!rows.iter().any(|r| r.starts_with('●')), "{rows:?}");
 }
 
 #[test]
@@ -455,7 +458,7 @@ fn narrow_terminals_clip_rows_ansi_safely() {
     let transition = render_cycle_transition(&iteration_event, 24);
     assert_eq!(transition.len(), 1);
     let plain = strip_ansi(&transition[0]);
-    assert!(plain.contains("cycle 2/5"), "{plain}");
+    assert!(plain.starts_with("● Cycle 2/5"), "{plain}");
     assert!(plain.contains('…'), "{plain}");
     assert!(!plain.contains("budget"), "{plain}");
 }

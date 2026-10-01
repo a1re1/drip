@@ -1,9 +1,10 @@
 //! Compact TUI projection of the raw transcript timeline (presentation-only).
 //!
 //! The full transcript keeps every event; this layer folds back-to-back tool
-//! activity within one goal cycle into a single summary row such as
-//! `── 3 Tools called: READ, PATCH, BASH ──` so the TUI shows user goals and
-//! model responses without per-tool chatter. Logs, `dripw` and headless
+//! activity within one goal cycle into a single summary such as
+//! `● Read 3 files, made 2 edits, ran 4 commands` (with the latest call's
+//! path or command under it) so the TUI shows user goals and model responses
+//! without per-tool chatter. Logs, `dripw` and headless
 //! rendering are untouched — this module is only used by the TUI.
 //!
 //! Rules:
@@ -21,7 +22,7 @@ use crate::watch::ansi::{c, string_width};
 /// One presentation row-group in the compact timeline.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactCell {
-    /// Folded `── N Tools called: … ──` row.
+    /// Folded `● Read 3 files, ran 1 command` summary.
     ToolGroup(ToolGroupCell),
     /// Any other transcript entry rendered as before.
     Passthrough(TranscriptEntry),
@@ -44,22 +45,17 @@ pub struct ToolGroupCell {
     pub count: usize,
     /// Distinct tool names in first-seen order.
     pub tools: Vec<String>,
+    /// Calls per tool, parallel to `tools`.
+    pub tool_counts: Vec<usize>,
+    /// What the most recent call was about — a path, a command, a search
+    /// pattern — or empty when its input names nothing readable.
+    pub last_detail: String,
     /// Total calls that failed, when known.
     pub failed: usize,
     /// Cycle number of the first folded call.
     pub iteration: i64,
     /// The first folded ToolCall entry, used for its timestamp.
     source: TranscriptEntry,
-}
-
-impl ToolGroupCell {
-    /// RFC3339 timestamp of the first folded call — "" for fixture/legacy rows.
-    fn source_at(&self) -> &str {
-        match &self.source {
-            TranscriptEntry::Event(event) => event.at.as_str(),
-            _ => "",
-        }
-    }
 }
 
 /// Presentation-only state machine folding tool activity per cycle.
@@ -112,16 +108,23 @@ impl CompactProjection {
             HarnessEventType::ToolCall => {
                 self.open.get_or_insert_with(|| ToolGroupCell {
                     count: 0,
-                    tools: Vec::from([event_tool_name(event)]),
+                    tools: Vec::new(),
+                    tool_counts: Vec::new(),
+                    last_detail: String::new(),
                     failed: 0,
                     iteration: event.iteration,
                     source: TranscriptEntry::Event(event.clone()),
                 });
                 let group = self.open.as_mut().unwrap();
                 let name = event_tool_name(event);
-                if !name.is_empty() && !group.tools.contains(&name) {
-                    group.tools.push(name);
+                match group.tools.iter().position(|tool| *tool == name) {
+                    Some(index) => group.tool_counts[index] += 1,
+                    None => {
+                        group.tools.push(name);
+                        group.tool_counts.push(1);
+                    }
                 }
+                group.last_detail = tool_call_detail(event);
                 group.count += 1;
             }
             HarnessEventType::ToolResult => {
@@ -253,50 +256,128 @@ fn event_tool_name(event: &TranscriptEventEntry) -> String {
         .to_string()
 }
 
-/// Render a tool group as the single painted summary row: dim `[  3 14:22:41]`
-/// iteration + local-clock prefix (taken from the first folded call), white
-/// `── N Tools called: … ──` summary, optional failed count.
-/// Clipping happens on the plain text BEFORE painting (drop the failed
-/// suffix first, then hard-clip with an ellipsis), so ANSI escapes stay
-/// balanced and the row always occupies exactly one line.
-pub fn render_tool_group(group: &ToolGroupCell, width: usize) -> Vec<String> {
-    let label = if group.count == 1 {
-        "Tool called"
-    } else {
-        "Tools called"
+/// What a ToolCall was about, from its input (`detail` is `NAME {json}`): the
+/// shell command, the file path, the search pattern or the URL. Empty when the
+/// input names none of those — raw JSON arguments are never shown.
+fn tool_call_detail(event: &TranscriptEventEntry) -> String {
+    let Some(input) = event
+        .detail
+        .split_once(' ')
+        .and_then(|(_, input)| serde_json::from_str::<serde_json::Value>(input).ok())
+    else {
+        return String::new();
     };
-    let summary = format!(
-        "\u{2500}\u{2500} {} {}: {} \u{2500}\u{2500}",
-        group.count,
-        label,
-        group.tools.join(", ")
-    );
-    let prefix = crate::tui::timeline::entry_prefix(group.iteration, group.source_at());
-    let mut plain = format!("{prefix}{summary}");
-
-    if group.failed > 0 {
-        plain.push_str(&format!(" ({} failed)", group.failed));
+    let text = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| input.get(*key).and_then(|value| value.as_str()))
+            .map(|value| value.lines().next().unwrap_or_default().trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(command) = text(&["command", "cmd"]) {
+        return format!("$ {command}");
     }
-
-    if width > 0 && string_width(&plain) > width {
-        if group.failed > 0 {
-            plain = format!("{prefix}{summary}");
-        }
-
-        if string_width(&plain) > width {
-            let mut clipped: String = plain.chars().take(width.saturating_sub(1)).collect();
-
-            while string_width(&clipped) > width.saturating_sub(1) {
-                clipped.pop();
+    if let Some(path) = text(&["path", "file_path", "file"]) {
+        return path;
+    }
+    // PATCH carries its targets as a list.
+    if let Some(files) = input.get("files").and_then(|files| files.as_array()) {
+        let mut paths: Vec<&str> = Vec::new();
+        for path in files.iter().filter_map(|file| file.get("path").and_then(|path| path.as_str())) {
+            if !paths.contains(&path) {
+                paths.push(path);
             }
-
-            clipped.push('\u{2026}');
-            plain = clipped;
+        }
+        if let Some(first) = paths.first() {
+            return match paths.len() {
+                1 => first.to_string(),
+                count => format!("{first} +{} more", count - 1),
+            };
         }
     }
+    if let Some(pattern) = text(&["pattern", "query"]) {
+        return format!("\"{pattern}\"");
+    }
+    text(&["url"]).unwrap_or_default()
+}
 
-    let (prefix, rest) = plain.split_at(plain.find(']').map(|i| i + 1).unwrap_or(0));
-    vec![format!("{}{}", c::dim(prefix), c::white(rest))]
+/// The phrase a tool's calls fold into: tools doing the same kind of work
+/// share one (BASH and CHECK both "ran N commands").
+fn tool_phrase(tool: &str, count: usize) -> (&'static str, String) {
+    let plural = |one: &str, many: &str| if count == 1 { one.to_string() } else { many.to_string() };
+    match tool {
+        "READ" | "REFERENCE" => ("read", format!("read {count} {}", plural("file", "files"))),
+        "PATCH" => ("edit", format!("made {count} {}", plural("edit", "edits"))),
+        "BASH" | "BASH_ASYNC" | "CHECK" | "VERIFY" | "START_DEV" => {
+            ("run", format!("ran {count} {}", plural("command", "commands")))
+        }
+        "GREP" | "DIR" => ("search", format!("searched {count} {}", plural("time", "times"))),
+        "FETCH" => ("fetch", format!("fetched {count} {}", plural("page", "pages"))),
+        _ => ("", format!("used {tool}{}", if count == 1 { String::new() } else { format!(" ×{count}") })),
+    }
+}
+
+/// `Read 3 files, made 2 edits, ran 4 commands`, kinds in first-seen order.
+fn tool_group_summary(group: &ToolGroupCell) -> String {
+    let mut kinds: Vec<(&'static str, &str, usize)> = Vec::new();
+    for (tool, count) in group.tools.iter().zip(&group.tool_counts) {
+        let (kind, _) = tool_phrase(tool, *count);
+        match kinds.iter_mut().find(|(seen, _, _)| !kind.is_empty() && *seen == kind) {
+            Some((_, _, total)) => *total += count,
+            None => kinds.push((kind, tool, *count)),
+        }
+    }
+    let summary = kinds
+        .iter()
+        .map(|(_, tool, count)| tool_phrase(tool, *count).1)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut chars = summary.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => summary,
+    }
+}
+
+fn clip_row(plain: String, width: usize) -> String {
+    if width == 0 || string_width(&plain) <= width {
+        return plain;
+    }
+    let mut clipped: String = plain.chars().take(width.saturating_sub(1)).collect();
+    while string_width(&clipped) > width.saturating_sub(1) {
+        clipped.pop();
+    }
+    clipped.push('\u{2026}');
+    clipped
+}
+
+/// Render a tool group as its painted rows: `● Read 3 files, ran 1 command`
+/// with ` · N failed` when calls failed, then `  ⎿ <path or command>` for the
+/// most recent call when its input names one. Clipping happens on the plain
+/// text BEFORE painting (the failed suffix is dropped first), so ANSI escapes
+/// stay balanced and each row occupies exactly one line.
+pub fn render_tool_group(group: &ToolGroupCell, width: usize) -> Vec<String> {
+    let summary = format!("\u{25cf} {}", tool_group_summary(group));
+    let failed = if group.failed > 0 {
+        format!(" \u{b7} {} failed", group.failed)
+    } else {
+        String::new()
+    };
+    let fits = width == 0 || string_width(&format!("{summary}{failed}")) <= width;
+    let head = if fits {
+        let (bullet, rest) = summary.split_at('\u{25cf}'.len_utf8());
+        format!("{}{}{}", c::accent(bullet), c::white(rest), c::red(&failed))
+    } else {
+        let clipped = clip_row(summary, width);
+        match clipped.strip_prefix('\u{25cf}') {
+            Some(rest) => format!("{}{}", c::accent("\u{25cf}"), c::white(rest)),
+            None => c::white(&clipped),
+        }
+    };
+    let mut rows = vec![head];
+    if !group.last_detail.is_empty() {
+        rows.push(c::dim(&clip_row(format!("  \u{23bf} {}", group.last_detail), width)));
+    }
+    rows
 }
 
 /// Render one projected cell as painted ANSI rows (no trailing newlines).
@@ -310,7 +391,7 @@ pub fn render_compact_cell(cell: &CompactCell, width: usize) -> Vec<String> {
 /// Budget helper mirroring `estimate_cell_rows` for projected cells.
 pub fn estimate_compact_rows(cell: &CompactCell) -> usize {
     match cell {
-        CompactCell::ToolGroup(_) => 1,
+        CompactCell::ToolGroup(group) => 1 + usize::from(!group.last_detail.is_empty()),
         CompactCell::Passthrough(entry) => crate::tui::timeline::estimate_cell_rows(entry),
     }
 }
@@ -337,58 +418,109 @@ pub fn select_compact_tail_start(cells: &[CompactCell], terminal_rows: usize) ->
     0
 }
 
-/// Numbered cycle-transition preview row painted from an IterationStart
-/// detail ("cycle 2/5 — task-3: Title: plan text [budget 1234/60000 tokens]").
-/// Carries the same `[  2 14:23:41]` iteration + local-clock block as every
-/// other timeline row.
-/// Whitespace-flattened, width-aware: the budget indicator is retained but is
-/// the first thing dropped when the terminal is too narrow; the body is then
-/// hard-clipped so the row always occupies exactly one line. Clipping happens
-/// on the plain text BEFORE painting, so ANSI escapes stay balanced.
+/// A transient notice as its painted `● text` row: a coloured bullet, then
+/// the text clipped (before painting) so the row always occupies one line.
+fn notice_row(kind: HarnessEventType, text: &str, width: usize, text_paint: fn(&str) -> String) -> Vec<String> {
+    let mut chars = text.chars();
+    let text: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    let plain = clip_row(format!("\u{25cf} {text}"), width);
+    let bullet = crate::tui::theme::event_paint(kind);
+    vec![match plain.strip_prefix('\u{25cf}') {
+        Some(rest) => format!("{}{}", bullet("\u{25cf}"), text_paint(rest)),
+        None => text_paint(&plain),
+    }]
+}
+
+/// Cycle-transition preview row painted from an IterationStart detail
+/// ("cycle 2/5 — task-3: Title: plan text [budget 1234/60000 tokens]") in the
+/// same `●` style as the tool summary: `● Cycle 2/5 — task-3: Title: plan text`.
+/// Whitespace-flattened, width-aware: the trailing budget indicator is kept
+/// only while the whole row fits; the body is then hard-clipped so the row
+/// always occupies exactly one line.
 pub fn render_cycle_transition(event: &TranscriptEventEntry, width: usize) -> Vec<String> {
     let flat = event
         .detail
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let budget_marker = " [budget ";
-    let (body, budget) = match flat.rfind(budget_marker) {
-        Some(start) => (
-            flat[..start].trim_end().to_string(),
-            Some(flat[start..].to_string()),
-        ),
-        None => (flat.clone(), None),
+    let (body, budget) = match flat.rfind(" [") {
+        Some(start) if flat.ends_with(']') => (&flat[..start], Some(&flat[start..])),
+        _ => (flat.as_str(), None),
     };
-
-    let prefix = crate::tui::timeline::entry_prefix(event.iteration, &event.at);
-
     // Keep the budget indicator only while the whole row fits; otherwise the
     // planning text is the part worth reading.
-    let mut plain = match &budget {
-        Some(b) if width == 0 || string_width(&format!("{prefix}{body} {b}")) <= width => {
-            format!("{prefix}{body} {b}")
+    let text = match budget {
+        Some(budget) if width == 0 || string_width(&format!("\u{25cf} {body}{budget}")) <= width => {
+            format!("{body}{budget}")
         }
-        _ => format!("{prefix}{body}"),
+        _ => body.to_string(),
     };
+    notice_row(event.kind, &text, width, c::white)
+}
 
-    if width > 0 && string_width(&plain) > width {
-        let mut clipped: String = plain.chars().take(width.saturating_sub(1)).collect();
-
-        while string_width(&clipped) > width.saturating_sub(1) {
-            clipped.pop();
+/// One transient event on the activity block above the working line, in the
+/// `●` style every row there shares. A cycle transition keeps its preview, a
+/// loop start is cut down to `● Loop 3 — task-1: Title` (its skill, plan and
+/// tool lists stay in the transcript), anything else shows its detail on one
+/// clipped row.
+pub fn render_activity_notice(event: &TranscriptEventEntry, width: usize) -> Vec<String> {
+    let flat = event
+        .detail
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match event.kind {
+        HarnessEventType::IterationStart => render_cycle_transition(event, width),
+        HarnessEventType::LoopStart => {
+            let head = flat.split(" [").next().unwrap_or_default();
+            let text = match flat.rsplit_once(" \u{2014} ") {
+                Some((_, what)) if !head.contains(" \u{2014} ") => format!("{head} \u{2014} {what}"),
+                _ => head.to_string(),
+            };
+            notice_row(event.kind, &text, width, c::dim)
         }
-
-        clipped.push('\u{2026}');
-        plain = clipped;
+        _ => notice_row(event.kind, &flat, width, c::dim),
     }
+}
 
-    if prefix.is_empty() {
-        return vec![c::white(&plain)];
-    }
-
-    let cut = plain.find(']').map(|i| i + 1).unwrap_or(0);
-    let (head, rest) = plain.split_at(cut);
-    vec![format!("{}{}", c::dim(head), c::white(rest))]
+/// What an IterationStart detail says the run is doing, for the working line:
+/// `(activity, cycle)` — ("Working on Fix the parser", "2/5") for
+/// "cycle 2/5 — task-3: Fix the parser [run 4/20]", ("Planning", "1/3") for
+/// "cycle 1/3 — planning".
+pub fn parse_cycle_detail(detail: &str) -> (Option<String>, Option<String>) {
+    let flat = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Only the harness's own trailing indicators are cut; a title may
+    // itself end in brackets.
+    let body = match flat.rfind(" [run ").or_else(|| flat.rfind(" [budget ")) {
+        Some(start) if flat.ends_with(']') => &flat[..start],
+        _ => flat.as_str(),
+    };
+    let (head, what) = match body.split_once(" \u{2014} ") {
+        Some((head, what)) => (head, Some(what.trim())),
+        None => (body, None),
+    };
+    let cycle = head
+        .strip_prefix("cycle ")
+        .map(|cycle| cycle.trim().to_string())
+        .filter(|cycle| !cycle.is_empty());
+    let activity = what.filter(|what| !what.is_empty()).map(|what| {
+        match what.split_once(": ") {
+            Some((id, title)) if !id.contains(' ') && !title.trim().is_empty() => {
+                format!("Working on {}", title.trim())
+            }
+            _ => {
+                let mut chars = what.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => String::new(),
+                }
+            }
+        }
+    });
+    (activity, cycle)
 }
 #[cfg(test)]
 mod tests {
@@ -487,8 +619,8 @@ mod tests {
         assert_eq!(group.tools, vec!["READ", "PATCH", "BASH"]);
         assert_eq!(group.iteration, 1);
         assert_eq!(
-            group_rows(&p, 120).last().unwrap(),
-            "[  1] ── 4 Tools called: READ, PATCH, BASH ──"
+            group_rows(&p, 120),
+            vec!["● Read 2 files, made 1 edit, ran 1 command", "  ⎿ x"]
         );
     }
 
@@ -520,16 +652,16 @@ mod tests {
         assert_eq!(group.count, 3, "{group:?}");
         assert_eq!(group.failed, 2, "{group:?}");
         assert_eq!(
-            group_rows(&p, 120).last().unwrap(),
-            "[  1] ── 3 Tools called: READ, BASH, FETCH ── (2 failed)"
+            group_rows(&p, 120),
+            vec!["● Read 1 file, ran 1 command, fetched 1 page · 2 failed", "  ⎿ x"]
         );
 
         // Narrow terminal: the failed suffix is dropped before the summary
-        // is hard-clipped, and the group still renders as exactly one row.
+        // is hard-clipped, and the summary still takes exactly one row.
         let rows = group_rows(&p, 40);
-        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(string_width(rows[0].as_str()) <= 40, "{rows:?}");
-        assert!(rows[0].contains("3 Tools called"), "{rows:?}");
+        assert!(rows[0].starts_with("● Read 1 file, ran 1 command"), "{rows:?}");
         assert!(!rows[0].contains("failed"), "{rows:?}");
     }
 
@@ -572,8 +704,8 @@ mod tests {
         assert_eq!(group.count, 1);
         assert_eq!(group.tools, vec!["GREP"]);
         assert_eq!(
-            group_rows(&p, 120).last().unwrap(),
-            "[  1] ── 1 Tool called: GREP ──"
+            group_rows(&p, 120),
+            vec!["● Searched 1 time", "  ⎿ \"x\""]
         );
     }
 
@@ -605,8 +737,7 @@ mod tests {
         assert!(
             plain
                 .iter()
-                .any(|row| row.contains("── 1 Tools called: READ ──")
-                    || row.contains("── 1 Tool called: READ ──")),
+                .any(|row| row == "● Read 1 file"),
             "{plain:?}"
         );
         assert!(
@@ -616,7 +747,7 @@ mod tests {
         assert!(
             plain
                 .iter()
-                .any(|row| row.contains("── 1 Tool called: PATCH ──")),
+                .any(|row| row == "● Made 1 edit"),
             "{plain:?}"
         );
         assert!(
@@ -628,11 +759,11 @@ mod tests {
         assert!(
             plain
                 .iter()
-                .any(|row| row.contains("── 1 Tool called: BASH ──")),
+                .any(|row| row == "● Ran 1 command"),
             "{plain:?}"
         );
         assert!(
-            plain.iter().any(|row| row.contains("run summary")),
+            plain.iter().any(|row| row == "done"),
             "{plain:?}"
         );
         // one row per burst, never merged across boundaries
@@ -656,6 +787,9 @@ mod tests {
             goal_id: "g".to_string(),
             iterations: 3,
             reason: crate::core::types::HarnessRunReason::Completed,
+            duration_ms: None,
+            tasks_done: None,
+            tasks_total: None,
         }));
         p.finalize();
 
@@ -671,7 +805,7 @@ mod tests {
         assert!(
             plain
                 .iter()
-                .any(|row| row.contains("run completed after 3 cycles")),
+                .any(|row| row == "✻ Worked · 3 cycles"),
             "{plain:?}"
         );
     }
@@ -758,7 +892,7 @@ mod tests {
         let plain = group_rows(&p, 120);
         assert!(plain.iter().any(|row| row.contains("cycle 1/3")));
         assert!(plain.iter().any(|row| row.contains("All done.")));
-        assert!(!plain.iter().any(|row| row.contains("Tools called")));
+        assert!(!plain.iter().any(|row| row.starts_with('●')));
     }
 
     #[test]
@@ -787,13 +921,13 @@ mod tests {
 		};
 
         let wide = strip_ansi(&render_cycle_transition(&entry, 200)[0]);
-        assert!(wide.contains("cycle 12/40"));
+        assert!(wide.starts_with("● Cycle 12/40"), "{wide:?}");
         assert!(wide.contains("écriture"));
         assert!(wide.contains("[budget 123456/60000 tokens]"));
 
         let mid = strip_ansi(&render_cycle_transition(&entry, 60)[0]);
         assert!(!mid.contains("[budget"), "{mid:?}");
-        assert!(mid.contains("cycle 12/40"), "{mid:?}");
+        assert!(mid.starts_with("● Cycle 12/40"), "{mid:?}");
         assert!(mid.ends_with('…'));
 
         let narrow = render_cycle_transition(&entry, 10)[0].clone();
@@ -840,10 +974,10 @@ mod tests {
         p.append(&goal("g"));
         p.finalize();
 
-        // Groups are strictly ONE physical row at every width, even when the
-        // name list is long enough to exceed the terminal: render_tool_group
-        // clips in place instead of wrapping.
-        assert_eq!(estimate_compact_rows(&p.cells[0]), 1);
+        // A group is its summary row plus the latest call's detail row at
+        // every width, even when the summary is long enough to exceed the
+        // terminal: render_tool_group clips in place instead of wrapping.
+        assert_eq!(estimate_compact_rows(&p.cells[0]), 2);
         assert_eq!(estimate_compact_rows(&p.cells[1]), 2);
         assert_eq!(select_compact_tail_start(&p.cells, 40), 0);
 
@@ -916,9 +1050,7 @@ mod tests {
         assert!(em.projection.cells.is_empty());
 
         let live = live_row(&em, 120);
-        assert!(live.contains("2 Tools called"), "{live:?}");
-        assert!(live.contains("READ"), "{live:?}");
-        assert!(live.contains("PATCH"), "{live:?}");
+        assert_eq!(live, "● Read 1 file, made 1 edit");
         // Raw payloads and telemetry never surface in the live row.
         assert!(!live.contains("{\"path\":\"x\"}"), "{live:?}");
         assert!(!live.contains("result text"), "{live:?}");
@@ -981,7 +1113,7 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("called") && row.contains("READ")),
+                .any(|row| row.starts_with("● Read")),
             "{rows:?}"
         );
     }
@@ -1125,70 +1257,99 @@ mod tests {
         };
         assert_eq!(
             estimate_compact_rows(&CompactCell::ToolGroup(group.clone())),
-            1
+            2
         );
         let wide = strip_ansi(&render_tool_group(group, 200)[0]);
-        assert!(wide.contains("15 Tools called"), "{wide:?}");
+        assert!(
+            wide.starts_with("● Read 1 file, made 1 edit, ran 2 commands, searched 2 times, fetched 1 page, used EDIT"),
+            "{wide:?}"
+        );
 
         for width in [20usize, 40, 80, 200] {
             let rows = render_tool_group(group, width);
-            assert_eq!(rows.len(), 1, "width {width}");
-            assert!(
-                string_width(&rows[0]) <= width,
-                "width {width}: {:?}",
-                strip_ansi(&rows[0])
-            );
+            assert_eq!(rows.len(), 2, "width {width}");
+            for row in &rows {
+                assert!(string_width(row) <= width, "width {width}: {:?}", strip_ansi(row));
+            }
         }
     }
 
     #[test]
-    fn tool_group_prefix_carries_the_first_calls_clock() {
-        let stamp = "2026-01-01T12:34:56.000Z";
-        let clock = crate::tui::timeline::clock_time(stamp).unwrap();
-        let source = TranscriptEntry::Event(TranscriptEventEntry {
-            at: stamp.to_string(),
-            data: None,
-            detail: "READ {\"path\":\"x\"}".to_string(),
-            goal_id: "g".to_string(),
-            iteration: 3,
-            kind: HarnessEventType::ToolCall,
-        });
-        let mut p = CompactProjection::new();
-        p.append(&source);
-        p.append(&source);
-        p.finalize();
+    fn tool_group_detail_row_names_the_latest_call_and_never_shows_raw_json() {
+        let call = |detail: &str| {
+            TranscriptEntry::Event(TranscriptEventEntry {
+                at: String::new(),
+                data: None,
+                detail: detail.to_string(),
+                goal_id: "g".to_string(),
+                iteration: 1,
+                kind: HarnessEventType::ToolCall,
+            })
+        };
+        let detail_row = |detail: &str| {
+            let mut p = CompactProjection::new();
+            p.append(&call(detail));
+            p.finalize();
+            group_rows(&p, 60)
+        };
 
-        let group = last_group(&p.cells);
-        assert_eq!(group.iteration, 3);
         assert_eq!(
-            strip_ansi(&render_tool_group(group, 200)[0]),
-            format!("[  3 {clock}] ── 2 Tools called: READ ──")
+            detail_row("BASH {\"command\":\"cargo test --lib\\necho done\"}"),
+            vec!["● Ran 1 command", "  ⎿ $ cargo test --lib"]
         );
+        assert_eq!(
+            detail_row("PATCH {\"files\":[{\"path\":\"src/a.rs\",\"find\":\"x\"},{\"path\":\"src/b.rs\"}]}"),
+            vec!["● Made 1 edit", "  ⎿ src/a.rs +1 more"]
+        );
+        assert_eq!(
+            detail_row("FETCH {\"url\":\"https://example.com/docs\"}"),
+            vec!["● Fetched 1 page", "  ⎿ https://example.com/docs"]
+        );
+        // Input that names nothing readable (or is not JSON) leaves the
+        // summary on its own rather than printing the arguments.
+        assert_eq!(detail_row("MONITOR {\"waitMs\":5000}"), vec!["● Used MONITOR"]);
+        assert_eq!(detail_row("READ not-json"), vec!["● Read 1 file"]);
 
-        // The clock never costs a row, at any width.
-        for width in [10usize, 20, 40, 200] {
-            let rows = render_tool_group(group, width);
-            assert_eq!(rows.len(), 1, "width {width}");
-            assert!(string_width(&rows[0]) <= width, "width {width}");
+        // Absurdly narrow terminals clip instead of panicking.
+        for width in [1usize, 2, 3] {
+            let mut p = CompactProjection::new();
+            p.append(&call("BASH {\"command\":\"ls\"}"));
+            p.finalize();
+            assert_eq!(group_rows(&p, width).len(), 2, "width {width}");
         }
 
-        // Timestamp-less groups (fixtures, legacy rows) keep the plain block.
-        let mut bare = CompactProjection::new();
-        bare.append(&tool_call(1, "READ", "c1"));
-        bare.append(&tool_call(1, "READ", "c2"));
-        bare.finalize();
-        assert_eq!(
-            strip_ansi(&render_tool_group(last_group(&bare.cells), 200)[0]),
-            "[  1] ── 2 Tools called: READ ──"
-        );
+        // A long command is clipped to the terminal, never wrapped.
+        let long = format!("BASH {{\"command\":\"{}\"}}", "x".repeat(200));
+        let rows = detail_row(&long);
+        assert_eq!(rows.len(), 2);
+        assert!(string_width(rows[1].as_str()) <= 60 && rows[1].ends_with('…'), "{rows:?}");
     }
 
     #[test]
-    fn cycle_transition_row_carries_the_iteration_clock() {
-        let stamp = "2026-01-01T12:34:56.000Z";
-        let clock = crate::tui::timeline::clock_time(stamp).unwrap();
+    fn cycle_detail_parses_into_the_working_line_parts() {
+        assert_eq!(
+            parse_cycle_detail("cycle 2/5 — task-3: Fix the parser [run 4/20]"),
+            (Some("Working on Fix the parser".to_string()), Some("2/5".to_string()))
+        );
+        assert_eq!(
+            parse_cycle_detail("cycle 1/3 — planning"),
+            (Some("Planning".to_string()), Some("1/3".to_string()))
+        );
+        assert_eq!(
+            parse_cycle_detail("cycle 3/3 — task-1: Title: with a colon [run 9/9 — budget exhausted after this cycle]"),
+            (Some("Working on Title: with a colon".to_string()), Some("3/3".to_string()))
+        );
+        assert_eq!(
+            parse_cycle_detail("cycle 1/2 — task-2: Fix the [bug] handler [legacy]"),
+            (Some("Working on Fix the [bug] handler [legacy]".to_string()), Some("1/2".to_string()))
+        );
+        assert_eq!(parse_cycle_detail("something else"), (None, None));
+    }
+
+    #[test]
+    fn cycle_transition_row_is_a_dot_row_without_the_iteration_block() {
         let event = TranscriptEventEntry {
-            at: stamp.to_string(),
+            at: "2026-01-01T12:34:56.000Z".to_string(),
             data: None,
             detail: "cycle 2/5 — task-2: wire the composer [budget 100/60000 tokens]".to_string(),
             goal_id: "g".to_string(),
@@ -1196,17 +1357,9 @@ mod tests {
             kind: HarnessEventType::IterationStart,
         };
 
-        let row = strip_ansi(&render_cycle_transition(&event, 200)[0]);
-        assert!(
-            row.starts_with(&format!(
-                "[  2 {clock}] cycle 2/5 — task-2: wire the composer"
-            )),
-            "{row:?}"
-        );
-        assert!(row.ends_with("[budget 100/60000 tokens]"), "{row:?}");
-        assert!(
-            !row.starts_with("[  2] "),
-            "the clock must ride in the block: {row:?}"
+        assert_eq!(
+            strip_ansi(&render_cycle_transition(&event, 200)[0]),
+            "● Cycle 2/5 — task-2: wire the composer [budget 100/60000 tokens]"
         );
 
         for width in [10usize, 24, 60, 200] {
@@ -1218,6 +1371,58 @@ mod tests {
                 strip_ansi(&rows[0])
             );
         }
+    }
+
+    #[test]
+    fn every_transient_notice_is_one_dot_row() {
+        let notice = |kind: HarnessEventType, detail: &str, width: usize| {
+            let rows = render_activity_notice(
+                &TranscriptEventEntry {
+                    at: "2026-01-01T12:34:56.000Z".to_string(),
+                    data: None,
+                    detail: detail.to_string(),
+                    goal_id: "g".to_string(),
+                    iteration: 4,
+                    kind,
+                },
+                width,
+            );
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            strip_ansi(&rows[0])
+        };
+
+        assert_eq!(
+            notice(HarnessEventType::IterationStart, "cycle 1/3 — replanning blocked tasks", 120),
+            "● Cycle 1/3 — replanning blocked tasks"
+        );
+        assert_eq!(
+            notice(
+                HarnessEventType::ContextRefreshed,
+                "context estimate for cycle 1: 38243 tokens across 6 categories",
+                120
+            ),
+            "● Context estimate for cycle 1: 38243 tokens across 6 categories"
+        );
+        // A loop start names the loop and its task; the skill, plan and tool
+        // lists never spill onto the block.
+        assert_eq!(
+            notice(
+                HarnessEventType::LoopStart,
+                "loop 3 [skills: verify-before-done] [tools: BASH_ASYNC, CHECK, DIR, FETCH, GREP, READ] [role: author] — task-1: Fix the parser",
+                120
+            ),
+            "● Loop 3 — task-1: Fix the parser"
+        );
+        assert_eq!(notice(HarnessEventType::LoopStart, "loop 1 — planning", 120), "● Loop 1 — planning");
+        // Long or multi-line details stay on one clipped row.
+        let warning = notice(
+            HarnessEventType::RunWarning,
+            &format!("read-only nudge:\n{}", "nothing written ".repeat(20)),
+            40,
+        );
+        assert!(warning.starts_with("● Read-only nudge: nothing written"), "{warning:?}");
+        assert!(string_width(&warning) <= 40 && warning.ends_with('…'), "{warning:?}");
+        assert!(!warning.contains('['), "{warning:?}");
     }
 
     #[test]
@@ -1241,12 +1446,10 @@ mod tests {
         };
         for width in [10usize, 24, 60] {
             let rows = render_tool_group(group, width);
-            assert_eq!(rows.len(), 1, "width {width}");
-            assert!(
-                string_width(&rows[0]) <= width,
-                "width {width}: {:?}",
-                strip_ansi(&rows[0])
-            );
+            assert_eq!(rows.len(), 2, "width {width}");
+            for row in &rows {
+                assert!(string_width(row) <= width, "width {width}: {:?}", strip_ansi(row));
+            }
         }
 
         // The open live-row path is equally width-safe.
@@ -1258,7 +1461,7 @@ mod tests {
                 .active_group()
                 .map(|g| render_tool_group(g, width))
                 .unwrap();
-            assert_eq!(rows.len(), 1, "width {width}");
+            assert_eq!(rows.len(), 2, "width {width}");
             assert!(
                 string_width(&rows[0]) <= width,
                 "width {width}: {:?}",

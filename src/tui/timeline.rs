@@ -112,6 +112,17 @@ fn info_note_rows(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// What a model-text or run-summary row prints: a run summary prefers the
+/// prose written for a reader (`data.display`) over the full summary text.
+fn summary_text(event: &crate::cli::transcript::TranscriptEventEntry) -> &str {
+    event
+        .data
+        .as_ref()
+        .filter(|_| event.kind == HarnessEventType::RunSummary)
+        .and_then(|data| data.display.as_deref())
+        .unwrap_or(&event.detail)
+}
+
 fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<String> {
     match entry {
         TranscriptEntry::Goal(goal) => {
@@ -129,15 +140,17 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
             rows
         }
         TranscriptEntry::Event(event) => match event.kind {
+            HarnessEventType::LoopChanges => {
+                crate::tui::diff::render_loop_changes(&event.detail, event.data.as_ref(), width)
+            }
             HarnessEventType::ModelText | HarnessEventType::RunSummary => {
                 let mut rows = Vec::new();
+                let text = summary_text(event);
 
                 if event.kind == HarnessEventType::RunSummary {
+                    // The closing message reads as prose under a blank row,
+                    // with no banner of its own.
                     rows.push(String::new());
-                }
-
-                if event.kind == HarnessEventType::RunSummary {
-                    rows.push(event_paint(event.kind)("── run summary ──"));
                 } else {
                     rows.push(event_paint(event.kind)(&format!(
                         "{}{}",
@@ -146,13 +159,13 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
                     )));
                 }
 
-                for line in render_markdown_ansi(&event.detail).split('\n') {
+                for line in render_markdown_ansi(text).split('\n') {
                     rows.push(line.to_string());
                 }
 
                 // Local markdown image links in model text render inline too
                 // (no-op unless the TUI opted into a protocol).
-                for path in crate::tui::images::markdown_image_paths(&event.detail) {
+                for path in crate::tui::images::markdown_image_paths(text) {
                     rows.extend(crate::tui::images::inline_image_rows(&[path], width));
                 }
 
@@ -175,19 +188,36 @@ fn render_timeline_cell_rows(entry: &TranscriptEntry, width: usize) -> Vec<Strin
             }
         },
         TranscriptEntry::RunEnd(run_end) => {
-            let cycles = if run_end.iterations == 1 { "" } else { "s" };
-            let painted = if matches!(run_end.reason, HarnessRunReason::Completed) {
-                c::green
-            } else {
-                c::yellow
-            };
-
-            vec![painted(&format!(
-                "∎ run {} after {} cycle{}",
-                reason_string(&run_end.reason),
+            // `✻ Worked for 3m 12s · 4 cycles · 5/5 tasks`; an entry written
+            // before the duration and task counts existed shows what it has.
+            let completed = matches!(run_end.reason, HarnessRunReason::Completed);
+            let clock = run_end.duration_ms.map(|ms| {
+                crate::tui::widgets::format_working_clock(std::time::Duration::from_millis(
+                    ms.max(0) as u64,
+                ))
+            });
+            let mut parts = vec![match (completed, clock) {
+                (true, Some(clock)) => format!("Worked for {clock}"),
+                (true, None) => "Worked".to_string(),
+                (false, Some(clock)) => format!("Stopped after {clock}"),
+                (false, None) => "Stopped".to_string(),
+            }];
+            parts.push(format!(
+                "{} cycle{}",
                 run_end.iterations,
-                cycles
-            ))]
+                if run_end.iterations == 1 { "" } else { "s" }
+            ));
+            if let (Some(done), Some(total)) = (run_end.tasks_done, run_end.tasks_total) {
+                if total > 0 {
+                    parts.push(format!("{done}/{total} tasks"));
+                }
+            }
+            let mut line = format!("✻ {}", parts.join(" · "));
+            if !completed {
+                line.push_str(&format!(" ({})", reason_string(&run_end.reason)));
+            }
+
+            vec![if completed { c::green(&line) } else { c::yellow(&line) }]
         }
         TranscriptEntry::Model(model) => format_model_route_lines(model)
             .iter()
@@ -227,14 +257,18 @@ pub fn estimate_cell_rows(entry: &TranscriptEntry) -> usize {
                 // Markdown rendering changes the line count (list spacing,
                 // tables), so budget from the rendered output rather than the
                 // raw detail.
-                let rows = render_markdown_ansi(&event.detail).split('\n').count();
+                let text = summary_text(event);
+                let rows = render_markdown_ansi(text).split('\n').count();
                 // Local markdown image links paint one inline row each (see
                 // `render_timeline_cell`); budgeting them keeps an image from
                 // pushing the pinned live region off screen. Counting every
                 // link is an overestimate when no protocol is active or a file
                 // will not load, which only shortens the tail.
-                let images = crate::tui::images::markdown_image_paths(&event.detail).len();
-                1 + rows + usize::from(event.kind == HarnessEventType::RunSummary) + images
+                let images = crate::tui::images::markdown_image_paths(text).len();
+                1 + rows + images
+            }
+            HarnessEventType::LoopChanges => {
+                crate::tui::diff::estimate_loop_changes_rows(event.data.as_ref())
             }
             _ => 1,
         },
@@ -478,6 +512,69 @@ mod tests {
     }
 
     #[test]
+    fn run_end_footer_shows_duration_and_tasks_when_recorded() {
+        let make = |reason: HarnessRunReason, duration_ms: Option<i64>, tasks: Option<(i64, i64)>| {
+            let entry = TranscriptEntry::RunEnd(TranscriptRunEndEntry {
+                at: String::new(),
+                goal_id: String::new(),
+                iterations: 4,
+                reason,
+                duration_ms,
+                tasks_done: tasks.map(|(done, _)| done),
+                tasks_total: tasks.map(|(_, total)| total),
+            });
+            strip_ansi(&render_timeline_cell(&entry, 80)[0])
+        };
+
+        assert_eq!(
+            make(HarnessRunReason::Completed, Some(192_000), Some((5, 5))),
+            "✻ Worked for 3m 12s · 4 cycles · 5/5 tasks"
+        );
+        assert_eq!(
+            make(HarnessRunReason::MaxIterations, Some(192_000), Some((3, 5))),
+            "✻ Stopped after 3m 12s · 4 cycles · 3/5 tasks (max-iterations)"
+        );
+        // A run that planned no tasks (a direct answer) names none.
+        assert_eq!(
+            make(HarnessRunReason::Completed, Some(6_000), Some((0, 0))),
+            "✻ Worked for 6s · 4 cycles"
+        );
+        assert_eq!(make(HarnessRunReason::Aborted, None, None), "✻ Stopped · 4 cycles (aborted)");
+    }
+
+    #[test]
+    fn run_summary_renders_the_display_prose_without_a_banner() {
+        let summary = |display: Option<&str>| {
+            let entry = TranscriptEntry::Event(crate::cli::transcript::TranscriptEventEntry {
+                at: String::new(),
+                data: display.map(|display| crate::core::types::HarnessEventData {
+                    display: Some(display.to_string()),
+                    ..Default::default()
+                }),
+                detail: "Completed 1 task(s).\n- task-1: wire it — wired".to_string(),
+                goal_id: String::new(),
+                iteration: 3,
+                kind: HarnessEventType::RunSummary,
+            });
+            let rows: Vec<String> = render_timeline_cell(&entry, 80)
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect();
+            assert_eq!(rows.len(), estimate_cell_rows(&entry), "{rows:?}");
+            rows
+        };
+
+        assert_eq!(
+            summary(Some("Wired the parser.\n\n`cargo test` passed (12 tests).")),
+            vec!["", "Wired the parser.", "", "cargo test passed (12 tests)."]
+        );
+        // Older transcripts carry no display text: the summary itself shows.
+        let rows = summary(None);
+        assert_eq!(rows[..2], ["", "Completed 1 task(s)."]);
+        assert!(!rows.iter().any(|row| row.contains("run summary")), "{rows:?}");
+    }
+
+    #[test]
     fn run_end_singular_plural() {
         let make = |iterations: i64| {
             let entry = TranscriptEntry::RunEnd(TranscriptRunEndEntry {
@@ -485,12 +582,15 @@ mod tests {
                 goal_id: String::new(),
                 iterations,
                 reason: HarnessRunReason::Completed,
+                duration_ms: None,
+                tasks_done: None,
+                tasks_total: None,
             });
             strip_ansi(&render_timeline_cell(&entry, 80)[0])
         };
 
-        assert_eq!(make(1), "∎ run completed after 1 cycle");
-        assert_eq!(make(3), "∎ run completed after 3 cycles");
+        assert_eq!(make(1), "✻ Worked · 1 cycle");
+        assert_eq!(make(3), "✻ Worked · 3 cycles");
     }
 
     #[test]

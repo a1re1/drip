@@ -111,6 +111,10 @@ pub struct SessionGoalArgs<'a> {
     pub signal: Option<AbortSignal>,
     pub skills: Vec<LoadedCliSkill>,
     pub summarize_run: Option<bool>,
+    /// Write the closing message a person reads at the end of the run (the
+    /// run-summary event's `data.display`) with a model call. Set by the TUI;
+    /// unset, the display text is composed from the ledger at no cost.
+    pub closing_message: Option<bool>,
     /// Draft mode (--lite): terminal reason "draft" and no run summary.
     pub lite: bool,
     /// Operator review/verify opt-out (implied by lite): no reviewer chain,
@@ -305,6 +309,7 @@ pub async fn run_session_goal(
         std::path::Path::new(&crate::core::home::open_drip_home(&args.project.home_root).plans_dir),
     );
 
+    let run_started = std::time::Instant::now();
     let result = run_cli_goal(CliGoalRunArgs {
         ask_user_enabled: args.ask_user_enabled,
         classifier: args.classifier.clone(),
@@ -347,6 +352,7 @@ pub async fn run_session_goal(
         skills: args.skills,
         state_path: paths.state_path.clone().into(),
         summarize_run: args.summarize_run,
+        closing_message: args.closing_message,
         lite: args.lite,
         no_review: args.no_review || args.lite,
         monitor_background_handoff: args.monitor_background_handoff,
@@ -363,6 +369,16 @@ pub async fn run_session_goal(
             goal_id: goal_id.clone(),
             iterations: result.iterations,
             reason: result.reason,
+            duration_ms: Some(run_started.elapsed().as_millis() as i64),
+            tasks_done: Some(
+                result
+                    .state
+                    .tasks
+                    .iter()
+                    .filter(|task| task.status == crate::core::types::HarnessTaskStatus::Completed)
+                    .count() as i64,
+            ),
+            tasks_total: Some(result.state.tasks.len() as i64),
         }),
     );
     sync_session_memories(args.index, &args.session.id, &result.state.memory);

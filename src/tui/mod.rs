@@ -3,6 +3,7 @@
 pub mod app;
 pub mod btw;
 pub mod compact;
+pub mod diff;
 pub mod evals;
 pub mod images;
 pub mod jobs;

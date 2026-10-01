@@ -56,6 +56,9 @@ fn run_end(reason: HarnessRunReason) -> TranscriptEntry {
         goal_id: "g1".to_string(),
         iterations: 7,
         reason,
+        duration_ms: None,
+        tasks_done: None,
+        tasks_total: None,
     })
 }
 

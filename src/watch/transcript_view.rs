@@ -770,6 +770,9 @@ mod tests {
             goal_id: "g".into(),
             iterations: 3,
             reason: HarnessRunReason::Completed,
+            duration_ms: None,
+            tasks_done: None,
+            tasks_total: None,
         });
         let model = TranscriptEntry::Model(crate::cli::transcript::TranscriptModelEntry {
             at: "t".into(),

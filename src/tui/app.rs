@@ -81,7 +81,7 @@ use crate::tui::btw::{
     BTW_DIGEST_CHARS, BTW_TIMEOUT_MS,
 };
 use crate::tui::compact::{
-    render_compact_cell, render_cycle_transition, render_tool_group, select_compact_tail_start,
+    render_activity_notice, render_compact_cell, render_tool_group, select_compact_tail_start,
     CompactCell, CompactEmitter,
 };
 use crate::tui::evals::{EvalBrowser, EvalRow, EvalRunSummary};
@@ -148,8 +148,9 @@ pub struct TuiBootstrap {
 const EVENT_BATCH_MS: u64 = 48;
 const RESIZE_SETTLE_MS: u64 = 150;
 // Transient activity + notice rows kept on the live line above the composer at
-// once: the block blinks in one or two rows instead of growing with a run.
-const ACTIVITY_NOTICE_LIMIT: usize = 2;
+// once: the folded tool summary (up to two rows) plus the newest notice,
+// instead of a block that grows with a run.
+const ACTIVITY_NOTICE_LIMIT: usize = 3;
 // Debounce window for the transient activity block: the rows above the working
 // line swap at most this often, so a burst of fast-arriving ops, cycle
 // transitions or warnings coalesces into one update instead of blinking.
@@ -711,7 +712,7 @@ struct TuiApp {
     /// Every timeline cell rendered so far (for the repaint tail after a resize).
     cells: Vec<TranscriptEntry>,
     /// Presentation-only projection folding tool activity per cycle into the
-    /// compact `-- N Tools called: ... --` rows. Never persisted.
+    /// compact `● Read 3 files, ran 1 command` rows. Never persisted.
     compact: CompactEmitter,
     cols: usize,
     /// Keyboard focus parked on the status-line background counter: `↓` on an
@@ -749,6 +750,9 @@ struct TuiApp {
     /// composer counts its clock up from here. `None` whenever no run is in
     /// flight, so nothing is painted above an idle composer.
     run_started_at: Option<Instant>,
+    /// What the activity line says beside the clock (current task, cycle,
+    /// tokens so far), gathered from the run's live events.
+    working_status: crate::tui::widgets::WorkingStatus,
     /// Next repaint deadline of the activity line animation; `None` when idle
     /// (or when the run already ended), so the loop falls back to its plain
     /// wait instead of busy-polling.
@@ -902,19 +906,28 @@ fn scrollback_cells(cells: &[CompactCell]) -> Vec<CompactCell> {
         .collect()
 }
 
-/// One transient notice row: a folded tool summary keeps its
-/// `── N Tools called: … ──` row, a cycle transition keeps its numbered
-/// `[  2 14:23:41]` preview (`render_cycle_transition`), every other transient
-/// event renders as the ordinary timeline row.
+/// One transient notice on the activity block, always in the `●` style: a
+/// folded tool summary, a transient event (`render_activity_notice`), or any
+/// other transient entry on one clipped row.
 fn activity_notice_rows(cell: &CompactCell, width: usize) -> Vec<String> {
     match cell {
         CompactCell::ToolGroup(group) => render_tool_group(group, width),
-        CompactCell::Passthrough(TranscriptEntry::Event(event))
-            if event.kind == HarnessEventType::IterationStart =>
-        {
-            render_cycle_transition(event, width)
+        CompactCell::Passthrough(TranscriptEntry::Event(event)) => {
+            render_activity_notice(event, width)
         }
-        CompactCell::Passthrough(other) => crate::tui::timeline::render_timeline_cell(other, width),
+        CompactCell::Passthrough(other) => {
+            let text = crate::tui::timeline::render_timeline_cell(other, 0)
+                .iter()
+                .map(|row| strip_ansi(row))
+                .find(|row| !row.trim().is_empty())
+                .unwrap_or_default();
+            let plain = format!("● {}", text.trim());
+            vec![crate::watch::ansi::c::dim(&if width > 0 {
+                crate::watch::ansi::fit(&plain, width, true).trim_end().to_string()
+            } else {
+                plain
+            })]
+        }
     }
 }
 
@@ -1117,6 +1130,7 @@ impl TuiApp {
             running: false,
             running_detail: None,
             run_started_at: None,
+            working_status: Default::default(),
             activity_next_tick: None,
             activity_notices: Vec::new(),
             activity_pending: Vec::new(),
@@ -1774,14 +1788,17 @@ impl TuiApp {
                 if let Some(group) = self.compact.projection.active_group() {
                     transient.extend(render_tool_group(group, self.cols));
                 }
+                let mut notices: Vec<String> = Vec::new();
                 for cell in &self.activity_notices {
-                    transient.extend(activity_notice_rows(cell, self.cols));
+                    notices.extend(activity_notice_rows(cell, self.cols));
                 }
-                if transient.len() > ACTIVITY_NOTICE_LIMIT {
-                    // Newest rows only: the block blinks in one or two lines
-                    // instead of growing with the run.
-                    transient = transient.split_off(transient.len() - ACTIVITY_NOTICE_LIMIT);
-                }
+                // Newest notice rows only, in whatever room the tool summary
+                // leaves: its rows stay together, and the block never grows
+                // with the run.
+                let room = ACTIVITY_NOTICE_LIMIT.saturating_sub(transient.len());
+                let hidden = notices.len().saturating_sub(room);
+                notices.drain(..hidden);
+                transient.extend(notices);
                 let status_rows = !transient.is_empty();
                 rows.extend(transient);
                 if status_rows && self.run_started_at.is_some() {
@@ -1794,6 +1811,7 @@ impl TuiApp {
                     rows.push(render_working_line(
                         crate::tui::pane_title::frame_for(elapsed),
                         elapsed,
+                        &self.working_status,
                         self.cols,
                     ));
                 }
@@ -4774,6 +4792,7 @@ impl TuiApp {
         // The activity line above the composer starts its clock here and
         // animates on the shared spinner cadence while the run is in flight.
         self.run_started_at = Some(Instant::now());
+        self.working_status = Default::default();
         self.activity_next_tick = Some(Instant::now() + Duration::from_millis(SPINNER_INTERVAL_MS));
         self.running_detail = Some("resolving context".to_string());
         // Mention resolution can read a whole directory tree; show the
@@ -5062,6 +5081,7 @@ impl TuiApp {
                 signal: Some(signal),
                 skills,
                 summarize_run: None,
+                closing_message: Some(true),
                 lite: false,
                 no_review: false,
                 tools: {
@@ -5101,6 +5121,21 @@ impl TuiApp {
                         goal_id: outcome.goal_id.clone(),
                         iterations: outcome.result.iterations,
                         reason: outcome.result.reason,
+                        duration_ms: self
+                            .run_started_at
+                            .map(|started| started.elapsed().as_millis() as i64),
+                        tasks_done: Some(
+                            outcome
+                                .result
+                                .state
+                                .tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status == crate::core::types::HarnessTaskStatus::Completed
+                                })
+                                .count() as i64,
+                        ),
+                        tasks_total: Some(outcome.result.state.tasks.len() as i64),
                     }),
                     false,
                 );
@@ -5610,10 +5645,29 @@ impl TuiApp {
                     {
                         self.drop_survey("survey answered via drip --answer — the run continues");
                     }
+                    match event.r#type {
+                        HarnessEventType::IterationStart => {
+                            let (activity, cycle) =
+                                crate::tui::compact::parse_cycle_detail(&event.detail);
+                            self.working_status.activity = activity;
+                            self.working_status.cycle = cycle;
+                        }
+                        HarnessEventType::Inference => {
+                            self.working_status.output_tokens += event
+                                .data
+                                .as_ref()
+                                .and_then(|data| data.completion_tokens)
+                                .unwrap_or(0);
+                        }
+                        _ => {}
+                    }
                     self.pending_detail = Some(format!("cycle {}", event.iteration));
+                    // The structured payload travels with the row: the tool
+                    // summary reads tool names and failures from it, and the
+                    // loop-changes and run-summary rows render from it.
                     self.queue_cell(TranscriptEntry::Event(TranscriptEventEntry {
                         at: now_iso(),
-                        data: None,
+                        data: event.data,
                         detail: event.detail,
                         goal_id: "live".to_string(),
                         iteration: event.iteration,
@@ -8777,7 +8831,7 @@ mod activity_line_tests {
         let rows = plain(&fixture.app.live_region());
         let index = rows
             .iter()
-            .position(|row| row.contains("working for 1m 05s"))
+            .position(|row| row.contains("Working… (1m 05s)"))
             .expect("a live run must paint the activity line");
         assert!(
             crate::tui::pane_title::SPINNER_FRAMES
@@ -8800,7 +8854,7 @@ mod activity_line_tests {
         fixture.app.run_started_at = Some(elapsed(3));
         let rows = plain(&fixture.app.live_region());
         assert!(
-            !rows.iter().any(|row| row.contains("working for")),
+            !rows.iter().any(|row| row.contains("Working…")),
             "{rows:?}"
         );
     }
@@ -8815,7 +8869,7 @@ mod activity_line_tests {
         assert!(fixture.app.run_started_at.is_none());
         assert!(fixture.app.activity_next_tick.is_none());
         let rows = plain(&fixture.app.live_region());
-        assert!(!rows.iter().any(|row| row.contains("working for")));
+        assert!(!rows.iter().any(|row| row.contains("Working…")));
     }
 
     #[test]
@@ -8963,12 +9017,55 @@ mod compact_ephemeral_tests {
             "{rows:?}"
         );
         assert!(rows.iter().any(|row| row.contains("All done.")), "{rows:?}");
-        for noise in ["cycle 1/2", "Tool called", "Tools called", "rate limited"] {
+        for noise in ["ycle 1/2", "●", "ate limited"] {
             assert!(
                 !rows.iter().any(|row| row.contains(noise)),
                 "{noise} leaked into scrollback: {rows:?}"
             );
         }
+    }
+
+    #[test]
+    fn loop_changes_settle_into_scrollback_while_tool_calls_do_not() {
+        let mut fixture = super::prompt_history_wiring_tests::make_history_app(&[]);
+        fixture.app.running = true;
+        let mut entries = one_cycle();
+        entries.insert(
+            3,
+            TranscriptEntry::Event(TranscriptEventEntry {
+                at: String::new(),
+                data: Some(crate::core::types::HarnessEventData {
+                    files: Some(vec![crate::core::types::LoopChangedFile {
+                        path: "src/x.rs".to_string(),
+                        added: 1,
+                        removed: 1,
+                        status: "modified".to_string(),
+                        binary: false,
+                        diff: Some("@@ -7,1 +7,1 @@\n-old\n+new\n".to_string()),
+                    }]),
+                    ..Default::default()
+                }),
+                detail: "1 file changed (+1 −1)".to_string(),
+                goal_id: "g".to_string(),
+                iteration: 1,
+                kind: HarnessEventType::LoopChanges,
+            }),
+        );
+        let cells = fixture.app.compact.absorb(&entries);
+        let rows = plain(&fixture.app.projected_rows(&cells));
+
+        let at = rows
+            .iter()
+            .position(|row| row == "● Changed 1 file (+1 −1)")
+            .unwrap_or_else(|| panic!("the changes block settles: {rows:?}"));
+        assert_eq!(
+            rows[at + 1..at + 4],
+            ["  ⎿ src/x.rs (+1 −1)", "       7 - old", "       7 + new"]
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Read 1 file") || row.contains("\"path\"")),
+            "tool calls stay out of scrollback: {rows:?}"
+        );
     }
 
     #[test]
@@ -8981,17 +9078,22 @@ mod compact_ephemeral_tests {
         let live = plain(&fixture.app.live_region());
         let spinner = live
             .iter()
-            .position(|row| row.contains("working for"))
+            .position(|row| row.contains("Working…"))
             .expect("the activity line is painted while running");
         assert!(
-            live.iter().any(|row| row.contains("Tool called")),
+            live.iter().any(|row| row.starts_with('●')),
             "the folded tool summary blinks on the activity line: {live:?}"
         );
         assert!(
             live[..spinner]
                 .iter()
-                .any(|row| row.contains("rate limited")),
+                .any(|row| row == "● Rate limited, waiting 2s"),
             "the newest op/warning row sits above the working line: {live:?}"
+        );
+        let block: Vec<&String> = live[..spinner].iter().filter(|row| !row.is_empty()).collect();
+        assert!(
+            block.iter().all(|row| row.starts_with('●') || row.starts_with("  ⎿")),
+            "every row of the block is in the dot style: {live:?}"
         );
         assert!(
             live[spinner + 1].starts_with('─') && live[spinner + 2].contains('❯'),
@@ -9001,7 +9103,7 @@ mod compact_ephemeral_tests {
 
         fixture.app.finish_run();
         let after = plain(&fixture.app.live_region());
-        for noise in ["Tool called", "Tools called", "rate limited", "cycle 1/2"] {
+        for noise in ["●", "ate limited", "ycle 1/2"] {
             assert!(
                 !after.iter().any(|row| row.contains(noise)),
                 "{noise} outlived the run: {after:?}"
@@ -9121,7 +9223,7 @@ mod compact_ephemeral_tests {
         let live = plain(&fixture.app.live_region());
         let spinner = live
             .iter()
-            .position(|row| row.contains("working for"))
+            .position(|row| row.contains("Working…"))
             .expect("the activity line is painted while running");
         assert!(spinner >= 2, "{live:?}");
         assert_eq!(
@@ -9132,7 +9234,7 @@ mod compact_ephemeral_tests {
         assert!(
             live[..spinner - 1]
                 .iter()
-                .any(|row| row.contains("Tool called")),
+                .any(|row| row.starts_with('●')),
             "the status lines stay above the gap: {live:?}"
         );
     }

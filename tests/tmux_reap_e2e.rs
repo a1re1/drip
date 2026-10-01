@@ -344,6 +344,121 @@ fn the_reap_cli_needs_no_project_config_or_inference_setup() {
     );
 }
 
+/// The cron case: a crontab runs with the operator's `$HOME` as the working
+/// directory, and drip refuses to treat `~/.drip` as a project. The reap path
+/// must never reach that gate, and must not create anything in `$HOME`.
+#[test]
+fn the_reap_cli_runs_with_home_as_the_working_directory_like_a_cron_entry() {
+    if !tmux_available() {
+        return;
+    }
+
+    let server = TmuxServer::new();
+    server.dead_owned_session("drip-cron-from-home", true);
+
+    // HOME and the working directory are the same directory — the shape a
+    // crontab gives every command.
+    let home = tempfile::tempdir().expect("a home dir");
+    let output = Command::new(DRIP_BIN)
+        .args(["--reap-tmux", "--json"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("TMUX_TMPDIR", server.socket())
+        .env_remove("TMUX")
+        .env_remove("DRIP_PROJECT_DIR")
+        .output()
+        .expect("the drip binary must run");
+
+    assert!(
+        output.status.success(),
+        "reaping from $HOME must exit 0 ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = json_of(&output);
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true), "{payload}");
+    assert_eq!(
+        killed_of(&payload),
+        vec!["drip-cron-from-home".to_string()],
+        "{payload}"
+    );
+    assert!(server.sessions().is_empty());
+    assert!(
+        std::fs::read_dir(home.path()).unwrap().count() == 0,
+        "--reap-tmux must not create home or project state"
+    );
+
+    // A dry run from the same shape behaves the same way.
+    let dry_home = tempfile::tempdir().expect("a home dir");
+    let output = Command::new(DRIP_BIN)
+        .args(["--reap-tmux", "--dry-run", "--json"])
+        .current_dir(dry_home.path())
+        .env("HOME", dry_home.path())
+        .env("TMUX_TMPDIR", server.socket())
+        .env_remove("TMUX")
+        .env_remove("DRIP_PROJECT_DIR")
+        .output()
+        .expect("the drip binary must run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = json_of(&output);
+    assert_eq!(
+        payload["dryRun"],
+        serde_json::Value::Bool(true),
+        "{payload}"
+    );
+
+    // The exclusive-mode guard still runs before the reap dispatch.
+    let output = Command::new(DRIP_BIN)
+        .args(["--reap-tmux", "--list"])
+        .current_dir(dry_home.path())
+        .env("HOME", dry_home.path())
+        .env("TMUX_TMPDIR", server.socket())
+        .env_remove("TMUX")
+        .output()
+        .expect("the drip binary must run");
+    assert!(
+        !output.status.success(),
+        "--reap-tmux --list must still be refused"
+    );
+}
+
+/// A machine where the tmux server was never started: nothing to reap, no
+/// error. This is the ordinary state of a cron environment, and the pass must
+/// stay quiet and exit 0 rather than fail every tick.
+#[test]
+fn a_tmux_server_that_was_never_started_is_a_clean_no_op() {
+    if !tmux_available() {
+        return;
+    }
+
+    // A socket directory with no server in it: tmux answers "error connecting".
+    let socket = tempfile::tempdir().expect("a socket dir");
+    let home = tempfile::tempdir().expect("a home dir");
+    let output = Command::new(DRIP_BIN)
+        .args(["--reap-tmux", "--json"])
+        .current_dir(home.path())
+        .env("HOME", home.path())
+        .env("TMUX_TMPDIR", socket.path())
+        .env_remove("TMUX")
+        .env_remove("DRIP_PROJECT_DIR")
+        .output()
+        .expect("the drip binary must run");
+
+    assert!(
+        output.status.success(),
+        "an absent tmux server must exit 0 ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = json_of(&output);
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true), "{payload}");
+    assert!(killed_of(&payload).is_empty(), "{payload}");
+}
+
 #[test]
 fn a_session_that_vanishes_mid_pass_is_kept_and_the_rest_still_reaps() {
     if !tmux_available() {

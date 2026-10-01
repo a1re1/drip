@@ -392,6 +392,9 @@ drip --reap-tmux --json           # {ok, dryRun, killed, kept, keptReasons}
 */15 * * * * /usr/local/bin/drip --reap-tmux >/dev/null 2>&1
 ```
 
+Reaping addresses each session with tmux's exact-target syntax (`=name`), so it
+needs tmux 2.6 or newer.
+
 `drip --gc` applies the same policy alongside its session compaction (its JSON
 keeps the `reapedJobs` key), and a `BASH_ASYNC` job's own session is collected as
 soon as its exit status is recorded — so nothing waits for the next cron tick.
@@ -422,7 +425,10 @@ was left behind and why. In particular:
 - Unrelated tmux sessions are ignored: another tmux server, a `-L` socket, or a
   hand-made session that merely starts with `drip-`.
 
-Job logs and results live outside tmux (under the project's `async-tools`), so
+A machine with no tmux server running (or no tmux at all) is a clean no-op:
+`--reap-tmux` exits 0 and reports nothing killed, so a cron entry never fails
+just because tmux is idle. Job logs and results live outside tmux (under the
+project's `async-tools`), so
 reaping never loses a result you can still read with `ASYNC_TAIL` / `ASYNC_WAIT`
 or from disk. Reaping is safe to repeat: a session that is already gone counts as
 kept (`vanished`), never as an error, and the exit code is 0 whenever the pass

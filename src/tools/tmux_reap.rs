@@ -126,7 +126,8 @@ impl TmuxProbe {
 /// ambiguous session is retained rather than killed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeepReason {
-    /// No `@drip_owner` marker and no `drip-` prefix — not ours at all.
+    /// Carries a non-empty `@drip_owner` that is not drip's current marker:
+    /// some other tool stamped it, so it is not ours to kill.
     NotDripOwned,
     /// `drip-`-prefixed but unmarked: created before ownership stamping (or by
     /// another tool). Kept rather than guessed at.
@@ -302,8 +303,9 @@ pub fn decide_reap(
     }
 }
 
-/// Lists the sessions of the default tmux server. A missing tmux binary or a
-/// server with no sessions is an empty list, not an error.
+/// Lists the sessions of the default tmux server. A missing tmux binary, a
+/// server that was never started, or a server with no sessions is an empty
+/// list, not an error: none of them can hold a session to reap.
 pub fn list_tmux_sessions() -> Result<Vec<TmuxSessionListing>, String> {
     let output = match Command::new("tmux")
         .args(["ls", "-F", TMUX_LIST_FORMAT])
@@ -325,6 +327,14 @@ pub fn list_tmux_sessions() -> Result<Vec<TmuxSessionListing>, String> {
 
         // "no server running" is the ordinary empty case.
         if stderr.contains("no server running") || stderr.contains("no sessions") {
+            return Ok(Vec::new());
+        }
+
+        // A server that cannot be reached at all (a fresh TMUX_TMPDIR, a cron
+        // environment, a machine where nothing runs tmux) holds no session of
+        // ours. Reporting an error would make every cron tick fail on a machine
+        // that simply has no tmux server; nothing can be killed either way.
+        if stderr.contains("error connecting to") {
             return Ok(Vec::new());
         }
 

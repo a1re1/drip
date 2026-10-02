@@ -1,13 +1,15 @@
 //! The "what changed" block a task loop leaves in scrollback: one headline,
-//! then each changed file with a short line-numbered inline diff.
+//! then each changed file with a short, line-numbered inline diff.
 //!
 //! Pure rendering over a "loop-changes" event (see harness::workspace_diff);
 //! the full diff stays in the transcript, this is a preview.
 //!
-//! Preview lines are token-colored from the file's type: the tokens sit inside
-//! the green/red line colour, and every token span hands that colour back
-//! before it ends. A file whose type is unknown, and prose like Markdown,
-//! renders exactly as it did before coloring existed.
+//! Preview lines are colored twice over: the change cue is the line's
+//! *background* — green for an added line, red for a removed one — and the code
+//! inside it is tokenized from the file's type. Every token span hands the
+//! row's background back before it ends, so the cue never thickens or fades
+//! mid-line. A context line carries no cue, and a file whose type is unknown —
+//! prose like Markdown — gets the cue with no tokens of its own.
 
 use crate::core::types::{HarnessEventData, LoopChangedFile};
 use crate::watch::ansi::{c, color_enabled, fit};
@@ -17,9 +19,19 @@ const ESC: &str = "\x1b";
 /// Columns the line number, the sign and their padding take before the code.
 const GUTTER: usize = 11;
 
-/// Files previewed per block; the rest are counted.
+/// The change cue is a *background*, the way a review tool paints a changed
+/// line: the code inside keeps the terminal's own foreground, and a token's
+/// colour sits on top of the cue. Added lines use a dark green and removed
+/// ones a dark red from the xterm 256-colour ramp, dark enough that the
+/// default foreground stays readable on either.
+const ADDED_BG: &str = "48;5;22";
+const REMOVED_BG: &str = "48;5;52";
+/// A context line shows no change, so it carries no cue at all.
+const NO_CUE: &str = "0";
+
+/// Files previewed per block — the rest are counted.
 pub const MAX_PREVIEW_FILES: usize = 6;
-/// Diff lines previewed per file; the rest are counted.
+/// Diff lines previewed per file — the rest are counted.
 pub const MAX_PREVIEW_LINES: usize = 12;
 
 /// Painted rows for one "loop-changes" event (no trailing newlines).
@@ -27,13 +39,26 @@ pub const MAX_PREVIEW_LINES: usize = 12;
 /// The coloring here is preview-only: the diff text handed in is read, never
 /// rewritten, so the transcript and the `loop-changes` payload keep exactly
 /// the bytes git produced.
-pub fn render_loop_changes(detail: &str, data: Option<&HarnessEventData>, width: usize) -> Vec<String> {
-    let mut rows = vec![String::new(), format!("{} {}", c::green("●"), c::bold(&headline(detail)))];
-    let files = data.and_then(|data| data.files.as_deref()).unwrap_or_default();
+pub fn render_loop_changes(
+    detail: &str,
+    data: Option<&HarnessEventData>,
+    width: usize,
+) -> Vec<String> {
+    let mut rows = vec![
+        String::new(),
+        format!("{} {}", c::green("●"), c::bold(&headline(detail))),
+    ];
+    let files = data
+        .and_then(|data| data.files.as_deref())
+        .unwrap_or_default();
     for file in files.iter().take(MAX_PREVIEW_FILES) {
         rows.push(file_row(file, width));
         if file.status != "deleted" {
-            rows.extend(diff_rows(file.diff.as_deref().unwrap_or_default(), &file.path, width));
+            rows.extend(diff_rows(
+                file.diff.as_deref().unwrap_or_default(),
+                &file.path,
+                width,
+            ));
         }
     }
     let hidden = files.len().saturating_sub(MAX_PREVIEW_FILES);
@@ -121,17 +146,17 @@ fn diff_rows(diff: &str, path: &str, width: usize) -> Vec<String> {
         let (sign, number, base): (char, usize, &str) = match line.chars().next() {
             Some('+') => {
                 new_line += 1;
-                ('+', new_line - 1, "32")
+                ('+', new_line - 1, ADDED_BG)
             }
             Some('-') => {
                 old_line += 1;
-                ('-', old_line - 1, "31")
+                ('-', old_line - 1, REMOVED_BG)
             }
             Some('\\') => continue,
             _ => {
                 old_line += 1;
                 new_line += 1;
-                (' ', new_line - 1, "2")
+                (' ', new_line - 1, NO_CUE)
             }
         };
         let text = line.get(1..).unwrap_or_default();
@@ -195,9 +220,9 @@ fn paint_row(
     wrap_row(&painted, base)
 }
 
-/// Open the row's add/delete colour, and close it at the end. The syntax
-/// spans re-open the same colour after each of their own, so a tinted token
-/// never leaves the rest of the line unpainted.
+/// Open the row's change cue — a background, never a foreground — and close it
+/// at the end. The syntax spans re-open the same cue after each of their own,
+/// so a tinted token never leaves the rest of the line uncued.
 fn wrap_row(plain: &str, base: &str) -> String {
     if color_enabled() {
         format!("{ESC}[{base}m{plain}{ESC}[0m")
@@ -313,7 +338,11 @@ mod syntax {
     /// extensions get `None`, which keeps their preview byte-identical to the
     /// uncolored one.
     pub fn detect(path: &str) -> Option<Lang> {
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+        let name = path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(path)
+            .to_ascii_lowercase();
         match name.as_str() {
             "dockerfile" | "containerfile" | "makefile" | "gnumakefile" | "justfile"
             | "rakefile" | "gemfile" | ".gitignore" | ".dockerignore" | ".env" | ".envrc" => {
@@ -328,13 +357,13 @@ mod syntax {
         Some(match ext {
             "rs" => RUST,
             "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go" => JS_LIKE,
-            "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "java" | "kt" | "kts"
-            | "swift" | "php" | "cs" | "scala" | "dart" | "m" | "mm" | "proto" | "css"
-            | "scss" | "less" | "groovy" | "zig" => C_LIKE,
+            "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "java" | "kt" | "kts" | "swift"
+            | "php" | "cs" | "scala" | "dart" | "m" | "mm" | "proto" | "css" | "scss" | "less"
+            | "groovy" | "zig" => C_LIKE,
             "py" | "pyi" => PYTHON,
             "rb" | "sh" | "bash" | "zsh" | "fish" | "pl" | "pm" | "r" | "jl" | "nim" | "ex"
-            | "exs" | "cr" | "awk" | "tcl" | "yaml" | "yml" | "toml" | "ini" | "cfg"
-            | "conf" | "lock" | "properties" | "env" | "mk" | "cmake" | "gradle" => SCRIPT,
+            | "exs" | "cr" | "awk" | "tcl" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf"
+            | "lock" | "properties" | "env" | "mk" | "cmake" | "gradle" => SCRIPT,
             "html" | "htm" | "xml" | "svg" | "vue" | "svelte" => MARKUP,
             "sql" => SQL,
             "lua" => LUA,
@@ -343,18 +372,107 @@ mod syntax {
     }
 
     const KEYWORDS: &[&str] = &[
-        "as", "async", "await", "break", "case", "catch", "chan", "class", "const",
-        "continue", "crate", "def", "defer", "do", "dyn", "elif", "else", "elsif", "end",
-        "enum", "except", "export", "extends", "extern", "false", "final", "finally", "fn",
-        "for", "from", "func", "function", "global", "go", "goto", "if", "impl",
-        "implements", "import", "in", "instanceof", "interface", "is", "lambda", "let",
-        "local", "loop", "match", "mod", "move", "mut", "namespace", "new", "nil", "none",
-        "not", "null", "operator", "or", "override", "package", "pass", "private",
-        "protected", "pub", "public", "raise", "ref", "require", "return", "select", "self",
-        "sizeof", "static", "struct", "super", "switch", "synchronized", "template", "this",
-        "throw", "throws", "trait", "true", "try", "type", "typedef", "typeof", "union",
-        "unsafe", "unsigned", "use", "using", "var", "virtual", "void", "volatile", "where",
-        "while", "with", "yield",
+        "as",
+        "async",
+        "await",
+        "break",
+        "case",
+        "catch",
+        "chan",
+        "class",
+        "const",
+        "continue",
+        "crate",
+        "def",
+        "defer",
+        "do",
+        "dyn",
+        "elif",
+        "else",
+        "elsif",
+        "end",
+        "enum",
+        "except",
+        "export",
+        "extends",
+        "extern",
+        "false",
+        "final",
+        "finally",
+        "fn",
+        "for",
+        "from",
+        "func",
+        "function",
+        "global",
+        "go",
+        "goto",
+        "if",
+        "impl",
+        "implements",
+        "import",
+        "in",
+        "instanceof",
+        "interface",
+        "is",
+        "lambda",
+        "let",
+        "local",
+        "loop",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "namespace",
+        "new",
+        "nil",
+        "none",
+        "not",
+        "null",
+        "operator",
+        "or",
+        "override",
+        "package",
+        "pass",
+        "private",
+        "protected",
+        "pub",
+        "public",
+        "raise",
+        "ref",
+        "require",
+        "return",
+        "select",
+        "self",
+        "sizeof",
+        "static",
+        "struct",
+        "super",
+        "switch",
+        "synchronized",
+        "template",
+        "this",
+        "throw",
+        "throws",
+        "trait",
+        "true",
+        "try",
+        "type",
+        "typedef",
+        "typeof",
+        "union",
+        "unsafe",
+        "unsigned",
+        "use",
+        "using",
+        "var",
+        "virtual",
+        "void",
+        "volatile",
+        "where",
+        "while",
+        "with",
+        "yield",
     ];
 
     /// Colorize one line body. `base` is the row's own SGR parameters, which
@@ -445,7 +563,11 @@ mod syntax {
                 }
                 continue;
             }
-            if lang.line_comments.iter().any(|prefix| rest.starts_with(*prefix)) {
+            if lang
+                .line_comments
+                .iter()
+                .any(|prefix| rest.starts_with(*prefix))
+            {
                 span(&mut out, COMMENT, rest, base, enabled);
                 i = text.len();
                 continue;
@@ -462,7 +584,8 @@ mod syntax {
                 let word = &rest[..end];
                 let params = if KEYWORDS.contains(&word) {
                     KEYWORD
-                } else if rest[end..].starts_with("!(") || rest[end..].trim_start().starts_with('(') {
+                } else if rest[end..].starts_with("!(") || rest[end..].trim_start().starts_with('(')
+                {
                     CALL
                 } else if word.starts_with(char::is_uppercase) {
                     TYPE
@@ -527,10 +650,11 @@ mod syntax {
         }
     }
 
-    /// Wrap `text` in `params` and hand the row colour back afterwards. The
+    /// Wrap `text` in `params` and hand the row's cue back afterwards. The
     /// hand-back resets first (`ESC[0;{base}m`): `0` clears the attributes the
     /// token set — the bold of a keyword, call or type — while the parameters
-    /// that follow re-apply the row's own cue, which `0` alone would drop.
+    /// that follow re-apply the row's own cue, which `0` alone would drop. A
+    /// context row's cue is the reset itself, so its hand-back reads `0;0`.
     fn span(out: &mut String, params: &str, text: &str, base: &str, enabled: bool) {
         if text.is_empty() {
             return;
@@ -556,7 +680,13 @@ mod tests {
     use super::*;
     use crate::watch::ansi::strip_ansi;
 
-    fn file(path: &str, added: i64, removed: i64, status: &str, diff: Option<&str>) -> LoopChangedFile {
+    fn file(
+        path: &str,
+        added: i64,
+        removed: i64,
+        status: &str,
+        diff: Option<&str>,
+    ) -> LoopChangedFile {
         LoopChangedFile {
             path: path.to_string(),
             added,
@@ -620,7 +750,11 @@ mod tests {
         assert_eq!(rows[2 + MAX_PREVIEW_LINES + 1], "         … +18 more lines");
         assert_eq!(rows.last().unwrap(), "  … +2 more files");
         let data = HarnessEventData {
-            files: Some((0..8).map(|n| file(&format!("f{n}.txt"), 30, 0, "added", Some(&diff))).collect()),
+            files: Some(
+                (0..8)
+                    .map(|n| file(&format!("f{n}.txt"), 30, 0, "added", Some(&diff)))
+                    .collect(),
+            ),
             ..Default::default()
         };
         assert_eq!(estimate_loop_changes_rows(Some(&data)), rows.len());
@@ -632,17 +766,37 @@ mod tests {
         logo.binary = true;
         let rows = plain(
             "2 files changed (+0 −3)",
-            vec![logo, file("old.rs", 0, 3, "deleted", Some("@@ -1,3 +0,0 @@\n-a\n-b\n-c\n"))],
+            vec![
+                logo,
+                file(
+                    "old.rs",
+                    0,
+                    3,
+                    "deleted",
+                    Some("@@ -1,3 +0,0 @@\n-a\n-b\n-c\n"),
+                ),
+            ],
             80,
         );
-        assert_eq!(rows[2..], ["  ⎿ logo.png (binary)", "  ⎿ old.rs (deleted, +0 −3)"]);
+        assert_eq!(
+            rows[2..],
+            ["  ⎿ logo.png (binary)", "  ⎿ old.rs (deleted, +0 −3)"]
+        );
     }
 
     #[test]
     fn rows_never_exceed_the_terminal_width_and_hunks_are_separated() {
         let diff = "@@ -1,1 +1,1 @@\n-short\n+a very long replacement line that cannot possibly fit\n@@ -40,1 +40,1 @@\n-x\n+y\n";
-        let rows = plain("1 file changed (+2 −2)", vec![file("a.rs", 2, 2, "modified", Some(diff))], 30);
-        assert!(rows.iter().all(|row| crate::watch::ansi::string_width(row) <= 30), "{rows:?}");
+        let rows = plain(
+            "1 file changed (+2 −2)",
+            vec![file("a.rs", 2, 2, "modified", Some(diff))],
+            30,
+        );
+        assert!(
+            rows.iter()
+                .all(|row| crate::watch::ansi::string_width(row) <= 30),
+            "{rows:?}"
+        );
         assert!(strip_ansi(&rows[4]).ends_with('…'), "{rows:?}");
         assert_eq!(rows[5], "         ⋯");
         assert_eq!(strip_ansi(&rows[6]), "      40 - x");
@@ -680,19 +834,28 @@ mod tests {
         let diff = "@@ -1,1 +1,1 @@\n-let n = 41; // before\n+let n = 42;\n";
         let (rows, _guard) = rows_with_color(true, "src/foo.rs", diff, 80);
         let removed = &rows[3];
-        assert!(removed.starts_with(&format!("{ESC}[31m")), "{removed:?}");
+        assert!(
+            removed.starts_with(&format!("{ESC}[{REMOVED_BG}m")),
+            "{removed:?}"
+        );
         assert!(removed.ends_with(&format!("{ESC}[0m")), "{removed:?}");
         assert!(
-            removed.contains(&format!("{ESC}[1;35mlet{ESC}[0;31m")),
+            removed.contains(&format!("{ESC}[1;35mlet{ESC}[0;{REMOVED_BG}m")),
             "the keyword is tinted and hands the row colour back: {removed:?}"
         );
-        assert!(removed.contains(&format!("{ESC}[36m41{ESC}[0;31m")), "{removed:?}");
         assert!(
-            removed.contains(&format!("{ESC}[2m// before{ESC}[0;31m")),
-            "the comment dims inside the red row: {removed:?}"
+            removed.contains(&format!("{ESC}[36m41{ESC}[0;{REMOVED_BG}m")),
+            "{removed:?}"
+        );
+        assert!(
+            removed.contains(&format!("{ESC}[2m// before{ESC}[0;{REMOVED_BG}m")),
+            "the comment dims inside the removed line: {removed:?}"
         );
         let added = &rows[4];
-        assert!(added.starts_with(&format!("{ESC}[32m")), "{added:?}");
+        assert!(
+            added.starts_with(&format!("{ESC}[{ADDED_BG}m")),
+            "{added:?}"
+        );
         assert_eq!(strip_ansi(added), "       1 + let n = 42;");
         assert_eq!(strip_ansi(removed), "       1 - let n = 41; // before");
     }
@@ -706,41 +869,42 @@ mod tests {
             80,
         );
         let row = &rows[3];
-        assert!(row.contains(&format!("{ESC}[1;35mdef{ESC}[0;32m")), "{row:?}");
         assert!(
-            row.contains(&format!("{ESC}[1;34mf{ESC}[0;32m")),
+            row.contains(&format!("{ESC}[1;35mdef{ESC}[0;{ADDED_BG}m")),
+            "{row:?}"
+        );
+        assert!(
+            row.contains(&format!("{ESC}[1;34mf{ESC}[0;{ADDED_BG}m")),
             "a call is tinted: {row:?}"
         );
-        assert!(row.contains(&format!("{ESC}[2m# note{ESC}[0;32m")), "{row:?}");
+        assert!(
+            row.contains(&format!("{ESC}[2m# note{ESC}[0;{ADDED_BG}m")),
+            "{row:?}"
+        );
         assert_eq!(strip_ansi(row), "       1 + def f(x):  # note");
     }
 
     #[test]
-    fn unknown_extensions_and_prose_keep_the_plain_preview() {
+    fn unknown_extensions_and_prose_keep_the_cue_without_tokens() {
         for path in ["notes.xyz", "README.md", "data.bin", "Makefile.orig"] {
-            let (rows, _guard) = rows_with_color(
-                true,
-                path,
-                "@@ -1,1 +1,1 @@\n+let n = 1; // c\n",
-                80,
-            );
+            let (rows, _guard) =
+                rows_with_color(true, path, "@@ -1,1 +1,1 @@\n+let n = 1; // c\n", 80);
             let row = &rows[3];
             assert_eq!(strip_ansi(row), "       1 + let n = 1; // c", "{path}");
-            assert!(row.starts_with(&format!("{ESC}[32m")), "{path}: {row:?}");
+            assert!(
+                row.starts_with(&format!("{ESC}[{ADDED_BG}m")),
+                "{path}: {row:?}"
+            );
             assert!(
                 !row.contains(&format!("{ESC}[1;35m")) && !row.contains(&format!("{ESC}[2m//")),
                 "{path} must not be tokenized: {row:?}"
             );
         }
         // A bare file name the tokenizer knows is still code.
-        let (rows, _guard) = rows_with_color(
-            true,
-            "Dockerfile",
-            "@@ -1,1 +1,1 @@\n+RUN true # c\n",
-            80,
-        );
+        let (rows, _guard) =
+            rows_with_color(true, "Dockerfile", "@@ -1,1 +1,1 @@\n+RUN true # c\n", 80);
         assert!(
-            rows[3].contains(&format!("{ESC}[2m# c{ESC}[0;32m")),
+            rows[3].contains(&format!("{ESC}[2m# c{ESC}[0;{ADDED_BG}m")),
             "{:?}",
             rows[3]
         );
@@ -765,12 +929,8 @@ mod tests {
         // Narrower than the gutter: one plain cue, never a half-sliced token.
         // (The colour lock is not reentrant, so hand the first row's back.)
         drop(guard);
-        let (narrow, _guard) = rows_with_color(
-            true,
-            "src/foo.rs",
-            "@@ -1,1 +1,1 @@\n+let n = 1;\n",
-            8,
-        );
+        let (narrow, _guard) =
+            rows_with_color(true, "src/foo.rs", "@@ -1,1 +1,1 @@\n+let n = 1;\n", 8);
         assert_eq!(strip_ansi(&narrow[3]), "       …");
         assert_eq!(crate::watch::ansi::string_width(&narrow[3]), 8);
         assert_eq!(narrow[3].matches(ESC).count() % 2, 0, "{narrow:?}");
@@ -791,7 +951,7 @@ mod tests {
             let open = format!("{ESC}[{token}m");
             if let Some(at) = row.find(&open) {
                 assert!(
-                    row[at + open.len()..].contains(&format!("{ESC}[0;32m")),
+                    row[at + open.len()..].contains(&format!("{ESC}[0;{ADDED_BG}m")),
                     "token {token} must reset and hand the row colour back: {row:?}"
                 );
             }
@@ -803,28 +963,28 @@ mod tests {
         let diff = "@@ -1,2 +1,2 @@\n-/* note\n-let a = 1;\n+let a = 2;\n@@ -9,2 +9,2 @@\n-still inside */\n-let b = 1;\n+let b = 2;\n";
         let (rows, _guard) = rows_with_color(true, "src/foo.rs", diff, 60);
         assert!(
-            rows[3].contains(&format!("{ESC}[2m/* note{ESC}[0;31m")),
+            rows[3].contains(&format!("{ESC}[2m/* note{ESC}[0;{REMOVED_BG}m")),
             "{:?}",
             rows[3]
         );
         assert!(
-            rows[4].contains(&format!("{ESC}[2mlet a = 1;{ESC}[0;31m")),
+            rows[4].contains(&format!("{ESC}[2mlet a = 1;{ESC}[0;{REMOVED_BG}m")),
             "the old side stays a comment: {:?}",
             rows[4]
         );
         assert!(
-            rows[5].contains(&format!("{ESC}[1;35mlet{ESC}[0;32m")),
+            rows[5].contains(&format!("{ESC}[1;35mlet{ESC}[0;{ADDED_BG}m")),
             "an open comment on the old side must not touch the new one: {:?}",
             rows[5]
         );
         assert_eq!(strip_ansi(&rows[6]), "         ⋯");
         assert!(
-            rows[7].contains(&format!("{ESC}[2mstill inside */{ESC}[0;31m")),
+            rows[7].contains(&format!("{ESC}[2mstill inside */{ESC}[0;{REMOVED_BG}m")),
             "the state survives the hunk header: {:?}",
             rows[7]
         );
         assert!(
-            rows[8].contains(&format!("{ESC}[1;35mlet{ESC}[0;31m")),
+            rows[8].contains(&format!("{ESC}[1;35mlet{ESC}[0;{REMOVED_BG}m")),
             "closing the comment restores code coloring: {:?}",
             rows[8]
         );
@@ -837,12 +997,12 @@ mod tests {
         let diff = "@@ -1,2 +1,2 @@\n-let s = \"open\n-/* c\n+println!(\"ok\");\n";
         let (rows, _guard) = rows_with_color(true, "src/foo.rs", diff, 60);
         assert!(
-            rows[4].contains(&format!("{ESC}[2m/* c{ESC}[0;31m")),
+            rows[4].contains(&format!("{ESC}[2m/* c{ESC}[0;{REMOVED_BG}m")),
             "the unterminated block comment colors its own line: {:?}",
             rows[4]
         );
         assert!(
-            rows[5].contains(&format!("{ESC}[1;34mprintln{ESC}[0;32m")),
+            rows[5].contains(&format!("{ESC}[1;34mprintln{ESC}[0;{ADDED_BG}m")),
             "the call keeps its own colour: {:?}",
             rows[5]
         );
@@ -863,17 +1023,17 @@ mod tests {
         );
         let row = &rows[3];
         assert!(
-            row.contains(&format!("{ESC}[1;35mlet{ESC}[0;32m")),
+            row.contains(&format!("{ESC}[1;35mlet{ESC}[0;{ADDED_BG}m")),
             "a bold keyword clears its own attributes: {row:?}"
         );
         assert!(
-            !row.contains(&format!("{ESC}[1;35mlet{ESC}[32m")),
+            !row.contains(&format!("{ESC}[1;35mlet{ESC}[{ADDED_BG}m")),
             "the cue must be reset, not merely re-opened: {row:?}"
         );
         // Nothing after the keyword is still bold: the rest of the row is the
-        // plain green cue, so the change cue never thickens mid-line.
+        // line's own cue, so the change cue never thickens mid-line.
         let tail = row
-            .split(&format!("{ESC}[0;32m"))
+            .split(&format!("{ESC}[0;{ADDED_BG}m"))
             .nth(1)
             .expect("the keyword hands the cue back");
         assert!(
@@ -885,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn context_rows_keep_their_faint_cue_after_a_tinted_token() {
+    fn context_rows_keep_the_default_colours_after_a_tinted_token() {
         let (rows, _guard) = rows_with_color(
             true,
             "src/foo.rs",
@@ -893,12 +1053,14 @@ mod tests {
             80,
         );
         let row = &rows[3];
-        assert!(row.starts_with(&format!("{ESC}[2m")), "{row:?}");
+        assert!(row.starts_with(&format!("{ESC}[0m")), "{row:?}");
         assert!(
-            row.contains(&format!("{ESC}[1;35mlet{ESC}[0;2m")),
-            "the faint cue survives the reset: {row:?}"
+            row.contains(&format!("{ESC}[1;35mlet{ESC}[0;0m")),
+            "a context line hands back no cue of its own: {row:?}"
         );
-        assert!(row.contains(&format!("{ESC}[36m42{ESC}[0;2m")), "{row:?}");
+        assert!(row.contains(&format!("{ESC}[36m42{ESC}[0;0m")), "{row:?}");
+        // No change cue to tint: a context line never opens a background.
+        assert!(!row.contains(&format!("{ESC}[48;")), "{row:?}");
         assert_eq!(strip_ansi(row), "       1   let n = 42; // t");
     }
 
@@ -912,15 +1074,19 @@ mod tests {
         );
         let row = &rows[3];
         assert!(
-            row.contains(&format!("{ESC}[33m`t${{n}}`{ESC}[0;32m")),
+            row.contains(&format!("{ESC}[33m`t${{n}}`{ESC}[0;{ADDED_BG}m")),
             "a JS template literal is a string: {row:?}"
         );
-        assert!(row.contains(&format!("{ESC}[2m// c{ESC}[0;32m")), "{row:?}");
+        assert!(
+            row.contains(&format!("{ESC}[2m// c{ESC}[0;{ADDED_BG}m")),
+            "{row:?}"
+        );
         drop(guard);
         // Go's raw strings use the same delimiter.
-        let (rows, guard) = rows_with_color(true, "tools/run.go", "@@ -1,1 +1,1 @@\n+s := `raw`\n", 80);
+        let (rows, guard) =
+            rows_with_color(true, "tools/run.go", "@@ -1,1 +1,1 @@\n+s := `raw`\n", 80);
         assert!(
-            rows[3].contains(&format!("{ESC}[33m`raw`{ESC}[0;32m")),
+            rows[3].contains(&format!("{ESC}[33m`raw`{ESC}[0;{ADDED_BG}m")),
             "{:?}",
             rows[3]
         );
@@ -938,7 +1104,10 @@ mod tests {
             !row.contains(&format!("{ESC}[33m")),
             "a lifetime must not open a string: {row:?}"
         );
-        assert!(row.contains(&format!("{ESC}[1;35mfn{ESC}[0;32m")), "{row:?}");
+        assert!(
+            row.contains(&format!("{ESC}[1;35mfn{ESC}[0;{ADDED_BG}m")),
+            "{row:?}"
+        );
         assert_eq!(
             strip_ansi(row),
             "       1 + fn f<'a>(x: &'a str) -> &'a str { x }"
@@ -951,7 +1120,7 @@ mod tests {
             80,
         );
         assert!(
-            rows[3].contains(&format!("{ESC}[33m'x'{ESC}[0;32m")),
+            rows[3].contains(&format!("{ESC}[33m'x'{ESC}[0;{ADDED_BG}m")),
             "a char literal is still a string: {:?}",
             rows[3]
         );
@@ -964,12 +1133,12 @@ mod tests {
         // (The colour lock is not reentrant — hand it back before re-taking it.)
         let (rows, guard) = rows_with_color(true, "conf/app.lua", diff, 60);
         assert!(
-            rows[3].contains(&format!("{ESC}[2m--[[ note{ESC}[0;31m")),
+            rows[3].contains(&format!("{ESC}[2m--[[ note{ESC}[0;{REMOVED_BG}m")),
             "the block opener colors its own line: {:?}",
             rows[3]
         );
         assert!(
-            rows[4].contains(&format!("{ESC}[2mlet a = 1;{ESC}[0;31m")),
+            rows[4].contains(&format!("{ESC}[2mlet a = 1;{ESC}[0;{REMOVED_BG}m")),
             "and stays open on the next line: {:?}",
             rows[4]
         );
@@ -982,7 +1151,7 @@ mod tests {
             60,
         );
         assert!(
-            rows[3].contains(&format!("{ESC}[2m-- note{ESC}[0;32m")),
+            rows[3].contains(&format!("{ESC}[2m-- note{ESC}[0;{ADDED_BG}m")),
             "{:?}",
             rows[3]
         );
@@ -996,13 +1165,13 @@ mod tests {
         let diff = "@@ -1,3 +1,3 @@\n-/* open\n */\n-let a = 1;\n";
         let (rows, _guard) = rows_with_color(true, "src/foo.rs", diff, 60);
         assert!(
-            rows[3].contains(&format!("{ESC}[2m/* open{ESC}[0;31m")),
+            rows[3].contains(&format!("{ESC}[2m/* open{ESC}[0;{REMOVED_BG}m")),
             "{:?}",
             rows[3]
         );
         assert_eq!(strip_ansi(&rows[4]), "       1   */");
         assert!(
-            rows[5].contains(&format!("{ESC}[1;35mlet{ESC}[0;31m")),
+            rows[5].contains(&format!("{ESC}[1;35mlet{ESC}[0;{REMOVED_BG}m")),
             "closing on a context line ends the old side's comment: {:?}",
             rows[5]
         );
@@ -1019,9 +1188,43 @@ mod tests {
         // Only the capped preview is painted, and the hidden tail's open
         // comment never reaches back into it.
         assert_eq!(strip_ansi(&rows[3]), "       1 + keep");
-        assert_eq!(rows[3], format!("{ESC}[32m       1 + keep{ESC}[0m"));
+        assert_eq!(rows[3], format!("{ESC}[{ADDED_BG}m       1 + keep{ESC}[0m"));
         assert_eq!(rows.len(), 3 + MAX_PREVIEW_LINES + 1);
         assert_eq!(strip_ansi(rows.last().unwrap()), "         … +9 more lines");
+    }
+
+    /// The change cue is a background and never a foreground: an added line
+    /// sits on green and a removed line on red, so the code and its tokens are
+    /// never painted over by the diff colour, and a context line shows no
+    /// change cue at all.
+    #[test]
+    fn the_change_cue_is_a_background_and_never_a_foreground() {
+        let diff = "@@ -1,2 +1,2 @@\n-let n = 41;\n+let n = 42;\n let n = 43;\n";
+        let (rows, _guard) = rows_with_color(true, "src/foo.rs", diff, 80);
+        assert!(
+            rows[3].starts_with(&format!("{ESC}[{REMOVED_BG}m")),
+            "{:?}",
+            rows[3]
+        );
+        assert!(
+            rows[4].starts_with(&format!("{ESC}[{ADDED_BG}m")),
+            "{:?}",
+            rows[4]
+        );
+        assert!(rows[5].starts_with(&format!("{ESC}[0m")), "{:?}", rows[5]);
+        for row in &rows[3..6] {
+            for fg in ["{ESC}[31m", "{ESC}[32m", "{ESC}[0;31m", "{ESC}[0;32m"] {
+                assert!(!row.contains(fg), "the cue is a foreground here: {row:?}");
+            }
+        }
+        // A removed line hands its cue back after each token, so the whole row
+        // stays on the red background.
+        assert!(
+            rows[3].contains(&format!("{ESC}[1;35mlet{ESC}[0;{REMOVED_BG}m")),
+            "{:?}",
+            rows[3]
+        );
+        assert_eq!(strip_ansi(&rows[5]), "       2   let n = 43;");
     }
 
     #[test]

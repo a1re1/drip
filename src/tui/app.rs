@@ -6415,8 +6415,8 @@ mod pane_title_lifecycle_tests {
             Instant::now(),
         )
         .expect("escape expected");
-        assert!(escape.starts_with("\x1b]2;") && escape.ends_with('\x07'));
-        assert!(!escape.contains("pwn"));
+        assert!(escape.starts_with("\x1b]0;") && escape.ends_with("\x1b\\"));
+        assert!(!escape.contains('\x07') && !escape.contains("pwn"));
         assert!(title.label().split_whitespace().count() <= 5);
     }
 
@@ -6459,8 +6459,9 @@ mod pane_title_lifecycle_tests {
         let first = title.tick(start + step).expect("first due tick emits");
         let second = title.tick(start + 2 * step).expect("second due tick emits");
         assert_ne!(first, second, "spinner frames must advance between ticks");
-        assert!(first.starts_with("\x1b]2;") && first.ends_with('\x07'));
-        assert!(second.ends_with("fix the login bug\x07"));
+        assert!(first.starts_with("\x1b]0;") && first.ends_with("\x1b\\"));
+        assert!(!first.contains('\x07'));
+        assert!(second.ends_with("fix the login bug\x1b\\"));
     }
 
     #[test]
@@ -6521,11 +6522,12 @@ mod pane_title_lifecycle_tests {
             !label.contains('\x1b') && !label.contains('\x07'),
             "{label:?}"
         );
-        let title = crate::tui::pane_title::osc2(&label);
+        let title = crate::tui::pane_title::osc(&label);
         assert!(
-            title.starts_with("\x1b]2;") && title.ends_with('\x07'),
+            title.starts_with("\x1b]0;") && title.ends_with("\x1b\\"),
             "{title:?}"
         );
+        assert!(!title.contains('\x07'), "{title:?}");
         assert!(
             !title.contains("pwn") && !title.contains("\x1b[2J"),
             "{title:?}"

@@ -30,6 +30,101 @@ use crate::tui::term::write_out;
 /// Braille spinner frames, cycled time-driven while busy.
 pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Braille Patterns block (U+2800..=U+28FF): the spinner frames. Allowed
+/// explicitly because these code points are Unicode symbols, not letters.
+const BRAILLE_BLOCK: std::ops::RangeInclusive<char> = '\u{2800}'..='\u{28ff}';
+
+/// Combining-mark ranges whose script has precomposed forms: a decomposed
+/// `e` + U+0301 renders as two cells in terminals with imperfect grapheme
+/// handling, so those marks are dropped and only the precomposed letter
+/// (`é`, U+00E9) is allowed through the allowlist.
+fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0300}'..='\u{036f}'
+            | '\u{0483}'..='\u{0489}'
+            | '\u{0591}'..='\u{05bd}'
+            | '\u{0610}'..='\u{061a}'
+            | '\u{064b}'..='\u{065f}'
+            | '\u{0e31}'..='\u{0e3a}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20f0}'
+            | '\u{fe20}'..='\u{fe2f}'
+    )
+}
+
+/// Scripts written with combining marks that carry no precomposed equivalent
+/// (Indic, Thai, Lao, Tibetan, Khmer, Myanmar). Dropping one of those marks
+/// leaves a consonant skeleton that still *looks* like real text — silent title
+/// corruption — so every character of these blocks is rejected outright.
+const ABUGIDA_BLOCKS: [std::ops::RangeInclusive<char>; 13] = [
+    '\u{0900}'..='\u{097f}', // Devanagari
+    '\u{0980}'..='\u{09ff}', // Bengali
+    '\u{0a00}'..='\u{0a7f}', // Gurmukhi
+    '\u{0a80}'..='\u{0aff}', // Gujarati
+    '\u{0b00}'..='\u{0b7f}', // Oriya
+    '\u{0b80}'..='\u{0bff}', // Tamil
+    '\u{0c00}'..='\u{0c7f}', // Telugu
+    '\u{0c80}'..='\u{0cff}', // Kannada
+    '\u{0d00}'..='\u{0d7f}', // Malayalam
+    '\u{0d80}'..='\u{0dff}', // Sinhala
+    '\u{0e00}'..='\u{0eff}', // Thai + Lao
+    '\u{0f00}'..='\u{0fff}', // Tibetan
+    '\u{1000}'..='\u{109f}', // Myanmar
+];
+
+/// True when `c` belongs to a script whose letters cannot survive mark
+/// stripping intact.
+fn is_abugida_char(c: char) -> bool {
+    ABUGIDA_BLOCKS.iter().any(|block| block.contains(&c))
+}
+
+/// Non-ASCII punctuation and symbols that are safe in a pane title: no emoji,
+/// no pictographs, no format or zero-width characters.
+fn is_safe_punctuation(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00a7}' // section sign
+            | '\u{00b0}' // degree sign
+            | '\u{00b7}' // middle dot
+            | '\u{2013}' // en dash
+            | '\u{2014}' // em dash
+            | '\u{2022}' // bullet
+            | '\u{2026}' // ellipsis
+            | '\u{3001}' // ideographic comma
+            | '\u{3002}' // ideographic full stop
+            | '\u{30fb}' // katakana middle dot
+    )
+}
+
+/// The allowlist every emitted title character must satisfy.
+///
+/// Kept deliberately narrow so the payload survives terminals and multiplexers
+/// that mangle wide or emoji code points: ASCII graphic characters and space,
+/// Unicode letters and numbers (precomposed accents, CJK, Greek, Cyrillic),
+/// the braille spinner block, and a short punctuation list. Everything else is
+/// dropped — notably ESC, C0/C1 controls, DEL, emoji and other pictographs,
+/// zero-width joiners/non-joiners, variation selectors, bidi/format characters,
+/// line and paragraph separators, and private-use code points.
+pub fn is_allowed_title_char(c: char) -> bool {
+    if is_abugida_char(c) {
+        return false;
+    }
+    // ASCII graphic characters and the space; DEL and every C0 control are
+    // excluded by construction.
+    if (' '..='~').contains(&c) {
+        return true;
+    }
+    if BRAILLE_BLOCK.contains(&c) {
+        return true;
+    }
+    if c.is_alphanumeric() && !is_combining_mark(c) {
+        return true;
+    }
+    is_safe_punctuation(c)
+}
+
 /// Minimum real-time spacing between two spinner frames.
 pub const SPINNER_INTERVAL_MS: u64 = 100;
 
@@ -135,14 +230,23 @@ pub fn sanitize(raw: &str) -> String {
     let mut out = String::with_capacity(stripped.len());
 
     for word in stripped.split_whitespace() {
+        // A word made entirely of dropped characters (an emoji-only word, a
+        // word of format characters) must not leave a double space behind.
+        let word: String = word
+            .chars()
+            .filter(|&c| !is_quote(c) && is_allowed_title_char(c))
+            .collect();
+        // The collection above already applied the quote filter and the
+        // allowlist once per character, so the word is emitted verbatim: a pane
+        // title can never carry an emoji, a zero-width joiner or a variation
+        // selector.
+        if word.is_empty() {
+            continue;
+        }
         if !out.is_empty() {
             out.push(' ');
         }
-        for c in word.chars() {
-            if !is_quote(c) {
-                out.push(c);
-            }
-        }
+        out.push_str(&word);
     }
     out
 }
@@ -193,9 +297,35 @@ pub fn frame_for(elapsed: Duration) -> &'static str {
     SPINNER_FRAMES[(step % SPINNER_FRAMES.len() as u128) as usize]
 }
 
-/// Wraps a sanitized title in an OSC 2 (window title) escape sequence.
-pub fn osc2(title: &str) -> String {
-    format!("\x1b]2;{title}\x07")
+/// The standard string terminator (ESC backslash) for OSC sequences.
+///
+/// ST is the documented terminator; BEL (0x07) is the legacy alternative some
+/// terminals still prefer, but ST parses identically everywhere, so both
+/// escapes drip emits use it.
+pub const ST: &str = "\x1b\\";
+
+/// Wraps a sanitized title in BOTH window-title escapes, each ST-terminated:
+///
+/// - `ESC ] 0 ; <title> ESC \` — icon name *and* window title. Several
+///   terminals (and tmux's `set-titles on`) key the visible title off OSC 0,
+///   which is why a drip pane could keep showing the bare process name
+///   ("drip") while the OSC 2 update alone went unnoticed.
+/// - `ESC ] 2 ; <title> ESC \` — window title, the sequence drip has always
+///   emitted.
+///
+/// The payload is passed through untouched: callers sanitize first, and
+/// [`PaneTitle`] deduplicates on the title text, not on the escape bytes.
+pub fn osc(title: &str) -> String {
+    format!("\x1b]0;{title}{ST}\x1b]2;{title}{ST}")
+}
+
+/// Recovers the title payload from an escape produced by [`osc`]. Returns
+/// `None` for anything that is not one of our title escapes, so callers
+/// degrade to "record the whole string" rather than to garbage.
+pub fn title_payload(escape: &str) -> Option<&str> {
+    let rest = escape.strip_prefix("\x1b]0;")?;
+    let end = rest.find(ST)?;
+    Some(&rest[..end])
 }
 
 // ---------------------------------------------------------------------------
@@ -272,19 +402,13 @@ impl PaneTitle {
         if self.last_emitted.as_deref() == Some(title.as_str()) {
             return None;
         }
-        Some(osc2(&title))
+        Some(osc(&title))
     }
 
     /// Recomputes the current title, deduplicates, and records emission.
     fn update(&mut self, now: Instant) -> Option<String> {
         let escape = self.candidate(now)?;
-        self.last_emitted = Some(
-            escape
-                .strip_prefix("\x1b]2;")
-                .and_then(|rest| rest.strip_suffix('\x07'))
-                .unwrap_or(&escape)
-                .to_string(),
-        );
+        self.last_emitted = Some(title_payload(&escape).unwrap_or(&escape).to_string());
         self.last_emit_at = Some(now);
         Some(escape)
     }
@@ -389,10 +513,14 @@ mod tests {
             fallback_title("修复登录问题 增加测试 改进文档 优化性能 重构代码"),
             "修复登录问题 增加测试 改进文档 优化性能 重构代码"
         );
+        // Emoji are NOT title-safe characters: an all-emoji goal falls back to
+        // the bare label instead of emitting pictographs a terminal may mangle.
         let emoji = "🦀🦀🦀🦀🦀🦀🦀🦀";
         let bounded = fallback_title(emoji);
+        assert_eq!(bounded, FALLBACK_LABEL);
         assert!(bounded.chars().count() <= MAX_TITLE_CHARS);
-        assert!(bounded.starts_with('🦀'));
+        // Emoji mixed with real words keep only the words.
+        assert_eq!(fallback_title("fix 🦀 login bug"), "fix login bug");
     }
 
     #[test]
@@ -408,13 +536,13 @@ mod tests {
         let start = Instant::now();
         let mut title = PaneTitle::new("fix login bug");
         let first = title.set_busy(true, start).expect("busy emits first frame");
-        assert_eq!(first, osc2("⠋ fix login bug"));
+        assert_eq!(first, osc("⠋ fix login bug"));
 
         // tick at +150ms -> second frame, purely from the clock.
         let second = title
             .tick(start + Duration::from_millis(150))
             .expect("frame advances");
-        assert_eq!(second, osc2("⠙ fix login bug"));
+        assert_eq!(second, osc("⠙ fix login bug"));
 
         // tick at +180ms -> throttled to None.
         assert_eq!(title.tick(start + Duration::from_millis(180)), None);
@@ -423,7 +551,7 @@ mod tests {
         let later = title
             .tick(start + Duration::from_millis(1000))
             .expect("frame advances");
-        assert_eq!(later, osc2("⠋ fix login bug"));
+        assert_eq!(later, osc("⠋ fix login bug"));
     }
 
     #[test]
@@ -444,7 +572,7 @@ mod tests {
         let idle = title
             .set_busy(false, start + Duration::from_secs(11))
             .expect("idle emits bare label");
-        assert_eq!(idle, osc2("fix login bug"));
+        assert_eq!(idle, osc("fix login bug"));
 
         // Repeated idle transitions are deduplicated.
         assert_eq!(title.set_busy(false, start + Duration::from_secs(12)), None);
@@ -459,7 +587,7 @@ mod tests {
         let mut title = PaneTitle::new("fix login bug");
         // The constructor emits nothing; the first update does, exactly once,
         // and a second identical update is deduplicated.
-        assert_eq!(title.update(start), Some(osc2("fix login bug")));
+        assert_eq!(title.update(start), Some(osc("fix login bug")));
         assert_eq!(title.update(start + Duration::from_millis(1)), None);
     }
 
@@ -477,7 +605,7 @@ mod tests {
         let second = title
             .tick(start + Duration::from_millis(150))
             .expect("frame advances");
-        assert_eq!(second, osc2("⠙ fix login bug"));
+        assert_eq!(second, osc("⠙ fix login bug"));
         // tick at +180ms is throttled again.
         assert_eq!(title.tick(start + Duration::from_millis(180)), None);
         // Setting the same label emits nothing (frame and label unchanged).
@@ -513,10 +641,7 @@ mod tests {
         let escape = title
             .set_label(hostile, start + Duration::from_millis(150))
             .expect("new label emits");
-        let inner = escape
-            .strip_prefix("\x1b]2;")
-            .and_then(|rest| rest.strip_suffix('\x07'))
-            .unwrap();
+        let inner = title_payload(&escape).expect("an OSC 0 title escape");
         // The injected OSC header (through BEL) is consumed, so "hacked" is gone.
         assert_eq!(inner, "⠙ write tests for parser now");
         assert!(!inner.contains("hacked"));
@@ -530,12 +655,12 @@ mod tests {
         let start = Instant::now();
         let mut title = PaneTitle::new("fix login bug");
         let busy = title.set_busy(true, start).expect("busy emits first frame");
-        assert_eq!(busy, osc2("⠋ fix login bug"));
+        assert_eq!(busy, osc("⠋ fix login bug"));
 
         // The run blocks on an ask_user survey: the spinner becomes `?`.
         assert_eq!(
             title.set_waiting(true, start + Duration::from_millis(10)),
-            Some(osc2("? fix login bug"))
+            Some(osc("? fix login bug"))
         );
         // A redundant set dedupes, and waiting is static: ticks emit nothing.
         assert_eq!(
@@ -549,7 +674,7 @@ mod tests {
         let resumed = title
             .set_waiting(false, start + Duration::from_millis(1000))
             .expect("resume emits the spinner again");
-        assert_eq!(resumed, osc2("⠋ fix login bug"));
+        assert_eq!(resumed, osc("⠋ fix login bug"));
         let advanced = title
             .tick(start + Duration::from_millis(1100))
             .expect("frames advance again");
@@ -558,14 +683,177 @@ mod tests {
         // Waiting follows the run, not the title: a title that never went
         // busy shows the bare label, and going busy while waiting shows `?`.
         let mut idle = PaneTitle::new("fix login bug");
-        assert_eq!(idle.set_waiting(true, start), Some(osc2("fix login bug")));
+        assert_eq!(idle.set_waiting(true, start), Some(osc("fix login bug")));
         assert_eq!(
             idle.set_busy(true, start + Duration::from_millis(1)),
-            Some(osc2("? fix login bug"))
+            Some(osc("? fix login bug"))
         );
         assert_eq!(
             idle.set_busy(false, start + Duration::from_millis(2)),
-            Some(osc2("fix login bug"))
+            Some(osc("fix login bug"))
         );
+    }
+    #[test]
+    fn emitted_escape_carries_both_title_codes_st_terminated() {
+        let escape = osc("fix login bug");
+        // Exactly two OSC sequences, in order: OSC 0 then OSC 2.
+        assert_eq!(
+            escape,
+            "\x1b]0;fix login bug\x1b\\\x1b]2;fix login bug\x1b\\"
+        );
+        assert!(escape.starts_with("\x1b]0;"));
+        assert!(escape.ends_with(ST));
+        assert_eq!(
+            escape.matches('\x1b').count(),
+            4,
+            "two ESC in, two ESC \\ out"
+        );
+        assert_eq!(
+            escape.matches('\x1b').count(),
+            escape.matches(ST).count() * 2,
+            "every ESC belongs to an escape introducer or an ST terminator"
+        );
+        // The BEL legacy terminator is never emitted.
+        assert!(!escape.contains('\x07'), "{escape:?}");
+        // Both halves carry the identical payload.
+        assert_eq!(title_payload(&escape), Some("fix login bug"));
+        let second = escape
+            .split(ST)
+            .find(|part| part.starts_with("\x1b]2;"))
+            .expect("the OSC 2 half");
+        assert_eq!(second, "\x1b]2;fix login bug");
+    }
+
+    #[test]
+    fn pane_title_emissions_use_the_st_terminated_pair() {
+        let start = Instant::now();
+        let mut title = PaneTitle::new("fix login bug");
+        for escape in [
+            title.set_busy(true, start).expect("busy emits"),
+            title
+                .tick(start + Duration::from_millis(150))
+                .expect("frame advances"),
+            title
+                .set_waiting(true, start + Duration::from_millis(200))
+                .expect("waiting emits"),
+            title
+                .set_busy(false, start + Duration::from_millis(250))
+                .expect("idle emits"),
+        ] {
+            assert!(escape.starts_with("\x1b]0;"), "{escape:?}");
+            assert!(escape.ends_with(ST), "{escape:?}");
+            assert!(!escape.contains('\x07'), "{escape:?}");
+            // The payload round-trips out of the escape unchanged.
+            let payload = title_payload(&escape).expect("payload");
+            assert!(!payload.is_empty());
+            assert_eq!(title_payload(&escape), Some(payload));
+        }
+    }
+
+    #[test]
+    fn a_tmux_style_title_round_trip_recovers_the_payload() {
+        // tmux rewrites the pane title from OSC 0 and OSC 2 and re-emits it
+        // to the outer terminal; anything the multiplexer cannot carry shows
+        // up here as a payload that differs from what drip intended.
+        let emitted = osc("⠙ fix login bug");
+        let oscs: Vec<&str> = emitted
+            .split(ST)
+            .filter(|p| p.starts_with('\x1b'))
+            .collect();
+        assert_eq!(oscs.len(), 2, "OSC 0 and OSC 2, nothing else: {emitted:?}");
+
+        // What a terminal left after consuming the stream.
+        let mut icon = None;
+        let mut window = None;
+        for body in &oscs {
+            let payload = body.trim_start_matches('\x1b').trim_start_matches(']');
+            let (code, text) = payload.split_once(';').expect("code;payload");
+            match code {
+                "0" => icon = Some(text.to_string()),
+                "2" => window = Some(text.to_string()),
+                other => panic!("unexpected OSC code {other:?} in {body:?}"),
+            }
+        }
+        assert_eq!(icon.as_deref(), Some("⠙ fix login bug"));
+        assert_eq!(
+            window, icon,
+            "both codes must agree or tmux shows one of them"
+        );
+        // And the recovered text is exactly what drip meant to show.
+        assert_eq!(window.as_deref(), Some(title_payload(&emitted).unwrap()));
+    }
+
+    #[test]
+    fn the_title_allowlist_rejects_emoji_and_invisible_characters() {
+        // Kept: the braille spinner, precomposed accented letters, CJK,
+        // Cyrillic, Greek, digits and the punctuation drip emits itself.
+        for kept in ['⠋', 'é', 'ß', '修', 'Д', 'Ω', '7', '?', ' ', '~', '·', '…'] {
+            assert!(is_allowed_title_char(kept), "{kept:?} must be allowed");
+        }
+        // Rejected: emoji and other pictographs, flags, ZWJ/ZWNJ, variation
+        // selectors, bidi and zero-width format controls, line/paragraph
+        // separators, private-use characters, and every control.
+        for dropped in [
+            '\u{1f980}',                                  // crab emoji
+            '\u{2764}',                                   // heavy black heart
+            "\u{1f1fa}\u{1f1f8}".chars().next().unwrap(), // regional indicator
+            '\u{200d}',                                   // zero-width joiner
+            '\u{200c}',                                   // zero-width non-joiner
+            '\u{200b}',                                   // zero-width space
+            '\u{fe0f}',                                   // variation selector-16
+            '\u{fe0e}',                                   // variation selector-15
+            '\u{feff}',                                   // zero-width no-break space / BOM
+            '\u{200e}',                                   // left-to-right mark
+            '\u{202a}',                                   // left-to-right embedding
+            '\u{202e}',                                   // right-to-left override
+            '\u{2066}',                                   // directional isolate
+            '\u{2028}',                                   // line separator
+            '\u{2029}',                                   // paragraph separator
+            '\u{e000}',                                   // private use
+            '\u{1b}',                                     // ESC
+            '\u{7f}',                                     // DEL
+            '\u{85}',                                     // C1 NEL
+            '\u{9c}',                                     // C1 ST
+        ] {
+            assert!(
+                !is_allowed_title_char(dropped),
+                "U+{:04X} must be rejected",
+                dropped as u32
+            );
+        }
+        // A decomposed accent loses the combining mark but keeps the letter.
+        assert!(!is_allowed_title_char('\u{301}'));
+    }
+
+    #[test]
+    fn sanitize_strips_emoji_and_invisible_characters_from_titles() {
+        assert_eq!(sanitize("fix \u{1f980} the bug"), "fix the bug");
+        assert_eq!(sanitize("ship \u{200d}\u{fe0f}it"), "ship it");
+        assert_eq!(sanitize("caf\u{e9} \u{301}run"), "caf\u{e9} run");
+        // The braille spinner survives: the busy prefix still renders.
+        for frame in SPINNER_FRAMES {
+            assert_eq!(sanitize(frame), frame);
+        }
+        assert_eq!(sanitize("one\u{200b}two"), "onetwo");
+        // An emoji-only word disappears without leaving a gap behind.
+        assert_eq!(sanitize("fix \u{1f980} the bug"), "fix the bug");
+        // A title made only of dropped characters falls back cleanly.
+        assert_eq!(fallback_title("\u{1f980}\u{1f980}\u{fe0f}"), FALLBACK_LABEL);
+    }
+
+    #[test]
+    fn abugida_scripts_are_dropped_whole_rather_than_mangled() {
+        // Devanagari virama (U+094D) and vowel sign I (U+093F) are not in the
+        // Latin/Greek/Cyrillic drop-list, but a title must never render a bare
+        // consonant skeleton: the whole word goes instead.
+        assert!(!is_allowed_title_char('\u{94d}'));
+        assert!(!is_allowed_title_char('\u{93f}'));
+        for dropped in ['स', 'त', 'य', 'अ', 'ก', 'ไ', 'ཀ', 'မ', 'ക'] {
+            assert!(!is_allowed_title_char(dropped), "U+{:04X}", dropped as u32);
+        }
+        assert_eq!(sanitize("सत्य bug"), "bug");
+        assert_eq!(fallback_title("सत्य"), FALLBACK_LABEL);
+        // A mixed-script title keeps the parts that are safe.
+        assert_eq!(sanitize("fix सत्य login"), "fix login");
     }
 }

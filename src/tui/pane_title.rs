@@ -34,9 +34,10 @@ pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"
 /// explicitly because these code points are Unicode symbols, not letters.
 const BRAILLE_BLOCK: std::ops::RangeInclusive<char> = '\u{2800}'..='\u{28ff}';
 
-/// Combining-mark ranges. A decomposed `e` + U+0301 renders as two cells in
-/// terminals with imperfect grapheme handling, so only precomposed letters
-/// (`é`, U+00E9) are allowed through the allowlist.
+/// Combining-mark ranges whose script has precomposed forms: a decomposed
+/// `e` + U+0301 renders as two cells in terminals with imperfect grapheme
+/// handling, so those marks are dropped and only the precomposed letter
+/// (`é`, U+00E9) is allowed through the allowlist.
 fn is_combining_mark(c: char) -> bool {
     matches!(
         c,
@@ -51,6 +52,32 @@ fn is_combining_mark(c: char) -> bool {
             | '\u{20d0}'..='\u{20f0}'
             | '\u{fe20}'..='\u{fe2f}'
     )
+}
+
+/// Scripts written with combining marks that carry no precomposed equivalent
+/// (Indic, Thai, Lao, Tibetan, Khmer, Myanmar). Dropping one of those marks
+/// leaves a consonant skeleton that still *looks* like real text — silent title
+/// corruption — so every character of these blocks is rejected outright.
+const ABUGIDA_BLOCKS: [std::ops::RangeInclusive<char>; 13] = [
+    '\u{0900}'..='\u{097f}', // Devanagari
+    '\u{0980}'..='\u{09ff}', // Bengali
+    '\u{0a00}'..='\u{0a7f}', // Gurmukhi
+    '\u{0a80}'..='\u{0aff}', // Gujarati
+    '\u{0b00}'..='\u{0b7f}', // Oriya
+    '\u{0b80}'..='\u{0bff}', // Tamil
+    '\u{0c00}'..='\u{0c7f}', // Telugu
+    '\u{0c80}'..='\u{0cff}', // Kannada
+    '\u{0d00}'..='\u{0d7f}', // Malayalam
+    '\u{0d80}'..='\u{0dff}', // Sinhala
+    '\u{0e00}'..='\u{0eff}', // Thai + Lao
+    '\u{0f00}'..='\u{0fff}', // Tibetan
+    '\u{1000}'..='\u{109f}', // Myanmar
+];
+
+/// True when `c` belongs to a script whose letters cannot survive mark
+/// stripping intact.
+fn is_abugida_char(c: char) -> bool {
+    ABUGIDA_BLOCKS.iter().any(|block| block.contains(&c))
 }
 
 /// Non-ASCII punctuation and symbols that are safe in a pane title: no emoji,
@@ -81,6 +108,9 @@ fn is_safe_punctuation(c: char) -> bool {
 /// zero-width joiners/non-joiners, variation selectors, bidi/format characters,
 /// line and paragraph separators, and private-use code points.
 pub fn is_allowed_title_char(c: char) -> bool {
+    if is_abugida_char(c) {
+        return false;
+    }
     // ASCII graphic characters and the space; DEL and every C0 control are
     // excluded by construction.
     if (' '..='~').contains(&c) {
@@ -206,20 +236,17 @@ pub fn sanitize(raw: &str) -> String {
             .chars()
             .filter(|&c| !is_quote(c) && is_allowed_title_char(c))
             .collect();
+        // The collection above already applied the quote filter and the
+        // allowlist once per character, so the word is emitted verbatim: a pane
+        // title can never carry an emoji, a zero-width joiner or a variation
+        // selector.
         if word.is_empty() {
             continue;
         }
         if !out.is_empty() {
             out.push(' ');
         }
-        for c in word.chars() {
-            // Quote-like characters and anything outside the title allowlist
-            // are dropped rather than emitted, so a pane title can never carry
-            // an emoji, a zero-width joiner or a variation selector.
-            if !is_quote(c) && is_allowed_title_char(c) {
-                out.push(c);
-            }
-        }
+        out.push_str(&word);
     }
     out
 }
@@ -812,5 +839,21 @@ mod tests {
         assert_eq!(sanitize("fix \u{1f980} the bug"), "fix the bug");
         // A title made only of dropped characters falls back cleanly.
         assert_eq!(fallback_title("\u{1f980}\u{1f980}\u{fe0f}"), FALLBACK_LABEL);
+    }
+
+    #[test]
+    fn abugida_scripts_are_dropped_whole_rather_than_mangled() {
+        // Devanagari virama (U+094D) and vowel sign I (U+093F) are not in the
+        // Latin/Greek/Cyrillic drop-list, but a title must never render a bare
+        // consonant skeleton: the whole word goes instead.
+        assert!(!is_allowed_title_char('\u{94d}'));
+        assert!(!is_allowed_title_char('\u{93f}'));
+        for dropped in ['स', 'त', 'य', 'अ', 'ก', 'ไ', 'ཀ', 'မ', 'ക'] {
+            assert!(!is_allowed_title_char(dropped), "U+{:04X}", dropped as u32);
+        }
+        assert_eq!(sanitize("सत्य bug"), "bug");
+        assert_eq!(fallback_title("सत्य"), FALLBACK_LABEL);
+        // A mixed-script title keeps the parts that are safe.
+        assert_eq!(sanitize("fix सत्य login"), "fix login");
     }
 }

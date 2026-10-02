@@ -376,6 +376,66 @@ For the full flag reference run `drip --help`.
 
 ---
 
+## Reaping unused tmux sessions
+
+`BASH_ASYNC` runs each background command in a detached tmux session so you can
+attach to it, and leaves the session `remain-on-exit` so its output survives.
+Finished sessions stay listed in `tmux ls` until something reaps them.
+`drip --reap-tmux` is that something — run it ad hoc, after a run, or from cron:
+
+```bash
+drip --reap-tmux --dry-run        # list what would be killed
+drip --reap-tmux                  # kill them
+drip --reap-tmux --json           # {ok, dryRun, killed, kept, keptReasons}
+
+# every 15 minutes from crontab — no project, index, or model config needed
+*/15 * * * * /usr/local/bin/drip --reap-tmux >/dev/null 2>&1
+```
+
+Reaping addresses each session with tmux's exact-target syntax (`=name`), so it
+needs tmux 2.6 or newer.
+
+`drip --gc` applies the same policy alongside its session compaction (its JSON
+keeps the `reapedJobs` key), and a `BASH_ASYNC` job's own session is collected as
+soon as its exit status is recorded — so nothing waits for the next cron tick.
+`--gc`'s tmux reap ignores `--older-than`: tmux eligibility is state-based
+(ownership marker, dead panes, detached client, recorded exit status), never
+age-based, so that flag only governs session compaction.
+
+It is deliberately conservative: a session is killed only when **all** of these
+hold.
+
+- It carries drip's ownership marker (`@drip_owner`, stamped when the session is
+  created).
+- Every pane in it is dead (nothing is still running).
+- It is detached — nobody is attached to it.
+- Its exit status was already recorded in the job log (`@drip_result`), or the
+  pane has been dead for longer than a short grace window (~120s).
+
+Anything ambiguous is kept and reported with a reason — `not-drip-owned`,
+`legacy-unmarked`, `attached`, `panes-alive`, `pane-death-too-recent`,
+`probe-failed`, `vanished`, `kill-failed` — so a dry run tells you exactly what
+was left behind and why. In particular:
+
+- Sessions from drip versions older than the ownership marker are **never**
+  deleted by name prefix or age. The retired age-only sweep that did that is
+  gone; attach and finish those sessions, or kill them yourself.
+- An attached session, or one with a live pane, is never touched, so a
+  `BASH_ASYNC` job still running when a run ends (or a `MONITOR` job) survives.
+- Unrelated tmux sessions are ignored: another tmux server, a `-L` socket, or a
+  hand-made session that merely starts with `drip-`.
+
+A machine with no tmux server running (or no tmux at all) is a clean no-op:
+`--reap-tmux` exits 0 and reports nothing killed, so a cron entry never fails
+just because tmux is idle. Job logs and results live outside tmux (under the
+project's `async-tools`), so
+reaping never loses a result you can still read with `ASYNC_TAIL` / `ASYNC_WAIT`
+or from disk. Reaping is safe to repeat: a session that is already gone counts as
+kept (`vanished`), never as an error, and the exit code is 0 whenever the pass
+itself completed.
+
+---
+
 ## Model providers
 
 Model profiles live in `~/.drip/config.json` and reference credentials by name

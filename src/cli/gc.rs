@@ -44,13 +44,6 @@ pub struct SweepResult {
     pub deleted_files: u64,
 }
 
-/// ReapResult — return shape of reap_orphan_tmux_sessions.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReapResult {
-    pub killed: Vec<String>,
-    pub kept: Vec<String>,
-}
-
 /// GcOptions — CLI-facing knobs.
 #[derive(Debug, Clone)]
 pub struct GcOptions {
@@ -356,67 +349,6 @@ pub fn sweep_async_job_logs(
         deleted_bytes,
         deleted_files,
     }
-}
-
-// ---------------------------------------------------------------------------
-// reapOrphanTmuxSessions
-// ---------------------------------------------------------------------------
-
-/// Kills drip-prefixed tmux sessions older than the cutoff. The caller
-/// supplies the listing and kill callbacks so the logic is testable without
-/// a tmux server.
-pub fn reap_orphan_tmux_sessions(
-    listing: &str,
-    older_than_ms: i64,
-    dry_run: bool,
-    now_ms: i64,
-    kill_session: &dyn Fn(&str) -> Result<(), String>,
-) -> ReapResult {
-    let prefix = crate::tools::child_process::TMUX_PREFIX;
-    let mut killed: Vec<String> = Vec::new();
-    let mut kept: Vec<String> = Vec::new();
-
-    for line in listing.split('\n') {
-        let line = line.trim();
-
-        if line.is_empty() || !line.starts_with(prefix) {
-            continue;
-        }
-
-        let name = line.split_whitespace().next().unwrap_or("").to_string();
-
-        if name.is_empty() {
-            continue;
-        }
-
-        // Parse the created timestamp from "#{session_name} #{session_created}".
-        let created_raw = line[name.len()..].trim();
-        let Ok(created_ms) = created_raw.parse::<i64>() else {
-            kept.push(name);
-            continue;
-        };
-
-        let _ = created_ms;
-        let age_ok = now_ms - created_ms * 1000 > older_than_ms;
-
-        if !age_ok {
-            kept.push(name);
-            continue;
-        }
-
-        // Dry run never invokes tmux kill-session.
-        if dry_run {
-            killed.push(name);
-            continue;
-        }
-
-        match kill_session(&name) {
-            Ok(()) => killed.push(name),
-            Err(_) => kept.push(name),
-        }
-    }
-
-    ReapResult { killed, kept }
 }
 
 // ---------------------------------------------------------------------------

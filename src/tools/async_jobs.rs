@@ -793,14 +793,20 @@ impl TmuxSessionManager {
         active_sessions
     }
 
-    /// Runs `tmux has-session -t <name>`, then `tmux display-message -p -t
-    /// <name>:0.0 #{pane_dead}`; a session is running when pane_dead is 0.
+    /// Runs `tmux has-session -t =<name>`, then `tmux display-message -p -t
+    /// =<name>:` `#{pane_dead}`; a session is running when pane_dead is 0.
     /// Probe failures fall back to the 10s start grace window; a spawn error
     /// returns false.
+    ///
+    /// Both probes use the exact targets from `tmux_reap`, because tmux
+    /// resolves a bare `-t` name by prefix: a same-prefix sibling session would
+    /// otherwise answer for this one, and a session that was never created
+    /// would read as running (and its `#{pane_dead}` as this session's).
     fn is_session_running(&self, session: &ChatTmuxSession) -> bool {
         let age = session_age_ms(&session.started_at);
 
-        let has_session = match run_process("tmux", &["has-session", "-t", &session.session_name]) {
+        let session_id = crate::tools::tmux_reap::exact_session_id(&session.session_name);
+        let has_session = match run_process("tmux", &["has-session", "-t", &session_id]) {
             Ok(result) => result,
             Err(_) => return false,
         };
@@ -815,7 +821,7 @@ impl TmuxSessionManager {
                 "display-message",
                 "-p",
                 "-t",
-                &format!("{}:0.0", session.session_name),
+                &crate::tools::tmux_reap::exact_session_target(&session.session_name),
                 "#{pane_dead}",
             ],
         ) {

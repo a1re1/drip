@@ -857,6 +857,53 @@ fn an_exact_target_never_resolves_to_a_longer_same_prefix_session() {
 }
 
 #[test]
+fn the_async_job_session_probe_never_reads_a_same_prefix_session() {
+    if !tmux_available() {
+        return;
+    }
+
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = TmuxServer::new();
+    let _restore = SocketRestore(set_process_socket(server.socket()));
+
+    // Only the LONGER name exists, and it is alive. A bare `-t` probe for the
+    // shorter name resolves to this session by prefix, so a registry entry that
+    // was never created would read as running with a live pane.
+    server.create("drip-e2e-aj-collide-long", "sleep 300");
+
+    let registry = drip::tools::async_jobs::TmuxSessionManager::new();
+    registry.register_session(drip::tools::types::ChatTmuxSession {
+        attach_command: String::new(),
+        cwd: String::new(),
+        job_id: "job-e2e".into(),
+        kill_command: String::new(),
+        session_name: "drip-e2e-aj-collide".into(),
+        // Long past the 10s start grace window, so a failed probe means "not
+        // running" rather than "still starting".
+        started_at: "2020-01-01T00:00:00.000Z".into(),
+        title: String::new(),
+        tool_name: "BASH_ASYNC".into(),
+    });
+
+    assert!(
+        registry.get_session("drip-e2e-aj-collide").is_none(),
+        "a session that was never created must not be reported running"
+    );
+    assert!(
+        registry.list_sessions().is_empty(),
+        "the registry must drop an entry no tmux session backs: {:?}",
+        registry.list_sessions()
+    );
+    assert!(
+        tmux_session_exists(&server, "drip-e2e-aj-collide-long"),
+        "the prefix sibling must be untouched: {:?}",
+        server.sessions()
+    );
+}
+
+#[test]
 fn a_live_second_window_keeps_the_session() {
     if !tmux_available() {
         return;

@@ -1467,6 +1467,20 @@ diff:
        1 + parser wired in
 ```
 
+Preview lines are token-colored from the file's type (Rust, JavaScript and
+TypeScript, Python, Go, C-like, shell, YAML/TOML, HTML, SQL and a few more):
+keywords, strings, numbers and comments are tinted inside the line's own green
+or red, and every tinted span resets its own attributes before handing that
+colour back — a bold keyword never leaves the rest of the line bold — so the
+change cue never thickens or fades mid-line. The language comes from the path — `src/parser.rs`, a bare
+`Makefile` — never from guessing at the content. A file whose type is not
+recognized (prose, data, an unknown extension) renders exactly as before, and
+`--no-color`/`NO_COLOR` turns the tinting off with the rest of the colors.
+Tinting is preview-only: the diff text, the transcript copy and the
+`loop-changes` payload keep git's exact bytes either way. A
+block comment left open by the hunk colors only the lines of the same side;
+the preview never invents code the hunk does not show.
+
 The diff comes from git, not from the edit tools' own records, so files
 rewritten by a script or a shell command are included. Both sides are
 snapshotted as tree objects through a temporary index: nothing is
